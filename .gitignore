@@ -1,0 +1,4 @@
+target/
+api/generator/target/
+api/generator/Cargo.lock
+.DS_Store
