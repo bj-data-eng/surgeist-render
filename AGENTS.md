@@ -1,6 +1,6 @@
 # Agent Guide
 
-Use this guide for automated work in the Surgeist top-level repo.
+Use this guide for automated work in the `surgeist-render` crate repo.
 
 ## Product Compass
 
@@ -20,44 +20,29 @@ Treat public APIs, internals, tests, docs, commands, defaults, and errors as par
 
 ## Repository Model
 
-This repo is both:
+This repo owns the `surgeist-render` crate.
 
-- the root `surgeist` facade crate at the repo root
-- the coordination workspace for sibling Surgeist crate repos linked as submodules
+The top-level `surgeist` repo is the facade crate and integration workspace. It links this repo as a submodule under `crates/surgeist-render` and owns workspace wiring, submodule pointers, cross-crate plans, source-derived API coordination, and whole-system verification.
 
-Expected shape:
-
-```text
-surgeist/
-  Cargo.toml
-  src/
-  crates/
-    surgeist-css/
-    surgeist-dialog/
-    surgeist-layout/
-    surgeist-render/
-    surgeist-retained/
-    surgeist-shape/
-    surgeist-style/
-    surgeist-text/
-    surgeist-window/
-```
-
-The root repo owns workspace wiring, submodule pointers, cross-crate plans, source-derived API coordination, and whole-system verification. Crate implementation work belongs in that crate's own repo and Codex project.
+This crate repo owns implementation, focused tests, crate-local plans, crate-local API reports, and the intentional front-door API exposed from `src/lib.rs`.
 
 ## Project Boundaries
 
-Use one Codex project for this root repo and one Codex project for each crate repo.
+Use one Codex project for the top-level repo and one Codex project for each crate repo.
 
-Top-level agents may coordinate, inspect submodules, write integration plans, run workspace checks, update submodule pointers, and review cross-crate compatibility.
+Agents working in this crate may edit this crate's source, tests, docs, plans, API artifact, and crate-local tooling. They should run focused checks here before declaring work complete.
 
-Top-level agents must not casually edit submodule contents. If a crate needs implementation work, do it from that crate's Codex project unless the user explicitly asks for a top-level integration edit.
-
-Crate project agents edit only their crate repo, run focused checks there, commit there, and expose intentional front-door APIs for integration.
+Do not casually edit sibling crates or the top-level repo from this crate project. If work requires a sibling API change, stop and report a precise inter-crate issue in that owning repo, or write a complete issue draft if issue creation is unavailable.
 
 Subagents inherit the project boundary they are launched from. Give each worker one clear repo/crate lane. Reviewers may inspect across crates, but implementation workers should stay in their assigned project.
 
-## Crate Roles
+## Crate Role
+
+`surgeist-render` owns rendering contracts and backend-facing draw data.
+
+Keep this crate's public API focused on that role. Do not absorb behavior just because another crate needs convenience. If a change would make this crate a dependency sink or introduce a cycle, stop and revisit the boundary with the top-level coordinator.
+
+## Surgeist Crate Map
 
 - root `surgeist`: thin facade, integration surface, and public composition layer.
 - `surgeist-css`: strict CSS parsing and lowering into typed style data.
@@ -102,7 +87,7 @@ Plan cross-crate API changes at the top level, then implement crate-local pieces
 
 API coordination is source-derived only. Do not maintain handwritten API truth tables as authority.
 
-Each crate should expose intentional front-door APIs from `lib.rs`, keep internals private by default, and support generated API shape checks when that tooling exists. The root repo may consume generated API reports, but source remains the source of truth.
+Expose intentional front-door APIs from `lib.rs`, keep internals private by default, and support generated API shape checks when that tooling exists. The top-level repo may consume generated API reports, but source remains the source of truth.
 
 Prefer typed commands, events, snapshots, reports, and change sets. Avoid sibling crates reaching through private module paths, broad common crates that become dependency sinks, and accidental cycles introduced for convenience.
 
@@ -116,7 +101,7 @@ For values that may stay symbolic across parsing, style resolution, and layout, 
 
 ## Upstream Issue Reporting
 
-Workers and reviewers may identify issues in sibling or upstream crates while working from another repo. They must not edit that crate from the wrong Codex project.
+Workers and reviewers may identify issues in sibling or upstream crates while working from this crate repo. They must not edit that crate from the wrong Codex project.
 
 When an upstream issue affects correctness, compatibility, integration, or developer workflow:
 
@@ -125,7 +110,7 @@ When an upstream issue affects correctness, compatibility, integration, or devel
 - Report the issue in the owning GitHub repo.
 - If GitHub issue creation is unavailable, write a complete issue draft in the task output and stop for coordinator action.
 
-Issue reports should be specific enough for a crate-local worker to act without rediscovering the problem. Do not file upstream issues for bugs owned by the current repo; fix those locally.
+Issue reports should be specific enough for a crate-local worker to act without rediscovering the problem. Do not file upstream issues for bugs owned by this crate; fix those locally.
 
 ## Plans And Specs
 
@@ -133,33 +118,47 @@ Use Superpowers for workflow guidance. Repo file locations override Superpowers 
 
 Plans go in `/plans` at the root of the repo where the implementation will happen:
 
+- Crate-local plans: this crate repo's `plans/`
 - Top-level integration plans: `surgeist/plans/`
-- Crate-local plans: that crate repo's `plans/`
 
 If writing specs or design docs, use the same root-local convention unless the user chooses a separate folder. Do not put new plans under `docs/superpowers`.
 
 ## Testing
 
-Each crate owns its focused test commands. The root repo coordinates whole-system checks, but tight iteration should happen in the relevant crate project.
+This crate owns its focused test commands. Tight iteration should happen in this crate project.
 
 Expected command pattern:
 
 ```sh
-cargo test -p <crate>
-cargo clippy -p <crate> --all-targets -- -D warnings
+cargo test -p surgeist-render
+cargo clippy -p surgeist-render --all-targets -- -D warnings
 cargo fmt --check
 ```
 
-Run focused checks before committing. Run broader root checks before updating submodule pointers or declaring cross-crate work complete.
+Run focused checks before committing. Ask the top-level coordinator to run broader root checks before submodule pointer updates or cross-crate work is declared complete.
 
 ## Subagents
 
-Use subagents for bounded work and clean reviews.
+Crate coordinators are coordinators first. For implementation work, they assign, verify, reconcile, and integrate; they do not default to doing the code edit themselves.
+
+For any requested code change, a crate coordinator must follow this sequence unless the user explicitly waives it:
+
+1. Confirm the work belongs in `surgeist-render`.
+2. Assign one implementation worker to this crate lane.
+3. Wait for the worker's result.
+4. Assign a separate reviewer to inspect the worker's changes.
+5. Reconcile the worker and reviewer findings.
+6. Run this crate's focused checks.
+7. Hand the completed crate-local result back to the top-level coordinator when root integration or submodule pointer updates are needed.
+
+The coordinator may directly edit crate-local planning, documentation, workflow, or tooling files when the user explicitly asks for that change.
+
+No coordinator may declare implementation complete until a separate reviewer has reviewed the changed code, or the user explicitly waives review.
 
 - Assign one clear repo/crate lane per worker.
 - Tell workers they are not alone in the codebase and must not revert others' work.
 - Do not duplicate a completed subagent's investigation. Review, verify, reconcile, and act on it.
-- Use clean reviewers for boundary changes, API changes, and nontrivial cross-crate work.
+- Use clean reviewers for code changes, boundary changes, API changes, and nontrivial cross-crate work.
 
 ## Editing And Git
 
@@ -172,7 +171,7 @@ Use subagents for bounded work and clean reviews.
 
 Commit in the repo being changed:
 
-- crate implementation commits inside that crate repo
+- crate implementation commits inside this crate repo
 - submodule pointer and integration commits inside the root Surgeist repo
 
-Never silently edit a sibling submodule from the root project and call it done. If that happens by mistake, stop, report it, and reconcile deliberately.
+Never silently edit a sibling crate or the top-level repo from this crate project and call it done. If that happens by mistake, stop, report it, and reconcile deliberately.
