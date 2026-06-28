@@ -1,4 +1,9 @@
-use super::{Image, ImageId, Paint, paint::PaintKind, scene::Command};
+use super::{
+    Image, ImageId, Paint,
+    command::{RenderCommand, RenderPaint},
+    paint::PaintKind,
+    scene::Command,
+};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -59,6 +64,49 @@ fn collect_paint_stats(
     uploaded_images: &mut std::collections::HashSet<ImageId>,
 ) {
     if let PaintKind::Image(image) = paint.kind() {
+        collect_image_stats(image, stats, uploaded_images);
+    }
+}
+
+pub(crate) fn collect_render_stats(
+    commands: &[RenderCommand],
+    stats: &mut Stats,
+    uploaded_images: &mut std::collections::HashSet<ImageId>,
+) {
+    for command in commands {
+        stats.commands = stats.commands.saturating_add(1);
+        match command {
+            RenderCommand::Fill { paint, .. } => {
+                stats.fills = stats.fills.saturating_add(1);
+                collect_render_paint_stats(paint, stats, uploaded_images);
+            }
+            RenderCommand::Stroke { paint, .. } => {
+                stats.strokes = stats.strokes.saturating_add(1);
+                collect_render_paint_stats(paint, stats, uploaded_images);
+            }
+            RenderCommand::Shadow { .. } => {
+                stats.shadows = stats.shadows.saturating_add(1);
+            }
+            RenderCommand::Image { image, .. } => {
+                collect_image_stats(image, stats, uploaded_images);
+            }
+            RenderCommand::TextRun { glyphs, .. } => {
+                stats.glyphs = stats.glyphs.saturating_add(glyphs.len());
+            }
+            RenderCommand::Layer { children, .. } => {
+                stats.layers = stats.layers.saturating_add(1);
+                collect_render_stats(children, stats, uploaded_images);
+            }
+        }
+    }
+}
+
+fn collect_render_paint_stats(
+    paint: &RenderPaint,
+    stats: &mut Stats,
+    uploaded_images: &mut std::collections::HashSet<ImageId>,
+) {
+    if let RenderPaint::Image(image) = paint {
         collect_image_stats(image, stats, uploaded_images);
     }
 }

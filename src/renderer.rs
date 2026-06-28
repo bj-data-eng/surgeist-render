@@ -1,5 +1,5 @@
 use super::{
-    backend::*, encode::encode_vello_scene, geometry::physical_size, stats::collect_stats,
+    backend::*, encode::encode_vello_scene, geometry::physical_size, stats::collect_render_stats,
     surface::SurfaceBackend, validation::*, *,
 };
 use std::{
@@ -235,9 +235,10 @@ impl Renderer {
             present_time: Duration::ZERO,
             ..Stats::default()
         };
+        let normalized = scene.normalize(self.capabilities())?;
         let mut uploaded_images = self.uploaded_images.clone();
-        collect_stats(&scene.commands, &mut stats, &mut uploaded_images);
-        let vello_scene = encode_vello_scene(scene, surface.scale())?;
+        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
+        let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
         stats.encode_time = encode_start.elapsed();
 
         if let Some(backend) = self.backend.as_mut() {

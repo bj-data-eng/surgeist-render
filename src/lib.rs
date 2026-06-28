@@ -7,6 +7,7 @@
 
 mod backend;
 mod capability;
+mod command;
 mod encode;
 mod error;
 mod geometry;

@@ -50,6 +50,46 @@ fn scene_stats_report_facts_without_renderer() {
 }
 
 #[test]
+fn scene_normalization_rejects_unsupported_commands_before_encoding() {
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_mask(Shape::rect(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap()))
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap(), Color::BLACK);
+        },
+    );
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("unsupported masks should fail during normalization");
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+}
+
+#[test]
+fn scene_normalization_preserves_stats() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap(), Color::BLACK)
+        .layer(Layer::new(), |scene| {
+            scene.stroke(
+                Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap(),
+                Stroke::try_new(1.0).unwrap(),
+                Color::BLACK,
+            );
+        });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let stats = normalized.stats();
+
+    assert_eq!(stats.commands, 3);
+    assert_eq!(stats.fills, 1);
+    assert_eq!(stats.strokes, 1);
+    assert_eq!(stats.layers, 1);
+}
+
+#[test]
 fn surface_tracks_size_and_scale() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
@@ -683,9 +723,30 @@ fn pure_transform_does_not_require_backend_layer() {
         .unwrap();
     let opacity = Layer::new().try_opacity(0.5).unwrap();
 
-    assert!(!requires_vello_layer(&transform));
-    assert!(requires_vello_layer(&clip));
-    assert!(requires_vello_layer(&opacity));
+    let mut scene = Scene::new();
+    scene
+        .layer(transform, |_| {})
+        .layer(clip, |_| {})
+        .layer(opacity, |_| {});
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let isolations: Vec<_> = normalized
+        .commands
+        .iter()
+        .map(|command| match command {
+            command::RenderCommand::Layer { layer, .. } => layer.isolation,
+            _ => panic!("expected layer command"),
+        })
+        .collect();
+
+    assert_eq!(
+        isolations,
+        [
+            command::LayerIsolation::None,
+            command::LayerIsolation::ClipOnly,
+            command::LayerIsolation::BackendLayer,
+        ]
+    );
 }
 
 #[test]

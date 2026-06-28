@@ -216,28 +216,6 @@ impl Stroke {
     pub const fn align_kind(self) -> StrokeAlign {
         self.align
     }
-
-    pub(crate) const fn parts(
-        self,
-    ) -> (
-        f64,
-        LineJoin,
-        LineCap,
-        LineCap,
-        f64,
-        Option<Dash>,
-        StrokeAlign,
-    ) {
-        (
-            self.width,
-            self.join,
-            self.start_cap,
-            self.end_cap,
-            self.miter_limit,
-            self.dash,
-            self.align,
-        )
-    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

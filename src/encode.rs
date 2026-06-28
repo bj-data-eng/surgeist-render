@@ -1,51 +1,54 @@
 use super::{
+    command::{
+        LayerIsolation, NormalizedLayer, RenderCommand, RenderCommands, RenderPaint, RenderShadow,
+        RenderShape, RenderStroke, RenderStrokeShape, ShadowShape, kurbo_rounded_rect,
+    },
     geometry::{expand_rect, offset_radii},
     paint::PaintKind,
-    scene::Command,
-    shape::ShapeKind,
     validation::*,
     *,
 };
 
-pub(crate) fn encode_vello_scene(scene: &Scene, scale: f64) -> Result<vello::Scene> {
+pub(crate) fn encode_vello_scene(commands: &RenderCommands, scale: f64) -> Result<vello::Scene> {
     let mut encoded = vello::Scene::new();
-    encode_vello_commands(&scene.commands, &mut encoded, kurbo::Affine::scale(scale))?;
+    encode_vello_commands(
+        &commands.commands,
+        &mut encoded,
+        kurbo::Affine::scale(scale),
+    )?;
     Ok(encoded)
 }
 
 fn encode_vello_commands(
-    commands: &[Command],
+    commands: &[RenderCommand],
     scene: &mut vello::Scene,
     transform: kurbo::Affine,
 ) -> Result<()> {
     for command in commands {
         match command {
-            Command::Fill { shape, paint } => encode_fill(scene, transform, shape, paint)?,
-            Command::Stroke {
+            RenderCommand::Fill { shape, paint } => encode_fill(scene, transform, shape, paint)?,
+            RenderCommand::Stroke {
                 shape,
                 stroke,
                 paint,
-            } => encode_stroke(scene, transform, shape, *stroke, paint)?,
-            Command::Shadow { shape, shadow } => encode_shadow(scene, transform, shape, shadow)?,
-            Command::Image { image, rect, fit } => {
+            } => encode_stroke(scene, transform, shape, stroke, paint)?,
+            RenderCommand::Shadow { shape, shadow } => {
+                encode_shadow(scene, transform, shape, shadow)?
+            }
+            RenderCommand::Image { image, rect, fit } => {
                 encode_image(scene, transform, image, *rect, *fit)?
             }
-            Command::TextRun {
+            RenderCommand::TextRun {
                 font,
                 size,
                 transform: run_transform,
                 paint,
                 glyphs,
             } => encode_text_run(scene, transform, font, *size, *run_transform, paint, glyphs)?,
-            Command::Layer { layer, children } => {
-                validate_layer(layer)?;
-                let layer_transform = transform * kurbo::Affine::from(layer.transform());
-                if requires_vello_layer(layer) {
-                    let clip = layer
-                        .clip()
-                        .cloned()
-                        .unwrap_or_else(|| Shape::rect(Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9)));
-                    encode_layer_start(scene, layer, layer_transform, &clip)?;
+            RenderCommand::Layer { layer, children } => {
+                let layer_transform = transform * kurbo::Affine::from(layer.transform);
+                if layer.isolation != LayerIsolation::None {
+                    encode_layer_start(scene, layer, layer_transform);
                     encode_vello_commands(children, scene, layer_transform)?;
                     scene.pop_layer();
                 } else {
@@ -60,38 +63,46 @@ fn encode_vello_commands(
 fn encode_fill(
     scene: &mut vello::Scene,
     transform: kurbo::Affine,
-    shape: &Shape,
-    paint: &Paint,
+    shape: &RenderShape,
+    paint: &RenderPaint,
 ) -> Result<()> {
-    validate_shape(shape)?;
-    validate_paint(paint)?;
-    let brush = paint_brush(paint)?;
-    match shape.kind() {
-        ShapeKind::Rect(rect) => scene.fill(
+    let brush = render_paint_brush(paint)?;
+    encode_solid_fill(scene, transform, shape, &brush);
+    Ok(())
+}
+
+fn encode_solid_fill(
+    scene: &mut vello::Scene,
+    transform: kurbo::Affine,
+    shape: &RenderShape,
+    brush: &peniko::Brush,
+) {
+    match shape {
+        RenderShape::Rect(rect) => scene.fill(
             peniko::Fill::NonZero,
             transform,
-            &brush,
+            brush,
             None,
             &kurbo::Rect::from(*rect),
         ),
-        ShapeKind::RoundedRect { rect, radii } => scene.fill(
+        RenderShape::RoundedRect { rect, radii } => scene.fill(
             peniko::Fill::NonZero,
             transform,
-            &brush,
+            brush,
             None,
             &kurbo_rounded_rect(*rect, *radii),
         ),
-        ShapeKind::Circle { center, radius } => scene.fill(
+        RenderShape::Circle { center, radius } => scene.fill(
             peniko::Fill::NonZero,
             transform,
-            &brush,
+            brush,
             None,
             &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
-        ShapeKind::Ellipse { center, radii } => scene.fill(
+        RenderShape::Ellipse { center, radii } => scene.fill(
             peniko::Fill::NonZero,
             transform,
-            &brush,
+            brush,
             None,
             &kurbo::Ellipse::new(
                 (center.x(), center.y()),
@@ -99,150 +110,84 @@ fn encode_fill(
                 0.0,
             ),
         ),
-        ShapeKind::Path(path) => scene.fill(
+        RenderShape::Path(path) => scene.fill(
             peniko::Fill::NonZero,
             transform,
-            &brush,
+            brush,
             None,
             &path.to_kurbo(),
         ),
     }
-    Ok(())
 }
 
 fn encode_stroke(
     scene: &mut vello::Scene,
     transform: kurbo::Affine,
-    shape: &Shape,
-    stroke: Stroke,
-    paint: &Paint,
+    shape: &RenderStrokeShape,
+    stroke: &RenderStroke,
+    paint: &RenderPaint,
 ) -> Result<()> {
-    validate_shape(shape)?;
-    validate_stroke(stroke)?;
-    validate_paint(paint)?;
-    let brush = paint_brush(paint)?;
-    let (shape, stroke) = aligned_stroke_shape(shape, stroke)?;
+    let brush = render_paint_brush(paint)?;
     let vello_stroke = vello_stroke(stroke);
     match shape {
-        AlignedShape::Rect(rect) => scene.stroke(&vello_stroke, transform, &brush, None, &rect),
-        AlignedShape::RoundedRect(rect) => {
-            scene.stroke(&vello_stroke, transform, &brush, None, &rect)
+        RenderStrokeShape::Rect(rect) => scene.stroke(&vello_stroke, transform, &brush, None, rect),
+        RenderStrokeShape::RoundedRect(rect) => {
+            scene.stroke(&vello_stroke, transform, &brush, None, rect)
         }
-        AlignedShape::Circle(circle) => {
-            scene.stroke(&vello_stroke, transform, &brush, None, &circle)
+        RenderStrokeShape::Circle(circle) => {
+            scene.stroke(&vello_stroke, transform, &brush, None, circle)
         }
-        AlignedShape::Ellipse(ellipse) => {
-            scene.stroke(&vello_stroke, transform, &brush, None, &ellipse)
+        RenderStrokeShape::Ellipse(ellipse) => {
+            scene.stroke(&vello_stroke, transform, &brush, None, ellipse)
         }
-        AlignedShape::Path(path) => scene.stroke(&vello_stroke, transform, &brush, None, &path),
+        RenderStrokeShape::Path(path) => scene.stroke(&vello_stroke, transform, &brush, None, path),
     }
     Ok(())
-}
-
-enum AlignedShape {
-    Rect(kurbo::Rect),
-    RoundedRect(kurbo::RoundedRect),
-    Circle(kurbo::Circle),
-    Ellipse(kurbo::Ellipse),
-    Path(kurbo::BezPath),
-}
-
-fn aligned_stroke_shape(shape: &Shape, mut stroke: Stroke) -> Result<(AlignedShape, Stroke)> {
-    let align = stroke.align_kind();
-    let width = stroke.width();
-    let offset = match align {
-        StrokeAlign::Center => 0.0,
-        StrokeAlign::Inside => -width * 0.5,
-        StrokeAlign::Outside => width * 0.5,
-    };
-    if align != StrokeAlign::Center {
-        stroke = stroke.align(StrokeAlign::Center);
-    }
-    let shape = match shape.kind() {
-        ShapeKind::Rect(rect) => {
-            AlignedShape::Rect(kurbo::Rect::from(*rect).inflate(offset, offset))
-        }
-        ShapeKind::RoundedRect { rect, radii } => {
-            let radii = offset_radii(*radii, offset);
-            let rect = kurbo::Rect::from(*rect).inflate(offset, offset);
-            AlignedShape::RoundedRect(kurbo_rounded_rect(
-                Rect::new(rect.x0, rect.y0, rect.width(), rect.height()),
-                radii,
-            ))
-        }
-        ShapeKind::Circle { center, radius } => AlignedShape::Circle(kurbo::Circle::new(
-            (center.x(), center.y()),
-            (*radius + offset).max(0.0),
-        )),
-        ShapeKind::Ellipse { center, radii } => AlignedShape::Ellipse(kurbo::Ellipse::new(
-            (center.x(), center.y()),
-            (
-                (radii.width() + offset).max(0.0),
-                (radii.height() + offset).max(0.0),
-            ),
-            0.0,
-        )),
-        ShapeKind::Path(path) if offset == 0.0 => AlignedShape::Path(path.to_kurbo()),
-        ShapeKind::Path(_) => {
-            Capabilities::VELLO_0_9.ensure(UnsupportedCapability::PathStrokeAlignment)?;
-            unreachable!("path stroke alignment support requires path offset lowering");
-        }
-    };
-    Ok((shape, stroke))
 }
 
 fn encode_shadow(
     scene: &mut vello::Scene,
     transform: kurbo::Affine,
-    shape: &Shape,
-    shadow: &Shadow,
+    shape: &ShadowShape,
+    shadow: &RenderShadow,
 ) -> Result<()> {
-    validate_shape(shape)?;
-    validate_shadow(shadow)?;
-    let color = paint_color(shadow.paint())?;
-    let std_dev = shadow.blur() * 0.5;
-    match shape.kind() {
-        ShapeKind::Rect(rect) => {
-            let rect = offset_rect(expand_rect(*rect, shadow.spread()), shadow.offset());
+    let color = peniko::Color::from(shadow.color);
+    let std_dev = shadow.blur * 0.5;
+    match shape {
+        ShadowShape::Rect(rect) => {
+            let rect = offset_rect(expand_rect(*rect, shadow.spread), shadow.offset);
             scene.draw_blurred_rounded_rect(transform, rect.into(), color, 0.0, std_dev);
         }
-        ShapeKind::RoundedRect { rect, radii } => {
-            let rect = offset_rect(expand_rect(*rect, shadow.spread()), shadow.offset());
+        ShadowShape::RoundedRect { rect, radii } => {
+            let rect = offset_rect(expand_rect(*rect, shadow.spread), shadow.offset);
             if let Some(radius) = radii.uniform() {
                 scene.draw_blurred_rounded_rect(
                     transform,
                     rect.into(),
                     color,
-                    (radius + shadow.spread()).max(0.0),
+                    (radius + shadow.spread).max(0.0),
                     std_dev,
                 );
             } else {
-                let color = solid_color(shadow.paint())?;
                 encode_non_uniform_rounded_shadow(
                     scene,
                     transform,
                     rect,
-                    offset_radii(*radii, shadow.spread()),
-                    shadow.blur(),
-                    color,
+                    offset_radii(*radii, shadow.spread),
+                    shadow.blur,
+                    shadow.color,
                 )?;
             }
         }
-        ShapeKind::Circle { center, radius } => {
-            let radius = (radius + shadow.spread()).max(0.0);
+        ShadowShape::Circle { center, radius } => {
+            let radius = (radius + shadow.spread).max(0.0);
             let rect = Rect::new(
-                center.x() - radius + shadow.offset().x(),
-                center.y() - radius + shadow.offset().y(),
+                center.x() - radius + shadow.offset.x(),
+                center.y() - radius + shadow.offset.y(),
                 radius * 2.0,
                 radius * 2.0,
             );
             scene.draw_blurred_rounded_rect(transform, rect.into(), color, radius, std_dev);
-        }
-        _ => {
-            return Err(Error::new(
-                ErrorCode::UnsupportedBackend,
-                "only rectangle, rounded rectangle, and circle shadows lower to Vello in this milestone",
-            ));
         }
     }
     Ok(())
@@ -257,12 +202,14 @@ fn encode_non_uniform_rounded_shadow(
     color: Color,
 ) -> Result<()> {
     if blur == 0.0 {
-        return encode_fill(
+        let brush = peniko::Brush::Solid(color.into());
+        encode_solid_fill(
             scene,
             transform,
-            &Shape::rounded_rect(rect, radii),
-            &Paint::color(color),
+            &RenderShape::RoundedRect { rect, radii },
+            &brush,
         );
+        return Ok(());
     }
 
     let std_dev = blur * 0.5;
@@ -313,7 +260,6 @@ fn encode_image(
     rect: Rect,
     fit: ImageFit,
 ) -> Result<()> {
-    validate_rect(rect, "image target rectangle")?;
     let brush = image_brush(image);
     let image_transform = transform * image_transform(image.size, rect, fit)?;
     let clip_to_target = matches!(fit, ImageFit::Contain | ImageFit::Cover);
@@ -346,8 +292,6 @@ fn encode_text_run(
     paint: &TextPaint,
     glyphs: &[TextGlyph],
 ) -> Result<()> {
-    validate_text_run(size, run_transform, glyphs)?;
-    validate_paint(paint.fill())?;
     let Some(data) = font.data.as_ref().map(|data| &data.data) else {
         return Err(invalid_input(
             "text run font data is required for rendering prepared glyphs",
@@ -370,26 +314,14 @@ fn encode_text_run(
     Ok(())
 }
 
-fn encode_layer_start(
-    scene: &mut vello::Scene,
-    layer: &Layer,
-    transform: kurbo::Affine,
-    clip: &Shape,
-) -> Result<()> {
-    validate_layer(layer)?;
-    if layer.filter().is_some() {
-        Capabilities::VELLO_0_9.ensure(UnsupportedCapability::LayerFilter)?;
-        unreachable!("layer filter support requires filter lowering");
-    }
-    if layer.mask().is_some() {
-        Capabilities::VELLO_0_9.ensure(UnsupportedCapability::LayerMask)?;
-        unreachable!("layer mask support requires mask lowering");
-    }
-    let blend = vello_blend(layer.blend_mode());
-    let alpha = layer.opacity().clamp(0.0, 1.0);
-    let use_clip = layer.blend_mode() == BlendMode::Normal && (alpha - 1.0).abs() < f32::EPSILON;
-    match clip.kind() {
-        ShapeKind::Rect(rect) => push_vello_layer(
+fn encode_layer_start(scene: &mut vello::Scene, layer: &NormalizedLayer, transform: kurbo::Affine) {
+    let blend = vello_blend(layer.blend);
+    let alpha = layer.opacity.clamp(0.0, 1.0);
+    let use_clip = layer.isolation == LayerIsolation::ClipOnly;
+    let default_clip = RenderShape::Rect(Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9));
+    let clip = layer.clip.as_ref().unwrap_or(&default_clip);
+    match clip {
+        RenderShape::Rect(rect) => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -397,7 +329,7 @@ fn encode_layer_start(
             transform,
             &kurbo::Rect::from(*rect),
         ),
-        ShapeKind::RoundedRect { rect, radii } => push_vello_layer(
+        RenderShape::RoundedRect { rect, radii } => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -405,7 +337,7 @@ fn encode_layer_start(
             transform,
             &kurbo_rounded_rect(*rect, *radii),
         ),
-        ShapeKind::Circle { center, radius } => push_vello_layer(
+        RenderShape::Circle { center, radius } => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -413,7 +345,7 @@ fn encode_layer_start(
             transform,
             &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
-        ShapeKind::Ellipse { center, radii } => push_vello_layer(
+        RenderShape::Ellipse { center, radii } => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -425,19 +357,10 @@ fn encode_layer_start(
                 0.0,
             ),
         ),
-        ShapeKind::Path(path) => {
+        RenderShape::Path(path) => {
             push_vello_layer(scene, use_clip, blend, alpha, transform, &path.to_kurbo())
         }
     }
-    Ok(())
-}
-
-pub(crate) fn requires_vello_layer(layer: &Layer) -> bool {
-    layer.clip().is_some()
-        || layer.mask().is_some()
-        || layer.filter().is_some()
-        || layer.blend_mode() != BlendMode::Normal
-        || (layer.opacity() - 1.0).abs() > f32::EPSILON
 }
 
 fn push_vello_layer(
@@ -455,32 +378,6 @@ fn push_vello_layer(
     }
 }
 
-fn kurbo_rounded_rect(rect: Rect, radii: Radii) -> kurbo::RoundedRect {
-    kurbo::RoundedRect::from_rect(
-        rect.into(),
-        kurbo::RoundedRectRadii::new(
-            radii.top_left(),
-            radii.top_right(),
-            radii.bottom_right(),
-            radii.bottom_left(),
-        ),
-    )
-}
-
-fn paint_color(paint: &Paint) -> Result<peniko::Color> {
-    Ok(solid_color(paint)?.into())
-}
-
-fn solid_color(paint: &Paint) -> Result<Color> {
-    match paint.kind() {
-        PaintKind::Color(color) => Ok(*color),
-        PaintKind::Gradient(_) | PaintKind::Image(_) => {
-            Capabilities::VELLO_0_9.ensure(UnsupportedCapability::NonSolidShadowPaint)?;
-            unreachable!("non-solid shadow paint support requires shadow paint lowering");
-        }
-    }
-}
-
 fn paint_brush(paint: &Paint) -> Result<peniko::Brush> {
     match paint.kind() {
         PaintKind::Color(color) => Ok(peniko::Brush::Solid((*color).into())),
@@ -489,14 +386,21 @@ fn paint_brush(paint: &Paint) -> Result<peniko::Brush> {
     }
 }
 
-fn vello_stroke(stroke: Stroke) -> kurbo::Stroke {
-    let (width, join, start_cap, end_cap, miter_limit, dash, _) = stroke.parts();
-    let mut vello = kurbo::Stroke::new(width)
-        .with_join(join.into())
-        .with_start_cap(start_cap.into())
-        .with_end_cap(end_cap.into())
-        .with_miter_limit(miter_limit);
-    if let Some(dash) = dash {
+fn render_paint_brush(paint: &RenderPaint) -> Result<peniko::Brush> {
+    match paint {
+        RenderPaint::Color(color) => Ok(peniko::Brush::Solid((*color).into())),
+        RenderPaint::Gradient(gradient) => Ok(peniko::Brush::Gradient(gradient.clone().into())),
+        RenderPaint::Image(image) => Ok(peniko::Brush::Image(image_brush(image))),
+    }
+}
+
+fn vello_stroke(stroke: &RenderStroke) -> kurbo::Stroke {
+    let mut vello = kurbo::Stroke::new(stroke.width)
+        .with_join(stroke.join.into())
+        .with_start_cap(stroke.start_cap.into())
+        .with_end_cap(stroke.end_cap.into())
+        .with_miter_limit(stroke.miter_limit);
+    if let Some(dash) = stroke.dash {
         vello.dash_offset = dash.offset();
         vello.dash_pattern = dash.intervals().to_vec().into();
     }

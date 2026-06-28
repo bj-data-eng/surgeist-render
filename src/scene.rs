@@ -1,4 +1,8 @@
-use super::{stats::collect_stats, *};
+use super::{
+    command::{RenderCommands, normalize_commands},
+    stats::collect_stats,
+    *,
+};
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
@@ -109,6 +113,10 @@ impl Scene {
         let mut uploaded_images = std::collections::HashSet::new();
         collect_stats(&self.commands, &mut stats, &mut uploaded_images);
         stats
+    }
+
+    pub(crate) fn normalize(&self, capabilities: Capabilities) -> Result<RenderCommands> {
+        normalize_commands(&self.commands, capabilities).map(RenderCommands::new)
     }
 }
 
