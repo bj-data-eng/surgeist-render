@@ -263,6 +263,25 @@ fn draw_value_constructors_preserve_valid_values() {
 }
 
 #[test]
+fn image_ids_are_typed_resource_handles() {
+    let image = Image::from_rgba(
+        Size::try_new(1.0, 1.0).unwrap(),
+        Arc::<[u8]>::from([0, 0, 0, 255]),
+    )
+    .unwrap();
+    let id = image.id();
+
+    assert_eq!(id.get(), image.id().get());
+}
+
+#[test]
+fn font_refs_use_typed_font_ids() {
+    let font = FontRef::new(FontId::new(42));
+
+    assert_eq!(font.id(), FontId::new(42));
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer

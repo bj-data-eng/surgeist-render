@@ -1,5 +1,4 @@
 use super::{stats::collect_stats, *};
-use std::borrow::Cow;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
@@ -53,15 +52,7 @@ impl Scene {
 
     pub fn text_run(&mut self, run: TextRun<'_>) -> &mut Self {
         self.commands.push(Command::TextRun {
-            font: FontRef {
-                id: run.font().id,
-                name: run
-                    .font()
-                    .name
-                    .as_ref()
-                    .map(|name| Cow::Owned(name.clone().into_owned())),
-                data: run.font().data.clone(),
-            },
+            font: run.font().to_owned_static(),
             size: run.size(),
             transform: run.transform(),
             paint: run.paint().clone(),

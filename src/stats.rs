@@ -1,4 +1,4 @@
-use super::{Image, Paint, paint::PaintKind, scene::Command};
+use super::{Image, ImageId, Paint, paint::PaintKind, scene::Command};
 use std::time::Duration;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -22,7 +22,7 @@ pub struct Stats {
 pub(crate) fn collect_stats(
     commands: &[Command],
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<u64>,
+    uploaded_images: &mut std::collections::HashSet<ImageId>,
 ) {
     for command in commands {
         stats.commands = stats.commands.saturating_add(1);
@@ -56,7 +56,7 @@ pub(crate) fn collect_stats(
 fn collect_paint_stats(
     paint: &Paint,
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<u64>,
+    uploaded_images: &mut std::collections::HashSet<ImageId>,
 ) {
     if let PaintKind::Image(image) = paint.kind() {
         collect_image_stats(image, stats, uploaded_images);
@@ -66,7 +66,7 @@ fn collect_paint_stats(
 fn collect_image_stats(
     image: &Image,
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<u64>,
+    uploaded_images: &mut std::collections::HashSet<ImageId>,
 ) {
     stats.images = stats.images.saturating_add(1);
     if uploaded_images.insert(image.id()) {

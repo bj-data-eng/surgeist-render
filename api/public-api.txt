@@ -167,12 +167,18 @@ pub fn surgeist_render::Error::fmt(&self, f: &mut core::fmt::Formatter<'_>) -> c
 pub struct surgeist_render::FontData
 impl surgeist_render::FontData
 pub fn surgeist_render::FontData::from_bytes(bytes: alloc::vec::Vec<u8>, index: u32) -> Self
+pub struct surgeist_render::FontId
+impl surgeist_render::FontId
+pub const fn surgeist_render::FontId::get(self) -> u64
+pub const fn surgeist_render::FontId::new(value: u64) -> Self
+impl core::convert::From<u64> for surgeist_render::FontId
+pub fn surgeist_render::FontId::from(value: u64) -> Self
 pub struct surgeist_render::FontRef<'a>
-pub surgeist_render::FontRef::id: u64
 pub surgeist_render::FontRef::name: core::option::Option<alloc::borrow::Cow<'a, str>>
 impl<'a> surgeist_render::FontRef<'a>
+pub const fn surgeist_render::FontRef<'a>::id(&self) -> surgeist_render::FontId
 pub fn surgeist_render::FontRef<'a>::named(self, name: impl core::convert::Into<alloc::borrow::Cow<'a, str>>) -> Self
-pub fn surgeist_render::FontRef<'a>::new(id: u64) -> Self
+pub fn surgeist_render::FontRef<'a>::new(id: impl core::convert::Into<surgeist_render::FontId>) -> Self
 pub fn surgeist_render::FontRef<'a>::with_data(self, data: surgeist_render::FontData) -> Self
 pub struct surgeist_render::GradientStop
 impl surgeist_render::GradientStop
@@ -183,7 +189,7 @@ pub struct surgeist_render::Image
 impl surgeist_render::Image
 pub const fn surgeist_render::Image::extend(self, extend: surgeist_render::Extend) -> Self
 pub fn surgeist_render::Image::from_rgba(size: surgeist_render::Size, data: impl core::convert::Into<alloc::sync::Arc<[u8]>>) -> surgeist_render::Result<Self>
-pub const fn surgeist_render::Image::id(&self) -> u64
+pub const fn surgeist_render::Image::id(&self) -> surgeist_render::ImageId
 pub const fn surgeist_render::Image::quality(self, quality: surgeist_render::ImageQuality) -> Self
 pub const fn surgeist_render::Image::size(&self) -> surgeist_render::Size
 impl core::convert::From<surgeist_render::Image> for surgeist_render::Paint
@@ -191,6 +197,10 @@ pub fn surgeist_render::Paint::from(image: surgeist_render::Image) -> Self
 pub struct surgeist_render::ImageBuffer
 pub surgeist_render::ImageBuffer::rgba: alloc::vec::Vec<u8>
 pub surgeist_render::ImageBuffer::size: surgeist_render::PhysicalSize
+pub struct surgeist_render::ImageId
+impl surgeist_render::ImageId
+pub const fn surgeist_render::ImageId::get(self) -> u64
+pub const fn surgeist_render::ImageId::new(value: u64) -> Self
 pub struct surgeist_render::Layer
 impl surgeist_render::Layer
 pub const fn surgeist_render::Layer::blend(self, blend: surgeist_render::BlendMode) -> Self

@@ -1,9 +1,24 @@
 use super::{Error, ErrorCode, PhysicalSize, Result, Size};
 use std::{hash::Hasher, sync::Arc};
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct ImageId(u64);
+
+impl ImageId {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Image {
-    id: u64,
+    id: ImageId,
     pub(crate) size: Size,
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) data: peniko::ImageData,
@@ -20,10 +35,11 @@ impl Image {
             size.height().to_bits(),
             data.as_ref(),
         ));
+        let id = ImageId::new(id);
         let width = image_dimension(size.width(), "width")?;
         let height = image_dimension(size.height(), "height")?;
         let image = peniko::ImageData {
-            data: peniko::Blob::from_raw_parts(Arc::new(data.to_vec()), id),
+            data: peniko::Blob::from_raw_parts(Arc::new(data.to_vec()), id.get()),
             format: peniko::ImageFormat::Rgba8,
             alpha_type: peniko::ImageAlphaType::Alpha,
             width,
@@ -40,7 +56,7 @@ impl Image {
     }
 
     #[must_use]
-    pub const fn id(&self) -> u64 {
+    pub const fn id(&self) -> ImageId {
         self.id
     }
 

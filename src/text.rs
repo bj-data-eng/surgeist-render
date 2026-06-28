@@ -1,6 +1,27 @@
 use super::{Paint, Result, Transform, validation::*};
 use std::borrow::Cow;
 
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct FontId(u64);
+
+impl FontId {
+    #[must_use]
+    pub const fn new(value: u64) -> Self {
+        Self(value)
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
+impl From<u64> for FontId {
+    fn from(value: u64) -> Self {
+        Self::new(value)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextRun<'a> {
     font: FontRef<'a>,
@@ -98,19 +119,24 @@ impl TextGlyph {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontRef<'a> {
-    pub id: u64,
+    id: FontId,
     pub name: Option<Cow<'a, str>>,
     pub(crate) data: Option<FontData>,
 }
 
 impl<'a> FontRef<'a> {
     #[must_use]
-    pub fn new(id: u64) -> Self {
+    pub fn new(id: impl Into<FontId>) -> Self {
         Self {
-            id,
+            id: id.into(),
             name: None,
             data: None,
         }
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> FontId {
+        self.id
     }
 
     #[must_use]
@@ -123,6 +149,17 @@ impl<'a> FontRef<'a> {
     pub fn with_data(mut self, data: FontData) -> Self {
         self.data = Some(data);
         self
+    }
+
+    pub(crate) fn to_owned_static(&self) -> FontRef<'static> {
+        FontRef {
+            id: self.id,
+            name: self
+                .name
+                .as_ref()
+                .map(|name| Cow::Owned(name.clone().into_owned())),
+            data: self.data.clone(),
+        }
     }
 }
 

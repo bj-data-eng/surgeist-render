@@ -22,7 +22,7 @@ mod validation;
 
 pub use error::{Error, ErrorCode, Result, UnsupportedCapability};
 pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
-pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageQuality};
+pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
 pub use layer::{BlendMode, Filter, Layer, Shadow};
 pub use paint::{Color, Gradient, GradientStop, Paint};
 pub use renderer::{Antialiasing, Options, Renderer};
@@ -32,7 +32,7 @@ pub use stats::Stats;
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, WebCanvas,
 };
-pub use text::{FontData, FontRef, TextGlyph, TextPaint, TextRun};
+pub use text::{FontData, FontId, FontRef, TextGlyph, TextPaint, TextRun};
 
 #[cfg(test)]
 mod tests;

@@ -10,7 +10,7 @@ use std::{
 pub struct Renderer {
     options: Options,
     stats: Stats,
-    uploaded_images: HashSet<u64>,
+    uploaded_images: HashSet<ImageId>,
     backend: Option<Backend>,
     default_device: Option<usize>,
 }
