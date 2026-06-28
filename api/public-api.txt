@@ -137,6 +137,14 @@ pub enum surgeist_render::StrokeAlign
 pub surgeist_render::StrokeAlign::Center
 pub surgeist_render::StrokeAlign::Inside
 pub surgeist_render::StrokeAlign::Outside
+pub enum surgeist_render::UnsupportedCapability
+pub surgeist_render::UnsupportedCapability::LayerFilter
+pub surgeist_render::UnsupportedCapability::LayerMask
+pub surgeist_render::UnsupportedCapability::NonSolidShadowPaint
+pub surgeist_render::UnsupportedCapability::PathStrokeAlignment
+pub surgeist_render::UnsupportedCapability::WebCanvasSurface
+impl surgeist_render::UnsupportedCapability
+pub const fn surgeist_render::UnsupportedCapability::label(self) -> &'static str
 pub struct surgeist_render::Color
 pub surgeist_render::Color::a: f32
 pub surgeist_render::Color::b: f32
@@ -160,7 +168,9 @@ pub surgeist_render::Error::code: surgeist_render::ErrorCode
 pub surgeist_render::Error::message: alloc::string::String
 pub surgeist_render::Error::source: core::option::Option<alloc::boxed::Box<(dyn core::error::Error + core::marker::Send + core::marker::Sync)>>
 impl surgeist_render::Error
+pub fn surgeist_render::Error::invalid_value(name: impl core::convert::Into<alloc::string::String>, value: impl core::fmt::Display, rule: &'static str) -> Self
 pub fn surgeist_render::Error::new(code: surgeist_render::ErrorCode, message: impl core::convert::Into<alloc::string::String>) -> Self
+pub fn surgeist_render::Error::unsupported_capability(capability: surgeist_render::UnsupportedCapability) -> Self
 pub fn surgeist_render::Error::with_source(self, source: impl core::error::Error + core::marker::Send + core::marker::Sync + 'static) -> Self
 impl core::error::Error for surgeist_render::Error
 pub fn surgeist_render::Error::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>

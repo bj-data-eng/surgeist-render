@@ -20,7 +20,7 @@ mod surface;
 mod text;
 mod validation;
 
-pub use error::{Error, ErrorCode, Result};
+pub use error::{Error, ErrorCode, Result, UnsupportedCapability};
 pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageQuality};
 pub use layer::{BlendMode, Filter, Layer, Shadow};

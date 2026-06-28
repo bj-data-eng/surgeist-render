@@ -25,6 +25,26 @@ impl Error {
         self.source = Some(Box::new(source));
         self
     }
+
+    #[must_use]
+    pub fn invalid_value(
+        name: impl Into<String>,
+        value: impl std::fmt::Display,
+        rule: &'static str,
+    ) -> Self {
+        Self::new(
+            ErrorCode::InvalidInput,
+            format!("{} value {value} is invalid: {rule}", name.into()),
+        )
+    }
+
+    #[must_use]
+    pub fn unsupported_capability(capability: UnsupportedCapability) -> Self {
+        Self::new(
+            ErrorCode::UnsupportedBackend,
+            format!("renderer capability is unsupported: {}", capability.label()),
+        )
+    }
 }
 
 impl fmt::Display for Error {
@@ -56,4 +76,26 @@ pub enum ErrorCode {
     RenderFailed,
     PresentFailed,
     UnsupportedBackend,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnsupportedCapability {
+    LayerFilter,
+    LayerMask,
+    NonSolidShadowPaint,
+    PathStrokeAlignment,
+    WebCanvasSurface,
+}
+
+impl UnsupportedCapability {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::LayerFilter => "layer filter",
+            Self::LayerMask => "layer mask",
+            Self::NonSolidShadowPaint => "non-solid shadow paint",
+            Self::PathStrokeAlignment => "inside/outside path stroke alignment",
+            Self::WebCanvasSurface => "web canvas surface",
+        }
+    }
 }

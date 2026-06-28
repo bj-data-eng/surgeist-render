@@ -137,6 +137,40 @@ fn rejects_invalid_surface_geometry() {
 }
 
 #[test]
+fn invalid_value_errors_name_rejected_value() {
+    let error = Error::invalid_value(
+        "rectangle width",
+        f64::NAN,
+        "must be finite and non-negative",
+    );
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert!(
+        error.message.contains("rectangle width"),
+        "error should name the rejected field: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("NaN"),
+        "error should include the rejected value: {}",
+        error.message
+    );
+}
+
+#[test]
+fn unsupported_operation_errors_name_capability() {
+    let capability = UnsupportedCapability::LayerMask;
+    let error = Error::unsupported_capability(capability);
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert!(
+        error.message.contains("layer mask"),
+        "message should name the unsupported capability: {}",
+        error.message
+    );
+}
+
+#[test]
 fn vello_out_of_memory_maps_to_stable_surface_error() {
     let error = vello::Error::WgpuErrorFromScope(wgpu::Error::OutOfMemory {
         source: Box::new(std::io::Error::other("oom")),
