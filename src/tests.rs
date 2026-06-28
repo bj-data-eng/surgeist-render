@@ -9,9 +9,9 @@ fn scene_encoding_is_deterministic() {
     let rect = Rect::new(0.0, 0.0, 10.0, 10.0);
 
     a.fill(rect, Color::BLACK)
-        .stroke(rect, Stroke::new(1.0), Color::BLACK);
+        .stroke(rect, Stroke::try_new(1.0).unwrap(), Color::BLACK);
     b.fill(rect, Color::BLACK)
-        .stroke(rect, Stroke::new(1.0), Color::BLACK);
+        .stroke(rect, Stroke::try_new(1.0).unwrap(), Color::BLACK);
 
     assert_eq!(a, b);
 }
@@ -25,12 +25,12 @@ fn scene_stats_report_facts_without_renderer() {
         .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
         .stroke(
             Rect::new(1.0, 1.0, 2.0, 2.0),
-            Stroke::new(1.0),
+            Stroke::try_new(1.0).unwrap(),
             Color::BLACK,
         )
         .shadow(
             Rect::new(0.0, 0.0, 4.0, 4.0),
-            Shadow::new(Point::new(0.0, 1.0), 2.0, 0.0, Color::BLACK),
+            Shadow::try_new(Point::new(0.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
         )
         .image(image, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch)
         .layer(Layer::new(), |scene| {
@@ -208,6 +208,61 @@ fn create_headless_rejects_physical_size_overflow() {
 }
 
 #[test]
+fn draw_value_try_constructors_reject_invalid_values() {
+    assert!(Shape::try_circle(Point::try_new(0.0, 0.0).unwrap(), -1.0).is_err());
+    assert!(Color::try_rgba(2.0, 0.0, 0.0, 1.0).is_err());
+    assert!(Stroke::try_new(0.0).is_err());
+    assert!(Dash::try_new(0.0, &[1.0, f64::NAN]).is_err());
+    assert!(GradientStop::try_new(1.5, Color::BLACK).is_err());
+    assert!(
+        Gradient::try_linear(
+            Point::try_new(0.0, 0.0).unwrap(),
+            Point::try_new(1.0, 1.0).unwrap(),
+            vec![],
+        )
+        .is_err()
+    );
+    assert!(Layer::new().try_opacity(f32::NAN).is_err());
+    assert!(Shadow::try_new(Point::try_new(0.0, 0.0).unwrap(), -1.0, 0.0, Color::BLACK).is_err());
+    assert!(TextGlyph::try_new(1, 0.0, f32::NAN, 1.0).is_err());
+    assert!(
+        TextRun::try_new(
+            FontRef::new(1),
+            -1.0,
+            Transform::identity(),
+            TextPaint::try_fill(Paint::color(Color::BLACK)).unwrap(),
+            &[],
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn draw_value_constructors_preserve_valid_values() {
+    let stroke = Stroke::try_new(2.0).unwrap().align(StrokeAlign::Inside);
+    let stop = GradientStop::try_new(0.5, Color::BLACK).unwrap();
+    let layer = Layer::new().try_opacity(0.5).unwrap();
+    let text_paint = TextPaint::try_fill(Paint::color(Color::BLACK)).unwrap();
+    let glyph = TextGlyph::try_new(7, 1.0, 2.0, 3.0).unwrap();
+    let glyphs = [glyph];
+    let text_run = TextRun::try_new(
+        FontRef::new(1),
+        12.0,
+        Transform::identity(),
+        text_paint.clone(),
+        &glyphs,
+    )
+    .unwrap();
+
+    assert_eq!(stroke.width(), 2.0);
+    assert_eq!(stop.offset(), 0.5);
+    assert_eq!(layer.opacity(), 0.5);
+    assert_eq!(text_paint.fill(), &Paint::color(Color::BLACK));
+    assert_eq!(glyph.id(), 7);
+    assert_eq!(text_run.size(), 12.0);
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
@@ -317,7 +372,7 @@ fn render_reports_command_stats() {
         .layer(Layer::new(), |scene| {
             scene.stroke(
                 Rect::new(1.0, 1.0, 3.0, 3.0),
-                Stroke::new(1.0),
+                Stroke::try_new(1.0).unwrap(),
                 Color::BLACK,
             );
         });
@@ -392,10 +447,9 @@ fn failed_render_does_not_warm_image_reuse_stats() {
         ImageFit::Stretch,
     );
     failing.layer(
-        Layer {
-            mask: Some(Shape::Rect(Rect::new(0.0, 0.0, 1.0, 1.0))),
-            ..Layer::new()
-        },
+        Layer::new()
+            .try_mask(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
+            .unwrap(),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
         },
@@ -434,17 +488,8 @@ fn rejects_malformed_rgba_images() {
 
 #[test]
 fn rejects_malformed_scene_values() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
-    let mut scene = Scene::new();
-    scene.fill(
-        Rect::new(0.0, 0.0, 1.0, 1.0),
-        Color::rgba(f32::NAN, 0.0, 0.0, 1.0),
-    );
-
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .expect_err("invalid paint should fail during scene encoding");
+    let error = Color::try_rgba(f32::NAN, 0.0, 0.0, 1.0)
+        .expect_err("invalid paint should fail at construction");
 
     assert_eq!(error.code, ErrorCode::InvalidInput);
     assert!(error.message.contains("red channel"));
@@ -462,7 +507,7 @@ fn image_paint_lowers_to_brush() {
     )
     .unwrap();
     let mut scene = Scene::new();
-    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Paint::Image(image));
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Paint::image(image));
 
     let stats = renderer
         .render(&mut surface, &scene, Parameters::default())
@@ -562,18 +607,13 @@ fn layer_transform_moves_child_content() {
 
 #[test]
 fn pure_transform_does_not_require_backend_layer() {
-    let transform = Layer {
-        transform: Transform::try_new([1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap(),
-        ..Layer::new()
-    };
-    let clip = Layer {
-        clip: Some(Shape::Rect(Rect::new(0.0, 0.0, 1.0, 1.0))),
-        ..Layer::new()
-    };
-    let opacity = Layer {
-        opacity: 0.5,
-        ..Layer::new()
-    };
+    let transform = Layer::new()
+        .try_transform(Transform::try_new([1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap())
+        .unwrap();
+    let clip = Layer::new()
+        .try_clip(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
+        .unwrap();
+    let opacity = Layer::new().try_opacity(0.5).unwrap();
 
     assert!(!requires_vello_layer(&transform));
     assert!(requires_vello_layer(&clip));
@@ -603,15 +643,9 @@ fn layer_opacity_isolates_child_output() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
     let mut scene = Scene::new();
-    scene.layer(
-        Layer {
-            opacity: 0.5,
-            ..Layer::new()
-        },
-        |scene| {
-            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-        },
-    );
+    scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    });
 
     let stats = renderer
         .render(&mut surface, &scene, Parameters::default())
@@ -631,20 +665,14 @@ fn layer_blend_isolates_child_output() {
     let mut scene = Scene::new();
     scene.fill(
         Rect::new(0.0, 0.0, 2.0, 2.0),
-        Color::rgba(1.0, 0.0, 0.0, 1.0),
+        Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
     );
-    scene.layer(
-        Layer {
-            blend: BlendMode::Multiply,
-            ..Layer::new()
-        },
-        |scene| {
-            scene.fill(
-                Rect::new(0.0, 0.0, 2.0, 2.0),
-                Color::rgba(0.0, 0.0, 1.0, 1.0),
-            );
-        },
-    );
+    scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 2.0, 2.0),
+            Color::try_rgba(0.0, 0.0, 1.0, 1.0).unwrap(),
+        );
+    });
 
     let stats = renderer
         .render(&mut surface, &scene, Parameters::default())
@@ -664,22 +692,18 @@ fn layer_blend_isolates_child_output() {
 
 #[test]
 fn text_run_requires_font_data() {
-    let glyphs = [TextGlyph {
-        id: 1,
-        x: 0.0,
-        y: 0.0,
-        advance: 5.0,
-    }];
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
     let mut scene = Scene::new();
-    scene.text_run(TextRun {
-        font: FontRef::new(1).named("Test"),
-        size: 16.0,
-        transform: Transform::identity(),
-        paint: TextPaint {
-            fill: Color::BLACK.into(),
-        },
-        glyphs: &glyphs,
-    });
+    scene.text_run(
+        TextRun::try_new(
+            FontRef::new(1).named("Test"),
+            16.0,
+            Transform::identity(),
+            TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+            &glyphs,
+        )
+        .unwrap(),
+    );
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
         .create_headless(Size::new(10.0, 10.0), 1.0)
@@ -703,15 +727,12 @@ fn inside_and_outside_strokes_lower_for_builtin_shapes() {
     scene
         .stroke(
             Rect::new(4.0, 4.0, 16.0, 16.0),
-            Stroke::new(2.0).align(StrokeAlign::Inside),
+            Stroke::try_new(2.0).unwrap().align(StrokeAlign::Inside),
             Color::BLACK,
         )
         .stroke(
-            Shape::Circle {
-                center: Point::new(12.0, 12.0),
-                radius: 6.0,
-            },
-            Stroke::new(2.0).align(StrokeAlign::Outside),
+            Shape::try_circle(Point::new(12.0, 12.0), 6.0).unwrap(),
+            Stroke::try_new(2.0).unwrap().align(StrokeAlign::Outside),
             Color::BLACK,
         );
 
@@ -731,7 +752,7 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
     let mut scene = Scene::new();
     scene.stroke(
         Rect::new(3.0, 3.0, 6.0, 6.0),
-        Stroke::new(2.0).align(StrokeAlign::Inside),
+        Stroke::try_new(2.0).unwrap().align(StrokeAlign::Inside),
         Color::BLACK,
     );
 
@@ -749,7 +770,7 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
     let mut scene = Scene::new();
     scene.stroke(
         Rect::new(3.0, 3.0, 6.0, 6.0),
-        Stroke::new(2.0).align(StrokeAlign::Outside),
+        Stroke::try_new(2.0).unwrap().align(StrokeAlign::Outside),
         Color::BLACK,
     );
 
@@ -770,11 +791,8 @@ fn circle_shadows_lower_to_blurred_round_rect() {
         .unwrap();
     let mut scene = Scene::new();
     scene.shadow(
-        Shape::Circle {
-            center: Point::new(12.0, 12.0),
-            radius: 4.0,
-        },
-        Shadow::new(Point::new(1.0, 1.0), 4.0, 1.0, Color::BLACK),
+        Shape::try_circle(Point::new(12.0, 12.0), 4.0).unwrap(),
+        Shadow::try_new(Point::new(1.0, 1.0), 4.0, 1.0, Color::BLACK).unwrap(),
     );
 
     let stats = renderer
@@ -794,11 +812,12 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
         .unwrap();
     let mut scene = Scene::new();
     scene.shadow(
-        Shape::RoundedRect {
-            rect: Rect::new(8.0, 8.0, 16.0, 14.0),
-            radii: Radii::new(0.0, 5.0, 10.0, 0.0),
-        },
-        Shadow::new(Point::new(4.0, 5.0), 8.0, 0.0, Color::BLACK),
+        Shape::try_rounded_rect(
+            Rect::new(8.0, 8.0, 16.0, 14.0),
+            Radii::new(0.0, 5.0, 10.0, 0.0),
+        )
+        .unwrap(),
+        Shadow::try_new(Point::new(4.0, 5.0), 8.0, 0.0, Color::BLACK).unwrap(),
     );
 
     let stats = renderer
@@ -821,8 +840,8 @@ fn aligned_path_strokes_report_explicit_error() {
         .line_to(Point::new(10.0, 10.0));
     let mut scene = Scene::new();
     scene.stroke(
-        Shape::Path(path),
-        Stroke::new(2.0).align(StrokeAlign::Inside),
+        Shape::path(path),
+        Stroke::try_new(2.0).unwrap().align(StrokeAlign::Inside),
         Color::BLACK,
     );
 
@@ -839,10 +858,9 @@ fn layer_masks_report_explicit_error() {
     let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
     let mut scene = Scene::new();
     scene.layer(
-        Layer {
-            mask: Some(Shape::Rect(Rect::new(0.0, 0.0, 2.0, 2.0))),
-            ..Layer::new()
-        },
+        Layer::new()
+            .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+            .unwrap(),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 4.0, 2.0), Color::BLACK);
         },
@@ -864,10 +882,9 @@ fn layer_filters_report_explicit_error() {
         .unwrap();
     let mut scene = Scene::new();
     scene.layer(
-        Layer {
-            filter: Some(Filter::Blur { radius: 4.0 }),
-            ..Layer::new()
-        },
+        Layer::new()
+            .try_filter(Filter::try_blur(4.0).unwrap())
+            .unwrap(),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
         },

@@ -1,6 +1,8 @@
 use super::{
     geometry::{expand_rect, offset_radii},
+    paint::PaintKind,
     scene::Command,
+    shape::ShapeKind,
     validation::*,
     *,
 };
@@ -37,12 +39,12 @@ fn encode_vello_commands(
             } => encode_text_run(scene, transform, font, *size, *run_transform, paint, glyphs)?,
             Command::Layer { layer, children } => {
                 validate_layer(layer)?;
-                let layer_transform = transform * kurbo::Affine::from(layer.transform);
+                let layer_transform = transform * kurbo::Affine::from(layer.transform());
                 if requires_vello_layer(layer) {
                     let clip = layer
-                        .clip
-                        .clone()
-                        .unwrap_or_else(|| Shape::Rect(Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9)));
+                        .clip()
+                        .cloned()
+                        .unwrap_or_else(|| Shape::rect(Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9)));
                     encode_layer_start(scene, layer, layer_transform, &clip)?;
                     encode_vello_commands(children, scene, layer_transform)?;
                     scene.pop_layer();
@@ -64,29 +66,29 @@ fn encode_fill(
     validate_shape(shape)?;
     validate_paint(paint)?;
     let brush = paint_brush(paint)?;
-    match shape {
-        Shape::Rect(rect) => scene.fill(
+    match shape.kind() {
+        ShapeKind::Rect(rect) => scene.fill(
             peniko::Fill::NonZero,
             transform,
             &brush,
             None,
             &kurbo::Rect::from(*rect),
         ),
-        Shape::RoundedRect { rect, radii } => scene.fill(
+        ShapeKind::RoundedRect { rect, radii } => scene.fill(
             peniko::Fill::NonZero,
             transform,
             &brush,
             None,
             &kurbo_rounded_rect(*rect, *radii),
         ),
-        Shape::Circle { center, radius } => scene.fill(
+        ShapeKind::Circle { center, radius } => scene.fill(
             peniko::Fill::NonZero,
             transform,
             &brush,
             None,
             &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
-        Shape::Ellipse { center, radii } => scene.fill(
+        ShapeKind::Ellipse { center, radii } => scene.fill(
             peniko::Fill::NonZero,
             transform,
             &brush,
@@ -97,7 +99,7 @@ fn encode_fill(
                 0.0,
             ),
         ),
-        Shape::Path(path) => scene.fill(
+        ShapeKind::Path(path) => scene.fill(
             peniko::Fill::NonZero,
             transform,
             &brush,
@@ -146,17 +148,21 @@ enum AlignedShape {
 }
 
 fn aligned_stroke_shape(shape: &Shape, mut stroke: Stroke) -> Result<(AlignedShape, Stroke)> {
-    let offset = match stroke.align {
+    let align = stroke.align_kind();
+    let width = stroke.width();
+    let offset = match align {
         StrokeAlign::Center => 0.0,
-        StrokeAlign::Inside => -stroke.width * 0.5,
-        StrokeAlign::Outside => stroke.width * 0.5,
+        StrokeAlign::Inside => -width * 0.5,
+        StrokeAlign::Outside => width * 0.5,
     };
-    if stroke.align != StrokeAlign::Center {
-        stroke.align = StrokeAlign::Center;
+    if align != StrokeAlign::Center {
+        stroke = stroke.align(StrokeAlign::Center);
     }
-    let shape = match shape {
-        Shape::Rect(rect) => AlignedShape::Rect(kurbo::Rect::from(*rect).inflate(offset, offset)),
-        Shape::RoundedRect { rect, radii } => {
+    let shape = match shape.kind() {
+        ShapeKind::Rect(rect) => {
+            AlignedShape::Rect(kurbo::Rect::from(*rect).inflate(offset, offset))
+        }
+        ShapeKind::RoundedRect { rect, radii } => {
             let radii = offset_radii(*radii, offset);
             let rect = kurbo::Rect::from(*rect).inflate(offset, offset);
             AlignedShape::RoundedRect(kurbo_rounded_rect(
@@ -164,11 +170,11 @@ fn aligned_stroke_shape(shape: &Shape, mut stroke: Stroke) -> Result<(AlignedSha
                 radii,
             ))
         }
-        Shape::Circle { center, radius } => AlignedShape::Circle(kurbo::Circle::new(
+        ShapeKind::Circle { center, radius } => AlignedShape::Circle(kurbo::Circle::new(
             (center.x(), center.y()),
             (*radius + offset).max(0.0),
         )),
-        Shape::Ellipse { center, radii } => AlignedShape::Ellipse(kurbo::Ellipse::new(
+        ShapeKind::Ellipse { center, radii } => AlignedShape::Ellipse(kurbo::Ellipse::new(
             (center.x(), center.y()),
             (
                 (radii.width() + offset).max(0.0),
@@ -176,8 +182,8 @@ fn aligned_stroke_shape(shape: &Shape, mut stroke: Stroke) -> Result<(AlignedSha
             ),
             0.0,
         )),
-        Shape::Path(path) if offset == 0.0 => AlignedShape::Path(path.to_kurbo()),
-        Shape::Path(_) => {
+        ShapeKind::Path(path) if offset == 0.0 => AlignedShape::Path(path.to_kurbo()),
+        ShapeKind::Path(_) => {
             return Err(Error::new(
                 ErrorCode::UnsupportedBackend,
                 "inside and outside stroke alignment for arbitrary paths requires a shape layer",
@@ -195,40 +201,40 @@ fn encode_shadow(
 ) -> Result<()> {
     validate_shape(shape)?;
     validate_shadow(shadow)?;
-    let color = paint_color(&shadow.paint)?;
-    let std_dev = shadow.blur * 0.5;
-    match shape {
-        Shape::Rect(rect) => {
-            let rect = offset_rect(expand_rect(*rect, shadow.spread), shadow.offset);
+    let color = paint_color(shadow.paint())?;
+    let std_dev = shadow.blur() * 0.5;
+    match shape.kind() {
+        ShapeKind::Rect(rect) => {
+            let rect = offset_rect(expand_rect(*rect, shadow.spread()), shadow.offset());
             scene.draw_blurred_rounded_rect(transform, rect.into(), color, 0.0, std_dev);
         }
-        Shape::RoundedRect { rect, radii } => {
-            let rect = offset_rect(expand_rect(*rect, shadow.spread), shadow.offset);
+        ShapeKind::RoundedRect { rect, radii } => {
+            let rect = offset_rect(expand_rect(*rect, shadow.spread()), shadow.offset());
             if let Some(radius) = radii.uniform() {
                 scene.draw_blurred_rounded_rect(
                     transform,
                     rect.into(),
                     color,
-                    (radius + shadow.spread).max(0.0),
+                    (radius + shadow.spread()).max(0.0),
                     std_dev,
                 );
             } else {
-                let color = solid_color(&shadow.paint)?;
+                let color = solid_color(shadow.paint())?;
                 encode_non_uniform_rounded_shadow(
                     scene,
                     transform,
                     rect,
-                    offset_radii(*radii, shadow.spread),
-                    shadow.blur,
+                    offset_radii(*radii, shadow.spread()),
+                    shadow.blur(),
                     color,
                 )?;
             }
         }
-        Shape::Circle { center, radius } => {
-            let radius = (radius + shadow.spread).max(0.0);
+        ShapeKind::Circle { center, radius } => {
+            let radius = (radius + shadow.spread()).max(0.0);
             let rect = Rect::new(
-                center.x() - radius + shadow.offset.x(),
-                center.y() - radius + shadow.offset.y(),
+                center.x() - radius + shadow.offset().x(),
+                center.y() - radius + shadow.offset().y(),
                 radius * 2.0,
                 radius * 2.0,
             );
@@ -256,8 +262,8 @@ fn encode_non_uniform_rounded_shadow(
         return encode_fill(
             scene,
             transform,
-            &Shape::RoundedRect { rect, radii },
-            &Paint::Color(color),
+            &Shape::rounded_rect(rect, radii),
+            &Paint::color(color),
         );
     }
 
@@ -343,13 +349,13 @@ fn encode_text_run(
     glyphs: &[TextGlyph],
 ) -> Result<()> {
     validate_text_run(size, run_transform, glyphs)?;
-    validate_paint(&paint.fill)?;
+    validate_paint(paint.fill())?;
     let Some(data) = font.data.as_ref().map(|data| &data.data) else {
         return Err(invalid_input(
             "text run font data is required for rendering prepared glyphs",
         ));
     };
-    let brush = paint_brush(&paint.fill)?;
+    let brush = paint_brush(paint.fill())?;
     scene
         .draw_glyphs(data)
         .font_size(size)
@@ -358,9 +364,9 @@ fn encode_text_run(
         .draw(
             peniko::Fill::NonZero,
             glyphs.iter().map(|glyph| vello::Glyph {
-                id: glyph.id,
-                x: glyph.x,
-                y: glyph.y,
+                id: glyph.id(),
+                x: glyph.x(),
+                y: glyph.y(),
             }),
         );
     Ok(())
@@ -373,23 +379,23 @@ fn encode_layer_start(
     clip: &Shape,
 ) -> Result<()> {
     validate_layer(layer)?;
-    if layer.filter.is_some() {
+    if layer.filter().is_some() {
         return Err(Error::new(
             ErrorCode::UnsupportedBackend,
             "layer filters are not implemented yet",
         ));
     }
-    if layer.mask.is_some() {
+    if layer.mask().is_some() {
         return Err(Error::new(
             ErrorCode::UnsupportedBackend,
             "layer masks are not implemented yet",
         ));
     }
-    let blend = vello_blend(layer.blend);
-    let alpha = layer.opacity.clamp(0.0, 1.0);
-    let use_clip = layer.blend == BlendMode::Normal && (alpha - 1.0).abs() < f32::EPSILON;
-    match clip {
-        Shape::Rect(rect) => push_vello_layer(
+    let blend = vello_blend(layer.blend_mode());
+    let alpha = layer.opacity().clamp(0.0, 1.0);
+    let use_clip = layer.blend_mode() == BlendMode::Normal && (alpha - 1.0).abs() < f32::EPSILON;
+    match clip.kind() {
+        ShapeKind::Rect(rect) => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -397,7 +403,7 @@ fn encode_layer_start(
             transform,
             &kurbo::Rect::from(*rect),
         ),
-        Shape::RoundedRect { rect, radii } => push_vello_layer(
+        ShapeKind::RoundedRect { rect, radii } => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -405,7 +411,7 @@ fn encode_layer_start(
             transform,
             &kurbo_rounded_rect(*rect, *radii),
         ),
-        Shape::Circle { center, radius } => push_vello_layer(
+        ShapeKind::Circle { center, radius } => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -413,7 +419,7 @@ fn encode_layer_start(
             transform,
             &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
-        Shape::Ellipse { center, radii } => push_vello_layer(
+        ShapeKind::Ellipse { center, radii } => push_vello_layer(
             scene,
             use_clip,
             blend,
@@ -425,7 +431,7 @@ fn encode_layer_start(
                 0.0,
             ),
         ),
-        Shape::Path(path) => {
+        ShapeKind::Path(path) => {
             push_vello_layer(scene, use_clip, blend, alpha, transform, &path.to_kurbo())
         }
     }
@@ -433,11 +439,11 @@ fn encode_layer_start(
 }
 
 pub(crate) fn requires_vello_layer(layer: &Layer) -> bool {
-    layer.clip.is_some()
-        || layer.mask.is_some()
-        || layer.filter.is_some()
-        || layer.blend != BlendMode::Normal
-        || (layer.opacity - 1.0).abs() > f32::EPSILON
+    layer.clip().is_some()
+        || layer.mask().is_some()
+        || layer.filter().is_some()
+        || layer.blend_mode() != BlendMode::Normal
+        || (layer.opacity() - 1.0).abs() > f32::EPSILON
 }
 
 fn push_vello_layer(
@@ -472,9 +478,9 @@ fn paint_color(paint: &Paint) -> Result<peniko::Color> {
 }
 
 fn solid_color(paint: &Paint) -> Result<Color> {
-    match paint {
-        Paint::Color(color) => Ok(*color),
-        Paint::Gradient(_) | Paint::Image(_) => Err(Error::new(
+    match paint.kind() {
+        PaintKind::Color(color) => Ok(*color),
+        PaintKind::Gradient(_) | PaintKind::Image(_) => Err(Error::new(
             ErrorCode::UnsupportedBackend,
             "this operation requires a solid color paint",
         )),
@@ -482,22 +488,23 @@ fn solid_color(paint: &Paint) -> Result<Color> {
 }
 
 fn paint_brush(paint: &Paint) -> Result<peniko::Brush> {
-    match paint {
-        Paint::Color(color) => Ok(peniko::Brush::Solid((*color).into())),
-        Paint::Gradient(gradient) => Ok(peniko::Brush::Gradient(gradient.clone().into())),
-        Paint::Image(image) => Ok(peniko::Brush::Image(image_brush(image))),
+    match paint.kind() {
+        PaintKind::Color(color) => Ok(peniko::Brush::Solid((*color).into())),
+        PaintKind::Gradient(gradient) => Ok(peniko::Brush::Gradient(gradient.clone().into())),
+        PaintKind::Image(image) => Ok(peniko::Brush::Image(image_brush(image))),
     }
 }
 
 fn vello_stroke(stroke: Stroke) -> kurbo::Stroke {
-    let mut vello = kurbo::Stroke::new(stroke.width)
-        .with_join(stroke.join.into())
-        .with_start_cap(stroke.start_cap.into())
-        .with_end_cap(stroke.end_cap.into())
-        .with_miter_limit(stroke.miter_limit);
-    if let Some(dash) = stroke.dash {
-        vello.dash_offset = dash.offset;
-        vello.dash_pattern = dash.intervals.to_vec().into();
+    let (width, join, start_cap, end_cap, miter_limit, dash, _) = stroke.parts();
+    let mut vello = kurbo::Stroke::new(width)
+        .with_join(join.into())
+        .with_start_cap(start_cap.into())
+        .with_end_cap(end_cap.into())
+        .with_miter_limit(miter_limit);
+    if let Some(dash) = dash {
+        vello.dash_offset = dash.offset();
+        vello.dash_pattern = dash.intervals().to_vec().into();
     }
     vello
 }

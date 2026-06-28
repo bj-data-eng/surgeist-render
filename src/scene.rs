@@ -54,18 +54,18 @@ impl Scene {
     pub fn text_run(&mut self, run: TextRun<'_>) -> &mut Self {
         self.commands.push(Command::TextRun {
             font: FontRef {
-                id: run.font.id,
+                id: run.font().id,
                 name: run
-                    .font
+                    .font()
                     .name
                     .as_ref()
                     .map(|name| Cow::Owned(name.clone().into_owned())),
-                data: run.font.data.clone(),
+                data: run.font().data.clone(),
             },
-            size: run.size,
-            transform: run.transform,
-            paint: run.paint.clone(),
-            glyphs: run.glyphs.to_vec(),
+            size: run.size(),
+            transform: run.transform(),
+            paint: run.paint().clone(),
+            glyphs: run.glyphs().to_vec(),
         });
         self
     }
@@ -85,13 +85,10 @@ impl Scene {
         transform: Transform,
         children: impl FnOnce(&mut Scene),
     ) -> &mut Self {
-        self.layer(
-            Layer {
-                transform,
-                ..Layer::new()
-            },
-            children,
-        )
+        let layer = Layer::new()
+            .try_transform(transform)
+            .expect("Transform constructors validate layer transform values");
+        self.layer(layer, children)
     }
 
     pub fn clip(
@@ -99,13 +96,10 @@ impl Scene {
         shape: impl Into<Shape>,
         children: impl FnOnce(&mut Scene),
     ) -> &mut Self {
-        self.layer(
-            Layer {
-                clip: Some(shape.into()),
-                ..Layer::new()
-            },
-            children,
-        )
+        let layer = Layer::new()
+            .try_clip(shape.into())
+            .expect("Shape constructors validate layer clip values");
+        self.layer(layer, children)
     }
 
     #[must_use]

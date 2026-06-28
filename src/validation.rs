@@ -1,4 +1,8 @@
 use super::*;
+use super::{
+    paint::{GradientKind, PaintKind},
+    shape::ShapeKind,
+};
 
 pub(crate) fn validate_surface_options(options: SurfaceOptions) -> Result<()> {
     validate_size(options.size, "surface size")?;
@@ -6,21 +10,21 @@ pub(crate) fn validate_surface_options(options: SurfaceOptions) -> Result<()> {
 }
 
 pub(crate) fn validate_shape(shape: &Shape) -> Result<()> {
-    match shape {
-        Shape::Rect(rect) => validate_rect(*rect, "rectangle"),
-        Shape::RoundedRect { rect, radii } => {
+    match shape.kind() {
+        ShapeKind::Rect(rect) => validate_rect(*rect, "rectangle"),
+        ShapeKind::RoundedRect { rect, radii } => {
             validate_rect(*rect, "rounded rectangle")?;
             validate_radii(*radii, "rounded rectangle radii")
         }
-        Shape::Circle { center, radius } => {
+        ShapeKind::Circle { center, radius } => {
             validate_point(*center, "circle center")?;
             validate_non_negative_f64(*radius, "circle radius")
         }
-        Shape::Ellipse { center, radii } => {
+        ShapeKind::Ellipse { center, radii } => {
             validate_point(*center, "ellipse center")?;
             validate_size(*radii, "ellipse radii")
         }
-        Shape::Path(path) => {
+        ShapeKind::Path(path) => {
             for element in &path.elements {
                 match *element {
                     PathElement::MoveTo(point) | PathElement::LineTo(point) => {
@@ -44,33 +48,38 @@ pub(crate) fn validate_shape(shape: &Shape) -> Result<()> {
 }
 
 pub(crate) fn validate_stroke(stroke: Stroke) -> Result<()> {
-    validate_positive_f64(stroke.width, "stroke width")?;
-    validate_positive_f64(stroke.miter_limit, "stroke miter limit")?;
-    if let Some(dash) = stroke.dash {
-        validate_finite_f64(dash.offset, "dash offset")?;
-        for interval in dash.intervals {
-            validate_non_negative_f64(*interval, "dash interval")?;
-        }
+    validate_positive_f64(stroke.width(), "stroke width")?;
+    validate_positive_f64(stroke.miter_limit(), "stroke miter limit")?;
+    if let Some(dash) = stroke.dash() {
+        validate_dash(dash)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_dash(dash: Dash) -> Result<()> {
+    validate_finite_f64(dash.offset(), "dash offset")?;
+    for interval in dash.intervals() {
+        validate_non_negative_f64(*interval, "dash interval")?;
     }
     Ok(())
 }
 
 pub(crate) fn validate_paint(paint: &Paint) -> Result<()> {
-    match paint {
-        Paint::Color(color) => validate_color(*color, "color paint"),
-        Paint::Gradient(gradient) => validate_gradient(gradient),
-        Paint::Image(image) => validate_size(image.size(), "image size"),
+    match paint.kind() {
+        PaintKind::Color(color) => validate_color(*color, "color paint"),
+        PaintKind::Gradient(gradient) => validate_gradient(gradient),
+        PaintKind::Image(image) => validate_size(image.size(), "image size"),
     }
 }
 
 pub(crate) fn validate_gradient(gradient: &Gradient) -> Result<()> {
-    match gradient {
-        Gradient::Linear { start, end, stops } => {
+    match gradient.kind() {
+        GradientKind::Linear { start, end, stops } => {
             validate_point(*start, "linear gradient start")?;
             validate_point(*end, "linear gradient end")?;
             validate_gradient_stops(stops)
         }
-        Gradient::Radial {
+        GradientKind::Radial {
             center,
             radius,
             stops,
@@ -79,7 +88,7 @@ pub(crate) fn validate_gradient(gradient: &Gradient) -> Result<()> {
             validate_positive_f64(*radius, "radial gradient radius")?;
             validate_gradient_stops(stops)
         }
-        Gradient::Sweep { center, stops } => {
+        GradientKind::Sweep { center, stops } => {
             validate_point(*center, "sweep gradient center")?;
             validate_gradient_stops(stops)
         }
@@ -87,39 +96,48 @@ pub(crate) fn validate_gradient(gradient: &Gradient) -> Result<()> {
 }
 
 pub(crate) fn validate_gradient_stops(stops: &[GradientStop]) -> Result<()> {
+    if stops.is_empty() {
+        return Err(invalid_input("gradient stops must not be empty"));
+    }
     for stop in stops {
-        if !stop.offset.is_finite() || !(0.0..=1.0).contains(&stop.offset) {
-            return Err(invalid_input(
-                "gradient stop offset must be finite and between 0 and 1",
+        if !stop.offset().is_finite() || !(0.0..=1.0).contains(&stop.offset()) {
+            return Err(Error::invalid_value(
+                "gradient stop offset",
+                stop.offset(),
+                "must be finite and between 0 and 1",
             ));
         }
-        validate_color(stop.color, "gradient stop color")?;
+        validate_color(stop.color(), "gradient stop color")?;
     }
     Ok(())
 }
 
 pub(crate) fn validate_shadow(shadow: &Shadow) -> Result<()> {
-    validate_point(shadow.offset, "shadow offset")?;
-    validate_non_negative_f64(shadow.blur, "shadow blur")?;
-    validate_finite_f64(shadow.spread, "shadow spread")?;
-    validate_paint(&shadow.paint)
+    validate_point(shadow.offset(), "shadow offset")?;
+    validate_non_negative_f64(shadow.blur(), "shadow blur")?;
+    validate_finite_f64(shadow.spread(), "shadow spread")?;
+    validate_paint(shadow.paint())
 }
 
 pub(crate) fn validate_layer(layer: &Layer) -> Result<()> {
-    validate_transform(layer.transform, "layer transform")?;
-    if !layer.opacity.is_finite() {
+    validate_transform(layer.transform(), "layer transform")?;
+    if !layer.opacity().is_finite() {
         return Err(invalid_input("layer opacity must be finite"));
     }
-    if let Some(clip) = &layer.clip {
+    if let Some(clip) = layer.clip() {
         validate_shape(clip)?;
     }
-    if let Some(mask) = &layer.mask {
+    if let Some(mask) = layer.mask() {
         validate_shape(mask)?;
     }
-    if let Some(Filter::Blur { radius }) = layer.filter {
-        validate_non_negative_f64(radius, "layer blur radius")?;
+    if let Some(filter) = layer.filter() {
+        validate_filter(filter)?;
     }
     Ok(())
+}
+
+pub(crate) fn validate_filter(filter: Filter) -> Result<()> {
+    validate_non_negative_f64(filter.blur_radius(), "layer blur radius")
 }
 
 pub(crate) fn validate_text_run(
@@ -134,7 +152,7 @@ pub(crate) fn validate_text_run(
     }
     validate_transform(transform, "text transform")?;
     for glyph in glyphs {
-        if !glyph.x.is_finite() || !glyph.y.is_finite() || !glyph.advance.is_finite() {
+        if !glyph.x().is_finite() || !glyph.y().is_finite() || !glyph.advance().is_finite() {
             return Err(invalid_input(
                 "text glyph positions and advances must be finite",
             ));
@@ -174,10 +192,10 @@ pub(crate) fn validate_transform(transform: Transform, name: &str) -> Result<()>
 
 pub(crate) fn validate_color(color: Color, name: &str) -> Result<()> {
     for (channel, value) in [
-        ("red", color.r),
-        ("green", color.g),
-        ("blue", color.b),
-        ("alpha", color.a),
+        ("red", color.r()),
+        ("green", color.g()),
+        ("blue", color.b()),
+        ("alpha", color.a()),
     ] {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) {
             return Err(Error::invalid_value(
