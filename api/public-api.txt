@@ -21,6 +21,12 @@ pub surgeist_render::BlendMode::Normal
 pub surgeist_render::BlendMode::Overlay
 pub surgeist_render::BlendMode::Plus
 pub surgeist_render::BlendMode::Screen
+pub struct surgeist_render::Capabilities
+impl surgeist_render::Capabilities
+pub const fn surgeist_render::Capabilities::supports_inside_outside_path_strokes(self) -> bool
+pub const fn surgeist_render::Capabilities::supports_layer_filters(self) -> bool
+pub const fn surgeist_render::Capabilities::supports_layer_masks(self) -> bool
+pub const fn surgeist_render::Capabilities::supports_web_canvas_surfaces(self) -> bool
 pub enum surgeist_render::ErrorCode
 pub surgeist_render::ErrorCode::AdapterUnavailable
 pub surgeist_render::ErrorCode::DeviceCreateFailed
@@ -275,6 +281,7 @@ impl core::convert::From<surgeist_render::Rect> for surgeist_render::Shape
 pub fn surgeist_render::Shape::from(rect: surgeist_render::Rect) -> Self
 pub struct surgeist_render::Renderer
 impl surgeist_render::Renderer
+pub const fn surgeist_render::Renderer::capabilities(&self) -> surgeist_render::Capabilities
 pub fn surgeist_render::Renderer::create_headless(&mut self, size: surgeist_render::Size, scale: f64) -> surgeist_render::Result<surgeist_render::Surface>
 pub fn surgeist_render::Renderer::create_surface(&mut self, attachment: surgeist_render::Attachment, options: surgeist_render::SurfaceOptions) -> surgeist_render::Result<surgeist_render::Surface>
 pub async fn surgeist_render::Renderer::new(options: surgeist_render::Options) -> surgeist_render::Result<Self>

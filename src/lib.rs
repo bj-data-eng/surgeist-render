@@ -6,6 +6,7 @@
 //! while reserving the backend boundary for Vello/wgpu submission.
 
 mod backend;
+mod capability;
 mod encode;
 mod error;
 mod geometry;
@@ -20,6 +21,7 @@ mod surface;
 mod text;
 mod validation;
 
+pub use capability::Capabilities;
 pub use error::{Error, ErrorCode, Result, UnsupportedCapability};
 pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};

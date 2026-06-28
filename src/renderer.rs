@@ -132,13 +132,9 @@ impl Renderer {
         canvas: WebCanvas,
         _options: SurfaceOptions,
     ) -> Result<Surface> {
-        Err(Error::new(
-            ErrorCode::UnsupportedBackend,
-            format!(
-                "web canvas surface '{}' requires the render web feature on wasm32",
-                canvas.id()
-            ),
-        ))
+        let _ = canvas;
+        Capabilities::VELLO_0_9.ensure(UnsupportedCapability::WebCanvasSurface)?;
+        unreachable!("web canvas support requires the render-web feature on wasm32");
     }
 
     pub fn create_headless(&mut self, size: Size, scale: f64) -> Result<Surface> {
@@ -322,6 +318,11 @@ impl Renderer {
     #[must_use]
     pub const fn options(&self) -> Options {
         self.options
+    }
+
+    #[must_use]
+    pub const fn capabilities(&self) -> Capabilities {
+        Capabilities::VELLO_0_9
     }
 }
 

@@ -159,6 +159,55 @@ fn unsupported_operation_errors_name_capability() {
 }
 
 #[test]
+fn renderer_reports_backend_capabilities() {
+    let renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let capabilities = renderer.capabilities();
+
+    assert!(!capabilities.supports_layer_masks());
+    assert!(!capabilities.supports_layer_filters());
+    assert!(!capabilities.supports_inside_outside_path_strokes());
+    assert_eq!(
+        capabilities.supports_web_canvas_surfaces(),
+        cfg!(all(feature = "render-web", target_arch = "wasm32"))
+    );
+}
+
+#[test]
+fn capabilities_map_unsupported_operations_to_typed_errors() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    let error = capabilities
+        .ensure(UnsupportedCapability::LayerMask)
+        .expect_err("layer masks are not supported in this milestone");
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert!(error.message.contains("layer mask"));
+}
+
+#[test]
+fn layer_masks_report_capability_error() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::try_new(4.0, 2.0).unwrap(), 1.0)
+        .unwrap();
+    let mut scene = Scene::new();
+
+    scene.layer(
+        Layer::new()
+            .try_mask(Shape::rect(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap()))
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap(), Color::BLACK);
+        },
+    );
+
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("unsupported mask should fail render");
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert!(error.message.contains("layer mask"));
+}
+
+#[test]
 fn geometry_try_constructors_reject_invalid_values() {
     assert!(Point::try_new(f64::NAN, 0.0).is_err());
     assert!(Size::try_new(-1.0, 1.0).is_err());
@@ -376,7 +425,7 @@ fn web_canvas_attachment_reports_target_requirement() {
     };
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
-    assert!(error.message.contains("wasm32"));
+    assert!(error.message.contains("web canvas surface"));
 }
 
 #[test]
@@ -869,6 +918,11 @@ fn aligned_path_strokes_report_explicit_error() {
         .expect_err("path offsetting is deliberately explicit");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert!(
+        error
+            .message
+            .contains("inside/outside path stroke alignment")
+    );
 }
 
 #[test]
@@ -890,7 +944,7 @@ fn layer_masks_report_explicit_error() {
         .expect_err("mask lowering should be explicit until implemented");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
-    assert!(error.message.contains("masks"));
+    assert!(error.message.contains("layer mask"));
 }
 
 #[test]
@@ -914,7 +968,34 @@ fn layer_filters_report_explicit_error() {
         .expect_err("filter lowering should be explicit until implemented");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
-    assert!(error.message.contains("filters"));
+    assert!(error.message.contains("layer filter"));
+}
+
+#[test]
+fn non_solid_shadow_paint_reports_capability_error() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 1.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.shadow(
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Paint::gradient(gradient)).unwrap(),
+    );
+
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("shadow lowering requires solid paint in this milestone");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert!(error.message.contains("non-solid shadow paint"));
 }
 
 #[test]

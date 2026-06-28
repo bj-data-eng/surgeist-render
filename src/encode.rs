@@ -184,10 +184,8 @@ fn aligned_stroke_shape(shape: &Shape, mut stroke: Stroke) -> Result<(AlignedSha
         )),
         ShapeKind::Path(path) if offset == 0.0 => AlignedShape::Path(path.to_kurbo()),
         ShapeKind::Path(_) => {
-            return Err(Error::new(
-                ErrorCode::UnsupportedBackend,
-                "inside and outside stroke alignment for arbitrary paths requires a shape layer",
-            ));
+            Capabilities::VELLO_0_9.ensure(UnsupportedCapability::PathStrokeAlignment)?;
+            unreachable!("path stroke alignment support requires path offset lowering");
         }
     };
     Ok((shape, stroke))
@@ -380,16 +378,12 @@ fn encode_layer_start(
 ) -> Result<()> {
     validate_layer(layer)?;
     if layer.filter().is_some() {
-        return Err(Error::new(
-            ErrorCode::UnsupportedBackend,
-            "layer filters are not implemented yet",
-        ));
+        Capabilities::VELLO_0_9.ensure(UnsupportedCapability::LayerFilter)?;
+        unreachable!("layer filter support requires filter lowering");
     }
     if layer.mask().is_some() {
-        return Err(Error::new(
-            ErrorCode::UnsupportedBackend,
-            "layer masks are not implemented yet",
-        ));
+        Capabilities::VELLO_0_9.ensure(UnsupportedCapability::LayerMask)?;
+        unreachable!("layer mask support requires mask lowering");
     }
     let blend = vello_blend(layer.blend_mode());
     let alpha = layer.opacity().clamp(0.0, 1.0);
@@ -480,10 +474,10 @@ fn paint_color(paint: &Paint) -> Result<peniko::Color> {
 fn solid_color(paint: &Paint) -> Result<Color> {
     match paint.kind() {
         PaintKind::Color(color) => Ok(*color),
-        PaintKind::Gradient(_) | PaintKind::Image(_) => Err(Error::new(
-            ErrorCode::UnsupportedBackend,
-            "this operation requires a solid color paint",
-        )),
+        PaintKind::Gradient(_) | PaintKind::Image(_) => {
+            Capabilities::VELLO_0_9.ensure(UnsupportedCapability::NonSolidShadowPaint)?;
+            unreachable!("non-solid shadow paint support requires shadow paint lowering");
+        }
     }
 }
 
