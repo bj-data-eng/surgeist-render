@@ -22,6 +22,13 @@ plans as the source of task scope for cross-crate work.
 - Generated files are owned by their generator. Regenerate them with the
   documented command instead of hand-editing output.
 
+## Plans
+
+Plans for this crate go in `plans/` at this repo root. This repo-local plan
+location intentionally overrides Superpowers default paths such as
+`docs/superpowers/plans`. Root-authored plans may be drafted in the root repo
+and then copied here for crate-local execution.
+
 ## Coordinator Workflow
 
 Crate coordinators coordinate first. They assign, verify, reconcile, and
@@ -86,6 +93,9 @@ If a broad check is skipped, name the reason in the task output.
 - Check status before and after edits: `git status --short --branch`.
 - Review `git diff --stat` and the relevant detailed diff before committing.
 - Do not rewrite unrelated files or revert user changes unless explicitly asked.
+- Do not create or switch branches for ordinary Surgeist work. Use the current
+  `main` branch and sequential task-scoped commits unless the user explicitly
+  asks for a branch or worktree.
 - Keep `.venv/`, `target/`, `build/`, `dist/`, secrets, editor residue, and
   runtime residue out of git.
 - Commit logical points with short, concrete messages.
