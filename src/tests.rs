@@ -72,13 +72,7 @@ fn headless_resize_keeps_target_when_physical_size_is_unchanged() {
     surface.resize(Size::new(10.4, 10.4), 1.0).unwrap();
 
     assert_eq!(surface.size(), Size::new(10.4, 10.4));
-    assert_eq!(
-        surface.physical_size(),
-        PhysicalSize {
-            width: 10,
-            height: 10,
-        }
-    );
+    assert_eq!(surface.physical_size(), PhysicalSize::new(10, 10));
     assert!(matches!(
         &surface.backend,
         SurfaceBackend::Headless {
@@ -109,13 +103,7 @@ fn create_surface_headless_preserves_surface_options() {
     assert_eq!(surface.scale(), 2.0);
     assert_eq!(surface.options.present_mode, PresentMode::Immediate);
     assert_eq!(surface.options.format, Format::Rgba8);
-    assert_eq!(
-        surface.physical_size(),
-        PhysicalSize {
-            width: 20,
-            height: 40,
-        }
-    );
+    assert_eq!(surface.physical_size(), PhysicalSize::new(20, 40));
 }
 
 #[test]
@@ -168,6 +156,72 @@ fn unsupported_operation_errors_name_capability() {
         "message should name the unsupported capability: {}",
         error.message
     );
+}
+
+#[test]
+fn geometry_try_constructors_reject_invalid_values() {
+    assert!(Point::try_new(f64::NAN, 0.0).is_err());
+    assert!(Size::try_new(-1.0, 1.0).is_err());
+    assert!(Rect::try_new(0.0, 0.0, 1.0, f64::INFINITY).is_err());
+    assert!(Radii::try_all(-0.1).is_err());
+    assert!(Transform::try_new([1.0, 0.0, 0.0, f64::NAN, 0.0, 0.0]).is_err());
+}
+
+#[test]
+fn rect_try_from_kurbo_rejects_invalid_bounds() {
+    let rect = kurbo::Rect {
+        x0: 1.0,
+        y0: 0.0,
+        x1: 0.0,
+        y1: 1.0,
+    };
+
+    assert!(Rect::try_from(rect).is_err());
+}
+
+#[test]
+fn physical_size_try_from_logical_size_rejects_invalid_scale() {
+    let error = PhysicalSize::try_from_logical(Size::try_new(10.0, 10.0).unwrap(), 0.0)
+        .expect_err("scale zero should be rejected before conversion");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn physical_size_try_from_logical_size_rejects_u32_overflow() {
+    let error =
+        PhysicalSize::try_from_logical(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0)
+            .expect_err("physical device pixels should fit in u32");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn create_headless_rejects_physical_size_overflow() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+
+    let error =
+        match renderer.create_headless(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0) {
+            Ok(_) => panic!("physical device pixels should fit in u32"),
+            Err(error) => error,
+        };
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::new(10.0, 20.0), 1.5)
+        .unwrap();
+
+    let error = surface
+        .resize(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0)
+        .expect_err("physical device pixels should fit in u32");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(surface.size(), Size::new(10.0, 20.0));
+    assert_eq!(surface.scale(), 1.5);
+    assert_eq!(surface.physical_size(), PhysicalSize::new(15, 30));
 }
 
 #[test]
@@ -295,13 +349,7 @@ fn render_scales_logical_scene_to_physical_surface() {
         .unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
-    assert_eq!(
-        output.size,
-        PhysicalSize {
-            width: 40,
-            height: 40,
-        }
-    );
+    assert_eq!(output.size, PhysicalSize::new(40, 40));
     assert!(pixel_alpha(&output, 18, 18) > 0);
     assert_eq!(pixel_alpha(&output, 22, 22), 0);
 }
@@ -494,9 +542,12 @@ fn layer_transform_moves_child_content() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
     let mut scene = Scene::new();
-    scene.transform(Transform::translate(2.0, 0.0), |scene| {
-        scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-    });
+    scene.transform(
+        Transform::try_new([1.0, 0.0, 0.0, 1.0, 2.0, 0.0]).unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+        },
+    );
 
     renderer
         .render(&mut surface, &scene, Parameters::default())
@@ -512,7 +563,7 @@ fn layer_transform_moves_child_content() {
 #[test]
 fn pure_transform_does_not_require_backend_layer() {
     let transform = Layer {
-        transform: Transform::translate(1.0, 1.0),
+        transform: Transform::try_new([1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap(),
         ..Layer::new()
     };
     let clip = Layer {
@@ -745,12 +796,7 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
     scene.shadow(
         Shape::RoundedRect {
             rect: Rect::new(8.0, 8.0, 16.0, 14.0),
-            radii: Radii {
-                top_left: 0.0,
-                top_right: 5.0,
-                bottom_right: 10.0,
-                bottom_left: 0.0,
-            },
+            radii: Radii::new(0.0, 5.0, 10.0, 0.0),
         },
         Shadow::new(Point::new(4.0, 5.0), 8.0, 0.0, Color::BLACK),
     );
@@ -847,13 +893,7 @@ fn headless_render_can_be_read_back() {
         .unwrap();
     let image = renderer.read_headless(&surface).unwrap();
 
-    assert_eq!(
-        image.size,
-        PhysicalSize {
-            width: 4,
-            height: 4
-        }
-    );
+    assert_eq!(image.size, PhysicalSize::new(4, 4));
     assert_eq!(image.rgba.len(), 4 * 4 * 4);
     assert!(image.rgba.iter().any(|channel| *channel != 0));
 }
@@ -863,7 +903,7 @@ fn pixel_alpha(image: &ImageBuffer, x: u32, y: u32) -> u8 {
 }
 
 fn pixel_rgba(image: &ImageBuffer, x: u32, y: u32) -> [u8; 4] {
-    let index = ((y * image.size.width + x) * 4 + 3) as usize;
+    let index = ((y * image.size.width() + x) * 4 + 3) as usize;
     [
         image.rgba[index - 3],
         image.rgba[index - 2],

@@ -15,9 +15,13 @@ impl Image {
     pub fn from_rgba(size: Size, data: impl Into<Arc<[u8]>>) -> Result<Self> {
         let data = data.into();
         validate_rgba_image(size, data.len())?;
-        let id = stable_hash(&(size.width.to_bits(), size.height.to_bits(), data.as_ref()));
-        let width = image_dimension(size.width, "width")?;
-        let height = image_dimension(size.height, "height")?;
+        let id = stable_hash(&(
+            size.width().to_bits(),
+            size.height().to_bits(),
+            data.as_ref(),
+        ));
+        let width = image_dimension(size.width(), "width")?;
+        let height = image_dimension(size.height(), "height")?;
         let image = peniko::ImageData {
             data: peniko::Blob::from_raw_parts(Arc::new(data.to_vec()), id),
             format: peniko::ImageFormat::Rgba8,
@@ -59,8 +63,8 @@ impl Image {
 }
 
 fn validate_rgba_image(size: Size, byte_len: usize) -> Result<()> {
-    let width = image_dimension(size.width, "width")?;
-    let height = image_dimension(size.height, "height")?;
+    let width = image_dimension(size.width(), "width")?;
+    let height = image_dimension(size.height(), "height")?;
     let expected_len = u64::from(width)
         .saturating_mul(u64::from(height))
         .saturating_mul(4);

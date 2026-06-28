@@ -24,7 +24,7 @@ pub(crate) fn render_vello_surface(
             view,
             physical_size,
         } => {
-            if physical_size.width == 0 || physical_size.height == 0 {
+            if physical_size.width() == 0 || physical_size.height() == 0 {
                 return Ok(RenderTimings::default());
             }
             ensure_vello_renderer(backend, options, *dev_id)?;
@@ -69,10 +69,10 @@ pub(crate) fn render_vello_surface(
             ..
         } => {
             if let Some(size) = pending_physical_size.take() {
-                if size.width > 0 && size.height > 0 {
+                if size.width() > 0 && size.height() > 0 {
                     backend
                         .context
-                        .resize_surface(native, size.width, size.height);
+                        .resize_surface(native, size.width(), size.height());
                     *valid = true;
                 } else {
                     *valid = false;
@@ -258,8 +258,8 @@ pub(crate) fn vello_render_params(
 ) -> vello::RenderParams {
     vello::RenderParams {
         base_color: parameters.base_color.into(),
-        width: physical_size.width,
-        height: physical_size.height,
+        width: physical_size.width(),
+        height: physical_size.height(),
         antialiasing_method: antialiasing.into(),
     }
 }
@@ -276,8 +276,8 @@ pub(crate) fn create_headless_texture(
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Surgeist headless target"),
         size: wgpu::Extent3d {
-            width: physical_size.width.max(1),
-            height: physical_size.height.max(1),
+            width: physical_size.width().max(1),
+            height: physical_size.height().max(1),
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
@@ -297,8 +297,8 @@ pub(crate) fn read_texture_rgba(
     texture: &wgpu::Texture,
     physical_size: PhysicalSize,
 ) -> Result<ImageBuffer> {
-    let width = physical_size.width.max(1);
-    let height = physical_size.height.max(1);
+    let width = physical_size.width().max(1);
+    let height = physical_size.height().max(1);
     let padded_bytes_per_row = (width * 4).next_multiple_of(256);
     let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {

@@ -144,29 +144,29 @@ pub(crate) fn validate_text_run(
 }
 
 pub(crate) fn validate_rect(rect: Rect, name: &str) -> Result<()> {
-    validate_point(rect.origin, name)?;
-    validate_size(rect.size, name)
+    validate_point(rect.origin(), name)?;
+    validate_size(rect.size(), name)
 }
 
 pub(crate) fn validate_size(size: Size, name: &str) -> Result<()> {
-    validate_non_negative_f64(size.width, &format!("{name} width"))?;
-    validate_non_negative_f64(size.height, &format!("{name} height"))
+    validate_non_negative_f64(size.width(), &format!("{name} width"))?;
+    validate_non_negative_f64(size.height(), &format!("{name} height"))
 }
 
 pub(crate) fn validate_radii(radii: Radii, name: &str) -> Result<()> {
-    validate_non_negative_f64(radii.top_left, &format!("{name} top-left"))?;
-    validate_non_negative_f64(radii.top_right, &format!("{name} top-right"))?;
-    validate_non_negative_f64(radii.bottom_right, &format!("{name} bottom-right"))?;
-    validate_non_negative_f64(radii.bottom_left, &format!("{name} bottom-left"))
+    validate_non_negative_f64(radii.top_left(), &format!("{name} top-left"))?;
+    validate_non_negative_f64(radii.top_right(), &format!("{name} top-right"))?;
+    validate_non_negative_f64(radii.bottom_right(), &format!("{name} bottom-right"))?;
+    validate_non_negative_f64(radii.bottom_left(), &format!("{name} bottom-left"))
 }
 
 pub(crate) fn validate_point(point: Point, name: &str) -> Result<()> {
-    validate_finite_f64(point.x, &format!("{name} x"))?;
-    validate_finite_f64(point.y, &format!("{name} y"))
+    validate_finite_f64(point.x(), &format!("{name} x"))?;
+    validate_finite_f64(point.y(), &format!("{name} y"))
 }
 
 pub(crate) fn validate_transform(transform: Transform, name: &str) -> Result<()> {
-    for value in transform.0 {
+    for value in transform.as_array() {
         validate_finite_f64(value, name)?;
     }
     Ok(())

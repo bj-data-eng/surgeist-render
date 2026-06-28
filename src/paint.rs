@@ -99,16 +99,16 @@ impl From<Gradient> for peniko::Gradient {
 
         match gradient {
             Gradient::Linear { start, end, .. } => peniko::Gradient::new_linear(
-                (start.x as f32, start.y as f32),
-                (end.x as f32, end.y as f32),
+                (start.x() as f32, start.y() as f32),
+                (end.x() as f32, end.y() as f32),
             )
             .with_stops(stops.as_slice()),
             Gradient::Radial { center, radius, .. } => {
-                peniko::Gradient::new_radial((center.x as f32, center.y as f32), radius as f32)
+                peniko::Gradient::new_radial((center.x() as f32, center.y() as f32), radius as f32)
                     .with_stops(stops.as_slice())
             }
             Gradient::Sweep { center, .. } => peniko::Gradient::new_sweep(
-                (center.x as f32, center.y as f32),
+                (center.x() as f32, center.y() as f32),
                 0.0,
                 std::f32::consts::TAU,
             )

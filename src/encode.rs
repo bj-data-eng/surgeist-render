@@ -84,14 +84,18 @@ fn encode_fill(
             transform,
             &brush,
             None,
-            &kurbo::Circle::new((center.x, center.y), *radius),
+            &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
         Shape::Ellipse { center, radii } => scene.fill(
             peniko::Fill::NonZero,
             transform,
             &brush,
             None,
-            &kurbo::Ellipse::new((center.x, center.y), (radii.width, radii.height), 0.0),
+            &kurbo::Ellipse::new(
+                (center.x(), center.y()),
+                (radii.width(), radii.height()),
+                0.0,
+            ),
         ),
         Shape::Path(path) => scene.fill(
             peniko::Fill::NonZero,
@@ -154,20 +158,21 @@ fn aligned_stroke_shape(shape: &Shape, mut stroke: Stroke) -> Result<(AlignedSha
         Shape::Rect(rect) => AlignedShape::Rect(kurbo::Rect::from(*rect).inflate(offset, offset)),
         Shape::RoundedRect { rect, radii } => {
             let radii = offset_radii(*radii, offset);
+            let rect = kurbo::Rect::from(*rect).inflate(offset, offset);
             AlignedShape::RoundedRect(kurbo_rounded_rect(
-                Rect::from(kurbo::Rect::from(*rect).inflate(offset, offset)),
+                Rect::new(rect.x0, rect.y0, rect.width(), rect.height()),
                 radii,
             ))
         }
         Shape::Circle { center, radius } => AlignedShape::Circle(kurbo::Circle::new(
-            (center.x, center.y),
+            (center.x(), center.y()),
             (*radius + offset).max(0.0),
         )),
         Shape::Ellipse { center, radii } => AlignedShape::Ellipse(kurbo::Ellipse::new(
-            (center.x, center.y),
+            (center.x(), center.y()),
             (
-                (radii.width + offset).max(0.0),
-                (radii.height + offset).max(0.0),
+                (radii.width() + offset).max(0.0),
+                (radii.height() + offset).max(0.0),
             ),
             0.0,
         )),
@@ -222,8 +227,8 @@ fn encode_shadow(
         Shape::Circle { center, radius } => {
             let radius = (radius + shadow.spread).max(0.0);
             let rect = Rect::new(
-                center.x - radius + shadow.offset.x,
-                center.y - radius + shadow.offset.y,
+                center.x() - radius + shadow.offset.x(),
+                center.y() - radius + shadow.offset.y(),
                 radius * 2.0,
                 radius * 2.0,
             );
@@ -259,27 +264,27 @@ fn encode_non_uniform_rounded_shadow(
     let std_dev = blur * 0.5;
     let kernel = 2.5 * std_dev;
     let support = kurbo::Rect::from(rect).inflate(kernel, kernel);
-    let mid_x = rect.origin.x + rect.size.width * 0.5;
-    let mid_y = rect.origin.y + rect.size.height * 0.5;
+    let mid_x = rect.x() + rect.width() * 0.5;
+    let mid_y = rect.y() + rect.height() * 0.5;
     let shadow_rect = kurbo::Rect::from(rect);
     let color = peniko::Color::from(color);
 
     let regions = [
         (
             kurbo::Rect::new(support.x0, support.y0, mid_x, mid_y),
-            radii.top_left,
+            radii.top_left(),
         ),
         (
             kurbo::Rect::new(mid_x, support.y0, support.x1, mid_y),
-            radii.top_right,
+            radii.top_right(),
         ),
         (
             kurbo::Rect::new(mid_x, mid_y, support.x1, support.y1),
-            radii.bottom_right,
+            radii.bottom_right(),
         ),
         (
             kurbo::Rect::new(support.x0, mid_y, mid_x, support.y1),
-            radii.bottom_left,
+            radii.bottom_left(),
         ),
     ];
 
@@ -406,7 +411,7 @@ fn encode_layer_start(
             blend,
             alpha,
             transform,
-            &kurbo::Circle::new((center.x, center.y), *radius),
+            &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
         Shape::Ellipse { center, radii } => push_vello_layer(
             scene,
@@ -414,7 +419,11 @@ fn encode_layer_start(
             blend,
             alpha,
             transform,
-            &kurbo::Ellipse::new((center.x, center.y), (radii.width, radii.height), 0.0),
+            &kurbo::Ellipse::new(
+                (center.x(), center.y()),
+                (radii.width(), radii.height()),
+                0.0,
+            ),
         ),
         Shape::Path(path) => {
             push_vello_layer(scene, use_clip, blend, alpha, transform, &path.to_kurbo())
@@ -450,10 +459,10 @@ fn kurbo_rounded_rect(rect: Rect, radii: Radii) -> kurbo::RoundedRect {
     kurbo::RoundedRect::from_rect(
         rect.into(),
         kurbo::RoundedRectRadii::new(
-            radii.top_left,
-            radii.top_right,
-            radii.bottom_right,
-            radii.bottom_left,
+            radii.top_left(),
+            radii.top_right(),
+            radii.bottom_right(),
+            radii.bottom_left(),
         ),
     )
 }
@@ -507,33 +516,33 @@ fn vello_blend(blend: BlendMode) -> peniko::BlendMode {
 
 fn offset_rect(rect: Rect, offset: Point) -> Rect {
     Rect::new(
-        rect.origin.x + offset.x,
-        rect.origin.y + offset.y,
-        rect.size.width,
-        rect.size.height,
+        rect.x() + offset.x(),
+        rect.y() + offset.y(),
+        rect.width(),
+        rect.height(),
     )
 }
 
 pub(crate) fn image_transform(size: Size, rect: Rect, fit: ImageFit) -> Result<kurbo::Affine> {
-    if size.width <= 0.0 || size.height <= 0.0 {
+    if size.width() <= 0.0 || size.height() <= 0.0 {
         return Err(Error::new(
             ErrorCode::ImageUploadFailed,
             "image size must be positive",
         ));
     }
-    let scale_x = rect.size.width / size.width;
-    let scale_y = rect.size.height / size.height;
+    let scale_x = rect.width() / size.width();
+    let scale_y = rect.height() / size.height();
     let (fit_scale_x, fit_scale_y, tx, ty) = match fit {
         ImageFit::Fill | ImageFit::Stretch | ImageFit::None => {
-            (scale_x, scale_y, rect.origin.x, rect.origin.y)
+            (scale_x, scale_y, rect.x(), rect.y())
         }
         ImageFit::Contain => {
             let scale = scale_x.min(scale_y);
             (
                 scale,
                 scale,
-                rect.origin.x + (rect.size.width - size.width * scale) * 0.5,
-                rect.origin.y + (rect.size.height - size.height * scale) * 0.5,
+                rect.x() + (rect.width() - size.width() * scale) * 0.5,
+                rect.y() + (rect.height() - size.height() * scale) * 0.5,
             )
         }
         ImageFit::Cover => {
@@ -541,8 +550,8 @@ pub(crate) fn image_transform(size: Size, rect: Rect, fit: ImageFit) -> Result<k
             (
                 scale,
                 scale,
-                rect.origin.x + (rect.size.width - size.width * scale) * 0.5,
-                rect.origin.y + (rect.size.height - size.height * scale) * 0.5,
+                rect.x() + (rect.width() - size.width() * scale) * 0.5,
+                rect.y() + (rect.height() - size.height() * scale) * 0.5,
             )
         }
     };

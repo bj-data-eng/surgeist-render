@@ -160,13 +160,13 @@ impl Path {
         let mut path = kurbo::BezPath::new();
         for element in &self.elements {
             match element {
-                PathElement::MoveTo(point) => path.move_to((point.x, point.y)),
-                PathElement::LineTo(point) => path.line_to((point.x, point.y)),
+                PathElement::MoveTo(point) => path.move_to((point.x(), point.y())),
+                PathElement::LineTo(point) => path.line_to((point.x(), point.y())),
                 PathElement::QuadTo(control, point) => {
-                    path.quad_to((control.x, control.y), (point.x, point.y));
+                    path.quad_to((control.x(), control.y()), (point.x(), point.y()));
                 }
                 PathElement::CubicTo(a, b, point) => {
-                    path.curve_to((a.x, a.y), (b.x, b.y), (point.x, point.y));
+                    path.curve_to((a.x(), a.y()), (b.x(), b.y()), (point.x(), point.y()));
                 }
                 PathElement::Close => path.close_path(),
             }

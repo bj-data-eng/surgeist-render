@@ -50,11 +50,11 @@ impl Renderer {
                         "no compatible wgpu adapter is available",
                     ));
                 };
-                let physical_size = physical_size(options.size, options.scale);
+                let physical_size = physical_size(options.size, options.scale)?;
                 let surface = pollster::block_on(backend.context.create_surface(
                     handle.clone(),
-                    physical_size.width,
-                    physical_size.height,
+                    physical_size.width(),
+                    physical_size.height(),
                     options.present_mode.into(),
                 ))
                 .map_err(|source| {
@@ -98,11 +98,11 @@ impl Renderer {
                 "no compatible WebGPU adapter is available",
             ));
         };
-        let physical_size = physical_size(options.size, options.scale);
+        let physical_size = physical_size(options.size, options.scale)?;
         let surface = pollster::block_on(backend.context.create_surface(
             html_canvas,
-            physical_size.width,
-            physical_size.height,
+            physical_size.width(),
+            physical_size.height(),
             options.present_mode.into(),
         ))
         .map_err(|source| {
@@ -158,7 +158,7 @@ impl Renderer {
                 "headless surfaces require Rgba8 format for Vello storage rendering",
             ));
         }
-        let physical_size = physical_size(options.size, options.scale);
+        let physical_size = physical_size(options.size, options.scale)?;
         let backend =
             if let (Some(backend), Some(dev_id)) = (self.backend.as_mut(), self.default_device) {
                 ensure_vello_renderer(backend, self.options, dev_id)?;

@@ -230,30 +230,39 @@ pub fn surgeist_render::Path::move_to(&mut self, point: surgeist_render::Point) 
 pub fn surgeist_render::Path::new() -> Self
 pub fn surgeist_render::Path::quad_to(&mut self, control: surgeist_render::Point, point: surgeist_render::Point) -> &mut Self
 pub struct surgeist_render::PhysicalSize
-pub surgeist_render::PhysicalSize::height: u32
-pub surgeist_render::PhysicalSize::width: u32
+impl surgeist_render::PhysicalSize
+pub const fn surgeist_render::PhysicalSize::height(self) -> u32
+pub const fn surgeist_render::PhysicalSize::new(width: u32, height: u32) -> Self
+pub fn surgeist_render::PhysicalSize::try_from_logical(size: surgeist_render::Size, scale: f64) -> surgeist_render::Result<Self>
+pub const fn surgeist_render::PhysicalSize::width(self) -> u32
 pub struct surgeist_render::Point
-pub surgeist_render::Point::x: f64
-pub surgeist_render::Point::y: f64
 impl surgeist_render::Point
-pub const fn surgeist_render::Point::new(x: f64, y: f64) -> Self
+pub fn surgeist_render::Point::try_new(x: f64, y: f64) -> surgeist_render::Result<Self>
+pub const fn surgeist_render::Point::x(self) -> f64
+pub const fn surgeist_render::Point::y(self) -> f64
 pub struct surgeist_render::Radii
-pub surgeist_render::Radii::bottom_left: f64
-pub surgeist_render::Radii::bottom_right: f64
-pub surgeist_render::Radii::top_left: f64
-pub surgeist_render::Radii::top_right: f64
 impl surgeist_render::Radii
-pub const fn surgeist_render::Radii::all(radius: f64) -> Self
+pub const fn surgeist_render::Radii::bottom_left(self) -> f64
+pub const fn surgeist_render::Radii::bottom_right(self) -> f64
+pub const fn surgeist_render::Radii::top_left(self) -> f64
+pub const fn surgeist_render::Radii::top_right(self) -> f64
+pub fn surgeist_render::Radii::try_all(radius: f64) -> surgeist_render::Result<Self>
+pub fn surgeist_render::Radii::try_new(top_left: f64, top_right: f64, bottom_right: f64, bottom_left: f64) -> surgeist_render::Result<Self>
 pub fn surgeist_render::Radii::uniform(self) -> core::option::Option<f64>
 pub struct surgeist_render::Rect
-pub surgeist_render::Rect::origin: surgeist_render::Point
-pub surgeist_render::Rect::size: surgeist_render::Size
 impl surgeist_render::Rect
+pub const fn surgeist_render::Rect::height(self) -> f64
 pub fn surgeist_render::Rect::max(self) -> surgeist_render::Point
-pub fn surgeist_render::Rect::min(self) -> surgeist_render::Point
-pub const fn surgeist_render::Rect::new(x: f64, y: f64, width: f64, height: f64) -> Self
-impl core::convert::From<kurbo::rect::Rect> for surgeist_render::Rect
-pub fn surgeist_render::Rect::from(rect: kurbo::rect::Rect) -> Self
+pub const fn surgeist_render::Rect::min(self) -> surgeist_render::Point
+pub const fn surgeist_render::Rect::origin(self) -> surgeist_render::Point
+pub const fn surgeist_render::Rect::size(self) -> surgeist_render::Size
+pub fn surgeist_render::Rect::try_new(x: f64, y: f64, width: f64, height: f64) -> surgeist_render::Result<Self>
+pub const fn surgeist_render::Rect::width(self) -> f64
+pub const fn surgeist_render::Rect::x(self) -> f64
+pub const fn surgeist_render::Rect::y(self) -> f64
+impl core::convert::TryFrom<kurbo::rect::Rect> for surgeist_render::Rect
+pub type surgeist_render::Rect::Error = surgeist_render::Error
+pub fn surgeist_render::Rect::try_from(rect: kurbo::rect::Rect) -> core::result::Result<Self, Self::Error>
 impl core::convert::From<surgeist_render::Rect> for kurbo::rect::Rect
 pub fn kurbo::rect::Rect::from(rect: surgeist_render::Rect) -> Self
 impl core::convert::From<surgeist_render::Rect> for surgeist_render::Shape
@@ -292,10 +301,10 @@ pub surgeist_render::Shadow::spread: f64
 impl surgeist_render::Shadow
 pub fn surgeist_render::Shadow::new(offset: surgeist_render::Point, blur: f64, spread: f64, paint: impl core::convert::Into<surgeist_render::Paint>) -> Self
 pub struct surgeist_render::Size
-pub surgeist_render::Size::height: f64
-pub surgeist_render::Size::width: f64
 impl surgeist_render::Size
-pub const fn surgeist_render::Size::new(width: f64, height: f64) -> Self
+pub const fn surgeist_render::Size::height(self) -> f64
+pub fn surgeist_render::Size::try_new(width: f64, height: f64) -> surgeist_render::Result<Self>
+pub const fn surgeist_render::Size::width(self) -> f64
 pub struct surgeist_render::Stats
 pub surgeist_render::Stats::cache_hits: usize
 pub surgeist_render::Stats::cache_misses: usize
@@ -350,12 +359,12 @@ pub surgeist_render::TextRun::glyphs: &'a [surgeist_render::TextGlyph]
 pub surgeist_render::TextRun::paint: surgeist_render::TextPaint
 pub surgeist_render::TextRun::size: f32
 pub surgeist_render::TextRun::transform: surgeist_render::Transform
-pub struct surgeist_render::Transform(pub [f64; 6])
+pub struct surgeist_render::Transform
 impl surgeist_render::Transform
 pub const surgeist_render::Transform::IDENTITY: Self
+pub const fn surgeist_render::Transform::as_array(self) -> [f64; 6]
 pub const fn surgeist_render::Transform::identity() -> Self
-pub const fn surgeist_render::Transform::scale(x: f64, y: f64) -> Self
-pub const fn surgeist_render::Transform::translate(x: f64, y: f64) -> Self
+pub fn surgeist_render::Transform::try_new(values: [f64; 6]) -> surgeist_render::Result<Self>
 impl core::convert::From<surgeist_render::Transform> for kurbo::affine::Affine
 pub fn kurbo::affine::Affine::from(transform: surgeist_render::Transform) -> Self
 impl core::default::Default for surgeist_render::Transform

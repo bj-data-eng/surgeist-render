@@ -28,9 +28,9 @@ impl Surface {
     pub fn resize(&mut self, size: Size, scale: f64) -> Result<()> {
         validate_size(size, "surface size")?;
         validate_positive_f64(scale, "surface scale")?;
+        let next = physical_size(size, scale)?;
         self.options.size = size;
         self.options.scale = scale;
-        let next = physical_size(size, scale);
         match &mut self.backend {
             SurfaceBackend::ContractOnly { physical_size } => {
                 *physical_size = next;
@@ -58,11 +58,8 @@ impl Surface {
                 pending_physical_size,
                 ..
             } => {
-                *valid = next.width > 0 && next.height > 0;
-                let current = PhysicalSize {
-                    width: surface.config.width,
-                    height: surface.config.height,
-                };
+                *valid = next.width() > 0 && next.height() > 0;
+                let current = PhysicalSize::new(surface.config.width, surface.config.height);
                 if pending_physical_size
                     .as_ref()
                     .is_some_and(|pending| *pending == next)
@@ -128,10 +125,9 @@ impl Surface {
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            SurfaceBackend::Presented { surface, .. } => PhysicalSize {
-                width: surface.config.width,
-                height: surface.config.height,
-            },
+            SurfaceBackend::Presented { surface, .. } => {
+                PhysicalSize::new(surface.config.width, surface.config.height)
+            }
         }
     }
 }
