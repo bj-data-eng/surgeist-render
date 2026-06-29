@@ -1,4 +1,10 @@
-use super::{surface::SurfaceBackend, *};
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::PresentedLifecycle;
+use super::surface::{HeadlessResources, SurfaceBackend};
+use super::*;
 use std::{
     num::NonZeroUsize,
     time::{Duration, Instant},
@@ -20,23 +26,27 @@ pub(crate) fn render_vello_surface(
         SurfaceBackend::ContractOnly { .. } => Ok(RenderTimings::default()),
         SurfaceBackend::Headless {
             dev_id,
-            texture,
-            view,
+            resources,
             physical_size,
         } => {
             if physical_size.width() == 0 || physical_size.height() == 0 {
                 return Ok(RenderTimings::default());
             }
             ensure_vello_renderer(backend, options, *dev_id)?;
-            if texture.is_none() || view.is_none() {
+            if matches!(resources, HeadlessResources::Pending) {
                 let (next_texture, next_view) = create_headless_texture(
                     &backend.context.devices[*dev_id].device,
                     *physical_size,
                     surface.options.format,
                 );
-                *texture = Some(next_texture);
-                *view = Some(next_view);
+                *resources = HeadlessResources::Ready {
+                    texture: next_texture,
+                    view: next_view,
+                };
             }
+            let HeadlessResources::Ready { view, .. } = resources else {
+                unreachable!("headless resources should be ready after allocation");
+            };
             let device_handle = &backend.context.devices[*dev_id];
             let render_start = Instant::now();
             backend.renderers[*dev_id]
@@ -46,7 +56,7 @@ pub(crate) fn render_vello_surface(
                     &device_handle.device,
                     &device_handle.queue,
                     scene,
-                    view.as_ref().expect("headless view should exist"),
+                    view,
                     &vello_render_params(parameters, *physical_size, options.antialiasing),
                 )
                 .map_err(|source| {
@@ -64,25 +74,31 @@ pub(crate) fn render_vello_surface(
         ))]
         SurfaceBackend::Presented {
             surface: native,
-            valid,
-            pending_physical_size,
+            lifecycle,
             ..
         } => {
-            if let Some(size) = pending_physical_size.take() {
-                if size.width() > 0 && size.height() > 0 {
-                    backend
-                        .context
-                        .resize_surface(native, size.width(), size.height());
-                    *valid = true;
-                } else {
-                    *valid = false;
+            match lifecycle {
+                PresentedLifecycle::ResizePending {
+                    physical_size,
+                    resizing,
+                } => {
+                    backend.context.resize_surface(
+                        native,
+                        physical_size.width(),
+                        physical_size.height(),
+                    );
+                    *lifecycle = PresentedLifecycle::Ready {
+                        resizing: *resizing,
+                    };
                 }
-            }
-            if !*valid {
-                return Ok(RenderTimings::default());
+                PresentedLifecycle::NonRenderable { .. } | PresentedLifecycle::Lost => {
+                    return Ok(RenderTimings::default());
+                }
+                PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
             }
             ensure_vello_renderer(backend, options, native.dev_id)?;
             let device_handle = &backend.context.devices[native.dev_id];
+            let resizing = lifecycle.resize_state();
             let render_start = Instant::now();
             backend.renderers[native.dev_id]
                 .as_mut()
@@ -107,7 +123,10 @@ pub(crate) fn render_vello_surface(
 
             let present_start = Instant::now();
             let surface_texture = match native.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
+                wgpu::CurrentSurfaceTexture::Success(surface_texture) => {
+                    *lifecycle = PresentedLifecycle::Ready { resizing };
+                    surface_texture
+                }
                 wgpu::CurrentSurfaceTexture::Outdated
                 | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
                     backend.context.configure_surface(native);
@@ -117,6 +136,7 @@ pub(crate) fn render_vello_surface(
                     ));
                 }
                 wgpu::CurrentSurfaceTexture::Occluded => {
+                    *lifecycle = PresentedLifecycle::Occluded { resizing };
                     return Ok(RenderTimings {
                         render_time,
                         present_time: present_start.elapsed(),
@@ -129,7 +149,7 @@ pub(crate) fn render_vello_surface(
                     ));
                 }
                 wgpu::CurrentSurfaceTexture::Lost => {
-                    *valid = false;
+                    *lifecycle = PresentedLifecycle::Lost;
                     return Err(Error::new(ErrorCode::SurfaceLost, "surface was lost"));
                 }
                 wgpu::CurrentSurfaceTexture::Validation => {

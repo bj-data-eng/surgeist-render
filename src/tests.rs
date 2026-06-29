@@ -1,7 +1,17 @@
-use super::{backend::*, encode::*, surface::SurfaceBackend};
+use super::{
+    backend::*,
+    encode::*,
+    surface::{HeadlessResources, SurfaceBackend},
+};
 use std::{sync::Arc, time::Duration};
 
 use super::*;
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::{PresentedLifecycle, ResizeState};
 #[test]
 fn scene_encoding_is_deterministic() {
     let mut a = Scene::new();
@@ -103,6 +113,71 @@ fn surface_tracks_size_and_scale() {
 }
 
 #[test]
+fn surface_state_reports_availability_without_bool_peeking() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::try_new(1.0, 1.0).unwrap(), 1.0)
+        .unwrap();
+
+    assert_eq!(surface.state(), SurfaceState::Available);
+    surface.suspend().unwrap();
+    assert_eq!(surface.state(), SurfaceState::Suspended);
+}
+
+#[test]
+fn headless_backend_resource_state_tracks_readiness() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::try_new(2.0, 2.0).unwrap(), 1.0)
+        .unwrap();
+
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    surface
+        .resize(Size::try_new(3.0, 3.0).unwrap(), 1.0)
+        .unwrap();
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation
+    );
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+#[test]
+fn presented_surface_lifecycle_state_names_pending_resize() {
+    let state = PresentedLifecycle::pending_resize(PhysicalSize::new(20, 10));
+
+    assert_eq!(
+        state,
+        PresentedLifecycle::ResizePending {
+            physical_size: PhysicalSize::new(20, 10),
+            resizing: ResizeState::Idle,
+        }
+    );
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+#[test]
+fn presented_surface_lifecycle_recovers_from_zero_size_at_current_native_size() {
+    let state = PresentedLifecycle::NonRenderable {
+        physical_size: PhysicalSize::new(0, 0),
+        resizing: ResizeState::Resizing,
+    };
+
+    assert_eq!(
+        state.resize_requested(PhysicalSize::new(640, 480), PhysicalSize::new(640, 480)),
+        PresentedLifecycle::Ready {
+            resizing: ResizeState::Resizing,
+        }
+    );
+}
+
+#[test]
 fn headless_resize_keeps_target_when_physical_size_is_unchanged() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
@@ -116,8 +191,7 @@ fn headless_resize_keeps_target_when_physical_size_is_unchanged() {
     assert!(matches!(
         &surface.backend,
         SurfaceBackend::Headless {
-            texture: Some(_),
-            view: Some(_),
+            resources: HeadlessResources::Ready { .. },
             ..
         }
     ));

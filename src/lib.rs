@@ -33,7 +33,8 @@ pub use scene::Scene;
 pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign};
 pub use stats::Stats;
 pub use surface::{
-    Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, WebCanvas,
+    Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,
+    SurfaceState, WebCanvas,
 };
 pub use text::{FontData, FontId, FontRef, TextGlyph, TextPaint, TextRun};
 

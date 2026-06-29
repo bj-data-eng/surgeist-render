@@ -352,9 +352,11 @@ pub struct surgeist_render::Surface
 impl surgeist_render::Surface
 pub const fn surgeist_render::Surface::physical_size(&self) -> surgeist_render::PhysicalSize
 pub fn surgeist_render::Surface::resize(&mut self, size: surgeist_render::Size, scale: f64) -> surgeist_render::Result<()>
+pub const fn surgeist_render::Surface::resource_state(&self) -> surgeist_render::SurfaceResourceState
 pub fn surgeist_render::Surface::resume(&mut self, attachment: surgeist_render::Attachment) -> surgeist_render::Result<()>
 pub const fn surgeist_render::Surface::scale(&self) -> f64
 pub const fn surgeist_render::Surface::size(&self) -> surgeist_render::Size
+pub const fn surgeist_render::Surface::state(&self) -> surgeist_render::SurfaceState
 pub fn surgeist_render::Surface::suspend(&mut self) -> surgeist_render::Result<()>
 pub struct surgeist_render::SurfaceOptions
 pub surgeist_render::SurfaceOptions::format: surgeist_render::Format
@@ -363,6 +365,14 @@ pub surgeist_render::SurfaceOptions::scale: f64
 pub surgeist_render::SurfaceOptions::size: surgeist_render::Size
 impl core::default::Default for surgeist_render::SurfaceOptions
 pub fn surgeist_render::SurfaceOptions::default() -> Self
+pub enum surgeist_render::SurfaceResourceState
+pub surgeist_render::SurfaceResourceState::ContractOnly
+pub surgeist_render::SurfaceResourceState::PendingAllocation
+pub surgeist_render::SurfaceResourceState::Presented
+pub surgeist_render::SurfaceResourceState::Ready
+pub enum surgeist_render::SurfaceState
+pub surgeist_render::SurfaceState::Available
+pub surgeist_render::SurfaceState::Suspended
 pub struct surgeist_render::TextGlyph
 impl surgeist_render::TextGlyph
 pub const fn surgeist_render::TextGlyph::advance(self) -> f32

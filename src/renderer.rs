@@ -1,6 +1,16 @@
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::{PresentedLifecycle, ResizeState};
 use super::{
-    backend::*, encode::encode_vello_scene, geometry::physical_size, stats::collect_render_stats,
-    surface::SurfaceBackend, validation::*, *,
+    backend::*,
+    encode::encode_vello_scene,
+    geometry::physical_size,
+    stats::collect_render_stats,
+    surface::{HeadlessResources, SurfaceBackend},
+    validation::*,
+    *,
 };
 use std::{
     collections::HashSet,
@@ -71,9 +81,9 @@ impl Renderer {
                     options,
                     SurfaceBackend::Presented {
                         surface: Box::new(surface),
-                        valid: true,
-                        resizing: false,
-                        pending_physical_size: None,
+                        lifecycle: PresentedLifecycle::Ready {
+                            resizing: ResizeState::Idle,
+                        },
                     },
                 ))
             }
@@ -119,9 +129,9 @@ impl Renderer {
             options,
             SurfaceBackend::Presented {
                 surface: Box::new(surface),
-                valid: true,
-                resizing: false,
-                pending_physical_size: None,
+                lifecycle: PresentedLifecycle::Ready {
+                    resizing: ResizeState::Idle,
+                },
             },
         ))
     }
@@ -165,8 +175,7 @@ impl Renderer {
                 );
                 SurfaceBackend::Headless {
                     dev_id,
-                    texture: Some(texture),
-                    view: Some(view),
+                    resources: HeadlessResources::Ready { texture, view },
                     physical_size,
                 }
             } else {
@@ -181,12 +190,7 @@ impl Renderer {
     }
 
     pub fn set_surface_resizing(&mut self, surface: &mut Surface, resizing: bool) -> Result<()> {
-        if !surface.available {
-            return Err(Error::new(
-                ErrorCode::SurfaceUnavailable,
-                "surface is not available",
-            ));
-        }
+        surface.ensure_available()?;
 
         #[cfg(not(any(
             feature = "render-window",
@@ -200,14 +204,19 @@ impl Renderer {
         ))]
         if let SurfaceBackend::Presented {
             surface: native,
-            resizing: active,
+            lifecycle,
             ..
         } = &mut surface.backend
         {
-            if *active == resizing {
+            let next = if resizing {
+                ResizeState::Resizing
+            } else {
+                ResizeState::Idle
+            };
+            if lifecycle.resize_state() == next {
                 return Ok(());
             }
-            *active = resizing;
+            *lifecycle = lifecycle.with_resizing(next);
             apply_presented_resize_state(self.backend.as_mut(), native, resizing);
         }
 
@@ -220,12 +229,7 @@ impl Renderer {
         scene: &Scene,
         parameters: Parameters,
     ) -> Result<Stats> {
-        if !surface.available {
-            return Err(Error::new(
-                ErrorCode::SurfaceUnavailable,
-                "surface is not available",
-            ));
-        }
+        surface.ensure_available()?;
 
         let frame_start = Instant::now();
         let encode_start = Instant::now();
@@ -286,7 +290,7 @@ impl Renderer {
     pub fn read_headless(&mut self, surface: &Surface) -> Result<ImageBuffer> {
         let SurfaceBackend::Headless {
             dev_id,
-            texture: Some(texture),
+            resources: HeadlessResources::Ready { texture, .. },
             physical_size,
             ..
         } = &surface.backend
