@@ -147,7 +147,10 @@ fn headless_backend_resource_state_tracks_readiness() {
 ))]
 #[test]
 fn presented_surface_lifecycle_state_names_pending_resize() {
-    let state = PresentedLifecycle::pending_resize(PhysicalSize::new(20, 10));
+    let state = PresentedLifecycle::ResizePending {
+        physical_size: PhysicalSize::new(20, 10),
+        resizing: ResizeState::Idle,
+    };
 
     assert_eq!(
         state,

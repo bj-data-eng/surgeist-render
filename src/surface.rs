@@ -223,13 +223,6 @@ pub(crate) enum PresentedLifecycle {
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 impl PresentedLifecycle {
-    pub(crate) const fn pending_resize(physical_size: PhysicalSize) -> Self {
-        Self::ResizePending {
-            physical_size,
-            resizing: ResizeState::Idle,
-        }
-    }
-
     pub(crate) const fn resizing(self) -> bool {
         matches!(
             self,
