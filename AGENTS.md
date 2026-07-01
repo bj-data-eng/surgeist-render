@@ -59,6 +59,9 @@ For code changes, follow this sequence unless the user explicitly waives it:
 During plan execution, assign one clear scoped task to each worker. Tell workers
 they are not alone in the codebase and must not revert others' work.
 
+Do not fork any conversation context into workers or reviewers. Provide only the
+scoped task prompt, relevant files, commands, and constraints.
+
 Do not declare a multi-task implementation plan complete until task-scoped
 worker/reviewer cycles and the final holistic review are clean.
 
