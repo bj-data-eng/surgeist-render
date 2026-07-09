@@ -53,11 +53,12 @@ pub use style::{
     BackgroundAttachment, BackgroundBox, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
     BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide, BorderStyle,
     ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur, FilterList, FilterOp,
-    FilterOpKind, ImagePlacementInput, ImageRepeatMode, ImageRepeatPlan, ImageResourceDensity,
-    MaskInput, MaskMode, MaskSource, MaskSourceKind, Outline, OutlineStyle, PositionComponent,
-    PositionComponentKind, PositionEdge, PositionEdgeOffset, RepeatMode, ResolvedImagePlacement,
-    ResolvedImageRepeat, ResolvedImageResource, SizeComponent, SizeComponentKind, StyleColor,
-    StyleImageLayer, StyleImageSource, StyleImageSourceKind, StyleResourceRef, UnitFilterAmount,
+    FilterOpKind, FilteredImagePaint, ImageAttachmentPlan, ImagePlacementInput, ImageRepeatMode,
+    ImageRepeatPlan, ImageResourceDensity, MaskInput, MaskMode, MaskSource, MaskSourceKind,
+    Outline, OutlineStyle, PositionComponent, PositionComponentKind, PositionEdge,
+    PositionEdgeOffset, RepeatMode, ResolvedImagePlacement, ResolvedImageRepeat,
+    ResolvedImageResource, SizeComponent, SizeComponentKind, StyleColor, StyleImageLayer,
+    StyleImageSource, StyleImageSourceKind, StyleResourceRef, UnitFilterAmount,
 };
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,

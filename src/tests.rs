@@ -735,6 +735,51 @@ fn fixed_background_layers_can_carry_viewport_coordinate_space() {
 }
 
 #[test]
+fn image_attachment_plan_uses_root_resolved_scroll_and_local_coordinates() {
+    let scroll = ImageAttachmentPlan::try_new(BackgroundAttachment::Scroll, None).unwrap();
+    assert_eq!(scroll.attachment(), BackgroundAttachment::Scroll);
+    assert_eq!(
+        scroll.coordinate_space().map(CoordinateSpaceTag::kind),
+        None
+    );
+
+    let local_tag = CoordinateSpaceTag::local();
+    let local = ImageAttachmentPlan::try_new(BackgroundAttachment::Local, Some(local_tag)).unwrap();
+    assert_eq!(local.attachment(), BackgroundAttachment::Local);
+    assert_eq!(
+        local.coordinate_space().map(CoordinateSpaceTag::kind),
+        Some(CoordinateSpaceKind::Local)
+    );
+}
+
+#[test]
+fn fixed_image_attachment_requires_viewport_coordinate_tag() {
+    let missing = ImageAttachmentPlan::try_new(BackgroundAttachment::Fixed, None)
+        .expect_err("fixed backgrounds require an explicit viewport tag");
+    assert_eq!(missing.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        missing.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background attachment coordinate space")
+    );
+
+    let surface = CoordinateSpaceTag::surface(Transform::identity()).unwrap();
+    let wrong = ImageAttachmentPlan::try_new(BackgroundAttachment::Fixed, Some(surface))
+        .expect_err("fixed backgrounds must be tagged in viewport coordinates");
+    assert_eq!(
+        wrong.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background attachment coordinate space")
+    );
+
+    let viewport = CoordinateSpaceTag::viewport(Transform::translation(3.0, 4.0).unwrap()).unwrap();
+    let fixed = ImageAttachmentPlan::try_new(BackgroundAttachment::Fixed, Some(viewport)).unwrap();
+    assert_eq!(fixed.attachment(), BackgroundAttachment::Fixed);
+    assert_eq!(
+        fixed.coordinate_space().map(CoordinateSpaceTag::kind),
+        Some(CoordinateSpaceKind::Viewport)
+    );
+}
+
+#[test]
 fn resolved_image_resources_reject_invalid_intrinsic_size() {
     let error = ResolvedImageResource::try_new(ImageId::new(7), Size::new(f64::NAN, 12.0))
         .expect_err("invalid intrinsic size should be rejected");
@@ -800,6 +845,43 @@ fn filter_lists_reject_empty_ordered_ops() {
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("filter operations")
+    );
+}
+
+#[test]
+fn filtered_image_paint_preserves_resolved_image_and_filter_list() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(30), Size::new(16.0, 16.0)).unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25).unwrap(),
+    )])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(resource.clone(), filters.clone()).unwrap();
+
+    assert_eq!(paint.resource(), &resource);
+    assert_eq!(paint.filters(), &filters);
+}
+
+#[test]
+fn filtered_image_paint_rejects_none_filter_list_and_reports_execution_boundary() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(31), Size::new(8.0, 8.0)).unwrap();
+    let error = FilteredImagePaint::try_new(resource.clone(), FilterList::none())
+        .expect_err("filtered image paint requires a non-empty filter list");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+
+    let filters = FilterList::try_ops(vec![FilterOp::contrast(
+        FilterAmount::try_new(0.75).unwrap(),
+    )])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(resource, filters).unwrap();
+    let unsupported = paint
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("filtered image paint execution belongs to filter phases");
+    assert_eq!(
+        unsupported.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::FilteredImagePaint
+        ))
     );
 }
 

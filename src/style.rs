@@ -1,8 +1,8 @@
 use super::{
-    Capabilities, Color, CoordinateSpaceTag, Error, Image, ImageColorProfilePolicy, ImageId,
-    ImageOrientationPolicy, Paint, PrimitiveFamily, PrimitiveOperation, Rect, Result, Shadow,
-    Shape, Size, SymbolicColorPolicy, UnresolvedResource, UnresolvedResourceKind,
-    UnsupportedPrimitive,
+    Capabilities, Color, CoordinateSpaceKind, CoordinateSpaceTag, Error, Image,
+    ImageColorProfilePolicy, ImageId, ImageOrientationPolicy, Paint, PrimitiveFamily,
+    PrimitiveOperation, Rect, Result, Shadow, Shape, Size, SymbolicColorPolicy, UnresolvedResource,
+    UnresolvedResourceKind, UnsupportedPrimitive,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
         validate_size,
@@ -955,6 +955,50 @@ pub enum BackgroundAttachment {
     Local,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageAttachmentPlan {
+    attachment: BackgroundAttachment,
+    coordinate_space: Option<CoordinateSpaceTag>,
+}
+
+impl ImageAttachmentPlan {
+    pub fn try_new(
+        attachment: BackgroundAttachment,
+        coordinate_space: Option<CoordinateSpaceTag>,
+    ) -> Result<Self> {
+        if matches!(attachment, BackgroundAttachment::Fixed) {
+            let Some(tag) = coordinate_space else {
+                return Err(Error::invalid_value(
+                    "background attachment coordinate space",
+                    "none",
+                    "fixed backgrounds require a viewport coordinate tag",
+                ));
+            };
+            if tag.kind() != CoordinateSpaceKind::Viewport {
+                return Err(Error::invalid_value(
+                    "background attachment coordinate space",
+                    format!("{:?}", tag.kind()),
+                    "fixed backgrounds require a viewport coordinate tag",
+                ));
+            }
+        }
+        Ok(Self {
+            attachment,
+            coordinate_space,
+        })
+    }
+
+    #[must_use]
+    pub const fn attachment(self) -> BackgroundAttachment {
+        self.attachment
+    }
+
+    #[must_use]
+    pub const fn coordinate_space(self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilterList {
     ops: Option<Vec<FilterOp>>,
@@ -985,6 +1029,42 @@ impl FilterList {
     #[must_use]
     pub fn ops(&self) -> &[FilterOp] {
         self.ops.as_deref().unwrap_or(&[])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilteredImagePaint {
+    resource: ResolvedImageResource,
+    filters: FilterList,
+}
+
+impl FilteredImagePaint {
+    pub fn try_new(resource: ResolvedImageResource, filters: FilterList) -> Result<Self> {
+        if filters.is_none() {
+            return Err(Error::invalid_value(
+                "filtered image paint filters",
+                "none",
+                "must contain at least one filter operation",
+            ));
+        }
+        Ok(Self { resource, filters })
+    }
+
+    #[must_use]
+    pub const fn resource(&self) -> &ResolvedImageResource {
+        &self.resource
+    }
+
+    #[must_use]
+    pub const fn filters(&self) -> &FilterList {
+        &self.filters
+    }
+
+    pub fn ensure_supported(&self, capabilities: Capabilities) -> Result<()> {
+        capabilities.ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::FilteredImagePaint,
+        ))
     }
 }
 
