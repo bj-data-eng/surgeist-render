@@ -3920,6 +3920,227 @@ fn pure_transform_does_not_require_backend_layer() {
 }
 
 #[test]
+fn layer_pass_plan_uses_clip_bounds_before_child_geometry() {
+    let clip = Layer::new()
+        .try_clip(Shape::rect(Rect::new(1.0, 2.0, 3.0, 4.0)))
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(clip, |scene| {
+        scene.fill(Rect::new(-10.0, -10.0, 50.0, 50.0), Color::BLACK);
+    });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected layer command");
+    };
+
+    assert_eq!(layer.isolation, command::LayerIsolation::ClipOnly);
+    assert_eq!(layer.pass_plan.kind(), command::LayerPassKind::ClipOnly);
+    assert_eq!(
+        layer.pass_plan.requirement(),
+        command::LayerPassRequirement::ClipOnly
+    );
+    assert_eq!(
+        layer.pass_plan.bounds().map(command::OffscreenBounds::rect),
+        Some(Rect::new(1.0, 2.0, 3.0, 4.0))
+    );
+}
+
+#[test]
+fn layer_pass_plan_names_opacity_and_blend_direct_layers() {
+    let opacity = Layer::new().try_opacity(0.5).unwrap();
+    let blend = Layer::new().blend(BlendMode::Multiply);
+    let mut scene = Scene::new();
+    scene
+        .layer(opacity, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+        })
+        .layer(blend, |scene| {
+            scene.fill(Rect::new(4.0, 0.0, 2.0, 2.0), Color::BLACK);
+        });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let plans: Vec<_> = normalized
+        .commands
+        .iter()
+        .map(|command| match command {
+            command::RenderCommand::Layer { layer, .. } => (
+                layer.isolation,
+                layer.pass_plan.kind(),
+                layer.pass_plan.requirement(),
+            ),
+            _ => panic!("expected layer command"),
+        })
+        .collect();
+
+    assert_eq!(
+        plans,
+        [
+            (
+                command::LayerIsolation::BackendLayer,
+                command::LayerPassKind::DirectVelloLayer,
+                command::LayerPassRequirement::DirectVelloOpacity,
+            ),
+            (
+                command::LayerIsolation::BackendLayer,
+                command::LayerPassKind::DirectVelloLayer,
+                command::LayerPassRequirement::DirectVelloBlend,
+            ),
+        ]
+    );
+}
+
+#[test]
+fn nested_layer_pass_plan_aggregates_transformed_child_bounds() {
+    let outer = Layer::new().try_opacity(0.5).unwrap();
+    let inner = Layer::new()
+        .try_transform(Transform::translation(4.0, 1.0).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(outer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+        scene.layer(inner, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 3.0, 2.0), Color::BLACK);
+        });
+    });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected outer layer command");
+    };
+
+    assert_eq!(
+        layer.pass_plan.bounds().map(command::OffscreenBounds::rect),
+        Some(Rect::new(0.0, 0.0, 7.0, 3.0))
+    );
+}
+
+#[test]
+fn layer_pass_plan_rejects_mask_filter_boundaries_with_typed_diagnostics() {
+    let cases = [
+        (
+            Layer::new()
+                .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+                .unwrap(),
+            UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::LayerMask,
+            ),
+        ),
+        (
+            Layer::new()
+                .try_filter(Filter::try_blur(4.0).unwrap())
+                .unwrap(),
+            UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        ),
+    ];
+
+    for (layer, primitive) in cases {
+        let mut scene = Scene::new();
+        scene.layer(layer, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+        });
+
+        let error = scene
+            .normalize(Capabilities::VELLO_0_9)
+            .expect_err("mask/filter layer pass planning should stop at diagnostic boundary");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(primitive));
+    }
+}
+
+#[test]
+fn layer_mask_filter_parent_diagnostics_win_over_unsupported_children() {
+    let cases = [
+        (
+            Layer::new()
+                .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+                .unwrap(),
+            UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::LayerMask,
+            ),
+        ),
+        (
+            Layer::new()
+                .try_filter(Filter::try_blur(4.0).unwrap())
+                .unwrap(),
+            UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        ),
+    ];
+
+    for (layer, primitive) in cases {
+        let mut path = Path::new();
+        path.move_to(Point::new(0.0, 0.0))
+            .line_to(Point::new(8.0, 0.0));
+        let mut scene = Scene::new();
+        scene.layer(layer, |scene| {
+            scene.stroke(
+                Shape::path(path),
+                Stroke::try_new(2.0).unwrap().align(StrokeAlign::Inside),
+                Color::BLACK,
+            );
+        });
+
+        let error = scene
+            .normalize(Capabilities::VELLO_0_9)
+            .expect_err("parent layer diagnostic should be reported before child geometry");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(primitive));
+    }
+}
+
+#[test]
+fn path_stroke_layer_bounds_include_miter_limit_conservatively() {
+    let mut path = Path::new();
+    path.move_to(Point::new(10.0, 10.0))
+        .line_to(Point::new(20.0, 10.0));
+    let stroke = Stroke::try_new(4.0).unwrap().try_miter_limit(10.0).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+        scene.stroke(Shape::path(path), stroke, Color::BLACK);
+    });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected layer command");
+    };
+
+    assert_eq!(
+        layer.pass_plan.bounds().map(command::OffscreenBounds::rect),
+        Some(Rect::new(-10.0, -10.0, 50.0, 40.0))
+    );
+}
+
+#[test]
+fn exact_epsilon_opacity_with_clip_keeps_backend_layer_isolation() {
+    let opacity = 1.0 - f32::EPSILON;
+    assert_eq!((opacity - 1.0).abs(), f32::EPSILON);
+    let layer = Layer::new()
+        .try_clip(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
+        .unwrap()
+        .try_opacity(opacity)
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+    });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected layer command");
+    };
+
+    assert_eq!(layer.isolation, command::LayerIsolation::BackendLayer);
+    assert_eq!(
+        layer.pass_plan.kind(),
+        command::LayerPassKind::DirectVelloLayer
+    );
+}
+
+#[test]
 fn layer_default_is_visible() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
