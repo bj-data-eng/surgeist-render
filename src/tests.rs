@@ -1756,8 +1756,19 @@ fn solid_border(width: f64, color: Color) -> BorderSide {
 }
 
 fn normalized_border_command(command: &NormalizedBoxDecorationCommand) -> &NormalizedBorderCommand {
-    let NormalizedBoxDecorationCommandKind::Border(border) = command.kind();
-    border
+    match command.kind() {
+        NormalizedBoxDecorationCommandKind::Border(border) => border,
+        NormalizedBoxDecorationCommandKind::Outline(_) => panic!("expected border command"),
+    }
+}
+
+fn normalized_outline_command(
+    command: &NormalizedBoxDecorationCommand,
+) -> &NormalizedOutlineCommand {
+    match command.kind() {
+        NormalizedBoxDecorationCommandKind::Outline(outline) => outline,
+        NormalizedBoxDecorationCommandKind::Border(_) => panic!("expected outline command"),
+    }
 }
 
 #[test]
@@ -2042,6 +2053,276 @@ fn box_decoration_normalization_emits_borders_for_multiple_fragments_in_order() 
     assert_eq!(commands[2].clip().shape(), Some(&shape));
     assert_eq!(commands[2].radii(), second.radii());
     assert_eq!(commands[2].break_mode(), BoxDecorationBreak::Clone);
+}
+
+#[test]
+fn box_decoration_normalization_expands_outline_target_by_offset_only() {
+    let outline = Outline::try_new(OutlineStyle::Solid, 5.0, Color::BLACK, 3.0).unwrap();
+    let fragment = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(6.0).unwrap(),
+        BoxDecorationBreak::Clone,
+    )
+    .unwrap();
+    let input =
+        BoxDecorationInput::try_new(None, Some(outline.clone()), vec![fragment.clone()]).unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands().len(), 1);
+    let command = normalized_outline_command(&normalized.commands()[0]);
+    assert_eq!(command.fragment_index(), 0);
+    assert_eq!(command.width(), 5.0);
+    assert_eq!(command.offset(), 3.0);
+    assert_eq!(command.paint(), outline.paint());
+    assert_eq!(command.style(), NormalizedOutlineStyle::Solid);
+    assert_eq!(command.target_rect(), Rect::new(-3.0, -3.0, 106.0, 46.0));
+    assert_eq!(
+        command.clip().rect(),
+        Some(box_decoration_test_areas().border_box())
+    );
+    assert_eq!(command.radii(), fragment.radii());
+    assert_eq!(command.break_mode(), BoxDecorationBreak::Clone);
+}
+
+#[test]
+fn box_decoration_normalization_keeps_outline_width_out_of_geometry() {
+    let thin = BoxDecorationInput::try_new(
+        None,
+        Some(Outline::try_new(OutlineStyle::Solid, 1.0, Color::BLACK, 2.0).unwrap()),
+        vec![
+            BoxDecorationFragment::try_new(
+                box_decoration_test_areas(),
+                Radii::try_all(0.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+    let thick = BoxDecorationInput::try_new(
+        None,
+        Some(Outline::try_new(OutlineStyle::Solid, 12.0, Color::BLACK, 2.0).unwrap()),
+        vec![
+            BoxDecorationFragment::try_new(
+                box_decoration_test_areas(),
+                Radii::try_all(0.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    assert_eq!(
+        normalized_outline_command(&thin.commands()[0]).target_rect(),
+        Rect::new(-2.0, -2.0, 104.0, 44.0)
+    );
+    assert_eq!(
+        normalized_outline_command(&thick.commands()[0]).target_rect(),
+        Rect::new(-2.0, -2.0, 104.0, 44.0)
+    );
+    assert_eq!(
+        normalized_outline_command(&thick.commands()[0]).width(),
+        12.0
+    );
+}
+
+#[test]
+fn box_decoration_normalization_preserves_dashed_and_dotted_outline_styles() {
+    for (style, normalized_style) in [
+        (OutlineStyle::Dashed, NormalizedOutlineStyle::Dashed),
+        (OutlineStyle::Dotted, NormalizedOutlineStyle::Dotted),
+    ] {
+        let input = BoxDecorationInput::try_new(
+            None,
+            Some(Outline::try_new(style, 2.0, Color::BLACK, 0.0).unwrap()),
+            vec![
+                BoxDecorationFragment::try_new(
+                    box_decoration_test_areas(),
+                    Radii::try_all(0.0).unwrap(),
+                    BoxDecorationBreak::Slice,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+        assert_eq!(
+            normalized_outline_command(&normalized.commands()[0]).style(),
+            normalized_style
+        );
+    }
+}
+
+#[test]
+fn box_decoration_normalization_reports_unsupported_outline_styles() {
+    for (style, operation) in [
+        (OutlineStyle::Double, PrimitiveOperation::OutlineDoubleStyle),
+        (OutlineStyle::Auto, PrimitiveOperation::OutlineAutoStyle),
+    ] {
+        let input = BoxDecorationInput::try_new(
+            None,
+            Some(Outline::try_new(style, 2.0, Color::BLACK, 0.0).unwrap()),
+            vec![
+                BoxDecorationFragment::try_new(
+                    box_decoration_test_areas(),
+                    Radii::try_all(0.0).unwrap(),
+                    BoxDecorationBreak::Slice,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let error = input
+            .normalize(Capabilities::VELLO_0_9)
+            .expect_err("unsupported outline styles should report typed diagnostics");
+
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::BoxDecorations,
+                operation,
+            ))
+        );
+    }
+}
+
+#[test]
+fn box_decoration_normalization_suppresses_none_and_zero_width_outlines() {
+    for outline in [
+        Outline::try_new(OutlineStyle::None, 2.0, Color::BLACK, 0.0).unwrap(),
+        Outline::try_new(OutlineStyle::Solid, 0.0, Color::BLACK, 0.0).unwrap(),
+    ] {
+        let input = BoxDecorationInput::try_new(
+            None,
+            Some(outline),
+            vec![
+                BoxDecorationFragment::try_new(
+                    box_decoration_test_areas(),
+                    Radii::try_all(0.0).unwrap(),
+                    BoxDecorationBreak::Slice,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+        assert!(normalized.commands().is_empty());
+    }
+}
+
+#[test]
+fn box_decoration_normalization_handles_negative_outline_offsets_deterministically() {
+    let valid = BoxDecorationInput::try_new(
+        None,
+        Some(Outline::try_new(OutlineStyle::Solid, 2.0, Color::BLACK, -4.0).unwrap()),
+        vec![
+            BoxDecorationFragment::try_new(
+                box_decoration_test_areas(),
+                Radii::try_all(0.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    assert_eq!(
+        normalized_outline_command(&valid.commands()[0]).target_rect(),
+        Rect::new(4.0, 4.0, 92.0, 32.0)
+    );
+
+    let invalid = BoxDecorationInput::try_new(
+        None,
+        Some(Outline::try_new(OutlineStyle::Solid, 2.0, Color::BLACK, -30.0).unwrap()),
+        vec![
+            BoxDecorationFragment::try_new(
+                box_decoration_test_areas(),
+                Radii::try_all(0.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+    let error = invalid
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("over-contracted outline target rects should be invalid");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("outline target rect")
+    );
+}
+
+#[test]
+fn box_decoration_normalization_emits_outline_after_borders_for_each_fragment() {
+    let first = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(2.0).unwrap(),
+        BoxDecorationBreak::Slice,
+    )
+    .unwrap();
+    let second_areas = BackgroundAreas::try_new(
+        Rect::new(120.0, 0.0, 60.0, 40.0),
+        Rect::new(124.0, 4.0, 52.0, 32.0),
+        Rect::new(128.0, 8.0, 44.0, 24.0),
+    )
+    .unwrap();
+    let second = BoxDecorationFragment::try_new(
+        second_areas,
+        Radii::try_all(4.0).unwrap(),
+        BoxDecorationBreak::Clone,
+    )
+    .unwrap();
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            solid_border(1.0, Color::BLACK),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+        )),
+        Some(Outline::try_new(OutlineStyle::Solid, 3.0, Color::TRANSPARENT, 1.0).unwrap()),
+        vec![first, second.clone()],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands().len(), 4);
+    assert_eq!(
+        normalized_border_command(&normalized.commands()[0]).fragment_index(),
+        0
+    );
+    assert_eq!(
+        normalized_outline_command(&normalized.commands()[1]).fragment_index(),
+        0
+    );
+    assert_eq!(
+        normalized_border_command(&normalized.commands()[2]).fragment_index(),
+        1
+    );
+    let second_outline = normalized_outline_command(&normalized.commands()[3]);
+    assert_eq!(second_outline.fragment_index(), 1);
+    assert_eq!(
+        second_outline.target_rect(),
+        Rect::new(119.0, -1.0, 62.0, 42.0)
+    );
+    assert_eq!(second_outline.radii(), second.radii());
+    assert_eq!(second_outline.break_mode(), BoxDecorationBreak::Clone);
 }
 
 #[test]

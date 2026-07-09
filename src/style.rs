@@ -1855,10 +1855,11 @@ impl BoxDecorationInput {
     pub fn normalize(&self, _capabilities: Capabilities) -> Result<NormalizedBoxDecoration> {
         let mut commands = Vec::new();
 
-        if let Some(border_edges) = &self.border_edges {
-            for (fragment_index, fragment) in self.fragments.iter().enumerate() {
-                let target_rect = fragment.areas().border_box();
-                let clip = border_clip_geometry(fragment)?;
+        for (fragment_index, fragment) in self.fragments.iter().enumerate() {
+            let target_rect = fragment.areas().border_box();
+            let clip = border_clip_geometry(fragment)?;
+
+            if let Some(border_edges) = &self.border_edges {
                 for (side, border_side) in border_sides(border_edges) {
                     if let Some(style) = normalize_border_style(border_side)? {
                         commands.push(NormalizedBoxDecorationCommand {
@@ -1878,6 +1879,24 @@ impl BoxDecorationInput {
                         });
                     }
                 }
+            }
+
+            if let Some(outline) = &self.outline
+                && let Some(style) = normalize_outline_style(outline)?
+            {
+                commands.push(NormalizedBoxDecorationCommand {
+                    kind: NormalizedBoxDecorationCommandKind::Outline(NormalizedOutlineCommand {
+                        fragment_index,
+                        width: outline.width(),
+                        paint: outline.paint().clone(),
+                        offset: outline.offset(),
+                        style,
+                        target_rect: outline_target_rect(target_rect, outline.offset())?,
+                        clip,
+                        radii: fragment.radii(),
+                        break_mode: fragment.break_mode(),
+                    }),
+                });
             }
         }
 
@@ -1944,6 +1963,13 @@ pub enum NormalizedBorderStyle {
     Double(NormalizedDoubleBorderBands),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum NormalizedOutlineStyle {
+    Solid,
+    Dashed,
+    Dotted,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedBorderCommand {
     fragment_index: usize,
@@ -2005,6 +2031,66 @@ impl NormalizedBorderCommand {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedOutlineCommand {
+    fragment_index: usize,
+    width: f64,
+    paint: Paint,
+    offset: f64,
+    style: NormalizedOutlineStyle,
+    target_rect: Rect,
+    clip: BackgroundClipGeometry,
+    radii: NormalizedBoxRadii,
+    break_mode: BoxDecorationBreak,
+}
+
+impl NormalizedOutlineCommand {
+    #[must_use]
+    pub const fn fragment_index(&self) -> usize {
+        self.fragment_index
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> f64 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn paint(&self) -> &Paint {
+        &self.paint
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> f64 {
+        self.offset
+    }
+
+    #[must_use]
+    pub const fn style(&self) -> NormalizedOutlineStyle {
+        self.style
+    }
+
+    #[must_use]
+    pub const fn target_rect(&self) -> Rect {
+        self.target_rect
+    }
+
+    #[must_use]
+    pub const fn clip(&self) -> &BackgroundClipGeometry {
+        &self.clip
+    }
+
+    #[must_use]
+    pub const fn radii(&self) -> NormalizedBoxRadii {
+        self.radii
+    }
+
+    #[must_use]
+    pub const fn break_mode(&self) -> BoxDecorationBreak {
+        self.break_mode
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedBoxDecoration {
     commands: Vec<NormalizedBoxDecorationCommand>,
 }
@@ -2031,6 +2117,7 @@ impl NormalizedBoxDecorationCommand {
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalizedBoxDecorationCommandKind {
     Border(NormalizedBorderCommand),
+    Outline(NormalizedOutlineCommand),
 }
 
 fn border_sides(edges: &BorderEdges) -> [(BoxSide, &BorderSide); 4] {
@@ -2084,6 +2171,57 @@ fn unsupported_border_style(
 ) -> Result<Option<NormalizedBorderStyle>> {
     let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::BoxDecorations, operation);
     Err(Error::unsupported_render_primitive(unsupported))
+}
+
+fn normalize_outline_style(outline: &Outline) -> Result<Option<NormalizedOutlineStyle>> {
+    if outline.width() == 0.0 || matches!(outline.style(), OutlineStyle::None) {
+        return Ok(None);
+    }
+
+    let style = match outline.style() {
+        OutlineStyle::None => unreachable!("suppressed before style mapping"),
+        OutlineStyle::Solid => NormalizedOutlineStyle::Solid,
+        OutlineStyle::Dashed => NormalizedOutlineStyle::Dashed,
+        OutlineStyle::Dotted => NormalizedOutlineStyle::Dotted,
+        OutlineStyle::Double => {
+            return unsupported_outline_style(PrimitiveOperation::OutlineDoubleStyle);
+        }
+        OutlineStyle::Auto => {
+            return unsupported_outline_style(PrimitiveOperation::OutlineAutoStyle);
+        }
+    };
+
+    Ok(Some(style))
+}
+
+fn unsupported_outline_style(
+    operation: PrimitiveOperation,
+) -> Result<Option<NormalizedOutlineStyle>> {
+    let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::BoxDecorations, operation);
+    Err(Error::unsupported_render_primitive(unsupported))
+}
+
+fn outline_target_rect(border_box: Rect, offset: f64) -> Result<Rect> {
+    let x = border_box.x() - offset;
+    let y = border_box.y() - offset;
+    let width = border_box.width() + offset * 2.0;
+    let height = border_box.height() + offset * 2.0;
+
+    if !x.is_finite()
+        || !y.is_finite()
+        || !width.is_finite()
+        || !height.is_finite()
+        || width <= 0.0
+        || height <= 0.0
+    {
+        return Err(Error::invalid_value(
+            "outline target rect",
+            format!("border box {border_box:?}, offset {offset}"),
+            "must resolve to finite positive width and height",
+        ));
+    }
+
+    Ok(Rect::new(x, y, width, height))
 }
 
 fn validate_box_decoration_radii(radii: Radii) -> Result<()> {

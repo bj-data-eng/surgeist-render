@@ -60,11 +60,11 @@ pub use style::{
     NormalizedBackgroundCommand, NormalizedBackgroundCommandKind, NormalizedBackgroundLayer,
     NormalizedBackgroundLayerSource, NormalizedBackgroundStack, NormalizedBorderCommand,
     NormalizedBorderStyle, NormalizedBoxDecoration, NormalizedBoxDecorationCommand,
-    NormalizedBoxDecorationCommandKind, NormalizedBoxRadii, NormalizedDoubleBorderBands, Outline,
-    OutlineStyle, PositionComponent, PositionComponentKind, PositionEdge, PositionEdgeOffset,
-    RepeatMode, ResolvedImagePlacement, ResolvedImageRepeat, ResolvedImageResource, SizeComponent,
-    SizeComponentKind, StyleColor, StyleImageLayer, StyleImageSource, StyleImageSourceKind,
-    StyleResourceRef, UnitFilterAmount,
+    NormalizedBoxDecorationCommandKind, NormalizedBoxRadii, NormalizedDoubleBorderBands,
+    NormalizedOutlineCommand, NormalizedOutlineStyle, Outline, OutlineStyle, PositionComponent,
+    PositionComponentKind, PositionEdge, PositionEdgeOffset, RepeatMode, ResolvedImagePlacement,
+    ResolvedImageRepeat, ResolvedImageResource, SizeComponent, SizeComponentKind, StyleColor,
+    StyleImageLayer, StyleImageSource, StyleImageSourceKind, StyleResourceRef, UnitFilterAmount,
 };
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,
