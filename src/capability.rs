@@ -4,6 +4,7 @@ use super::{Error, PrimitiveFamily, PrimitiveOperation, Result, UnsupportedPrimi
 pub struct Capabilities {
     geometry_targets: GeometryTargetCapabilities,
     paint_sources: PaintSourceCapabilities,
+    image_sampling: ImageSamplingCapabilities,
     shadows: ShadowCapabilities,
     filters: FilterCapabilities,
     masks_clips: MaskClipCapabilities,
@@ -36,6 +37,21 @@ impl Capabilities {
             color_mix: false,
             repeating_gradients: false,
             symbolic_color_policy: SymbolicColorPolicy::RootResolvedOnly,
+        },
+        image_sampling: ImageSamplingCapabilities {
+            image_fit: true,
+            background_position: true,
+            background_size: true,
+            repeat_xy: true,
+            repeat_round: false,
+            repeat_space: false,
+            filtered_image_paint: false,
+            image_orientation_conversion: false,
+            image_color_profile_conversion: false,
+            attachment_coordinate_policy:
+                BackgroundAttachmentCoordinatePolicy::RootResolvedOrTagged,
+            image_orientation_policy: ImageOrientationPolicy::RootResolvedOnly,
+            image_color_profile_policy: ImageColorProfilePolicy::RootResolvedOnly,
         },
         shadows: ShadowCapabilities {
             rect_rounded_circle_shadows: true,
@@ -73,6 +89,11 @@ impl Capabilities {
     #[must_use]
     pub const fn paint_sources(self) -> PaintSourceCapabilities {
         self.paint_sources
+    }
+
+    #[must_use]
+    pub const fn image_sampling(self) -> ImageSamplingCapabilities {
+        self.image_sampling
     }
 
     #[must_use]
@@ -140,6 +161,22 @@ impl Capabilities {
             (PrimitiveFamily::PaintSources, PrimitiveOperation::RepeatingGradient) => {
                 self.paint_sources.supports_repeating_gradients()
             }
+            (PrimitiveFamily::ImageSampling, PrimitiveOperation::BackgroundRepeatRound) => {
+                self.image_sampling.supports_repeat_round()
+            }
+            (PrimitiveFamily::ImageSampling, PrimitiveOperation::BackgroundRepeatSpace) => {
+                self.image_sampling.supports_repeat_space()
+            }
+            (PrimitiveFamily::ImageSampling, PrimitiveOperation::FilteredImagePaint) => {
+                self.image_sampling.supports_filtered_image_paint()
+            }
+            (PrimitiveFamily::ImageSampling, PrimitiveOperation::ImageOrientationConversion) => {
+                self.image_sampling.supports_image_orientation_conversion()
+            }
+            (PrimitiveFamily::ImageSampling, PrimitiveOperation::ImageColorProfileConversion) => {
+                self.image_sampling
+                    .supports_image_color_profile_conversion()
+            }
             (PrimitiveFamily::Shadows, PrimitiveOperation::EllipsePathShadowShape) => {
                 self.shadows.supports_ellipse_path_shadows()
             }
@@ -172,6 +209,21 @@ pub enum HitTestOwnership {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SymbolicColorPolicy {
+    RootResolvedOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundAttachmentCoordinatePolicy {
+    RootResolvedOrTagged,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageOrientationPolicy {
+    RootResolvedOnly,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageColorProfilePolicy {
     RootResolvedOnly,
 }
 
@@ -298,6 +350,84 @@ impl PaintSourceCapabilities {
     #[must_use]
     pub const fn symbolic_color_policy(self) -> SymbolicColorPolicy {
         self.symbolic_color_policy
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImageSamplingCapabilities {
+    image_fit: bool,
+    background_position: bool,
+    background_size: bool,
+    repeat_xy: bool,
+    repeat_round: bool,
+    repeat_space: bool,
+    filtered_image_paint: bool,
+    image_orientation_conversion: bool,
+    image_color_profile_conversion: bool,
+    attachment_coordinate_policy: BackgroundAttachmentCoordinatePolicy,
+    image_orientation_policy: ImageOrientationPolicy,
+    image_color_profile_policy: ImageColorProfilePolicy,
+}
+
+impl ImageSamplingCapabilities {
+    #[must_use]
+    pub const fn supports_image_fit(self) -> bool {
+        self.image_fit
+    }
+
+    #[must_use]
+    pub const fn supports_background_position(self) -> bool {
+        self.background_position
+    }
+
+    #[must_use]
+    pub const fn supports_background_size(self) -> bool {
+        self.background_size
+    }
+
+    #[must_use]
+    pub const fn supports_repeat_xy(self) -> bool {
+        self.repeat_xy
+    }
+
+    #[must_use]
+    pub const fn supports_repeat_round(self) -> bool {
+        self.repeat_round
+    }
+
+    #[must_use]
+    pub const fn supports_repeat_space(self) -> bool {
+        self.repeat_space
+    }
+
+    #[must_use]
+    pub const fn supports_filtered_image_paint(self) -> bool {
+        self.filtered_image_paint
+    }
+
+    #[must_use]
+    pub const fn supports_image_orientation_conversion(self) -> bool {
+        self.image_orientation_conversion
+    }
+
+    #[must_use]
+    pub const fn supports_image_color_profile_conversion(self) -> bool {
+        self.image_color_profile_conversion
+    }
+
+    #[must_use]
+    pub const fn attachment_coordinate_policy(self) -> BackgroundAttachmentCoordinatePolicy {
+        self.attachment_coordinate_policy
+    }
+
+    #[must_use]
+    pub const fn image_orientation_policy(self) -> ImageOrientationPolicy {
+        self.image_orientation_policy
+    }
+
+    #[must_use]
+    pub const fn image_color_profile_policy(self) -> ImageColorProfilePolicy {
+        self.image_color_profile_policy
     }
 }
 

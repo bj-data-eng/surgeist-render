@@ -24,9 +24,11 @@ mod text;
 mod validation;
 
 pub use capability::{
-    Capabilities, CompositingCapabilities, FilterCapabilities, GeometryTargetCapabilities,
-    HitTestOwnership, MaskClipCapabilities, PaintSourceCapabilities, ShadowCapabilities,
-    SurfaceCapabilities, SymbolicColorPolicy, TransformCoordinateSpaceCapabilities,
+    BackgroundAttachmentCoordinatePolicy, Capabilities, CompositingCapabilities,
+    FilterCapabilities, GeometryTargetCapabilities, HitTestOwnership, ImageColorProfilePolicy,
+    ImageOrientationPolicy, ImageSamplingCapabilities, MaskClipCapabilities,
+    PaintSourceCapabilities, ShadowCapabilities, SurfaceCapabilities, SymbolicColorPolicy,
+    TransformCoordinateSpaceCapabilities,
 };
 pub use error::{
     DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,

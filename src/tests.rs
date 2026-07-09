@@ -1115,6 +1115,33 @@ fn paint_capabilities_name_color_policy_and_conversion_boundaries() {
 }
 
 #[test]
+fn image_sampling_capabilities_name_css_sampling_boundaries() {
+    let capabilities = Capabilities::VELLO_0_9.image_sampling();
+
+    assert!(capabilities.supports_image_fit());
+    assert!(capabilities.supports_background_position());
+    assert!(capabilities.supports_background_size());
+    assert!(capabilities.supports_repeat_xy());
+    assert_eq!(
+        capabilities.attachment_coordinate_policy(),
+        BackgroundAttachmentCoordinatePolicy::RootResolvedOrTagged
+    );
+    assert_eq!(
+        capabilities.image_orientation_policy(),
+        ImageOrientationPolicy::RootResolvedOnly
+    );
+    assert_eq!(
+        capabilities.image_color_profile_policy(),
+        ImageColorProfilePolicy::RootResolvedOnly
+    );
+    assert!(!capabilities.supports_repeat_round());
+    assert!(!capabilities.supports_repeat_space());
+    assert!(!capabilities.supports_filtered_image_paint());
+    assert!(!capabilities.supports_image_orientation_conversion());
+    assert!(!capabilities.supports_image_color_profile_conversion());
+}
+
+#[test]
 fn hit_test_geometry_is_root_owned_not_render_lowered() {
     assert_eq!(
         Capabilities::VELLO_0_9.geometry_targets().hit_testing(),
@@ -1188,6 +1215,26 @@ fn repeating_gradients_report_typed_diagnostics() {
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
+}
+
+#[test]
+fn unsupported_image_sampling_operations_report_typed_diagnostics() {
+    for operation in [
+        PrimitiveOperation::BackgroundRepeatRound,
+        PrimitiveOperation::BackgroundRepeatSpace,
+        PrimitiveOperation::FilteredImagePaint,
+        PrimitiveOperation::ImageOrientationConversion,
+        PrimitiveOperation::ImageColorProfileConversion,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::ImageSampling, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("Vello baseline should reject this image sampling primitive");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains(unsupported.label()));
+    }
 }
 
 #[test]
