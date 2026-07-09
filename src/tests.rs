@@ -9777,6 +9777,213 @@ fn layer_blend_isolates_child_output() {
 }
 
 #[test]
+fn direct_vello_blend_modes_match_reference_oracle_for_opaque_pixels() {
+    let source = PremultipliedRgba8::try_new(192, 64, 128, 255).unwrap();
+    let destination = PremultipliedRgba8::try_new(64, 192, 96, 255).unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+
+    for mode in [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Plus,
+    ] {
+        let mut scene = Scene::new();
+        scene.fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color_from_opaque_rgba8(destination),
+        );
+        scene.layer(Layer::new().blend(mode), |scene| {
+            scene.fill(
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                color_from_opaque_rgba8(source),
+            );
+        });
+
+        let output = render_scene_pixel(&mut renderer, &scene);
+        let expected = source.blend_over(destination, mode);
+
+        assert_rgba_near_reference_pixel(
+            output,
+            expected,
+            2,
+            &format!("direct Vello {mode:?} blend should stay aligned with the CPU oracle"),
+        );
+    }
+}
+
+#[test]
+fn blend_layer_isolation_changes_backdrop_composition_from_normal_paint_order() {
+    let source = PremultipliedRgba8::try_new(64, 128, 192, 255).unwrap();
+    let destination = PremultipliedRgba8::try_new(192, 128, 64, 255).unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+
+    let mut normal_scene = Scene::new();
+    normal_scene.fill(
+        Rect::new(0.0, 0.0, 1.0, 1.0),
+        color_from_opaque_rgba8(destination),
+    );
+    normal_scene.layer(Layer::new(), |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color_from_opaque_rgba8(source),
+        );
+    });
+
+    let mut blended_scene = Scene::new();
+    blended_scene.fill(
+        Rect::new(0.0, 0.0, 1.0, 1.0),
+        color_from_opaque_rgba8(destination),
+    );
+    blended_scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color_from_opaque_rgba8(source),
+        );
+    });
+
+    let normal_output = render_scene_pixel(&mut renderer, &normal_scene);
+    let blended_output = render_scene_pixel(&mut renderer, &blended_scene);
+    let expected_blend = source.blend_over(destination, BlendMode::Multiply);
+
+    assert_rgba_near_reference_pixel(
+        normal_output,
+        source,
+        2,
+        "non-isolated normal layer should paint its children in command order",
+    );
+    assert_rgba_near_reference_pixel(
+        blended_output,
+        expected_blend,
+        2,
+        "blend layer should isolate its child output before blending with prior backdrop",
+    );
+    assert_ne!(
+        normal_output, blended_output,
+        "multiply isolation should produce a different pixel than normal child painting"
+    );
+}
+
+#[test]
+fn nested_direct_vello_blend_groups_match_nested_reference_oracle() {
+    let backdrop = PremultipliedRgba8::try_new(64, 192, 96, 255).unwrap();
+    let outer_child_backdrop = PremultipliedRgba8::try_new(128, 128, 128, 255).unwrap();
+    let inner_source = PremultipliedRgba8::try_new(192, 64, 128, 255).unwrap();
+    let expected_inner = inner_source.blend_over(outer_child_backdrop, BlendMode::Multiply);
+    let expected_outer = expected_inner.blend_over(backdrop, BlendMode::Screen);
+
+    let mut scene = Scene::new();
+    scene.fill(
+        Rect::new(0.0, 0.0, 1.0, 1.0),
+        color_from_opaque_rgba8(backdrop),
+    );
+    scene.layer(Layer::new().blend(BlendMode::Screen), |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color_from_opaque_rgba8(outer_child_backdrop),
+        );
+        scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+            scene.fill(
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                color_from_opaque_rgba8(inner_source),
+            );
+        });
+    });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer {
+        layer: outer,
+        children,
+    } = &normalized.commands[1]
+    else {
+        panic!("expected outer blend layer command");
+    };
+    let command::RenderCommand::Layer { layer: inner, .. } = &children[1] else {
+        panic!("expected nested blend layer command");
+    };
+    for layer in [outer, inner] {
+        assert_eq!(layer.isolation, command::LayerIsolation::BackendLayer);
+        assert_eq!(
+            layer.pass_plan.requirement(),
+            command::LayerPassRequirement::DirectVelloBlend
+        );
+        assert_eq!(
+            layer.pass_plan.kind(),
+            command::LayerPassKind::DirectVelloLayer
+        );
+    }
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let output = render_scene_pixel(&mut renderer, &scene);
+
+    assert_rgba_near_reference_pixel(
+        output,
+        expected_outer,
+        2,
+        "nested direct Vello blend groups should compose in command order",
+    );
+}
+
+#[test]
+fn unsupported_blend_and_composite_boundaries_remain_typed_diagnostics() {
+    let public_layer_modes = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Plus,
+    ];
+    assert_eq!(
+        public_layer_modes.len(),
+        7,
+        "Task 6 should not expand layer BlendMode without encoding and tests"
+    );
+
+    for mode in [
+        BackgroundBlendMode::Multiply,
+        BackgroundBlendMode::Screen,
+        BackgroundBlendMode::Overlay,
+        BackgroundBlendMode::Darken,
+        BackgroundBlendMode::Lighten,
+        BackgroundBlendMode::Plus,
+    ] {
+        let error = BackgroundBlendList::try_new(vec![BackgroundBlendMode::Normal, mode])
+            .expect_err("background-layer blending is not routed through layer BlendMode");
+
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::Compositing,
+                PrimitiveOperation::BackgroundBlendMode,
+            ))
+        );
+    }
+
+    for operation in [
+        PrimitiveOperation::AdditionalMixBlendMode,
+        PrimitiveOperation::PorterDuffCompositeMode,
+        PrimitiveOperation::RootBackdropPolicy,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::Compositing, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("future blend/composite policy must stay behind typed diagnostics");
+
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(
+            error.message.contains(unsupported.label()),
+            "diagnostic should name unsupported compositing boundary: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn text_run_requires_font_data() {
     let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
     let mut scene = Scene::new();
@@ -10359,6 +10566,51 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
         Err(error) => panic!("render failed unexpectedly: {error:?}"),
     }
     Some(renderer.read_headless(&surface).unwrap())
+}
+
+fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {
+    let mut surface = renderer.create_headless(Size::new(1.0, 1.0), 1.0).unwrap();
+    renderer
+        .render(&mut surface, scene, Parameters::default())
+        .expect("single-pixel blend scene should render through the direct Vello path");
+    let output = renderer.read_headless(&surface).unwrap();
+    pixel_rgba(&output, 0, 0)
+}
+
+fn color_from_opaque_rgba8(pixel: PremultipliedRgba8) -> Color {
+    assert_eq!(
+        pixel.alpha(),
+        u8::MAX,
+        "test helper only accepts opaque straight-compatible pixels"
+    );
+    Color::try_rgba(
+        f32::from(pixel.red()) / 255.0,
+        f32::from(pixel.green()) / 255.0,
+        f32::from(pixel.blue()) / 255.0,
+        1.0,
+    )
+    .unwrap()
+}
+
+fn assert_rgba_near_reference_pixel(
+    actual: [u8; 4],
+    expected: PremultipliedRgba8,
+    tolerance: u8,
+    message: &str,
+) {
+    let expected = [
+        expected.red(),
+        expected.green(),
+        expected.blue(),
+        expected.alpha(),
+    ];
+    for (channel, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+        let delta = actual.abs_diff(expected);
+        assert!(
+            delta <= tolerance,
+            "{message}: channel {channel} expected {expected} +/- {tolerance}, got {actual}"
+        );
+    }
 }
 
 fn pixel_alpha(image: &ImageBuffer, x: u32, y: u32) -> u8 {
