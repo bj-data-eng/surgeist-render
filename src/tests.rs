@@ -937,6 +937,14 @@ fn geometry_capabilities_name_boolean_offset_and_hit_test_boundaries() {
 }
 
 #[test]
+fn hit_test_geometry_is_root_owned_not_render_lowered() {
+    assert_eq!(
+        Capabilities::VELLO_0_9.geometry_targets().hit_testing(),
+        HitTestOwnership::RootOwned
+    );
+}
+
+#[test]
 fn capabilities_map_unsupported_primitives_to_typed_errors() {
     let capabilities = Capabilities::VELLO_0_9;
     let unsupported = UnsupportedPrimitive::new(
@@ -1878,6 +1886,36 @@ fn centered_path_strokes_support_join_cap_and_dash_inputs() {
     renderer
         .render(&mut surface, &scene, Parameters::default())
         .expect("centered path strokes should render");
+}
+
+#[test]
+fn inside_outside_path_strokes_keep_typed_geometry_diagnostic() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut path = Path::new();
+    path.move_to(Point::try_new(1.0, 1.0).unwrap())
+        .line_to(Point::try_new(6.0, 1.0).unwrap())
+        .line_to(Point::try_new(6.0, 6.0).unwrap())
+        .close();
+    let mut scene = Scene::new();
+    scene.stroke(
+        Shape::path(path),
+        Stroke::try_new(1.0).unwrap().align(StrokeAlign::Inside),
+        Color::BLACK,
+    );
+
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("inside path stroke alignment requires offset lowering");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::GeometryTargets,
+            PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+        ))
+    );
 }
 
 #[test]
