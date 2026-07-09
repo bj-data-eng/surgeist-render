@@ -261,6 +261,8 @@ pub enum PrimitiveOperation {
     ImageOrientationConversion,
     ImageColorProfileConversion,
     EllipsePathShadowShape,
+    InsetBoxShadow,
+    TextShadow,
     InsideOutsidePathStrokeAlignment,
     GeometryBooleanOperation,
     GeometryOffsetOperation,
@@ -285,6 +287,11 @@ pub enum PrimitiveOperation {
     FilterExecution,
     ColorFilterClassification,
     ColorFilterPipelineExecution,
+    MaterializedImageFilterClassification,
+    MaterializedBlurFilterExecution,
+    MaterializedDropShadowFilterExecution,
+    FilterRegionOutsetPlanning,
+    CpuReferenceBlurFallback,
     ColorFilterBlur,
     ColorFilterDropShadow,
     BackdropExecution,
@@ -308,6 +315,8 @@ impl PrimitiveOperation {
             Self::ImageOrientationConversion => "image orientation conversion",
             Self::ImageColorProfileConversion => "image color profile conversion",
             Self::EllipsePathShadowShape => "ellipse/path shadow shape",
+            Self::InsetBoxShadow => "inset box shadow",
+            Self::TextShadow => "text shadow",
             Self::InsideOutsidePathStrokeAlignment => "inside/outside path stroke alignment",
             Self::GeometryBooleanOperation => "geometry boolean operation",
             Self::GeometryOffsetOperation => "geometry offset operation",
@@ -332,6 +341,15 @@ impl PrimitiveOperation {
             Self::FilterExecution => "filter execution",
             Self::ColorFilterClassification => "color filter classification",
             Self::ColorFilterPipelineExecution => "color filter pipeline execution",
+            Self::MaterializedImageFilterClassification => {
+                "materialized image filter classification"
+            }
+            Self::MaterializedBlurFilterExecution => "materialized blur filter execution",
+            Self::MaterializedDropShadowFilterExecution => {
+                "materialized drop-shadow filter execution"
+            }
+            Self::FilterRegionOutsetPlanning => "filter-region/outset planning",
+            Self::CpuReferenceBlurFallback => "CPU/reference blur fallback",
             Self::ColorFilterBlur => "color filter blur",
             Self::ColorFilterDropShadow => "color filter drop-shadow",
             Self::BackdropExecution => "backdrop execution",

@@ -1,12 +1,109 @@
 use super::{
-    Error, Result,
+    Error, Result, Shadow,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
-    style::{ColorFilterOp, ColorFilterPipeline, UnitFilterAmount},
+    style::{
+        ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterList, FilterOpKind, UnitFilterAmount,
+    },
 };
 
 const LUMA_RED: f64 = 0.213;
 const LUMA_GREEN: f64 = 0.715;
 const LUMA_BLUE: f64 = 0.072;
+
+/// Render-owned ordered classifier for materialized image filters.
+///
+/// This is an execution plan shape, not execution itself. Color-only runs are
+/// compiled into the existing color pipeline, while pixel-moving operations
+/// remain named steps for later region planning and byte execution.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterializedImageFilterPipeline {
+    steps: Vec<MaterializedImageFilterStep>,
+}
+
+impl MaterializedImageFilterPipeline {
+    pub fn try_from_filter_list(filters: &FilterList) -> Result<Option<Self>> {
+        let ops = filters.ops();
+        if ops.is_empty() {
+            return Ok(None);
+        }
+
+        let mut steps = Vec::new();
+        let mut color_run = Vec::new();
+
+        for op in ops {
+            match op.kind() {
+                FilterOpKind::Blur(blur) => {
+                    flush_materialized_color_run(&mut steps, &mut color_run)?;
+                    steps.push(MaterializedImageFilterStep::Blur(*blur));
+                }
+                FilterOpKind::DropShadow(shadow) => {
+                    flush_materialized_color_run(&mut steps, &mut color_run)?;
+                    steps.push(MaterializedImageFilterStep::DropShadow(shadow.clone()));
+                }
+                FilterOpKind::Brightness(amount) => {
+                    color_run.push(ColorFilterOp::Brightness(*amount));
+                }
+                FilterOpKind::Contrast(amount) => {
+                    color_run.push(ColorFilterOp::Contrast(*amount));
+                }
+                FilterOpKind::Grayscale(amount) => {
+                    color_run.push(ColorFilterOp::Grayscale(*amount));
+                }
+                FilterOpKind::HueRotate(angle) => {
+                    color_run.push(ColorFilterOp::HueRotate(*angle));
+                }
+                FilterOpKind::Invert(amount) => {
+                    color_run.push(ColorFilterOp::Invert(*amount));
+                }
+                FilterOpKind::Opacity(amount) => {
+                    color_run.push(ColorFilterOp::Opacity(*amount));
+                }
+                FilterOpKind::Saturate(amount) => {
+                    color_run.push(ColorFilterOp::Saturate(*amount));
+                }
+                FilterOpKind::Sepia(amount) => {
+                    color_run.push(ColorFilterOp::Sepia(*amount));
+                }
+            }
+        }
+
+        flush_materialized_color_run(&mut steps, &mut color_run)?;
+        Ok(Some(Self { steps }))
+    }
+
+    #[must_use]
+    pub fn steps(&self) -> &[MaterializedImageFilterStep] {
+        &self.steps
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterializedImageFilterStep {
+    ColorFilters(CompiledColorFilterPipeline),
+    Blur(FilterBlur),
+    DropShadow(Shadow),
+}
+
+impl FilterList {
+    pub fn materialized_image_filter_pipeline(
+        &self,
+    ) -> Result<Option<MaterializedImageFilterPipeline>> {
+        MaterializedImageFilterPipeline::try_from_filter_list(self)
+    }
+}
+
+fn flush_materialized_color_run(
+    steps: &mut Vec<MaterializedImageFilterStep>,
+    color_run: &mut Vec<ColorFilterOp>,
+) -> Result<()> {
+    if color_run.is_empty() {
+        return Ok(());
+    }
+
+    let compiled = CompiledColorFilterPipeline::try_from_ops(std::mem::take(color_run))?;
+    steps.push(MaterializedImageFilterStep::ColorFilters(compiled));
+    Ok(())
+}
 
 /// Render-owned executable color-only filter pipeline.
 ///

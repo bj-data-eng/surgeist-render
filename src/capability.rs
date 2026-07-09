@@ -59,11 +59,18 @@ impl Capabilities {
         shadows: ShadowCapabilities {
             rect_rounded_circle_shadows: true,
             ellipse_path_shadows: false,
+            inset_box_shadows: false,
+            text_shadows: false,
         },
         filters: FilterCapabilities {
             layer_filters: false,
             color_filter_classification: true,
             color_filter_pipeline_execution: true,
+            materialized_image_filter_classification: true,
+            materialized_blur_filter_execution: false,
+            materialized_drop_shadow_filter_execution: false,
+            filter_region_outset_planning: false,
+            cpu_reference_blur_fallback: false,
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,
@@ -228,6 +235,12 @@ impl Capabilities {
             (PrimitiveFamily::Shadows, PrimitiveOperation::EllipsePathShadowShape) => {
                 self.shadows.supports_ellipse_path_shadows()
             }
+            (PrimitiveFamily::Shadows, PrimitiveOperation::InsetBoxShadow) => {
+                self.shadows.supports_inset_box_shadows()
+            }
+            (PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow) => {
+                self.shadows.supports_text_shadows()
+            }
             (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter) => {
                 self.filters.supports_layer_filters()
             }
@@ -236,6 +249,27 @@ impl Capabilities {
             }
             (PrimitiveFamily::Filters, PrimitiveOperation::ColorFilterPipelineExecution) => {
                 self.filters.supports_color_filter_pipeline_execution()
+            }
+            (
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::MaterializedImageFilterClassification,
+            ) => self
+                .filters
+                .supports_materialized_image_filter_classification(),
+            (PrimitiveFamily::Filters, PrimitiveOperation::MaterializedBlurFilterExecution) => {
+                self.filters.supports_materialized_blur_filter_execution()
+            }
+            (
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::MaterializedDropShadowFilterExecution,
+            ) => self
+                .filters
+                .supports_materialized_drop_shadow_filter_execution(),
+            (PrimitiveFamily::Filters, PrimitiveOperation::FilterRegionOutsetPlanning) => {
+                self.filters.supports_filter_region_outset_planning()
+            }
+            (PrimitiveFamily::Filters, PrimitiveOperation::CpuReferenceBlurFallback) => {
+                self.filters.supports_cpu_reference_blur_fallback()
             }
             (
                 PrimitiveFamily::Filters,
@@ -545,6 +579,8 @@ impl ImageSamplingCapabilities {
 pub struct ShadowCapabilities {
     rect_rounded_circle_shadows: bool,
     ellipse_path_shadows: bool,
+    inset_box_shadows: bool,
+    text_shadows: bool,
 }
 
 impl ShadowCapabilities {
@@ -557,6 +593,16 @@ impl ShadowCapabilities {
     pub const fn supports_ellipse_path_shadows(self) -> bool {
         self.ellipse_path_shadows
     }
+
+    #[must_use]
+    pub const fn supports_inset_box_shadows(self) -> bool {
+        self.inset_box_shadows
+    }
+
+    #[must_use]
+    pub const fn supports_text_shadows(self) -> bool {
+        self.text_shadows
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -564,6 +610,11 @@ pub struct FilterCapabilities {
     layer_filters: bool,
     color_filter_classification: bool,
     color_filter_pipeline_execution: bool,
+    materialized_image_filter_classification: bool,
+    materialized_blur_filter_execution: bool,
+    materialized_drop_shadow_filter_execution: bool,
+    filter_region_outset_planning: bool,
+    cpu_reference_blur_fallback: bool,
 }
 
 impl FilterCapabilities {
@@ -580,6 +631,31 @@ impl FilterCapabilities {
     #[must_use]
     pub const fn supports_color_filter_pipeline_execution(self) -> bool {
         self.color_filter_pipeline_execution
+    }
+
+    #[must_use]
+    pub const fn supports_materialized_image_filter_classification(self) -> bool {
+        self.materialized_image_filter_classification
+    }
+
+    #[must_use]
+    pub const fn supports_materialized_blur_filter_execution(self) -> bool {
+        self.materialized_blur_filter_execution
+    }
+
+    #[must_use]
+    pub const fn supports_materialized_drop_shadow_filter_execution(self) -> bool {
+        self.materialized_drop_shadow_filter_execution
+    }
+
+    #[must_use]
+    pub const fn supports_filter_region_outset_planning(self) -> bool {
+        self.filter_region_outset_planning
+    }
+
+    #[must_use]
+    pub const fn supports_cpu_reference_blur_fallback(self) -> bool {
+        self.cpu_reference_blur_fallback
     }
 }
 

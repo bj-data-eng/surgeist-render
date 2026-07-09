@@ -2947,6 +2947,116 @@ fn filter_none_has_no_executable_color_pipeline() {
 }
 
 #[test]
+fn materialized_image_filter_classifier_preserves_mixed_filter_order() {
+    let shadow = Shadow::try_new(Point::new(2.0, 3.0), 4.0, 0.0, Color::BLACK).unwrap();
+    let list = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.2).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(0.8).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(4.0).unwrap()),
+        FilterOp::opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+        FilterOp::drop_shadow(shadow.clone()),
+        FilterOp::sepia(UnitFilterAmount::try_new(0.25).unwrap()),
+    ])
+    .unwrap();
+
+    let pipeline = list
+        .materialized_image_filter_pipeline()
+        .expect("materialized image filters should classify")
+        .expect("non-empty filter lists should produce a pipeline");
+
+    assert_eq!(pipeline.steps().len(), 5);
+    assert!(matches!(
+        &pipeline.steps()[0],
+        MaterializedImageFilterStep::ColorFilters(pipeline)
+            if pipeline.source_ops()
+                == [
+                    ColorFilterOp::Brightness(FilterAmount::try_new(1.2).unwrap()),
+                    ColorFilterOp::Contrast(FilterAmount::try_new(0.8).unwrap()),
+                ]
+    ));
+    assert!(matches!(
+        pipeline.steps()[1],
+        MaterializedImageFilterStep::Blur(blur) if blur.radius() == 4.0
+    ));
+    assert!(matches!(
+        &pipeline.steps()[2],
+        MaterializedImageFilterStep::ColorFilters(pipeline)
+            if pipeline.source_ops()
+                == [ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.75).unwrap())]
+    ));
+    assert!(matches!(
+        &pipeline.steps()[3],
+        MaterializedImageFilterStep::DropShadow(classified) if classified == &shadow
+    ));
+    assert!(matches!(
+        &pipeline.steps()[4],
+        MaterializedImageFilterStep::ColorFilters(pipeline)
+            if pipeline.source_ops()
+                == [ColorFilterOp::Sepia(UnitFilterAmount::try_new(0.25).unwrap())]
+    ));
+}
+
+#[test]
+fn filter_none_has_no_materialized_image_filter_pipeline() {
+    assert_eq!(
+        FilterList::none()
+            .materialized_image_filter_pipeline()
+            .unwrap(),
+        None
+    );
+}
+
+#[test]
+fn materialized_image_filter_classifier_accepts_blur_and_drop_shadow() {
+    let shadow = Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap();
+    let list = FilterList::try_ops(vec![
+        FilterOp::blur(FilterBlur::try_new(2.0).unwrap()),
+        FilterOp::drop_shadow(shadow.clone()),
+    ])
+    .unwrap();
+
+    let pipeline = list
+        .materialized_image_filter_pipeline()
+        .expect("blur and drop-shadow should classify")
+        .expect("non-empty materialized filter lists should produce a pipeline");
+
+    assert_eq!(
+        pipeline.steps(),
+        &[
+            MaterializedImageFilterStep::Blur(FilterBlur::try_new(2.0).unwrap()),
+            MaterializedImageFilterStep::DropShadow(shadow),
+        ]
+    );
+}
+
+#[test]
+fn materialized_filter_classification_does_not_make_resource_handles_bytes() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(41), Size::new(8.0, 8.0)).unwrap();
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap();
+    let paint = FilteredImagePaint::try_new(resource, filters).unwrap();
+
+    assert!(
+        paint
+            .filters()
+            .materialized_image_filter_pipeline()
+            .unwrap()
+            .is_some()
+    );
+
+    let unsupported = paint
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("resource-only filtered image paint is still not materialized bytes");
+    assert_eq!(
+        unsupported.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::FilteredImagePaint
+        ))
+    );
+}
+
+#[test]
 fn filter_color_pipeline_rejects_blur_with_typed_diagnostic() {
     let list = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(1.0).unwrap()),
@@ -5029,6 +5139,98 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
             .offscreen_pipeline()
             .supports_filter_execution()
     );
+}
+
+#[test]
+fn pixel_moving_filter_capability_names_do_not_advertise_execution_yet() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    assert!(
+        capabilities
+            .filters()
+            .supports_materialized_image_filter_classification()
+    );
+    assert!(
+        !capabilities
+            .filters()
+            .supports_materialized_blur_filter_execution()
+    );
+    assert!(
+        !capabilities
+            .filters()
+            .supports_materialized_drop_shadow_filter_execution()
+    );
+    assert!(
+        !capabilities
+            .filters()
+            .supports_filter_region_outset_planning()
+    );
+    assert!(
+        !capabilities
+            .filters()
+            .supports_cpu_reference_blur_fallback()
+    );
+    assert!(!capabilities.shadows().supports_inset_box_shadows());
+    assert!(!capabilities.shadows().supports_text_shadows());
+    assert!(!capabilities.filters().supports_layer_filters());
+    assert!(
+        !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+    );
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_filter_execution()
+    );
+}
+
+#[test]
+fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
+    let cases = [
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::MaterializedBlurFilterExecution,
+            "materialized blur filter execution",
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::MaterializedDropShadowFilterExecution,
+            "materialized drop-shadow filter execution",
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::FilterRegionOutsetPlanning,
+            "filter-region/outset planning",
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::CpuReferenceBlurFallback,
+            "CPU/reference blur fallback",
+        ),
+        (
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::InsetBoxShadow,
+            "inset box shadow",
+        ),
+        (
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+            "text shadow",
+        ),
+    ];
+
+    for (family, operation, label) in cases {
+        let unsupported = UnsupportedPrimitive::new(family, operation);
+        assert_eq!(unsupported.label(), label);
+
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("Task 1 names diagnostics without enabling execution");
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains(label));
+    }
 }
 
 #[test]
