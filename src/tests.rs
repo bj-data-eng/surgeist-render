@@ -220,6 +220,194 @@ fn reference_buffers_compare_with_deterministic_equality() {
 }
 
 #[test]
+fn reference_color_filter_identity_ops_preserve_pixels_byte_for_byte() {
+    let pixel = PremultipliedRgba8::try_new(64, 32, 16, 128).unwrap();
+    let pipeline = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Contrast(FilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Grayscale(UnitFilterAmount::try_new(0.0).unwrap()),
+        ColorFilterOp::HueRotate(FilterAngle::try_radians(0.0).unwrap()),
+        ColorFilterOp::HueRotate(FilterAngle::try_radians(std::f64::consts::TAU).unwrap()),
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(0.0).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Saturate(FilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Sepia(UnitFilterAmount::try_new(0.0).unwrap()),
+    ]);
+
+    let buffer =
+        ReferencePremultipliedRgba8Buffer::from_pixels(PhysicalSize::new(1, 1), vec![pixel])
+            .unwrap();
+
+    assert_eq!(pixel.apply_color_filter_pipeline(&pipeline).unwrap(), pixel);
+    assert_eq!(
+        buffer.apply_color_filter_pipeline(&pipeline).unwrap(),
+        buffer
+    );
+}
+
+#[test]
+fn reference_color_filter_partial_ops_match_deterministic_bytes() {
+    let pixel = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
+    let cases = [
+        (
+            ColorFilterOp::Brightness(FilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(50, 75, 100, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Contrast(FilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(114, 139, 164, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Grayscale(UnitFilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(121, 146, 171, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::HueRotate(
+                FilterAngle::try_radians(std::f64::consts::FRAC_PI_2).unwrap(),
+            ),
+            PremultipliedRgba8::try_new(200, 122, 186, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::HueRotate(
+                FilterAngle::try_radians(-std::f64::consts::FRAC_PI_2).unwrap(),
+            ),
+            PremultipliedRgba8::try_new(86, 164, 100, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Invert(UnitFilterAmount::try_new(0.25).unwrap()),
+            PremultipliedRgba8::try_new(114, 139, 164, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(50, 75, 100, 128).unwrap(),
+        ),
+        (
+            ColorFilterOp::Saturate(FilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(121, 146, 171, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Sepia(UnitFilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(146, 161, 167, 255).unwrap(),
+        ),
+    ];
+
+    for (op, expected) in cases {
+        let pipeline = color_filter_pipeline([op]);
+        assert_eq!(
+            pixel.apply_color_filter_pipeline(&pipeline).unwrap(),
+            expected,
+            "unexpected output for {op:?}"
+        );
+    }
+}
+
+#[test]
+fn reference_color_filter_extreme_ops_clamp_to_valid_premultiplied_pixels() {
+    let pixel = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
+    let cases = [
+        (
+            ColorFilterOp::Brightness(FilterAmount::try_new(0.0).unwrap()),
+            PremultipliedRgba8::try_new(0, 0, 0, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Brightness(FilterAmount::try_new(2.0).unwrap()),
+            PremultipliedRgba8::try_new(200, 255, 255, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Contrast(FilterAmount::try_new(0.0).unwrap()),
+            PremultipliedRgba8::try_new(128, 128, 128, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Contrast(FilterAmount::try_new(2.0).unwrap()),
+            PremultipliedRgba8::try_new(73, 173, 255, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Grayscale(UnitFilterAmount::try_new(1.0).unwrap()),
+            PremultipliedRgba8::try_new(143, 143, 143, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap()),
+            PremultipliedRgba8::try_new(155, 105, 55, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.0).unwrap()),
+            PremultipliedRgba8::TRANSPARENT,
+        ),
+        (
+            ColorFilterOp::Saturate(FilterAmount::try_new(0.0).unwrap()),
+            PremultipliedRgba8::try_new(143, 143, 143, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Saturate(FilterAmount::try_new(2.0).unwrap()),
+            PremultipliedRgba8::try_new(57, 157, 255, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Sepia(UnitFilterAmount::try_new(1.0).unwrap()),
+            PremultipliedRgba8::try_new(192, 171, 134, 255).unwrap(),
+        ),
+    ];
+
+    for (op, expected) in cases {
+        let filtered = pixel
+            .apply_color_filter_pipeline(&color_filter_pipeline([op]))
+            .unwrap();
+        assert_eq!(filtered, expected, "unexpected output for {op:?}");
+        assert_premultiplied(filtered);
+    }
+}
+
+#[test]
+fn reference_color_filter_buffer_preserves_transparency_and_partial_alpha_invariants() {
+    let partial = PremultipliedRgba8::try_new(50, 75, 100, 128).unwrap();
+    let buffer = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![PremultipliedRgba8::TRANSPARENT, partial],
+    )
+    .unwrap();
+    let pipeline = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.5).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap()),
+    ]);
+
+    let filtered = buffer.apply_color_filter_pipeline(&pipeline).unwrap();
+    let transparent = filtered.pixel(0, 0).unwrap();
+    let partial = filtered.pixel(1, 0).unwrap();
+
+    assert_eq!(transparent, PremultipliedRgba8::TRANSPARENT);
+    assert_eq!(partial, PremultipliedRgba8::try_new(26, 7, 0, 64).unwrap());
+    assert_premultiplied(transparent);
+    assert_premultiplied(partial);
+}
+
+fn color_filter_pipeline<const N: usize>(ops: [ColorFilterOp; N]) -> ColorFilterPipeline {
+    let ops = ops
+        .into_iter()
+        .map(|op| match op {
+            ColorFilterOp::Brightness(amount) => FilterOp::brightness(amount),
+            ColorFilterOp::Contrast(amount) => FilterOp::contrast(amount),
+            ColorFilterOp::Grayscale(amount) => FilterOp::grayscale(amount),
+            ColorFilterOp::HueRotate(angle) => FilterOp::hue_rotate(angle),
+            ColorFilterOp::Invert(amount) => FilterOp::invert(amount),
+            ColorFilterOp::Opacity(amount) => FilterOp::opacity(amount),
+            ColorFilterOp::Saturate(amount) => FilterOp::saturate(amount),
+            ColorFilterOp::Sepia(amount) => FilterOp::sepia(amount),
+        })
+        .collect();
+    FilterList::try_ops(ops)
+        .unwrap()
+        .color_filter_pipeline()
+        .unwrap()
+        .unwrap()
+}
+
+fn assert_premultiplied(pixel: PremultipliedRgba8) {
+    assert!(pixel.red() <= pixel.alpha());
+    assert!(pixel.green() <= pixel.alpha());
+    assert!(pixel.blue() <= pixel.alpha());
+}
+
+#[test]
 fn texture_descriptor_equality_uses_size_format_and_intent() {
     let size = PhysicalSize::new(32, 16);
     let layer = TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::OffscreenLayer)

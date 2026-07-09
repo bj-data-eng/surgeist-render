@@ -1,6 +1,10 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
-use super::{Error, PhysicalSize, Result};
+use super::{Error, PhysicalSize, Result, style::ColorFilterOp, style::ColorFilterPipeline};
+
+const LUMA_RED: f64 = 0.213;
+const LUMA_GREEN: f64 = 0.715;
+const LUMA_BLUE: f64 = 0.072;
 
 /// CPU reference pixel stored as premultiplied RGBA8.
 ///
@@ -53,6 +57,22 @@ impl PremultipliedRgba8 {
         })
     }
 
+    pub(crate) const fn red(self) -> u8 {
+        self.red
+    }
+
+    pub(crate) const fn green(self) -> u8 {
+        self.green
+    }
+
+    pub(crate) const fn blue(self) -> u8 {
+        self.blue
+    }
+
+    pub(crate) const fn alpha(self) -> u8 {
+        self.alpha
+    }
+
     pub(crate) fn apply_opacity(self, opacity: f32) -> Result<Self> {
         if !opacity.is_finite() {
             return Err(Error::invalid_value(
@@ -61,13 +81,18 @@ impl PremultipliedRgba8 {
                 "must be finite",
             ));
         }
-        let opacity = opacity.clamp(0.0, 1.0);
-        Ok(Self {
-            red: scale_channel_by_opacity(self.red, opacity),
-            green: scale_channel_by_opacity(self.green, opacity),
-            blue: scale_channel_by_opacity(self.blue, opacity),
-            alpha: scale_channel_by_opacity(self.alpha, opacity),
-        })
+        Ok(self.apply_opacity_amount(f64::from(opacity)))
+    }
+
+    pub(crate) fn apply_color_filter_pipeline(
+        self,
+        pipeline: &ColorFilterPipeline,
+    ) -> Result<Self> {
+        let mut pixel = self;
+        for op in pipeline.ops() {
+            pixel = pixel.apply_color_filter_op(*op);
+        }
+        Ok(pixel)
     }
 
     pub(crate) const fn source_over(self, destination: Self) -> Self {
@@ -87,6 +112,131 @@ impl PremultipliedRgba8 {
             blue: self.blue + scale_channel_by_alpha(destination.blue, inverse_source_alpha),
             alpha: self.alpha + scale_channel_by_alpha(destination.alpha, inverse_source_alpha),
         }
+    }
+
+    fn apply_color_filter_op(self, op: ColorFilterOp) -> Self {
+        match op {
+            ColorFilterOp::Brightness(amount) => {
+                self.apply_straight_color_filter(|rgb| rgb.map(|channel| channel * amount.value()))
+            }
+            ColorFilterOp::Contrast(amount) => self.apply_straight_color_filter(|rgb| {
+                rgb.map(|channel| (channel - 0.5) * amount.value() + 0.5)
+            }),
+            ColorFilterOp::Grayscale(amount) => self.apply_straight_color_filter(|rgb| {
+                let gray = rgb.luma();
+                rgb.mix(StraightRgb::new(gray, gray, gray), amount.value())
+            }),
+            ColorFilterOp::HueRotate(angle) => self.apply_straight_color_filter(|rgb| {
+                let (sin, cos) = angle.radians().sin_cos();
+                StraightRgb::new(
+                    (0.213 + cos * 0.787 - sin * 0.213) * rgb.red
+                        + (0.715 - cos * 0.715 - sin * 0.715) * rgb.green
+                        + (0.072 - cos * 0.072 + sin * 0.928) * rgb.blue,
+                    (0.213 - cos * 0.213 + sin * 0.143) * rgb.red
+                        + (0.715 + cos * 0.285 + sin * 0.140) * rgb.green
+                        + (0.072 - cos * 0.072 - sin * 0.283) * rgb.blue,
+                    (0.213 - cos * 0.213 - sin * 0.787) * rgb.red
+                        + (0.715 - cos * 0.715 + sin * 0.715) * rgb.green
+                        + (0.072 + cos * 0.928 + sin * 0.072) * rgb.blue,
+                )
+            }),
+            ColorFilterOp::Invert(amount) => self.apply_straight_color_filter(|rgb| {
+                rgb.map(|channel| {
+                    channel * (1.0 - amount.value()) + (1.0 - channel) * amount.value()
+                })
+            }),
+            ColorFilterOp::Opacity(amount) => self.apply_opacity_amount(amount.value()),
+            ColorFilterOp::Saturate(amount) => self.apply_straight_color_filter(|rgb| {
+                let gray = rgb.luma();
+                StraightRgb::new(gray, gray, gray).mix(rgb, amount.value())
+            }),
+            ColorFilterOp::Sepia(amount) => self.apply_straight_color_filter(|rgb| {
+                let sepia = StraightRgb::new(
+                    rgb.red * 0.393 + rgb.green * 0.769 + rgb.blue * 0.189,
+                    rgb.red * 0.349 + rgb.green * 0.686 + rgb.blue * 0.168,
+                    rgb.red * 0.272 + rgb.green * 0.534 + rgb.blue * 0.131,
+                );
+                rgb.mix(sepia, amount.value())
+            }),
+        }
+    }
+
+    fn apply_straight_color_filter(self, filter: impl FnOnce(StraightRgb) -> StraightRgb) -> Self {
+        let Some(straight) = StraightRgb::from_premultiplied(self) else {
+            return Self::TRANSPARENT;
+        };
+        Self::from_straight_rgb(filter(straight).clamp_unit(), self.alpha)
+    }
+
+    fn apply_opacity_amount(self, opacity: f64) -> Self {
+        let opacity = opacity.clamp(0.0, 1.0);
+        Self {
+            red: scale_channel_by_opacity(self.red, opacity),
+            green: scale_channel_by_opacity(self.green, opacity),
+            blue: scale_channel_by_opacity(self.blue, opacity),
+            alpha: scale_channel_by_opacity(self.alpha, opacity),
+        }
+    }
+
+    fn from_straight_rgb(rgb: StraightRgb, alpha: u8) -> Self {
+        if alpha == 0 {
+            return Self::TRANSPARENT;
+        }
+        Self {
+            red: premultiply_straight_channel(rgb.red, alpha),
+            green: premultiply_straight_channel(rgb.green, alpha),
+            blue: premultiply_straight_channel(rgb.blue, alpha),
+            alpha,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct StraightRgb {
+    red: f64,
+    green: f64,
+    blue: f64,
+}
+
+impl StraightRgb {
+    const fn new(red: f64, green: f64, blue: f64) -> Self {
+        Self { red, green, blue }
+    }
+
+    fn from_premultiplied(pixel: PremultipliedRgba8) -> Option<Self> {
+        if pixel.alpha == 0 {
+            return None;
+        }
+        let alpha = f64::from(pixel.alpha);
+        Some(Self {
+            red: f64::from(pixel.red) / alpha,
+            green: f64::from(pixel.green) / alpha,
+            blue: f64::from(pixel.blue) / alpha,
+        })
+    }
+
+    fn map(self, map_channel: impl Fn(f64) -> f64) -> Self {
+        Self {
+            red: map_channel(self.red),
+            green: map_channel(self.green),
+            blue: map_channel(self.blue),
+        }
+    }
+
+    fn mix(self, other: Self, amount: f64) -> Self {
+        Self {
+            red: self.red * (1.0 - amount) + other.red * amount,
+            green: self.green * (1.0 - amount) + other.green * amount,
+            blue: self.blue * (1.0 - amount) + other.blue * amount,
+        }
+    }
+
+    fn luma(self) -> f64 {
+        self.red * LUMA_RED + self.green * LUMA_GREEN + self.blue * LUMA_BLUE
+    }
+
+    fn clamp_unit(self) -> Self {
+        self.map(|channel| channel.clamp(0.0, 1.0))
     }
 }
 
@@ -167,6 +317,19 @@ impl ReferencePremultipliedRgba8Buffer {
             .iter()
             .copied()
             .map(|pixel| pixel.apply_opacity(opacity))
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
+    pub(crate) fn apply_color_filter_pipeline(
+        &self,
+        pipeline: &ColorFilterPipeline,
+    ) -> Result<Self> {
+        let pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .map(|pixel| pixel.apply_color_filter_pipeline(pipeline))
             .collect::<Result<Vec<_>>>()?;
         Self::from_pixels(self.physical_size, pixels)
     }
@@ -269,8 +432,18 @@ fn validate_size(physical_size: PhysicalSize) -> Result<u64> {
     Ok(pixel_count)
 }
 
-fn scale_channel_by_opacity(channel: u8, opacity: f32) -> u8 {
-    (f32::from(channel) * opacity).round().clamp(0.0, 255.0) as u8
+fn scale_channel_by_opacity(channel: u8, opacity: f64) -> u8 {
+    round_byte(f64::from(channel) * opacity)
+}
+
+fn premultiply_straight_channel(channel: f64, alpha: u8) -> u8 {
+    round_byte(channel * f64::from(alpha))
+}
+
+fn round_byte(value: f64) -> u8 {
+    // Reference color filters round half away from zero after clamping, matching
+    // Rust's stable `f64::round` behavior so byte oracles are deterministic.
+    value.round().clamp(0.0, 255.0) as u8
 }
 
 const fn scale_channel_by_alpha(channel: u8, alpha: u8) -> u8 {
