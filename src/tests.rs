@@ -9277,6 +9277,50 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
 }
 
 #[test]
+fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
+    let unsupported =
+        UnsupportedPrimitive::new(PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow);
+    assert!(!Capabilities::VELLO_0_9.shadows().supports_text_shadows());
+
+    let capability_error = Capabilities::VELLO_0_9
+        .ensure_supported(unsupported)
+        .expect_err("text-shadow capability should stay false until execution exists");
+    assert_eq!(capability_error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(capability_error.unsupported_primitive(), Some(unsupported));
+
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Test"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
+
+    let normalize_error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("normalization should report the same unsupported text-shadow boundary");
+    assert_eq!(normalize_error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(normalize_error.unsupported_primitive(), Some(unsupported));
+    assert_eq!(
+        normalize_error.unsupported_primitive(),
+        capability_error.unsupported_primitive()
+    );
+    assert!(
+        normalize_error
+            .message
+            .contains("glyph-alpha/offscreen text capture")
+    );
+}
+
+#[test]
 fn blurred_text_shadow_reports_same_typed_boundary() {
     let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
     let run = TextRun::try_new(
@@ -9333,6 +9377,59 @@ fn ordinary_text_run_normalization_remains_unaffected_by_text_shadow_boundary() 
     assert!(matches!(
         normalized.commands[0],
         command::RenderCommand::TextRun { .. }
+    ));
+}
+
+#[test]
+fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
+    let capabilities = Capabilities::VELLO_0_9;
+    assert!(capabilities.geometry_targets().supports_rect_fill_stroke());
+    assert!(capabilities.paint_sources().supports_solid_rgba());
+    assert!(
+        !capabilities.shadows().supports_text_shadows(),
+        "materialized selection/generated text buckets must not depend on text-shadow execution"
+    );
+
+    let selected_glyphs = [TextGlyph::try_new(10, 2.0, 10.0, 6.0).unwrap()];
+    let generated_glyphs = [TextGlyph::try_new(11, 14.0, 10.0, 5.0).unwrap()];
+    let selected_run = TextRun::try_new(
+        FontRef::new(1).named("Selection"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap().into()).unwrap(),
+        &selected_glyphs,
+    )
+    .unwrap();
+    let generated_run = TextRun::try_new(
+        FontRef::new(2).named("Generated"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &generated_glyphs,
+    )
+    .unwrap();
+
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 12.0, 16.0), Color::BLACK)
+        .text_run(selected_run)
+        .text_run(generated_run);
+
+    let normalized = scene
+        .normalize(capabilities)
+        .expect("materialized selection/generated content should normalize as ordinary commands");
+
+    assert_eq!(normalized.commands.len(), 3);
+    assert_eq!(normalized.stats().fills, 1);
+    assert_eq!(normalized.stats().glyphs, 2);
+    assert_eq!(normalized.stats().shadows, 0);
+    assert!(matches!(
+        normalized.commands.as_slice(),
+        [
+            command::RenderCommand::Fill { .. },
+            command::RenderCommand::TextRun { .. },
+            command::RenderCommand::TextRun { .. },
+        ]
     ));
 }
 
