@@ -512,7 +512,7 @@ fn premultiplied_rgba8_pixel_to_straight_rgba8(pixel: PremultipliedRgba8) -> [u8
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize) -> Result<()> {
+pub(crate) fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize) -> Result<()> {
     if size.width() == 0 {
         return Err(Error::invalid_value(
             "image buffer width",

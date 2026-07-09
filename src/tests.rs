@@ -427,6 +427,176 @@ fn resolved_alpha_mask_execution_rejects_mismatched_buffers() {
 }
 
 #[test]
+fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(3, 1),
+        rgba: vec![
+            255, 255, 255, 255, //
+            255, 255, 255, 128, //
+            0, 0, 0, 0,
+        ],
+    };
+    let layer = Layer::new().try_resolved_alpha_mask(mask).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 3.0, 1.0),
+            Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
+        );
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert!(pixel_rgba(&output, 0, 0)[0] > 200);
+    assert!(pixel_alpha(&output, 0, 0) > 200);
+    assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
+    assert_eq!(pixel_alpha(&output, 2, 0), 0);
+}
+
+#[test]
+fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(2.0, 1.0), 1.0).unwrap();
+    let inner_mask = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 255, 255, 255, 255, 255, 255, 128],
+    };
+    let outer_mask = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 255, 255, 128, 255, 255, 255, 255],
+    };
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_resolved_alpha_mask(outer_mask).unwrap(),
+        |scene| {
+            scene.layer(
+                Layer::new().try_resolved_alpha_mask(inner_mask).unwrap(),
+                |scene| {
+                    scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
+                },
+            );
+        },
+    );
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert!((96..=160).contains(&pixel_alpha(&output, 0, 0)));
+    assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
+}
+
+#[test]
+fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 255, 255, 255, 255, 255, 255, 255],
+    };
+    let layer = Layer::new()
+        .try_clip(Shape::rect(Rect::new(1.0, 0.0, 2.0, 1.0)))
+        .unwrap()
+        .try_resolved_alpha_mask(mask)
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert!(pixel_alpha(&output, 1, 0) > 200);
+    assert!(pixel_alpha(&output, 2, 0) > 200);
+}
+
+#[test]
+fn layer_resolved_alpha_mask_composites_after_layer_transform() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 255, 255, 255],
+    };
+    let layer = Layer::new()
+        .try_transform(Transform::translation(1.0, 0.0).unwrap())
+        .unwrap()
+        .try_resolved_alpha_mask(mask)
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert!(pixel_alpha(&output, 1, 0) > 200);
+    assert_eq!(pixel_alpha(&output, 2, 0), 0);
+}
+
+#[test]
+fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(1.0, 1.0), 1.0).unwrap();
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 255, 255, 128],
+    };
+    let layer = Layer::new()
+        .try_opacity(0.5)
+        .unwrap()
+        .try_resolved_alpha_mask(mask)
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        });
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+    let alpha = pixel_alpha(&output, 0, 0);
+
+    assert!((24..=40).contains(&alpha), "unexpected alpha {alpha}");
+}
+
+#[test]
+fn layer_resolved_alpha_mask_rejects_luminance_mode_without_conversion_policy() {
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 255, 255, 255],
+    };
+
+    let error = ResolvedLayerAlphaMask::try_new_with_mode(mask, MaskMode::Luminance)
+        .expect_err("resolved layer masks do not implement luminance conversion");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LuminanceMaskMode,
+        ))
+    );
+}
+
+#[test]
 fn reference_blur_zero_radius_is_identity() {
     let pixels = vec![
         PremultipliedRgba8::TRANSPARENT,

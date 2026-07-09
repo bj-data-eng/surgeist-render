@@ -53,7 +53,7 @@ pub use geometry::{
 pub use image::{
     Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality, ResolvedAlphaMaskExecution,
 };
-pub use layer::{BlendMode, Filter, Layer, Shadow, ShadowKind, ShadowList};
+pub use layer::{BlendMode, Filter, Layer, ResolvedLayerAlphaMask, Shadow, ShadowKind, ShadowList};
 pub use paint::{
     Color, Gradient, GradientStop, NormalizedPaintLayer, Paint, PaintColor, PaintColorSpace,
 };

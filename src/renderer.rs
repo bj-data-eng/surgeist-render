@@ -5,6 +5,7 @@
 use super::surface::{PresentedLifecycle, ResizeState};
 use super::{
     backend::*,
+    command::{RenderCommand, RenderCommands},
     encode::encode_vello_scene,
     geometry::physical_size,
     stats::collect_render_stats,
@@ -243,6 +244,12 @@ impl Renderer {
             ..Stats::default()
         };
         let normalized = scene.normalize(self.capabilities())?;
+        let normalized = RenderCommands::new(self.materialize_resolved_layer_masks(
+            normalized.commands,
+            surface.scale(),
+            surface.options.format,
+            parameters,
+        )?);
         let mut uploaded_images = self.uploaded_images.clone();
         collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
         let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
@@ -318,7 +325,6 @@ impl Renderer {
         )
     }
 
-    #[cfg(test)]
     pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
         let backend = self.backend.as_mut()?;
         let dev_id = self.default_device?;
@@ -326,7 +332,6 @@ impl Renderer {
         Some((&device_handle.device, &device_handle.queue))
     }
 
-    #[cfg(test)]
     pub(crate) fn default_offscreen_render_context(
         &mut self,
     ) -> Option<OffscreenRenderGpuContext<'_>> {
@@ -343,6 +348,133 @@ impl Renderer {
     #[must_use]
     pub const fn options(&self) -> Options {
         self.options
+    }
+
+    fn materialize_resolved_layer_masks(
+        &mut self,
+        commands: Vec<RenderCommand>,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Result<Vec<RenderCommand>> {
+        commands
+            .into_iter()
+            .map(|command| self.materialize_resolved_layer_mask(command, scale, format, parameters))
+            .collect()
+    }
+
+    fn materialize_resolved_layer_mask(
+        &mut self,
+        command: RenderCommand,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Result<RenderCommand> {
+        let RenderCommand::Layer { layer, children } = command else {
+            return Ok(command);
+        };
+        let children =
+            self.materialize_resolved_layer_masks(children, scale, format, parameters)?;
+        let Some(mask) = layer.mask.clone() else {
+            return Ok(RenderCommand::Layer { layer, children });
+        };
+
+        let bounds = layer.pass_plan.bounds().ok_or_else(|| {
+            Error::invalid_value(
+                "materialized masked layer bounds",
+                "unknown",
+                "must be explicit before rendering resolved layer alpha masks",
+            )
+        })?;
+        let physical_size = physical_size(bounds.rect().size(), scale)?;
+        if mask.alpha_mask().size != physical_size {
+            return Err(Error::invalid_value(
+                "resolved layer alpha mask size",
+                format!(
+                    "{}x{}",
+                    mask.alpha_mask().size.width(),
+                    mask.alpha_mask().size.height()
+                ),
+                "must match the offscreen layer bounds in device pixels",
+            ));
+        }
+
+        let local_scene = self.mask_source_scene(&layer, children, bounds, scale)?;
+        let request = OffscreenLocalSceneRenderRequest::new(bounds, scale, format, parameters);
+        let options = self.options;
+        let mut cache = OffscreenTextureResourceCache::new();
+        let Some(context) = self.default_offscreen_render_context() else {
+            return Err(Error::new(
+                ErrorCode::AdapterUnavailable,
+                "resolved layer alpha masks require an available wgpu device context",
+            ));
+        };
+        let rendered = render_vello_local_scene_to_offscreen_texture(
+            Some(context),
+            options,
+            &mut cache,
+            &local_scene,
+            request,
+        )?;
+        let source = {
+            let Some((device, queue)) = self.default_wgpu_device_queue() else {
+                return Err(Error::new(
+                    ErrorCode::AdapterUnavailable,
+                    "resolved layer alpha masks require an available wgpu device queue",
+                ));
+            };
+            read_texture_rgba(device, queue, rendered.texture(), physical_size)?
+        };
+        rendered.release(&mut cache)?;
+        let masked = ResolvedAlphaMaskExecution::try_new(&source, mask.alpha_mask())?
+            .execute_to_image_buffer()?;
+        let image = Image::from_rgba(
+            Size::new(
+                f64::from(masked.size.width()),
+                f64::from(masked.size.height()),
+            ),
+            masked.rgba,
+        )?;
+        let image_command = RenderCommand::Image {
+            image,
+            rect: bounds.rect(),
+            fit: ImageFit::Stretch,
+        };
+        Ok(RenderCommand::Layer {
+            layer: command::NormalizedLayer {
+                clip: None,
+                mask: None,
+                ..layer
+            },
+            children: vec![image_command],
+        })
+    }
+
+    fn mask_source_scene(
+        &self,
+        layer: &command::NormalizedLayer,
+        children: Vec<RenderCommand>,
+        bounds: command::OffscreenBounds,
+        scale: f64,
+    ) -> Result<vello::Scene> {
+        let source_layer = command::NormalizedLayer {
+            clip: layer.clip.clone(),
+            transform: Transform::translation(-bounds.rect().x(), -bounds.rect().y())?,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            mask: None,
+            isolation: if layer.clip.is_some() {
+                command::LayerIsolation::ClipOnly
+            } else {
+                command::LayerIsolation::None
+            },
+            pass_plan: layer.pass_plan,
+        };
+        let commands = RenderCommands::new(vec![RenderCommand::Layer {
+            layer: source_layer,
+            children,
+        }]);
+        encode_vello_scene(&commands, scale)
     }
 
     #[must_use]

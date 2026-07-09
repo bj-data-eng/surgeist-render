@@ -1,5 +1,7 @@
 use super::{
-    ClipInput, Error, Paint, Point, Result, Shape, Transform,
+    ClipInput, Error, ImageBuffer, MaskMode, Paint, PhysicalSize, Point, PrimitiveFamily,
+    PrimitiveOperation, Result, Shape, Transform, UnsupportedPrimitive,
+    image::validate_image_buffer_rgba_len,
     style::validate_clip_input,
     validation::{
         validate_filter, validate_finite_f64, validate_non_negative_f64, validate_paint,
@@ -13,7 +15,7 @@ pub struct Layer {
     transform: Transform,
     opacity: f32,
     blend: BlendMode,
-    mask: Option<Shape>,
+    mask: Option<LayerMask>,
     filter: Option<Filter>,
 }
 
@@ -37,7 +39,13 @@ impl Layer {
 
     pub fn try_mask(mut self, mask: Shape) -> Result<Self> {
         validate_shape(&mask)?;
-        self.mask = Some(mask);
+        self.mask = Some(LayerMask::AuthoredShape(mask));
+        Ok(self)
+    }
+
+    pub fn try_resolved_alpha_mask(mut self, alpha_mask: ImageBuffer) -> Result<Self> {
+        let mask = ResolvedLayerAlphaMask::try_new(alpha_mask)?;
+        self.mask = Some(LayerMask::ResolvedAlpha(mask));
         Ok(self)
     }
 
@@ -83,7 +91,18 @@ impl Layer {
 
     #[must_use]
     pub fn mask(&self) -> Option<&Shape> {
-        self.mask.as_ref()
+        match &self.mask {
+            Some(LayerMask::AuthoredShape(mask)) => Some(mask),
+            Some(LayerMask::ResolvedAlpha(_)) | None => None,
+        }
+    }
+
+    #[must_use]
+    pub fn resolved_alpha_mask(&self) -> Option<&ResolvedLayerAlphaMask> {
+        match &self.mask {
+            Some(LayerMask::ResolvedAlpha(mask)) => Some(mask),
+            Some(LayerMask::AuthoredShape(_)) | None => None,
+        }
     }
 
     #[must_use]
@@ -104,6 +123,55 @@ impl Layer {
     #[must_use]
     pub const fn blend_mode(&self) -> BlendMode {
         self.blend
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum LayerMask {
+    AuthoredShape(Shape),
+    ResolvedAlpha(ResolvedLayerAlphaMask),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ResolvedLayerAlphaMask {
+    alpha_mask: ImageBuffer,
+    mode: MaskMode,
+}
+
+impl ResolvedLayerAlphaMask {
+    pub fn try_new(alpha_mask: ImageBuffer) -> Result<Self> {
+        Self::try_new_with_mode(alpha_mask, MaskMode::Alpha)
+    }
+
+    pub fn try_new_with_mode(alpha_mask: ImageBuffer, mode: MaskMode) -> Result<Self> {
+        match mode {
+            MaskMode::Alpha => {}
+            MaskMode::Luminance => {
+                return Err(Error::unsupported_render_primitive(
+                    UnsupportedPrimitive::new(
+                        PrimitiveFamily::MasksAndClips,
+                        PrimitiveOperation::LuminanceMaskMode,
+                    ),
+                ));
+            }
+        }
+        validate_image_buffer_rgba_len(alpha_mask.size, alpha_mask.rgba.len())?;
+        Ok(Self { alpha_mask, mode })
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> PhysicalSize {
+        self.alpha_mask.size
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> MaskMode {
+        self.mode
+    }
+
+    #[must_use]
+    pub const fn alpha_mask(&self) -> &ImageBuffer {
+        &self.alpha_mask
     }
 }
 

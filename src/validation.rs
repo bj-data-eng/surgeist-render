@@ -134,6 +134,12 @@ pub(crate) fn validate_layer(layer: &Layer) -> Result<()> {
     if let Some(mask) = layer.mask() {
         validate_shape(mask)?;
     }
+    if let Some(mask) = layer.resolved_alpha_mask() {
+        super::image::validate_image_buffer_rgba_len(
+            mask.alpha_mask().size,
+            mask.alpha_mask().rgba.len(),
+        )?;
+    }
     if let Some(filter) = layer.filter() {
         validate_filter(filter)?;
     }

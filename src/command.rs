@@ -135,8 +135,31 @@ pub(crate) struct NormalizedLayer {
     pub(crate) transform: Transform,
     pub(crate) opacity: f32,
     pub(crate) blend: BlendMode,
+    pub(crate) mask: Option<RenderLayerMask>,
     pub(crate) isolation: LayerIsolation,
     pub(crate) pass_plan: LayerPassPlan,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RenderLayerMask {
+    alpha_mask: ImageBuffer,
+}
+
+impl RenderLayerMask {
+    fn from_resolved(mask: &ResolvedLayerAlphaMask, capabilities: Capabilities) -> Result<Self> {
+        capabilities.ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaterializedAlphaMaskExecution,
+        ))?;
+        Ok(Self {
+            alpha_mask: mask.alpha_mask().clone(),
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn alpha_mask(&self) -> &ImageBuffer {
+        &self.alpha_mask
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -215,10 +238,32 @@ impl LayerPassPlan {
         let bounds = clip_bounds(clip).or_else(|| commands_bounds(children));
 
         let has_clip = clip.is_some();
+        let has_resolved_mask = layer.resolved_alpha_mask().is_some();
         let opacity_delta = (layer.opacity() - 1.0).abs();
         let opacity_is_clip_identity = opacity_delta < f32::EPSILON;
         let has_opacity = opacity_delta > f32::EPSILON;
         let has_blend = layer.blend_mode() != BlendMode::Normal;
+
+        if has_resolved_mask {
+            capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::MaterializedAlphaMaskExecution,
+            ))?;
+            let bounds = bounds.ok_or_else(|| {
+                Error::invalid_value(
+                    "materialized masked layer bounds",
+                    "unknown",
+                    "must be explicit for resolved layer alpha masks",
+                )
+            })?;
+            return Ok(Self::new(
+                LayerPassRequirement::OffscreenTexture(
+                    PrimitiveOperation::MaterializedAlphaMaskExecution,
+                ),
+                LayerPassKind::OffscreenTexture,
+                Some(bounds),
+            ));
+        }
 
         if has_clip && opacity_is_clip_identity && !has_blend {
             return Ok(Self::new(
@@ -612,12 +657,17 @@ impl NormalizedLayer {
             .clip_input()
             .map(|clip| RenderClip::from_input(clip, capabilities))
             .transpose()?;
+        let mask = layer
+            .resolved_alpha_mask()
+            .map(|mask| RenderLayerMask::from_resolved(mask, capabilities))
+            .transpose()?;
         let pass_plan = LayerPassPlan::from_authored(layer, clip.as_ref(), children, capabilities)?;
         Ok(Self {
             clip,
             transform: layer.transform(),
             opacity: layer.opacity(),
             blend: layer.blend_mode(),
+            mask,
             isolation: pass_plan.isolation(),
             pass_plan,
         })
