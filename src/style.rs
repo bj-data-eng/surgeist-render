@@ -1288,6 +1288,121 @@ impl FilteredImagePaint {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackdropCaptureBounds {
+    rect: Rect,
+}
+
+impl BackdropCaptureBounds {
+    pub fn try_new(rect: Rect) -> Result<Self> {
+        validate_finite_f64(rect.x(), "backdrop capture bounds x")?;
+        validate_finite_f64(rect.y(), "backdrop capture bounds y")?;
+        if !rect.width().is_finite() || rect.width() <= 0.0 {
+            return Err(Error::invalid_value(
+                "backdrop capture bounds width",
+                rect.width(),
+                "must be finite and positive",
+            ));
+        }
+        if !rect.height().is_finite() || rect.height() <= 0.0 {
+            return Err(Error::invalid_value(
+                "backdrop capture bounds height",
+                rect.height(),
+                "must be finite and positive",
+            ));
+        }
+        Ok(Self { rect })
+    }
+
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        self.rect
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackdropFilterInput {
+    filters: FilterList,
+    capture_bounds: BackdropCaptureBounds,
+    clip: Option<ClipInput>,
+}
+
+impl BackdropFilterInput {
+    pub fn try_new(
+        filters: FilterList,
+        capture_bounds: BackdropCaptureBounds,
+        clip: Option<ClipInput>,
+    ) -> Result<Self> {
+        validate_backdrop_filter_list(&filters)?;
+        validate_backdrop_clip(clip.as_ref())?;
+        Ok(Self {
+            filters,
+            capture_bounds,
+            clip,
+        })
+    }
+
+    pub fn try_root_backdrop(filters: FilterList, clip: Option<ClipInput>) -> Result<Self> {
+        validate_backdrop_filter_list(&filters)?;
+        validate_backdrop_clip(clip.as_ref())?;
+        Err(Error::unsupported_render_primitive(
+            UnsupportedPrimitive::new(
+                PrimitiveFamily::Compositing,
+                PrimitiveOperation::RootBackdropPolicy,
+            ),
+        ))
+    }
+
+    #[must_use]
+    pub const fn filters(&self) -> &FilterList {
+        &self.filters
+    }
+
+    #[must_use]
+    pub const fn capture_bounds(&self) -> BackdropCaptureBounds {
+        self.capture_bounds
+    }
+
+    #[must_use]
+    pub const fn clip(&self) -> Option<&ClipInput> {
+        self.clip.as_ref()
+    }
+
+    pub fn ensure_supported(&self, capabilities: Capabilities) -> Result<()> {
+        capabilities.ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropCapture,
+        ))?;
+        capabilities.ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::MaterializedBackdropFilterExecution,
+        ))?;
+        capabilities.ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropIsolationComposition,
+        ))
+    }
+}
+
+fn validate_backdrop_filter_list(filters: &FilterList) -> Result<()> {
+    if filters.is_none() {
+        return Err(Error::invalid_value(
+            "backdrop filter input filters",
+            "none",
+            "must contain at least one supported filter operation",
+        ));
+    }
+    filters.materialized_image_filter_pipeline()?;
+    Ok(())
+}
+
+fn validate_backdrop_clip(clip: Option<&ClipInput>) -> Result<()> {
+    let Some(clip) = clip else {
+        return Ok(());
+    };
+    clip.ensure_supported(Capabilities::VELLO_0_9)
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilterOp {
     kind: FilterOpKind,
@@ -2806,6 +2921,51 @@ impl BackgroundStack {
     pub fn layers(&self) -> &[BackgroundLayer] {
         &self.layers
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundBlendList {
+    modes: Vec<BackgroundBlendMode>,
+}
+
+impl BackgroundBlendList {
+    pub fn try_new(modes: Vec<BackgroundBlendMode>) -> Result<Self> {
+        if modes.is_empty() {
+            return Err(Error::invalid_value(
+                "background blend list",
+                "[]",
+                "must contain at least one mode",
+            ));
+        }
+        if modes
+            .iter()
+            .any(|mode| *mode != BackgroundBlendMode::Normal)
+        {
+            return Err(Error::unsupported_render_primitive(
+                UnsupportedPrimitive::new(
+                    PrimitiveFamily::Compositing,
+                    PrimitiveOperation::BackgroundBlendMode,
+                ),
+            ));
+        }
+        Ok(Self { modes })
+    }
+
+    #[must_use]
+    pub fn modes(&self) -> &[BackgroundBlendMode] {
+        &self.modes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundBlendMode {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Plus,
 }
 
 #[derive(Clone, Debug, PartialEq)]

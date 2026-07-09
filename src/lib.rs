@@ -64,7 +64,8 @@ pub use shape::{
 };
 pub use stats::Stats;
 pub use style::{
-    BackgroundAreas, BackgroundAttachment, BackgroundBox, BackgroundClipGeometry,
+    BackdropCaptureBounds, BackdropFilterInput, BackgroundAreas, BackgroundAttachment,
+    BackgroundBlendList, BackgroundBlendMode, BackgroundBox, BackgroundClipGeometry,
     BackgroundClipGeometryKind, BackgroundLayer, BackgroundNormalizationInput, BackgroundPosition,
     BackgroundRepeat, BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide,
     BorderStyle, BoxDecorationBreak, BoxDecorationFragment, BoxDecorationInput, BoxSide,

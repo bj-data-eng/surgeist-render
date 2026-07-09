@@ -4767,6 +4767,118 @@ fn filtered_image_paint_rejects_none_filter_list_and_reports_execution_boundary(
 }
 
 #[test]
+fn backdrop_filter_input_preserves_supported_filters_bounds_and_clip() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 1.0, 12.0, 8.0)).unwrap();
+    let clip = ClipInput::try_shape(Shape::rect(Rect::new(1.0, 2.0, 4.0, 5.0))).unwrap();
+
+    let input = BackdropFilterInput::try_new(filters.clone(), bounds, Some(clip.clone())).unwrap();
+
+    assert_eq!(input.filters(), &filters);
+    assert_eq!(input.capture_bounds(), bounds);
+    assert_eq!(input.clip(), Some(&clip));
+}
+
+#[test]
+fn backdrop_filter_input_rejects_empty_filters() {
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let error = BackdropFilterInput::try_new(FilterList::none(), bounds, None)
+        .expect_err("backdrop filters must be an explicit non-empty filter list");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("backdrop filter input filters")
+    );
+}
+
+#[test]
+fn backdrop_capture_bounds_reject_invalid_rectangles() {
+    let zero = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 0.0, 10.0))
+        .expect_err("backdrop capture bounds must have positive area");
+
+    assert_eq!(zero.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        zero.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("backdrop capture bounds width")
+    );
+
+    let non_finite = BackdropCaptureBounds::try_new(Rect::new(f64::INFINITY, 0.0, 1.0, 1.0))
+        .expect_err("backdrop capture bounds must be finite");
+    assert_eq!(
+        non_finite
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("backdrop capture bounds x")
+    );
+}
+
+#[test]
+fn backdrop_filter_input_rejects_unresolved_clip_references() {
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.1).unwrap(),
+    )])
+    .unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let clip = ClipInput::reference(StyleResourceRef::try_new("#backdrop-clip").unwrap());
+
+    let error = BackdropFilterInput::try_new(filters, bounds, Some(clip))
+        .expect_err("backdrop clip geometry must already be render-owned");
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(
+        error
+            .unresolved_resource_diagnostic()
+            .map(UnresolvedResource::kind),
+        Some(UnresolvedResourceKind::Clip)
+    );
+}
+
+#[test]
+fn backdrop_filter_root_policy_reports_explicit_diagnostic() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let error = BackdropFilterInput::try_root_backdrop(filters, None)
+        .expect_err("root backdrop capture is not render-owned yet");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::RootBackdropPolicy,
+        ))
+    );
+}
+
+#[test]
+fn background_blend_lists_model_normal_layers_and_reject_blend_modes() {
+    let list = BackgroundBlendList::try_new(vec![
+        BackgroundBlendMode::Normal,
+        BackgroundBlendMode::Normal,
+    ])
+    .expect("normal-only background blending is a no-op model");
+
+    assert_eq!(
+        list.modes(),
+        &[BackgroundBlendMode::Normal, BackgroundBlendMode::Normal]
+    );
+
+    let error = BackgroundBlendList::try_new(vec![
+        BackgroundBlendMode::Normal,
+        BackgroundBlendMode::Multiply,
+    ])
+    .expect_err("non-normal background blend execution is not implemented");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::BackgroundBlendMode,
+        ))
+    );
+}
+
+#[test]
 fn filter_blur_rejects_negative_radius() {
     let error = FilterBlur::try_new(-0.1).expect_err("negative blur radius should be rejected");
 
