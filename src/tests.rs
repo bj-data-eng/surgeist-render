@@ -9441,6 +9441,118 @@ fn text_fill_paint_matches_concrete_render_paint_surface() {
 }
 
 #[test]
+fn text_decoration_line_preserves_paint_thickness_transform_and_text_order() {
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 12.0),
+        Point::new(32.0, 12.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let decoration = TextDecorationLine::try_solid(
+        Point::new(2.0, 12.0),
+        Point::new(34.0, 12.0),
+        2.5,
+        Transform::translation(3.0, 4.0).unwrap(),
+        Paint::gradient(gradient.clone()),
+    )
+    .unwrap();
+    let glyphs = [TextGlyph::try_new(1, 4.0, 10.0, 8.0).unwrap()];
+    let text = TextRun::try_new(
+        FontRef::new(1).named("Decoration order"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_decoration_line(decoration).text_run(text);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands.len(), 2);
+    assert!(matches!(
+        normalized.commands[1],
+        command::RenderCommand::TextRun { .. }
+    ));
+    let command::RenderCommand::Layer { layer, children } = &normalized.commands[0] else {
+        panic!("transformed decoration should lower through a layer");
+    };
+    assert_eq!(layer.transform, Transform::translation(3.0, 4.0).unwrap());
+    let [
+        command::RenderCommand::Stroke {
+            shape,
+            stroke,
+            paint,
+        },
+    ] = children.as_slice()
+    else {
+        panic!("decoration layer should contain one stroke command");
+    };
+    assert_eq!(stroke.width, 2.5);
+    assert!(matches!(shape, command::RenderStrokeShape::Path(_)));
+    assert_eq!(paint, &command::RenderPaint::Gradient(gradient));
+}
+
+#[test]
+fn text_decoration_line_supports_solid_color_without_extra_text_semantics() {
+    let decoration = TextDecorationLine::try_new(
+        Point::new(1.0, 5.0),
+        Point::new(9.0, 5.0),
+        1.0,
+        Transform::identity(),
+        Color::BLACK.into(),
+        TextDecorationLineStyle::Solid,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_decoration_line(decoration);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    let [command::RenderCommand::Stroke { stroke, paint, .. }] = normalized.commands.as_slice()
+    else {
+        panic!("identity decoration should lower to a plain stroke");
+    };
+    assert_eq!(stroke.width, 1.0);
+    assert_eq!(paint, &command::RenderPaint::Color(Color::BLACK));
+}
+
+#[test]
+fn non_solid_text_decoration_styles_report_typed_boundary() {
+    for style in [
+        TextDecorationLineStyle::Double,
+        TextDecorationLineStyle::Dotted,
+        TextDecorationLineStyle::Dashed,
+        TextDecorationLineStyle::Wavy,
+    ] {
+        let error = TextDecorationLine::try_new(
+            Point::new(0.0, 0.0),
+            Point::new(10.0, 0.0),
+            1.0,
+            Transform::identity(),
+            Color::BLACK.into(),
+            style,
+        )
+        .expect_err("non-solid decoration styles require root/text expansion");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::TextDecorations,
+                PrimitiveOperation::TextDecorationStyle,
+            ))
+        );
+        assert!(error.message.contains("text decoration style"));
+        assert!(error.message.contains("root/text"));
+    }
+}
+
+#[test]
 fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
     let capabilities = Capabilities::VELLO_0_9;
     assert!(capabilities.geometry_targets().supports_rect_fill_stroke());

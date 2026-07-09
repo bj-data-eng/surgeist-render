@@ -1,4 +1,7 @@
-use super::{Paint, Result, ShadowList, Transform, validation::*};
+use super::{
+    Paint, Point, PrimitiveFamily, PrimitiveOperation, Result, ShadowList, Transform,
+    UnsupportedPrimitive, validation::*,
+};
 use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -101,6 +104,125 @@ impl<'a> TextShadowRun<'a> {
     pub const fn shadows(&self) -> &ShadowList {
         &self.shadows
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextDecorationLine {
+    start: Point,
+    end: Point,
+    thickness: f64,
+    transform: Transform,
+    paint: Paint,
+}
+
+impl TextDecorationLine {
+    pub fn try_solid(
+        start: Point,
+        end: Point,
+        thickness: f64,
+        transform: Transform,
+        paint: Paint,
+    ) -> Result<Self> {
+        Self::try_new(
+            start,
+            end,
+            thickness,
+            transform,
+            paint,
+            TextDecorationLineStyle::Solid,
+        )
+    }
+
+    pub fn try_new(
+        start: Point,
+        end: Point,
+        thickness: f64,
+        transform: Transform,
+        paint: Paint,
+        style: TextDecorationLineStyle,
+    ) -> Result<Self> {
+        validate_point(start, "text decoration start")?;
+        validate_point(end, "text decoration end")?;
+        if start == end {
+            return Err(super::Error::invalid_value(
+                "text decoration line",
+                "zero-length",
+                "must have distinct start and end points",
+            ));
+        }
+        validate_positive_f64(thickness, "text decoration thickness")?;
+        validate_transform(transform, "text decoration transform")?;
+        validate_paint(&paint)?;
+        if style != TextDecorationLineStyle::Solid {
+            return Err(unsupported_text_decoration_style_error(style));
+        }
+        Ok(Self {
+            start,
+            end,
+            thickness,
+            transform,
+            paint,
+        })
+    }
+
+    #[must_use]
+    pub const fn start(&self) -> Point {
+        self.start
+    }
+
+    #[must_use]
+    pub const fn end(&self) -> Point {
+        self.end
+    }
+
+    #[must_use]
+    pub const fn thickness(&self) -> f64 {
+        self.thickness
+    }
+
+    #[must_use]
+    pub const fn transform(&self) -> Transform {
+        self.transform
+    }
+
+    #[must_use]
+    pub const fn paint(&self) -> &Paint {
+        &self.paint
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextDecorationLineStyle {
+    Solid,
+    Double,
+    Dotted,
+    Dashed,
+    Wavy,
+}
+
+impl TextDecorationLineStyle {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Solid => "solid",
+            Self::Double => "double",
+            Self::Dotted => "dotted",
+            Self::Dashed => "dashed",
+            Self::Wavy => "wavy",
+        }
+    }
+}
+
+fn unsupported_text_decoration_style_error(style: TextDecorationLineStyle) -> super::Error {
+    let mut error = super::Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::TextDecorations,
+        PrimitiveOperation::TextDecorationStyle,
+    ));
+    error.message.push_str(&format!(
+        ": text decoration style '{}' requires root/text to expand the decoration into explicit render geometry",
+        style.label()
+    ));
+    error
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
