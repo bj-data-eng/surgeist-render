@@ -1785,6 +1785,102 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
 }
 
 #[test]
+fn direct_geometry_targets_render_without_unsupported_diagnostics() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::new(32.0, 32.0), 1.0)
+        .unwrap();
+    let mut scene = Scene::new();
+    let mut path = Path::new();
+    path.move_to(Point::try_new(2.0, 24.0).unwrap())
+        .line_to(Point::try_new(8.0, 24.0).unwrap())
+        .line_to(Point::try_new(8.0, 30.0).unwrap())
+        .close();
+
+    scene.fill(
+        Shape::rect(Rect::try_new(1.0, 1.0, 4.0, 4.0).unwrap()),
+        Color::BLACK,
+    );
+    scene.stroke(
+        Shape::rect(Rect::try_new(1.0, 7.0, 4.0, 4.0).unwrap()),
+        Stroke::try_new(1.0).unwrap(),
+        Color::BLACK,
+    );
+    scene.fill(
+        Shape::try_rounded_rect(
+            Rect::try_new(6.0, 1.0, 4.0, 4.0).unwrap(),
+            Radii::try_all(1.0).unwrap(),
+        )
+        .unwrap(),
+        Color::BLACK,
+    );
+    scene.stroke(
+        Shape::try_rounded_rect(
+            Rect::try_new(6.0, 7.0, 4.0, 4.0).unwrap(),
+            Radii::try_all(1.0).unwrap(),
+        )
+        .unwrap(),
+        Stroke::try_new(1.0).unwrap(),
+        Color::BLACK,
+    );
+    scene.fill(
+        Shape::try_circle(Point::try_new(4.0, 14.0).unwrap(), 2.0).unwrap(),
+        Color::BLACK,
+    );
+    scene.stroke(
+        Shape::try_circle(Point::try_new(4.0, 20.0).unwrap(), 2.0).unwrap(),
+        Stroke::try_new(1.0).unwrap(),
+        Color::BLACK,
+    );
+    scene.fill(
+        Shape::try_ellipse(
+            Point::try_new(14.0, 14.0).unwrap(),
+            Size::try_new(3.0, 2.0).unwrap(),
+        )
+        .unwrap(),
+        Color::BLACK,
+    );
+    scene.stroke(
+        Shape::try_ellipse(
+            Point::try_new(14.0, 20.0).unwrap(),
+            Size::try_new(3.0, 2.0).unwrap(),
+        )
+        .unwrap(),
+        Stroke::try_new(1.0).unwrap(),
+        Color::BLACK,
+    );
+    scene.fill(Shape::path(path), Color::BLACK);
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("direct geometry targets should render");
+}
+
+#[test]
+fn centered_path_strokes_support_join_cap_and_dash_inputs() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::new(24.0, 24.0), 1.0)
+        .unwrap();
+    let mut path = Path::new();
+    path.move_to(Point::try_new(2.0, 2.0).unwrap())
+        .line_to(Point::try_new(20.0, 2.0).unwrap())
+        .line_to(Point::try_new(20.0, 20.0).unwrap());
+    let stroke = Stroke::try_new(2.0)
+        .unwrap()
+        .join(LineJoin::Round)
+        .caps(LineCap::Round, LineCap::Square)
+        .try_dash(Dash::try_new(0.0, &[2.0, 1.0]).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.stroke(Shape::path(path), stroke, Color::BLACK);
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("centered path strokes should render");
+}
+
+#[test]
 fn unsupported_aligned_path_strokes_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
