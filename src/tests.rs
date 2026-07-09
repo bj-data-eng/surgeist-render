@@ -264,44 +264,151 @@ fn invalid_value_errors_name_rejected_value() {
 
 #[test]
 fn unsupported_operation_errors_name_capability() {
-    let capability = UnsupportedCapability::LayerMask;
-    let error = Error::unsupported_capability(capability);
+    let unsupported = UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LayerMask,
+    );
+    let error = Error::unsupported_render_primitive(unsupported);
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.unsupported_primitive(), Some(unsupported));
     assert!(
         error.message.contains("layer mask"),
-        "message should name the unsupported capability: {}",
+        "message should name the unsupported primitive: {}",
         error.message
     );
 }
 
 #[test]
-fn renderer_reports_backend_capabilities() {
+fn renderer_reports_backend_capabilities_by_family() {
     let renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let capabilities = renderer.capabilities();
 
-    assert!(!capabilities.supports_layer_masks());
-    assert!(!capabilities.supports_layer_filters());
-    assert!(!capabilities.supports_inside_outside_path_strokes());
+    assert!(capabilities.geometry_targets().supports_rect_fill_stroke());
+    assert!(
+        capabilities
+            .geometry_targets()
+            .supports_rounded_rect_fill_stroke()
+    );
+    assert!(
+        capabilities
+            .geometry_targets()
+            .supports_circle_ellipse_fill_stroke()
+    );
+    assert!(
+        capabilities
+            .geometry_targets()
+            .supports_arbitrary_path_fill()
+    );
+    assert!(
+        capabilities
+            .geometry_targets()
+            .supports_arbitrary_path_centered_stroke()
+    );
+    assert!(
+        !capabilities
+            .geometry_targets()
+            .supports_arbitrary_path_inside_outside_stroke()
+    );
+
+    assert!(capabilities.paint_sources().supports_solid_rgba());
+    assert!(capabilities.paint_sources().supports_gradients());
+    assert!(capabilities.paint_sources().supports_image_paint());
+    assert!(
+        !capabilities
+            .paint_sources()
+            .supports_non_solid_shadow_paint()
+    );
+
+    assert!(!capabilities.filters().supports_layer_filters());
+    assert!(capabilities.masks_clips().supports_shape_clips());
+    assert!(!capabilities.masks_clips().supports_layer_masks());
+    assert!(capabilities.compositing().supports_layer_opacity());
+    assert!(capabilities.compositing().supports_blend_modes());
+    assert!(capabilities.surfaces().supports_headless_surfaces());
     assert_eq!(
-        capabilities.supports_web_canvas_surfaces(),
+        capabilities.surfaces().supports_web_canvas_surfaces(),
         cfg!(all(feature = "render-web", target_arch = "wasm32"))
     );
 }
 
 #[test]
-fn capabilities_map_unsupported_operations_to_typed_errors() {
+fn capabilities_map_unsupported_primitives_to_typed_errors() {
     let capabilities = Capabilities::VELLO_0_9;
+    let unsupported = UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LayerMask,
+    );
 
     let error = capabilities
-        .ensure(UnsupportedCapability::LayerMask)
+        .ensure_supported(unsupported)
         .expect_err("layer masks are not supported in this milestone");
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.unsupported_primitive(), Some(unsupported));
     assert!(error.message.contains("layer mask"));
 }
 
 #[test]
-fn layer_masks_report_capability_error() {
+fn vello_baseline_reports_current_unsupported_primitives() {
+    let capabilities = Capabilities::VELLO_0_9;
+    let cases = [
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ),
+        UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::GeometryTargets,
+            PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::PaintSources,
+            PrimitiveOperation::NonSolidShadowPaint,
+        ),
+    ];
+
+    for unsupported in cases {
+        let error = capabilities
+            .ensure_supported(unsupported)
+            .expect_err("Vello 0.9 should reject this primitive");
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains(unsupported.label()));
+    }
+}
+
+#[cfg(not(all(feature = "render-web", target_arch = "wasm32")))]
+#[test]
+fn vello_baseline_reports_web_canvas_surface_as_unsupported_off_wasm_web() {
+    let unsupported = UnsupportedPrimitive::new(
+        PrimitiveFamily::Surfaces,
+        PrimitiveOperation::WebCanvasSurface,
+    );
+
+    let error = Capabilities::VELLO_0_9
+        .ensure_supported(unsupported)
+        .expect_err("web canvas surfaces require render-web on wasm32");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    assert!(error.message.contains("web canvas surface"));
+}
+
+#[cfg(all(feature = "render-web", target_arch = "wasm32"))]
+#[test]
+fn vello_baseline_reports_web_canvas_surface_as_supported_on_wasm_web() {
+    let unsupported = UnsupportedPrimitive::new(
+        PrimitiveFamily::Surfaces,
+        PrimitiveOperation::WebCanvasSurface,
+    );
+
+    Capabilities::VELLO_0_9
+        .ensure_supported(unsupported)
+        .expect("web canvas surfaces are available with render-web on wasm32");
+}
+
+#[test]
+fn unsupported_layer_masks_report_capability_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
         .create_headless(Size::try_new(4.0, 2.0).unwrap(), 1.0)
@@ -321,6 +428,13 @@ fn layer_masks_report_capability_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("unsupported mask should fail render");
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ))
+    );
     assert!(error.message.contains("layer mask"));
 }
 
@@ -524,7 +638,7 @@ fn surface_suspend_and_resume_preserve_attachment_kind() {
 
 #[cfg(not(all(feature = "render-web", target_arch = "wasm32")))]
 #[test]
-fn web_canvas_attachment_reports_target_requirement() {
+fn unsupported_web_canvas_attachment_reports_target_requirement() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let canvas = WebCanvas::new("preview");
 
@@ -542,6 +656,13 @@ fn web_canvas_attachment_reports_target_requirement() {
     };
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Surfaces,
+            PrimitiveOperation::WebCanvasSurface,
+        ))
+    );
     assert!(error.message.contains("web canvas surface"));
 }
 
@@ -1036,7 +1157,7 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
 }
 
 #[test]
-fn aligned_path_strokes_report_explicit_error() {
+fn unsupported_aligned_path_strokes_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
         .create_headless(Size::new(24.0, 24.0), 1.0)
@@ -1056,6 +1177,13 @@ fn aligned_path_strokes_report_explicit_error() {
         .expect_err("path offsetting is deliberately explicit");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::GeometryTargets,
+            PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+        ))
+    );
     assert!(
         error
             .message
@@ -1064,7 +1192,7 @@ fn aligned_path_strokes_report_explicit_error() {
 }
 
 #[test]
-fn layer_masks_report_explicit_error() {
+fn unsupported_layer_masks_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
     let mut scene = Scene::new();
@@ -1082,11 +1210,18 @@ fn layer_masks_report_explicit_error() {
         .expect_err("mask lowering should be explicit until implemented");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ))
+    );
     assert!(error.message.contains("layer mask"));
 }
 
 #[test]
-fn layer_filters_report_explicit_error() {
+fn unsupported_layer_filters_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
         .create_headless(Size::new(24.0, 24.0), 1.0)
@@ -1106,11 +1241,18 @@ fn layer_filters_report_explicit_error() {
         .expect_err("filter lowering should be explicit until implemented");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::LayerFilter,
+        ))
+    );
     assert!(error.message.contains("layer filter"));
 }
 
 #[test]
-fn non_solid_shadow_paint_reports_capability_error() {
+fn unsupported_non_solid_shadow_paint_reports_capability_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
     let gradient = Gradient::try_linear(
@@ -1133,6 +1275,13 @@ fn non_solid_shadow_paint_reports_capability_error() {
         .expect_err("shadow lowering requires solid paint in this milestone");
 
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::PaintSources,
+            PrimitiveOperation::NonSolidShadowPaint,
+        ))
+    );
     assert!(error.message.contains("non-solid shadow paint"));
 }
 

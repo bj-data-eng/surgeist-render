@@ -22,8 +22,13 @@ mod surface;
 mod text;
 mod validation;
 
-pub use capability::Capabilities;
-pub use error::{Error, ErrorCode, Result, UnsupportedCapability};
+pub use capability::{
+    Capabilities, CompositingCapabilities, FilterCapabilities, GeometryTargetCapabilities,
+    MaskClipCapabilities, PaintSourceCapabilities, SurfaceCapabilities,
+};
+pub use error::{
+    Error, ErrorCode, PrimitiveFamily, PrimitiveOperation, Result, UnsupportedPrimitive,
+};
 pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
 pub use layer::{BlendMode, Filter, Layer, Shadow};

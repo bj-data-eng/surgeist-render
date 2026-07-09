@@ -8,6 +8,7 @@ pub struct Error {
     pub code: ErrorCode,
     pub message: String,
     pub source: Option<Box<dyn error::Error + Send + Sync>>,
+    unsupported_primitive: Option<UnsupportedPrimitive>,
 }
 
 impl Error {
@@ -17,6 +18,7 @@ impl Error {
             code,
             message: message.into(),
             source: None,
+            unsupported_primitive: None,
         }
     }
 
@@ -39,11 +41,22 @@ impl Error {
     }
 
     #[must_use]
-    pub fn unsupported_capability(capability: UnsupportedCapability) -> Self {
-        Self::new(
+    pub fn unsupported_render_primitive(primitive: UnsupportedPrimitive) -> Self {
+        let mut error = Self::new(
             ErrorCode::UnsupportedBackend,
-            format!("renderer capability is unsupported: {}", capability.label()),
-        )
+            format!(
+                "render primitive is unsupported: {} / {}",
+                primitive.family().label(),
+                primitive.label()
+            ),
+        );
+        error.unsupported_primitive = Some(primitive);
+        error
+    }
+
+    #[must_use]
+    pub const fn unsupported_primitive(&self) -> Option<UnsupportedPrimitive> {
+        self.unsupported_primitive
     }
 }
 
@@ -79,22 +92,72 @@ pub enum ErrorCode {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum UnsupportedCapability {
+pub struct UnsupportedPrimitive {
+    family: PrimitiveFamily,
+    operation: PrimitiveOperation,
+}
+
+impl UnsupportedPrimitive {
+    #[must_use]
+    pub const fn new(family: PrimitiveFamily, operation: PrimitiveOperation) -> Self {
+        Self { family, operation }
+    }
+
+    #[must_use]
+    pub const fn family(self) -> PrimitiveFamily {
+        self.family
+    }
+
+    #[must_use]
+    pub const fn operation(self) -> PrimitiveOperation {
+        self.operation
+    }
+
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        self.operation.label()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrimitiveFamily {
+    GeometryTargets,
+    PaintSources,
+    Filters,
+    MasksAndClips,
+    Surfaces,
+}
+
+impl PrimitiveFamily {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::GeometryTargets => "geometry targets",
+            Self::PaintSources => "paint sources",
+            Self::Filters => "filters",
+            Self::MasksAndClips => "masks and clips",
+            Self::Surfaces => "surfaces",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PrimitiveOperation {
     LayerFilter,
     LayerMask,
     NonSolidShadowPaint,
-    PathStrokeAlignment,
+    InsideOutsidePathStrokeAlignment,
     WebCanvasSurface,
 }
 
-impl UnsupportedCapability {
+impl PrimitiveOperation {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
             Self::LayerFilter => "layer filter",
             Self::LayerMask => "layer mask",
             Self::NonSolidShadowPaint => "non-solid shadow paint",
-            Self::PathStrokeAlignment => "inside/outside path stroke alignment",
+            Self::InsideOutsidePathStrokeAlignment => "inside/outside path stroke alignment",
             Self::WebCanvasSurface => "web canvas surface",
         }
     }

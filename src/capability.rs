@@ -1,53 +1,245 @@
-use super::UnsupportedCapability;
+use super::{Error, PrimitiveFamily, PrimitiveOperation, Result, UnsupportedPrimitive};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
-    layer_masks: bool,
-    layer_filters: bool,
-    inside_outside_path_strokes: bool,
-    web_canvas_surfaces: bool,
+    geometry_targets: GeometryTargetCapabilities,
+    paint_sources: PaintSourceCapabilities,
+    filters: FilterCapabilities,
+    masks_clips: MaskClipCapabilities,
+    compositing: CompositingCapabilities,
+    surfaces: SurfaceCapabilities,
 }
 
 impl Capabilities {
-    pub(crate) const VELLO_0_9: Self = Self {
-        layer_masks: false,
-        layer_filters: false,
-        inside_outside_path_strokes: false,
-        web_canvas_surfaces: cfg!(all(feature = "render-web", target_arch = "wasm32")),
+    pub const VELLO_0_9: Self = Self {
+        geometry_targets: GeometryTargetCapabilities {
+            rect_fill_stroke: true,
+            rounded_rect_fill_stroke: true,
+            circle_ellipse_fill_stroke: true,
+            arbitrary_path_fill: true,
+            arbitrary_path_centered_stroke: true,
+            arbitrary_path_inside_outside_stroke: false,
+        },
+        paint_sources: PaintSourceCapabilities {
+            solid_rgba: true,
+            gradients: true,
+            image_paint: true,
+            non_solid_shadow_paint: false,
+        },
+        filters: FilterCapabilities {
+            layer_filters: false,
+        },
+        masks_clips: MaskClipCapabilities {
+            shape_clips: true,
+            layer_masks: false,
+        },
+        compositing: CompositingCapabilities {
+            layer_opacity: true,
+            blend_modes: true,
+        },
+        surfaces: SurfaceCapabilities {
+            headless_surfaces: true,
+            web_canvas_surfaces: cfg!(all(feature = "render-web", target_arch = "wasm32")),
+        },
     };
+
+    #[must_use]
+    pub const fn geometry_targets(self) -> GeometryTargetCapabilities {
+        self.geometry_targets
+    }
+
+    #[must_use]
+    pub const fn paint_sources(self) -> PaintSourceCapabilities {
+        self.paint_sources
+    }
+
+    #[must_use]
+    pub const fn filters(self) -> FilterCapabilities {
+        self.filters
+    }
+
+    #[must_use]
+    pub const fn masks_clips(self) -> MaskClipCapabilities {
+        self.masks_clips
+    }
+
+    #[must_use]
+    pub const fn compositing(self) -> CompositingCapabilities {
+        self.compositing
+    }
+
+    #[must_use]
+    pub const fn surfaces(self) -> SurfaceCapabilities {
+        self.surfaces
+    }
+
+    pub fn ensure_supported(self, primitive: UnsupportedPrimitive) -> Result<()> {
+        if self.supports(primitive) {
+            Ok(())
+        } else {
+            Err(Error::unsupported_render_primitive(primitive))
+        }
+    }
+
+    const fn supports(self, primitive: UnsupportedPrimitive) -> bool {
+        match (primitive.family(), primitive.operation()) {
+            (
+                PrimitiveFamily::GeometryTargets,
+                PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+            ) => self
+                .geometry_targets
+                .supports_arbitrary_path_inside_outside_stroke(),
+            (PrimitiveFamily::PaintSources, PrimitiveOperation::NonSolidShadowPaint) => {
+                self.paint_sources.supports_non_solid_shadow_paint()
+            }
+            (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter) => {
+                self.filters.supports_layer_filters()
+            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LayerMask) => {
+                self.masks_clips.supports_layer_masks()
+            }
+            (PrimitiveFamily::Surfaces, PrimitiveOperation::WebCanvasSurface) => {
+                self.surfaces.supports_web_canvas_surfaces()
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct GeometryTargetCapabilities {
+    rect_fill_stroke: bool,
+    rounded_rect_fill_stroke: bool,
+    circle_ellipse_fill_stroke: bool,
+    arbitrary_path_fill: bool,
+    arbitrary_path_centered_stroke: bool,
+    arbitrary_path_inside_outside_stroke: bool,
+}
+
+impl GeometryTargetCapabilities {
+    #[must_use]
+    pub const fn supports_rect_fill_stroke(self) -> bool {
+        self.rect_fill_stroke
+    }
+
+    #[must_use]
+    pub const fn supports_rounded_rect_fill_stroke(self) -> bool {
+        self.rounded_rect_fill_stroke
+    }
+
+    #[must_use]
+    pub const fn supports_circle_ellipse_fill_stroke(self) -> bool {
+        self.circle_ellipse_fill_stroke
+    }
+
+    #[must_use]
+    pub const fn supports_arbitrary_path_fill(self) -> bool {
+        self.arbitrary_path_fill
+    }
+
+    #[must_use]
+    pub const fn supports_arbitrary_path_centered_stroke(self) -> bool {
+        self.arbitrary_path_centered_stroke
+    }
+
+    #[must_use]
+    pub const fn supports_arbitrary_path_inside_outside_stroke(self) -> bool {
+        self.arbitrary_path_inside_outside_stroke
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PaintSourceCapabilities {
+    solid_rgba: bool,
+    gradients: bool,
+    image_paint: bool,
+    non_solid_shadow_paint: bool,
+}
+
+impl PaintSourceCapabilities {
+    #[must_use]
+    pub const fn supports_solid_rgba(self) -> bool {
+        self.solid_rgba
+    }
+
+    #[must_use]
+    pub const fn supports_gradients(self) -> bool {
+        self.gradients
+    }
+
+    #[must_use]
+    pub const fn supports_image_paint(self) -> bool {
+        self.image_paint
+    }
+
+    #[must_use]
+    pub const fn supports_non_solid_shadow_paint(self) -> bool {
+        self.non_solid_shadow_paint
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilterCapabilities {
+    layer_filters: bool,
+}
+
+impl FilterCapabilities {
+    #[must_use]
+    pub const fn supports_layer_filters(self) -> bool {
+        self.layer_filters
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MaskClipCapabilities {
+    shape_clips: bool,
+    layer_masks: bool,
+}
+
+impl MaskClipCapabilities {
+    #[must_use]
+    pub const fn supports_shape_clips(self) -> bool {
+        self.shape_clips
+    }
 
     #[must_use]
     pub const fn supports_layer_masks(self) -> bool {
         self.layer_masks
     }
+}
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CompositingCapabilities {
+    layer_opacity: bool,
+    blend_modes: bool,
+}
+
+impl CompositingCapabilities {
     #[must_use]
-    pub const fn supports_layer_filters(self) -> bool {
-        self.layer_filters
+    pub const fn supports_layer_opacity(self) -> bool {
+        self.layer_opacity
     }
 
     #[must_use]
-    pub const fn supports_inside_outside_path_strokes(self) -> bool {
-        self.inside_outside_path_strokes
+    pub const fn supports_blend_modes(self) -> bool {
+        self.blend_modes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfaceCapabilities {
+    headless_surfaces: bool,
+    web_canvas_surfaces: bool,
+}
+
+impl SurfaceCapabilities {
+    #[must_use]
+    pub const fn supports_headless_surfaces(self) -> bool {
+        self.headless_surfaces
     }
 
     #[must_use]
     pub const fn supports_web_canvas_surfaces(self) -> bool {
         self.web_canvas_surfaces
-    }
-
-    pub(crate) fn ensure(self, capability: UnsupportedCapability) -> super::Result<()> {
-        let supported = match capability {
-            UnsupportedCapability::LayerMask => self.layer_masks,
-            UnsupportedCapability::LayerFilter => self.layer_filters,
-            UnsupportedCapability::PathStrokeAlignment => self.inside_outside_path_strokes,
-            UnsupportedCapability::WebCanvasSurface => self.web_canvas_surfaces,
-            UnsupportedCapability::NonSolidShadowPaint => false,
-        };
-        if supported {
-            Ok(())
-        } else {
-            Err(super::Error::unsupported_capability(capability))
-        }
     }
 }

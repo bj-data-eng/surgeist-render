@@ -143,7 +143,10 @@ impl Renderer {
         _options: SurfaceOptions,
     ) -> Result<Surface> {
         let _ = canvas;
-        Capabilities::VELLO_0_9.ensure(UnsupportedCapability::WebCanvasSurface)?;
+        Capabilities::VELLO_0_9.ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::Surfaces,
+            PrimitiveOperation::WebCanvasSurface,
+        ))?;
         unreachable!("web canvas support requires the render-web feature on wasm32");
     }
 

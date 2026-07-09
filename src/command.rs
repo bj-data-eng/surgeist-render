@@ -242,7 +242,10 @@ impl RenderStrokeShape {
             )),
             ShapeKind::Path(path) if align == StrokeAlign::Center => Self::Path(path.to_kurbo()),
             ShapeKind::Path(_) => {
-                capabilities.ensure(UnsupportedCapability::PathStrokeAlignment)?;
+                capabilities.ensure_supported(UnsupportedPrimitive::new(
+                    PrimitiveFamily::GeometryTargets,
+                    PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+                ))?;
                 unreachable!("path stroke alignment support requires path offset lowering");
             }
         })
@@ -319,10 +322,16 @@ impl NormalizedLayer {
     fn from_authored(layer: &Layer, capabilities: Capabilities) -> Result<Self> {
         validate_layer(layer)?;
         if layer.mask().is_some() {
-            capabilities.ensure(UnsupportedCapability::LayerMask)?;
+            capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::LayerMask,
+            ))?;
         }
         if layer.filter().is_some() {
-            capabilities.ensure(UnsupportedCapability::LayerFilter)?;
+            capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::LayerFilter,
+            ))?;
         }
         let isolation = if layer.clip().is_some()
             && layer.blend_mode() == BlendMode::Normal
@@ -355,7 +364,10 @@ fn solid_shadow_color(paint: &Paint, capabilities: Capabilities) -> Result<Color
     match paint.kind() {
         PaintKind::Color(color) => Ok(*color),
         PaintKind::Gradient(_) | PaintKind::Image(_) => {
-            capabilities.ensure(UnsupportedCapability::NonSolidShadowPaint)?;
+            capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::PaintSources,
+                PrimitiveOperation::NonSolidShadowPaint,
+            ))?;
             unreachable!("non-solid shadow paint support requires shadow paint lowering");
         }
     }
