@@ -535,6 +535,175 @@ fn compiled_color_filter_pipeline_rejects_empty_construction() {
     );
 }
 
+#[test]
+fn image_straight_rgba8_converts_to_premultiplied_and_back_deterministically() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(3, 1),
+        rgba: vec![90, 120, 150, 0, 64, 128, 255, 128, 255, 10, 20, 255],
+    };
+
+    let premultiplied =
+        image::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
+    assert_eq!(
+        premultiplied.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::TRANSPARENT
+    );
+    assert_eq!(
+        premultiplied.pixel(1, 0).unwrap(),
+        PremultipliedRgba8::try_new(32, 64, 128, 128).unwrap()
+    );
+    assert_eq!(
+        premultiplied.pixel(2, 0).unwrap(),
+        PremultipliedRgba8::try_new(255, 10, 20, 255).unwrap()
+    );
+
+    let straight =
+        image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&premultiplied)
+            .unwrap();
+
+    assert_eq!(straight.size, PhysicalSize::new(3, 1));
+    assert_eq!(
+        straight.rgba,
+        vec![0, 0, 0, 0, 64, 128, 255, 128, 255, 10, 20, 255]
+    );
+}
+
+#[test]
+fn image_color_filter_execution_applies_color_chain_to_one_pixel_image() {
+    let image =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([100, 150, 200, 255])).unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(0.5).unwrap(),
+    )])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
+        filters,
+    )
+    .unwrap();
+
+    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+        .unwrap()
+        .execute_to_image()
+        .unwrap();
+
+    assert_eq!(filtered.size(), Size::new(1.0, 1.0));
+    assert_eq!(filtered.bytes.as_ref(), &[50, 75, 100, 255]);
+}
+
+#[test]
+fn image_color_filter_execution_applies_color_chain_to_multi_pixel_buffer() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 2),
+        rgba: vec![
+            64, 128, 255, 128, 10, 20, 30, 0, 100, 150, 200, 255, 20, 40, 80, 64,
+        ],
+    };
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(0.5).unwrap()),
+        FilterOp::opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+    ])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.size, PhysicalSize::new(2, 2));
+    assert_eq!(
+        filtered.rgba,
+        vec![
+            32, 64, 128, 64, 0, 0, 0, 0, 50, 76, 100, 128, 16, 24, 40, 32,
+        ]
+    );
+}
+
+#[test]
+fn image_color_filter_execution_preserves_buffer_size_and_rgba_order() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![10, 20, 30, 40, 200, 150, 100, 255],
+    };
+    let filters = FilterList::try_ops(vec![FilterOp::opacity(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.size, PhysicalSize::new(2, 1));
+    assert_eq!(filtered.rgba, vec![13, 19, 32, 40, 200, 150, 100, 255]);
+}
+
+#[test]
+fn image_color_filter_execution_changes_image_identity_when_bytes_change() {
+    let image =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([100, 150, 200, 255])).unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
+        filters,
+    )
+    .unwrap();
+
+    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+        .unwrap()
+        .execute_to_image()
+        .unwrap();
+
+    assert_ne!(filtered.id(), image.id());
+    assert_eq!(filtered.bytes.as_ref(), &[155, 105, 55, 255]);
+}
+
+#[test]
+fn image_color_filter_execution_rejects_blur_and_drop_shadow_before_bytes_transform() {
+    let image =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([100, 150, 200, 255])).unwrap();
+    let resource = ResolvedImageResource::try_new(image.id(), image.size()).unwrap();
+    let blur = FilteredImagePaint::try_new(
+        resource.clone(),
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap(),
+    )
+    .unwrap();
+    let drop_shadow = FilteredImagePaint::try_new(
+        resource,
+        FilterList::try_ops(vec![FilterOp::drop_shadow(
+            Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+        )])
+        .unwrap(),
+    )
+    .unwrap();
+
+    let blur_error = image::ResolvedImageColorFilterExecution::try_new(&blur, &image)
+        .expect_err("blur must be rejected before any image bytes are transformed");
+    let drop_shadow_error = image::ResolvedImageColorFilterExecution::try_new(&drop_shadow, &image)
+        .expect_err("drop-shadow must be rejected before any image bytes are transformed");
+
+    assert_eq!(
+        blur_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::ColorFilterBlur,
+        ))
+    );
+    assert_eq!(
+        drop_shadow_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::ColorFilterDropShadow,
+        ))
+    );
+}
+
 fn color_filter_pipeline<const N: usize>(ops: [ColorFilterOp; N]) -> ColorFilterPipeline {
     let ops = ops
         .into_iter()
