@@ -372,6 +372,47 @@ fn normalized_paint_layers_reject_invalid_paint_sources() {
 }
 
 #[test]
+fn gradients_expose_render_ready_geometry_and_stops() {
+    let stops = vec![
+        GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+        GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+    ];
+    let linear = Gradient::try_linear(
+        Point::try_new(1.0, 2.0).unwrap(),
+        Point::try_new(3.0, 4.0).unwrap(),
+        stops.clone(),
+    )
+    .unwrap();
+    let radial =
+        Gradient::try_radial(Point::try_new(5.0, 6.0).unwrap(), 7.0, stops.clone()).unwrap();
+    let sweep = Gradient::try_sweep(Point::try_new(8.0, 9.0).unwrap(), stops.clone()).unwrap();
+
+    assert_eq!(linear.stops(), stops.as_slice());
+    assert_eq!(
+        linear.linear_points(),
+        Some((
+            Point::try_new(1.0, 2.0).unwrap(),
+            Point::try_new(3.0, 4.0).unwrap()
+        ))
+    );
+    assert_eq!(
+        radial.radial_geometry(),
+        Some((Point::try_new(5.0, 6.0).unwrap(), 7.0))
+    );
+    assert_eq!(
+        sweep.sweep_center(),
+        Some(Point::try_new(8.0, 9.0).unwrap())
+    );
+}
+
+#[test]
+fn gradients_preserve_transparent_stops() {
+    let stop = GradientStop::try_new(0.5, Color::TRANSPARENT).unwrap();
+
+    assert_eq!(stop.color(), Color::TRANSPARENT);
+}
+
+#[test]
 fn style_reference_identifiers_must_not_be_empty() {
     let error = StyleResourceRef::try_new("  ").expect_err("empty identifiers are invalid");
 
@@ -1132,6 +1173,21 @@ fn unsupported_symbolic_color_inputs_report_typed_diagnostics() {
         assert_eq!(error.code, ErrorCode::UnsupportedBackend);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
+}
+
+#[test]
+fn repeating_gradients_report_typed_diagnostics() {
+    let unsupported = UnsupportedPrimitive::new(
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::RepeatingGradient,
+    );
+
+    let error = Capabilities::VELLO_0_9
+        .ensure_supported(unsupported)
+        .expect_err("repeating gradients require later normalization");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.unsupported_primitive(), Some(unsupported));
 }
 
 #[test]

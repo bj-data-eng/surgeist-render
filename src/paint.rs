@@ -292,6 +292,39 @@ impl Gradient {
         })
     }
 
+    #[must_use]
+    pub fn stops(&self) -> &[GradientStop] {
+        match &self.kind {
+            GradientKind::Linear { stops, .. }
+            | GradientKind::Radial { stops, .. }
+            | GradientKind::Sweep { stops, .. } => stops,
+        }
+    }
+
+    #[must_use]
+    pub const fn linear_points(&self) -> Option<(Point, Point)> {
+        match &self.kind {
+            GradientKind::Linear { start, end, .. } => Some((*start, *end)),
+            GradientKind::Radial { .. } | GradientKind::Sweep { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn radial_geometry(&self) -> Option<(Point, f64)> {
+        match &self.kind {
+            GradientKind::Radial { center, radius, .. } => Some((*center, *radius)),
+            GradientKind::Linear { .. } | GradientKind::Sweep { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn sweep_center(&self) -> Option<Point> {
+        match &self.kind {
+            GradientKind::Sweep { center, .. } => Some(*center),
+            GradientKind::Linear { .. } | GradientKind::Radial { .. } => None,
+        }
+    }
+
     pub(crate) const fn kind(&self) -> &GradientKind {
         &self.kind
     }
