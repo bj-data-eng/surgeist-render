@@ -1,7 +1,8 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::{
-    Error, PhysicalSize, PrimitiveFamily, PrimitiveOperation, Result, Shadow, UnsupportedPrimitive,
+    Error, PhysicalSize, PrimitiveFamily, PrimitiveOperation, Result, Shadow, ShadowKind,
+    UnsupportedPrimitive,
     filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
     paint::PaintKind,
     style::{ColorFilterOp, ColorFilterPipeline, FilterBlur},
@@ -403,6 +404,14 @@ impl ReferencePremultipliedRgba8Buffer {
     }
 
     pub(crate) fn apply_drop_shadow(&self, shadow: &Shadow, policy: BlurPolicy) -> Result<Self> {
+        if shadow.kind() == ShadowKind::Inset {
+            return Err(Error::unsupported_render_primitive(
+                UnsupportedPrimitive::new(
+                    PrimitiveFamily::Shadows,
+                    PrimitiveOperation::InsetBoxShadow,
+                ),
+            ));
+        }
         if shadow.spread() != 0.0 {
             return Err(Error::invalid_value(
                 "filter drop-shadow spread",

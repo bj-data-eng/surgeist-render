@@ -1299,6 +1299,32 @@ fn css_drop_shadow_rejects_non_zero_spread() {
 }
 
 #[test]
+fn materialized_drop_shadow_rejects_inset_shadow_with_typed_diagnostic() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
+    };
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_inset(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+
+    let error =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .expect_err("CSS drop-shadow must not execute inset shadows as outer alpha shadows");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::InsetBoxShadow,
+        ))
+    );
+}
+
+#[test]
 fn css_drop_shadow_rejects_non_solid_shadow_paint() {
     let source = ImageBuffer {
         size: PhysicalSize::new(1, 1),
@@ -3952,6 +3978,21 @@ fn drop_shadow_outset_combines_offset_and_blur_support() {
     assert_eq!(
         plan.inflated_bounds().rect(),
         Rect::new(8.0, 3.0, 30.0, 20.0)
+    );
+}
+
+#[test]
+fn drop_shadow_outset_rejects_inset_shadow_with_typed_diagnostic() {
+    let shadow = Shadow::try_inset(Point::new(3.0, -2.0), 2.0, 0.0, Color::BLACK).unwrap();
+    let error = FilterOutset::from_drop_shadow(&shadow, BlurPolicy::css_filter_default())
+        .expect_err("CSS drop-shadow outset planning does not support inset shadows");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::InsetBoxShadow,
+        ))
     );
 }
 

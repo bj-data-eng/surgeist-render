@@ -1,5 +1,6 @@
 use super::{
-    Error, Rect, Result, Shadow,
+    Error, PrimitiveFamily, PrimitiveOperation, Rect, Result, Shadow, ShadowKind,
+    UnsupportedPrimitive,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     style::{
         ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterList, FilterOpKind, UnitFilterAmount,
@@ -182,6 +183,14 @@ impl FilterOutset {
     }
 
     pub fn from_drop_shadow(shadow: &Shadow, policy: BlurPolicy) -> Result<Self> {
+        if shadow.kind() == ShadowKind::Inset {
+            return Err(Error::unsupported_render_primitive(
+                UnsupportedPrimitive::new(
+                    PrimitiveFamily::Shadows,
+                    PrimitiveOperation::InsetBoxShadow,
+                ),
+            ));
+        }
         if shadow.spread() != 0.0 {
             return Err(Error::invalid_value(
                 "filter drop-shadow spread",
