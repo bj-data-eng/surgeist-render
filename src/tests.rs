@@ -4852,6 +4852,229 @@ fn backdrop_filter_root_policy_reports_explicit_diagnostic() {
 }
 
 #[test]
+fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(1.0, 2.0, 8.0, 6.0)).unwrap();
+    let backdrop = BackdropFilterInput::try_new(filters.clone(), bounds, None).unwrap();
+    let layer = Layer::new().try_backdrop_filter(backdrop).unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(layer, |scene| {
+            scene.fill(
+                Rect::new(2.0, 3.0, 4.0, 2.0),
+                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+            );
+        });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[1] else {
+        panic!("expected backdrop layer command");
+    };
+
+    assert_eq!(
+        layer.pass_plan.requirement(),
+        command::LayerPassRequirement::BoundedBackdropCapture
+    );
+    assert_eq!(
+        layer.pass_plan.kind(),
+        command::LayerPassKind::DiagnosticBoundary
+    );
+    assert_eq!(
+        layer.pass_plan.bounds().map(command::OffscreenBounds::rect),
+        Some(bounds.rect())
+    );
+    let capture = layer
+        .backdrop
+        .as_ref()
+        .expect("backdrop capture is planned");
+    assert_eq!(capture.filters(), &filters);
+    assert_eq!(capture.capture_bounds().rect(), bounds.rect());
+    assert_eq!(capture.source_commands().len(), 1);
+    assert!(
+        !Capabilities::VELLO_0_9
+            .offscreen_pipeline()
+            .supports_backdrop_execution()
+    );
+}
+
+#[test]
+fn render_rejects_planned_backdrop_execution_after_normalization() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap();
+    let layer = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(layer, |scene| {
+            scene.fill(Rect::new(1.0, 1.0, 2.0, 2.0), Color::BLACK);
+        });
+
+    let normalized = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect("backdrop planning should remain inspectable through normalization");
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[1] else {
+        panic!("expected normalized backdrop layer");
+    };
+    assert!(layer.backdrop.is_some());
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("planned backdrop capture must not silently render before execution lands");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropExecution,
+        ))
+    );
+    assert!(error.message.contains("backdrop"));
+}
+
+#[test]
+fn backdrop_layer_normalization_preserves_command_order_for_capture_sources() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let layer = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK)
+        .layer(layer, |scene| {
+            scene.fill(
+                Rect::new(2.0, 0.0, 1.0, 1.0),
+                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+            );
+        })
+        .fill(Rect::new(4.0, 0.0, 1.0, 1.0), Color::BLACK);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, children } = &normalized.commands[1] else {
+        panic!("expected backdrop layer command");
+    };
+    let capture = layer
+        .backdrop
+        .as_ref()
+        .expect("backdrop capture is planned");
+
+    assert_eq!(capture.source_commands().len(), 1);
+    assert!(matches!(
+        capture.source_commands()[0],
+        command::RenderCommand::Fill { .. }
+    ));
+    assert_eq!(children.len(), 1);
+    assert!(matches!(
+        normalized.commands[2],
+        command::RenderCommand::Fill { .. }
+    ));
+}
+
+#[test]
+fn nested_backdrop_layer_normalization_reports_typed_boundary() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(Layer::new(), |scene| {
+        scene.layer(backdrop, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        });
+    });
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("nested backdrop capture is outside the normalization boundary");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropExecution,
+        ))
+    );
+    assert!(error.message.contains("nested backdrop capture"));
+}
+
+#[test]
+fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 20.0, 20.0)).unwrap();
+    let rounded_clip = ClipInput::try_shape(Shape::rounded_rect(
+        Rect::new(1.0, 2.0, 8.0, 6.0),
+        Radii::all(2.0),
+    ))
+    .unwrap();
+    let rounded_layer = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(filters.clone(), bounds, Some(rounded_clip)).unwrap(),
+        )
+        .unwrap();
+    let mut path = Path::new();
+    path.move_to(Point::new(3.0, 4.0))
+        .line_to(Point::new(7.0, 4.0))
+        .line_to(Point::new(7.0, 9.0))
+        .close();
+    let filled = FilledPath::try_new(path, FillRule::EvenOdd).unwrap();
+    let path_layer = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                bounds,
+                Some(ClipInput::try_filled_path(filled).unwrap()),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .layer(rounded_layer, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        })
+        .layer(path_layer, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let captures: Vec<_> = normalized
+        .commands
+        .iter()
+        .map(|command| match command {
+            command::RenderCommand::Layer { layer, .. } => layer
+                .backdrop
+                .as_ref()
+                .expect("backdrop capture is planned"),
+            _ => panic!("expected layer command"),
+        })
+        .collect();
+
+    assert!(matches!(
+        captures[0].clip().map(command::RenderClip::geometry),
+        Some(command::RenderClipGeometry::RoundedRect { .. })
+    ));
+    assert!(matches!(
+        captures[1].clip().map(command::RenderClip::geometry),
+        Some(command::RenderClipGeometry::Path {
+            fill_rule: FillRule::EvenOdd,
+            ..
+        })
+    ));
+}
+
+#[test]
 fn background_blend_lists_model_normal_layers_and_reject_blend_modes() {
     let list = BackgroundBlendList::try_new(vec![
         BackgroundBlendMode::Normal,

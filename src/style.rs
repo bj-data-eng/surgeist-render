@@ -1382,6 +1382,14 @@ impl BackdropFilterInput {
             PrimitiveOperation::BackdropIsolationComposition,
         ))
     }
+
+    pub(crate) fn ensure_supported_for_planning(&self, capabilities: Capabilities) -> Result<()> {
+        validate_backdrop_filter_list(&self.filters)?;
+        if let Some(clip) = &self.clip {
+            clip.normalize(capabilities)?;
+        }
+        Ok(())
+    }
 }
 
 fn validate_backdrop_filter_list(filters: &FilterList) -> Result<()> {

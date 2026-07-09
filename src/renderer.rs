@@ -244,6 +244,7 @@ impl Renderer {
             ..Stats::default()
         };
         let normalized = scene.normalize(self.capabilities())?;
+        reject_backdrop_execution(&normalized.commands)?;
         let normalized = RenderCommands::new(self.materialize_resolved_layer_masks(
             normalized.commands,
             surface.scale(),
@@ -375,6 +376,9 @@ impl Renderer {
         };
         let children =
             self.materialize_resolved_layer_masks(children, scale, format, parameters)?;
+        if layer.backdrop.is_some() {
+            return Err(backdrop_execution_error());
+        }
         let Some(mask) = layer.mask.clone() else {
             return Ok(RenderCommand::Layer { layer, children });
         };
@@ -444,6 +448,7 @@ impl Renderer {
             layer: command::NormalizedLayer {
                 clip: None,
                 mask: None,
+                backdrop: None,
                 ..layer
             },
             children: vec![image_command],
@@ -463,6 +468,7 @@ impl Renderer {
             opacity: 1.0,
             blend: BlendMode::Normal,
             mask: None,
+            backdrop: None,
             isolation: if layer.clip.is_some() {
                 command::LayerIsolation::ClipOnly
             } else {
@@ -481,6 +487,30 @@ impl Renderer {
     pub const fn capabilities(&self) -> Capabilities {
         Capabilities::VELLO_0_9
     }
+}
+
+fn reject_backdrop_execution(commands: &[RenderCommand]) -> Result<()> {
+    for command in commands {
+        let RenderCommand::Layer { layer, children } = command else {
+            continue;
+        };
+        if layer.backdrop.is_some() {
+            return Err(backdrop_execution_error());
+        }
+        reject_backdrop_execution(children)?;
+    }
+    Ok(())
+}
+
+fn backdrop_execution_error() -> Error {
+    let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropExecution,
+    ));
+    error.message.push_str(
+        ": backdrop capture was planned during normalization but render-time backdrop execution is not implemented",
+    );
+    error
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]

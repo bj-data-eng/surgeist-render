@@ -1,6 +1,6 @@
 use super::{
-    ClipInput, Error, ImageBuffer, MaskMode, Paint, PhysicalSize, Point, PrimitiveFamily,
-    PrimitiveOperation, Result, Shape, Transform, UnsupportedPrimitive,
+    BackdropFilterInput, ClipInput, Error, ImageBuffer, MaskMode, Paint, PhysicalSize, Point,
+    PrimitiveFamily, PrimitiveOperation, Result, Shape, Transform, UnsupportedPrimitive,
     image::validate_image_buffer_rgba_len,
     style::validate_clip_input,
     validation::{
@@ -17,6 +17,7 @@ pub struct Layer {
     blend: BlendMode,
     mask: Option<LayerMask>,
     filter: Option<Filter>,
+    backdrop_filter: Option<Box<BackdropFilterInput>>,
 }
 
 impl Layer {
@@ -52,6 +53,11 @@ impl Layer {
     pub fn try_filter(mut self, filter: Filter) -> Result<Self> {
         validate_filter(filter)?;
         self.filter = Some(filter);
+        Ok(self)
+    }
+
+    pub fn try_backdrop_filter(mut self, backdrop_filter: BackdropFilterInput) -> Result<Self> {
+        self.backdrop_filter = Some(Box::new(backdrop_filter));
         Ok(self)
     }
 
@@ -108,6 +114,14 @@ impl Layer {
     #[must_use]
     pub const fn filter(&self) -> Option<Filter> {
         self.filter
+    }
+
+    #[must_use]
+    pub fn backdrop_filter(&self) -> Option<&BackdropFilterInput> {
+        match &self.backdrop_filter {
+            Some(backdrop_filter) => Some(backdrop_filter.as_ref()),
+            None => None,
+        }
     }
 
     #[must_use]
@@ -184,6 +198,7 @@ impl Default for Layer {
             blend: BlendMode::Normal,
             mask: None,
             filter: None,
+            backdrop_filter: None,
         }
     }
 }

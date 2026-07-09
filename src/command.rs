@@ -4,7 +4,7 @@ use super::{
     scene::Command,
     shape::ShapeKind,
     stats::collect_render_stats,
-    style::{ClipGeometryKind, NormalizedClip},
+    style::{ClipGeometryKind, FilterList, NormalizedClip},
     validation::*,
     *,
 };
@@ -136,6 +136,7 @@ pub(crate) struct NormalizedLayer {
     pub(crate) opacity: f32,
     pub(crate) blend: BlendMode,
     pub(crate) mask: Option<RenderLayerMask>,
+    pub(crate) backdrop: Option<Box<RenderBackdropCapture>>,
     pub(crate) isolation: LayerIsolation,
     pub(crate) pass_plan: LayerPassPlan,
 }
@@ -162,6 +163,59 @@ impl RenderLayerMask {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenderBackdropCapture {
+    filters: FilterList,
+    capture_bounds: OffscreenBounds,
+    clip: Option<RenderClip>,
+    source_commands: Vec<RenderCommand>,
+}
+
+impl RenderBackdropCapture {
+    fn from_input(
+        input: &BackdropFilterInput,
+        source_commands: &[RenderCommand],
+        capabilities: Capabilities,
+    ) -> Result<Self> {
+        input.ensure_supported_for_planning(capabilities)?;
+        let capture_bounds = OffscreenBounds::try_new(input.capture_bounds().rect())?;
+        let clip = input
+            .clip()
+            .map(|clip| RenderClip::from_input(clip, capabilities))
+            .transpose()?;
+        Ok(Self {
+            filters: input.filters().clone(),
+            capture_bounds,
+            clip,
+            source_commands: source_commands.to_vec(),
+        })
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn filters(&self) -> &FilterList {
+        &self.filters
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn capture_bounds(&self) -> OffscreenBounds {
+        self.capture_bounds
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn clip(&self) -> Option<&RenderClip> {
+        self.clip.as_ref()
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn source_commands(&self) -> &[RenderCommand] {
+        &self.source_commands
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum LayerIsolation {
     None,
@@ -176,6 +230,7 @@ pub(crate) enum LayerPassRequirement {
     DirectVelloOpacity,
     DirectVelloBlend,
     DirectVelloOpacityBlend,
+    BoundedBackdropCapture,
     OffscreenTexture(PrimitiveOperation),
     DiagnosticBoundary(PrimitiveOperation),
 }
@@ -234,6 +289,14 @@ impl LayerPassPlan {
     ) -> Result<Self> {
         if let Some(unsupported) = unsupported_layer_effect(layer) {
             return Self::diagnostic_boundary(unsupported);
+        }
+        if let Some(backdrop) = layer.backdrop_filter() {
+            let bounds = OffscreenBounds::try_new(backdrop.capture_bounds().rect())?;
+            return Ok(Self::new(
+                LayerPassRequirement::BoundedBackdropCapture,
+                LayerPassKind::DiagnosticBoundary,
+                Some(bounds),
+            ));
         }
         let bounds = clip_bounds(clip).or_else(|| commands_bounds(children));
 
@@ -376,6 +439,14 @@ pub(crate) fn normalize_commands(
     commands: &[Command],
     capabilities: Capabilities,
 ) -> Result<Vec<RenderCommand>> {
+    normalize_commands_in_context(commands, capabilities, 0)
+}
+
+fn normalize_commands_in_context(
+    commands: &[Command],
+    capabilities: Capabilities,
+    layer_depth: usize,
+) -> Result<Vec<RenderCommand>> {
     let mut normalized = Vec::with_capacity(commands.len());
     for command in commands {
         normalized.push(match command {
@@ -439,15 +510,36 @@ pub(crate) fn normalize_commands(
             Command::Layer { layer, children } => {
                 validate_layer(layer)?;
                 reject_unsupported_layer_effect(layer)?;
-                let children = normalize_commands(children, capabilities)?;
+                if layer.backdrop_filter().is_some() && layer_depth > 0 {
+                    return Err(nested_backdrop_capture_error());
+                }
+                let previous_siblings = normalized.clone();
+                let children =
+                    normalize_commands_in_context(children, capabilities, layer_depth + 1)?;
                 RenderCommand::Layer {
-                    layer: NormalizedLayer::from_authored(layer, &children, capabilities)?,
+                    layer: NormalizedLayer::from_authored(
+                        layer,
+                        &children,
+                        &previous_siblings,
+                        capabilities,
+                    )?,
                     children,
                 }
             }
         });
     }
     Ok(normalized)
+}
+
+fn nested_backdrop_capture_error() -> Error {
+    let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropExecution,
+    ));
+    error.message.push_str(
+        ": nested backdrop capture crosses a layer isolation boundary and is not normalized in this task",
+    );
+    error
 }
 
 fn unsupported_text_shadow_error() -> Error {
@@ -650,6 +742,7 @@ impl NormalizedLayer {
     fn from_authored(
         layer: &Layer,
         children: &[RenderCommand],
+        previous_siblings: &[RenderCommand],
         capabilities: Capabilities,
     ) -> Result<Self> {
         validate_layer(layer)?;
@@ -661,6 +754,13 @@ impl NormalizedLayer {
             .resolved_alpha_mask()
             .map(|mask| RenderLayerMask::from_resolved(mask, capabilities))
             .transpose()?;
+        let backdrop = layer
+            .backdrop_filter()
+            .map(|backdrop| {
+                RenderBackdropCapture::from_input(backdrop, previous_siblings, capabilities)
+                    .map(Box::new)
+            })
+            .transpose()?;
         let pass_plan = LayerPassPlan::from_authored(layer, clip.as_ref(), children, capabilities)?;
         Ok(Self {
             clip,
@@ -668,6 +768,7 @@ impl NormalizedLayer {
             opacity: layer.opacity(),
             blend: layer.blend_mode(),
             mask,
+            backdrop,
             isolation: pass_plan.isolation(),
             pass_plan,
         })
@@ -695,6 +796,7 @@ fn direct_vello_layer_supported(
         }
         LayerPassRequirement::None
         | LayerPassRequirement::ClipOnly
+        | LayerPassRequirement::BoundedBackdropCapture
         | LayerPassRequirement::OffscreenTexture(_)
         | LayerPassRequirement::DiagnosticBoundary(_) => false,
     }
