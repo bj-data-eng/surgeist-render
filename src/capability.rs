@@ -30,6 +30,12 @@ impl Capabilities {
             gradients: true,
             image_paint: true,
             non_solid_shadow_paint: false,
+            srgb_color_conversion: true,
+            hsl_color_conversion: true,
+            unresolved_symbolic_colors: false,
+            color_mix: false,
+            repeating_gradients: false,
+            symbolic_color_policy: SymbolicColorPolicy::RootResolvedOnly,
         },
         shadows: ShadowCapabilities {
             rect_rounded_circle_shadows: true,
@@ -124,6 +130,16 @@ impl Capabilities {
             (PrimitiveFamily::PaintSources, PrimitiveOperation::NonSolidShadowPaint) => {
                 self.paint_sources.supports_non_solid_shadow_paint()
             }
+            (PrimitiveFamily::PaintSources, PrimitiveOperation::UnresolvedSymbolicColor) => {
+                self.paint_sources.supports_unresolved_symbolic_colors()
+            }
+            (PrimitiveFamily::PaintSources, PrimitiveOperation::ColorMixFunction) => {
+                self.paint_sources.supports_color_mix()
+            }
+            (PrimitiveFamily::PaintSources, PrimitiveOperation::UnsupportedColorSpace) => false,
+            (PrimitiveFamily::PaintSources, PrimitiveOperation::RepeatingGradient) => {
+                self.paint_sources.supports_repeating_gradients()
+            }
             (PrimitiveFamily::Shadows, PrimitiveOperation::EllipsePathShadowShape) => {
                 self.shadows.supports_ellipse_path_shadows()
             }
@@ -152,6 +168,11 @@ impl Capabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HitTestOwnership {
     RootOwned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SymbolicColorPolicy {
+    RootResolvedOnly,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -220,6 +241,12 @@ pub struct PaintSourceCapabilities {
     gradients: bool,
     image_paint: bool,
     non_solid_shadow_paint: bool,
+    srgb_color_conversion: bool,
+    hsl_color_conversion: bool,
+    unresolved_symbolic_colors: bool,
+    color_mix: bool,
+    repeating_gradients: bool,
+    symbolic_color_policy: SymbolicColorPolicy,
 }
 
 impl PaintSourceCapabilities {
@@ -241,6 +268,36 @@ impl PaintSourceCapabilities {
     #[must_use]
     pub const fn supports_non_solid_shadow_paint(self) -> bool {
         self.non_solid_shadow_paint
+    }
+
+    #[must_use]
+    pub const fn supports_srgb_color_conversion(self) -> bool {
+        self.srgb_color_conversion
+    }
+
+    #[must_use]
+    pub const fn supports_hsl_color_conversion(self) -> bool {
+        self.hsl_color_conversion
+    }
+
+    #[must_use]
+    pub const fn supports_unresolved_symbolic_colors(self) -> bool {
+        self.unresolved_symbolic_colors
+    }
+
+    #[must_use]
+    pub const fn supports_color_mix(self) -> bool {
+        self.color_mix
+    }
+
+    #[must_use]
+    pub const fn supports_repeating_gradients(self) -> bool {
+        self.repeating_gradients
+    }
+
+    #[must_use]
+    pub const fn symbolic_color_policy(self) -> SymbolicColorPolicy {
+        self.symbolic_color_policy
     }
 }
 

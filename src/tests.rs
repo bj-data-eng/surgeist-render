@@ -294,6 +294,18 @@ fn style_color_inputs_are_root_resolved_concrete_colors() {
 }
 
 #[test]
+fn symbolic_color_policy_keeps_style_colors_root_resolved() {
+    let color = Color::try_rgba(0.25, 0.5, 0.75, 0.8).unwrap();
+    let style_color = StyleColor::new(color);
+
+    assert_eq!(style_color.color(), color);
+    assert_eq!(
+        StyleColor::symbolic_policy(),
+        SymbolicColorPolicy::RootResolvedOnly
+    );
+}
+
+#[test]
 fn style_reference_identifiers_must_not_be_empty() {
     let error = StyleResourceRef::try_new("  ").expect_err("empty identifiers are invalid");
 
@@ -979,6 +991,23 @@ fn geometry_capabilities_name_boolean_offset_and_hit_test_boundaries() {
 }
 
 #[test]
+fn paint_capabilities_name_color_policy_and_conversion_boundaries() {
+    let capabilities = Capabilities::VELLO_0_9.paint_sources();
+
+    assert!(capabilities.supports_solid_rgba());
+    assert!(capabilities.supports_gradients());
+    assert!(capabilities.supports_srgb_color_conversion());
+    assert!(capabilities.supports_hsl_color_conversion());
+    assert_eq!(
+        capabilities.symbolic_color_policy(),
+        SymbolicColorPolicy::RootResolvedOnly
+    );
+    assert!(!capabilities.supports_unresolved_symbolic_colors());
+    assert!(!capabilities.supports_color_mix());
+    assert!(!capabilities.supports_repeating_gradients());
+}
+
+#[test]
 fn hit_test_geometry_is_root_owned_not_render_lowered() {
     assert_eq!(
         Capabilities::VELLO_0_9.geometry_targets().hit_testing(),
@@ -1017,6 +1046,23 @@ fn unsupported_geometry_operations_report_typed_diagnostics() {
         let error = Capabilities::VELLO_0_9
             .ensure_supported(unsupported)
             .expect_err("geometry operation should be explicitly unsupported");
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
+}
+
+#[test]
+fn unsupported_symbolic_color_inputs_report_typed_diagnostics() {
+    for operation in [
+        PrimitiveOperation::UnresolvedSymbolicColor,
+        PrimitiveOperation::ColorMixFunction,
+        PrimitiveOperation::UnsupportedColorSpace,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::PaintSources, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("symbolic or unsupported color input is not render-resolved");
+
         assert_eq!(error.code, ErrorCode::UnsupportedBackend);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }

@@ -1,5 +1,6 @@
 use super::{
     Color, CoordinateSpaceTag, Error, Image, ImageId, Paint, Result, Shadow, Shape, Size,
+    SymbolicColorPolicy,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
         validate_size,
@@ -20,6 +21,11 @@ impl StyleColor {
     #[must_use]
     pub const fn color(self) -> Color {
         self.color
+    }
+
+    #[must_use]
+    pub const fn symbolic_policy() -> SymbolicColorPolicy {
+        SymbolicColorPolicy::RootResolvedOnly
     }
 }
 
