@@ -1,4 +1,4 @@
-use super::{Paint, Result, Transform, validation::*};
+use super::{Paint, Result, ShadowList, Transform, validation::*};
 use std::borrow::Cow;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -73,6 +73,33 @@ impl<'a> TextRun<'a> {
     #[must_use]
     pub const fn glyphs(&self) -> &'a [TextGlyph] {
         self.glyphs
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextShadowRun<'a> {
+    run: TextRun<'a>,
+    shadows: ShadowList,
+}
+
+impl<'a> TextShadowRun<'a> {
+    pub fn try_new(run: TextRun<'a>, shadows: ShadowList) -> Result<Self> {
+        validate_text_run(run.size(), run.transform(), run.glyphs())?;
+        validate_paint(run.paint().fill())?;
+        for shadow in shadows.shadows() {
+            validate_shadow(shadow)?;
+        }
+        Ok(Self { run, shadows })
+    }
+
+    #[must_use]
+    pub const fn run(&self) -> &TextRun<'a> {
+        &self.run
+    }
+
+    #[must_use]
+    pub const fn shadows(&self) -> &ShadowList {
+        &self.shadows
     }
 }
 

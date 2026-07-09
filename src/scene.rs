@@ -76,6 +76,19 @@ impl Scene {
         self
     }
 
+    pub fn text_shadow_run(&mut self, run: TextShadowRun<'_>) -> &mut Self {
+        let text = run.run();
+        self.commands.push(Command::TextShadowRun {
+            font: text.font().to_owned_static(),
+            size: text.size(),
+            transform: text.transform(),
+            paint: text.paint().clone(),
+            glyphs: text.glyphs().to_vec(),
+            shadows: run.shadows().clone(),
+        });
+        self
+    }
+
     pub fn layer(&mut self, layer: Layer, children: impl FnOnce(&mut Scene)) -> &mut Self {
         let mut child = Scene::new();
         children(&mut child);
@@ -157,6 +170,14 @@ pub(crate) enum Command {
         transform: Transform,
         paint: TextPaint,
         glyphs: Vec<TextGlyph>,
+    },
+    TextShadowRun {
+        font: FontRef<'static>,
+        size: f32,
+        transform: Transform,
+        paint: TextPaint,
+        glyphs: Vec<TextGlyph>,
+        shadows: ShadowList,
     },
     Layer {
         layer: Layer,

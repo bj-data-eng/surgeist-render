@@ -50,6 +50,15 @@ pub(crate) fn collect_stats(
             Command::TextRun { glyphs, .. } => {
                 stats.glyphs = stats.glyphs.saturating_add(glyphs.len());
             }
+            Command::TextShadowRun {
+                glyphs, shadows, ..
+            } => {
+                stats.glyphs = stats.glyphs.saturating_add(glyphs.len());
+                stats.shadows = stats.shadows.saturating_add(shadows.len());
+                for shadow in shadows.shadows() {
+                    collect_paint_stats(shadow.paint(), stats, uploaded_images);
+                }
+            }
             Command::Layer { children, .. } => {
                 stats.layers = stats.layers.saturating_add(1);
                 collect_stats(children, stats, uploaded_images);

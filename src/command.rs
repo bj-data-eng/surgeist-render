@@ -355,6 +355,21 @@ pub(crate) fn normalize_commands(
                     glyphs: glyphs.clone(),
                 }
             }
+            Command::TextShadowRun {
+                size,
+                transform,
+                paint,
+                glyphs,
+                shadows,
+                ..
+            } => {
+                validate_text_run(*size, *transform, glyphs)?;
+                validate_paint(paint.fill())?;
+                for shadow in shadows.shadows() {
+                    validate_shadow(shadow)?;
+                }
+                return Err(unsupported_text_shadow_error());
+            }
             Command::Layer { layer, children } => {
                 validate_layer(layer)?;
                 reject_unsupported_layer_effect(layer)?;
@@ -367,6 +382,17 @@ pub(crate) fn normalize_commands(
         });
     }
     Ok(normalized)
+}
+
+fn unsupported_text_shadow_error() -> Error {
+    let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::TextShadow,
+    ));
+    error
+        .message
+        .push_str(": text-shadow execution depends on glyph-alpha/offscreen text capture before blurred shadows can be composited behind text");
+    error
 }
 
 impl TryFrom<Shape> for RenderShape {

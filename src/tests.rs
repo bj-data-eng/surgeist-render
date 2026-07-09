@@ -6484,6 +6484,124 @@ fn font_refs_use_typed_font_ids() {
 }
 
 #[test]
+fn text_shadow_run_model_preserves_text_run_and_shadow_order() {
+    let glyph = TextGlyph::try_new(7, 1.0, 2.0, 3.0).unwrap();
+    let glyphs = [glyph];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Test"),
+        12.0,
+        Transform::identity(),
+        TextPaint::try_fill(Paint::color(Color::BLACK)).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let first = Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap();
+    let second = Shadow::try_new(Point::new(0.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
+    let shadows = ShadowList::try_new(vec![first.clone(), second.clone()]).unwrap();
+
+    let text_shadow = TextShadowRun::try_new(run.clone(), shadows).unwrap();
+
+    assert_eq!(text_shadow.run(), &run);
+    assert_eq!(text_shadow.shadows().len(), 2);
+    assert_eq!(text_shadow.shadows().shadows()[0], first);
+    assert_eq!(text_shadow.shadows().shadows()[1], second);
+}
+
+#[test]
+fn text_shadow_run_reports_typed_unsupported_diagnostic() {
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Test"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("text-shadow execution is not implemented in this phase");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
+    assert!(error.message.contains("text shadow"));
+    assert!(error.message.contains("glyph-alpha/offscreen text capture"));
+}
+
+#[test]
+fn blurred_text_shadow_reports_same_typed_boundary() {
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Test"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(1.0, 1.0), 4.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("blurred text-shadow needs glyph-alpha capture before pixel-moving blur");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
+    assert!(error.message.contains("text shadow"));
+    assert!(error.message.contains("glyph-alpha/offscreen text capture"));
+}
+
+#[test]
+fn ordinary_text_run_normalization_remains_unaffected_by_text_shadow_boundary() {
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Test"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_run(run);
+
+    let normalized = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect("ordinary text runs should not use the text-shadow diagnostic");
+
+    assert_eq!(normalized.commands.len(), 1);
+    assert_eq!(normalized.stats().glyphs, 1);
+    assert_eq!(normalized.stats().shadows, 0);
+    assert!(matches!(
+        normalized.commands[0],
+        command::RenderCommand::TextRun { .. }
+    ));
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer

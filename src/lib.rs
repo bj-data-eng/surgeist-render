@@ -83,7 +83,7 @@ pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,
     SurfaceState, WebCanvas,
 };
-pub use text::{FontData, FontId, FontRef, TextGlyph, TextPaint, TextRun};
+pub use text::{FontData, FontId, FontRef, TextGlyph, TextPaint, TextRun, TextShadowRun};
 
 #[cfg(test)]
 mod tests;
