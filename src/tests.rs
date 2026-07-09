@@ -5338,6 +5338,504 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
 }
 
 #[test]
+fn sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foreground_order() {
+    let filters = FilterList::try_ops(vec![FilterOp::invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 3.0, 1.0)).unwrap();
+    let backdrop_layer = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
+        )
+        .layer(backdrop_layer, |scene| {
+            scene.fill(Rect::new(1.0, 0.0, 1.0, 1.0), Color::BLACK);
+        })
+        .fill(
+            Rect::new(2.0, 0.0, 1.0, 1.0),
+            Color::try_rgba(0.0, 1.0, 0.0, 1.0).unwrap(),
+        );
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, children } = &normalized.commands[1] else {
+        panic!("expected bounded backdrop layer command");
+    };
+    let capture = layer.backdrop.as_ref().expect("backdrop capture planned");
+    assert_eq!(
+        layer.pass_plan.requirement(),
+        command::LayerPassRequirement::BoundedBackdropCapture
+    );
+    assert_eq!(
+        layer.pass_plan.kind(),
+        command::LayerPassKind::OffscreenTexture
+    );
+    assert_eq!(capture.capture_bounds().rect(), bounds.rect());
+    assert_eq!(capture.source_commands().len(), 1);
+    assert_eq!(children.len(), 1);
+    assert!(matches!(
+        normalized.commands[2],
+        command::RenderCommand::Fill { .. }
+    ));
+
+    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(3.0, 1.0))
+    else {
+        return;
+    };
+
+    let prior_backdrop = pixel_rgba(&output, 0, 0);
+    assert!(
+        prior_backdrop[1] > 200 && prior_backdrop[2] > 200,
+        "prior red sibling should be captured then inverted: {prior_backdrop:?}"
+    );
+    let foreground = pixel_rgba(&output, 1, 0);
+    assert!(
+        foreground[0] < 80 && foreground[1] < 80 && foreground[2] < 80,
+        "foreground child should composite over the filtered backdrop: {foreground:?}"
+    );
+    let later_sibling = pixel_rgba(&output, 2, 0);
+    assert!(
+        later_sibling[1] > 200 && later_sibling[0] < 80 && later_sibling[2] < 80,
+        "later sibling should paint after backdrop capture, not feed it: {later_sibling:?}"
+    );
+}
+
+#[test]
+fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
+    let source_rect = Rect::new(0.0, 0.0, 3.0, 1.0);
+    let bounds = BackdropCaptureBounds::try_new(source_rect).unwrap();
+    let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
+    let blur = FilterOp::blur(FilterBlur::try_new(1.0).unwrap());
+    let mut color_before_blur = Scene::new();
+    color_before_blur
+        .fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color::try_rgba(0.8, 0.0, 0.0, 1.0).unwrap(),
+        )
+        .fill(Rect::new(1.0, 0.0, 1.0, 1.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_backdrop_filter(
+                    BackdropFilterInput::try_new(
+                        FilterList::try_ops(vec![brightness.clone(), blur.clone()]).unwrap(),
+                        bounds,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            |_| {},
+        );
+    let mut blur_before_color = Scene::new();
+    blur_before_color
+        .fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            Color::try_rgba(0.8, 0.0, 0.0, 1.0).unwrap(),
+        )
+        .fill(Rect::new(1.0, 0.0, 1.0, 1.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_backdrop_filter(
+                    BackdropFilterInput::try_new(
+                        FilterList::try_ops(vec![blur, brightness]).unwrap(),
+                        bounds,
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            |_| {},
+        );
+
+    let Some(color_first) =
+        render_scene_to_headless_or_skip_no_adapter(&color_before_blur, Size::new(3.0, 1.0))
+    else {
+        return;
+    };
+    let Some(blur_first) =
+        render_scene_to_headless_or_skip_no_adapter(&blur_before_color, Size::new(3.0, 1.0))
+    else {
+        return;
+    };
+    assert_ne!(
+        color_first.rgba, blur_first.rgba,
+        "materialized backdrop filters must execute in authored order"
+    );
+
+    let clip = ClipInput::try_shape(Shape::rounded_rect(
+        Rect::new(1.0, 1.0, 3.0, 3.0),
+        Radii::all(1.5),
+    ))
+    .unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+    let clipped_layer = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 5.0, 5.0)).unwrap(),
+                Some(clip),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut clipped_scene = Scene::new();
+    clipped_scene
+        .fill(
+            Rect::new(0.0, 0.0, 5.0, 5.0),
+            Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
+        )
+        .layer(clipped_layer, |_| {});
+    let Some(clipped) =
+        render_scene_to_headless_or_skip_no_adapter(&clipped_scene, Size::new(5.0, 5.0))
+    else {
+        return;
+    };
+
+    let outside_clip = pixel_rgba(&clipped, 0, 0);
+    assert!(
+        outside_clip[0] > 200 && outside_clip[1] < 80 && outside_clip[2] < 80,
+        "filtered backdrop should stay clipped out at the rounded corner: {outside_clip:?}"
+    );
+    let inside_clip = pixel_rgba(&clipped, 2, 2);
+    assert!(
+        inside_clip[1] > 200 && inside_clip[2] > 200,
+        "filtered backdrop should appear inside the rounded clip: {inside_clip:?}"
+    );
+}
+
+#[test]
+fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
+    let unsupported_isolation = UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropIsolationComposition,
+    );
+    let unsupported_broad = UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropExecution,
+    );
+    for unsupported in [unsupported_isolation, unsupported_broad] {
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("broad backdrop execution must stay diagnostic");
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
+
+    fn backdrop_layer() -> Layer {
+        let filters =
+            FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+        let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
+        Layer::new()
+            .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+            .unwrap()
+    }
+
+    let mut nested_scene = Scene::new();
+    nested_scene.layer(Layer::new(), |scene| {
+        scene.layer(backdrop_layer(), |_| {});
+    });
+    let nested = nested_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("nested backdrop capture crosses the bounded Sequence 13 path");
+    assert_eq!(nested.unsupported_primitive(), Some(unsupported_broad));
+    assert!(nested.message.contains("nested backdrop capture"));
+
+    let mut repeated_scene = Scene::new();
+    repeated_scene
+        .fill(Rect::new(0.0, 0.0, 10.0, 10.0), Color::BLACK)
+        .layer(backdrop_layer(), |_| {})
+        .layer(backdrop_layer(), |_| {});
+    let repeated = repeated_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("repeated top-level backdrop capture remains bounded");
+    assert_eq!(repeated.unsupported_primitive(), Some(unsupported_broad));
+    assert!(
+        repeated
+            .message
+            .contains("repeated top-level backdrop capture")
+    );
+
+    let mut transformed_scene = Scene::new();
+    transformed_scene.layer(
+        backdrop_layer()
+            .try_transform(Transform::translation(1.0, 0.0).unwrap())
+            .unwrap(),
+        |_| {},
+    );
+    let transformed = transformed_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("transformed backdrop capture needs coordinate reconciliation");
+    assert_eq!(transformed.unsupported_primitive(), Some(unsupported_broad));
+    assert!(transformed.message.contains("transformed backdrop capture"));
+}
+
+#[test]
+fn sequence13_mix_blend_set_is_direct_vello_only_with_extra_modes_diagnostic() {
+    let blend_modes = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Plus,
+    ];
+    assert_eq!(
+        blend_modes.len(),
+        7,
+        "public layer BlendMode additions require encoding and reference coverage"
+    );
+
+    let source = PremultipliedRgba8::try_new(192, 64, 128, 255).unwrap();
+    let destination = PremultipliedRgba8::try_new(64, 192, 96, 255).unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    for mode in blend_modes {
+        let mut scene = Scene::new();
+        scene.fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color_from_opaque_rgba8(destination),
+        );
+        scene.layer(Layer::new().blend(mode), |scene| {
+            scene.fill(
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                color_from_opaque_rgba8(source),
+            );
+        });
+
+        let output = render_scene_pixel(&mut renderer, &scene);
+        assert_rgba_near_reference_pixel(
+            output,
+            source.blend_over(destination, mode),
+            2,
+            &format!("Sequence 13 direct Vello blend mode {mode:?} should match reference"),
+        );
+    }
+
+    let backdrop = PremultipliedRgba8::try_new(64, 192, 96, 255).unwrap();
+    let outer_child_backdrop = PremultipliedRgba8::try_new(128, 128, 128, 255).unwrap();
+    let inner_source = PremultipliedRgba8::try_new(192, 64, 128, 255).unwrap();
+    let expected_inner = inner_source.blend_over(outer_child_backdrop, BlendMode::Multiply);
+    let expected_outer = expected_inner.blend_over(backdrop, BlendMode::Screen);
+    let mut nested_scene = Scene::new();
+    nested_scene.fill(
+        Rect::new(0.0, 0.0, 1.0, 1.0),
+        color_from_opaque_rgba8(backdrop),
+    );
+    nested_scene.layer(Layer::new().blend(BlendMode::Screen), |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 1.0, 1.0),
+            color_from_opaque_rgba8(outer_child_backdrop),
+        );
+        scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+            scene.fill(
+                Rect::new(0.0, 0.0, 1.0, 1.0),
+                color_from_opaque_rgba8(inner_source),
+            );
+        });
+    });
+    let normalized = nested_scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer: outer, .. } = &normalized.commands[1] else {
+        panic!("expected outer blend layer");
+    };
+    assert_eq!(
+        outer.pass_plan.requirement(),
+        command::LayerPassRequirement::DirectVelloBlend
+    );
+    let nested_output = render_scene_pixel(&mut renderer, &nested_scene);
+    assert_rgba_near_reference_pixel(
+        nested_output,
+        expected_outer,
+        2,
+        "nested direct Vello blend groups stay implemented in command order",
+    );
+
+    let unsupported = UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::AdditionalMixBlendMode,
+    );
+    let error = Capabilities::VELLO_0_9
+        .ensure_supported(unsupported)
+        .expect_err("mix-blend modes outside BlendMode remain diagnostic");
+    assert_eq!(error.unsupported_primitive(), Some(unsupported));
+}
+
+#[test]
+fn sequence13_root_background_and_composite_boundaries_remain_typed() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let root = BackdropFilterInput::try_root_backdrop(filters, None)
+        .expect_err("root backdrop policy is not render-owned");
+    assert_eq!(
+        root.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::RootBackdropPolicy,
+        ))
+    );
+
+    let normal_background =
+        BackgroundBlendList::try_new(vec![BackgroundBlendMode::Normal]).unwrap();
+    assert_eq!(normal_background.modes(), &[BackgroundBlendMode::Normal]);
+    for mode in [
+        BackgroundBlendMode::Multiply,
+        BackgroundBlendMode::Screen,
+        BackgroundBlendMode::Overlay,
+        BackgroundBlendMode::Darken,
+        BackgroundBlendMode::Lighten,
+        BackgroundBlendMode::Plus,
+    ] {
+        let error = BackgroundBlendList::try_new(vec![BackgroundBlendMode::Normal, mode])
+            .expect_err("non-normal background blend lists remain diagnostic");
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::Compositing,
+                PrimitiveOperation::BackgroundBlendMode,
+            ))
+        );
+    }
+
+    let source = PremultipliedRgba8::try_new(80, 40, 20, 128).unwrap();
+    let destination = PremultipliedRgba8::try_new(20, 30, 40, 96).unwrap();
+    let mask = PremultipliedRgba8::try_new(0, 0, 0, 64).unwrap();
+    for pixel in [
+        source.blend_over(destination, BlendMode::Normal),
+        source.blend_over(destination, BlendMode::Plus),
+        source.source_in_alpha_of(mask),
+        destination.destination_in_alpha_of(mask),
+    ] {
+        assert_premultiplied(pixel);
+    }
+
+    let porter_duff = UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::PorterDuffCompositeMode,
+    );
+    let error = Capabilities::VELLO_0_9
+        .ensure_supported(porter_duff)
+        .expect_err("Porter-Duff CSS operators stay behind a typed boundary");
+    assert_eq!(error.unsupported_primitive(), Some(porter_duff));
+
+    let alpha_mask =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)), MaskMode::Alpha).unwrap();
+    for mode in [
+        MaskCompositeMode::Subtract,
+        MaskCompositeMode::Intersect,
+        MaskCompositeMode::Exclude,
+    ] {
+        let stack = MaskLayerStack::single(MaskLayer::try_new(alpha_mask.clone(), mode).unwrap());
+        let error = stack
+            .ensure_supported(Capabilities::VELLO_0_9)
+            .expect_err("non-default mask composites remain diagnostic");
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::MaskCompositeMode,
+            ))
+        );
+    }
+}
+
+#[test]
+fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contract() {
+    let capabilities = Capabilities::VELLO_0_9;
+    let offscreen = capabilities.offscreen_pipeline();
+    assert!(offscreen.supports_direct_vello_opacity_isolation());
+    assert!(offscreen.supports_direct_vello_blend_isolation());
+    assert!(offscreen.supports_bounded_backdrop_capture());
+    assert!(offscreen.supports_materialized_backdrop_filter_execution());
+    assert!(!offscreen.supports_offscreen_layer_rendering());
+    assert!(!offscreen.supports_texture_cache_upload_lifecycle());
+    assert!(!offscreen.supports_rect_fullscreen_shader_passes());
+    assert!(!offscreen.supports_cpu_reference_buffers());
+    assert!(!offscreen.supports_nested_opacity_planning());
+    assert!(!offscreen.supports_mask_execution());
+    assert!(!offscreen.supports_filter_execution());
+    assert!(!offscreen.supports_backdrop_execution());
+    assert!(!offscreen.supports_backdrop_isolation_composition());
+
+    let compositing = capabilities.compositing();
+    assert!(compositing.supports_layer_opacity());
+    assert!(compositing.supports_blend_modes());
+    assert!(!compositing.supports_root_backdrop_policy());
+    assert!(!compositing.supports_background_blend_modes());
+    assert!(!compositing.supports_additional_mix_blend_modes());
+    assert!(!compositing.supports_porter_duff_composite_modes());
+
+    let masks = capabilities.masks_clips();
+    assert!(masks.supports_shape_clips());
+    assert!(masks.supports_materialized_alpha_mask_execution());
+    assert!(!masks.supports_clip_reference_execution());
+    assert!(!masks.supports_layer_masks());
+    assert!(!masks.supports_luminance_mask_mode());
+    assert!(!masks.supports_multi_layer_mask_composition());
+    assert!(!masks.supports_mask_composite_modes());
+
+    for supported in [
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropCapture,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::MaterializedBackdropFilterExecution,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaterializedAlphaMaskExecution,
+        ),
+    ] {
+        capabilities
+            .ensure_supported(supported)
+            .expect("narrow Sequence 13 capability should be advertised");
+    }
+
+    for unsupported in [
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropExecution,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropIsolationComposition,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::RootBackdropPolicy,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::BackgroundBlendMode,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::AdditionalMixBlendMode,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::PorterDuffCompositeMode,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaskCompositeMode,
+        ),
+    ] {
+        let error = capabilities
+            .ensure_supported(unsupported)
+            .expect_err("broader Sequence 13 behavior must not be advertised");
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
+}
+
+#[test]
 fn background_blend_lists_model_normal_layers_and_reject_blend_modes() {
     let list = BackgroundBlendList::try_new(vec![
         BackgroundBlendMode::Normal,
