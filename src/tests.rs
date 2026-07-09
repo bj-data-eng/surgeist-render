@@ -200,6 +200,170 @@ fn reference_buffer_source_over_preserves_transparent_edges() {
 }
 
 #[test]
+fn reference_pixels_apply_plus_lighter_and_blend_modes_deterministically() {
+    let source = PremultipliedRgba8::try_new(60, 30, 10, 128).unwrap();
+    let destination = PremultipliedRgba8::try_new(20, 80, 40, 160).unwrap();
+    let cases = [
+        (
+            BlendMode::Normal,
+            PremultipliedRgba8::try_new(70, 70, 30, 208).unwrap(),
+        ),
+        (
+            BlendMode::Plus,
+            PremultipliedRgba8::try_new(80, 110, 50, 255).unwrap(),
+        ),
+        (
+            BlendMode::Multiply,
+            PremultipliedRgba8::try_new(37, 60, 25, 208).unwrap(),
+        ),
+        (
+            BlendMode::Screen,
+            PremultipliedRgba8::try_new(75, 101, 48, 208).unwrap(),
+        ),
+        (
+            BlendMode::Overlay,
+            PremultipliedRgba8::try_new(42, 70, 27, 208).unwrap(),
+        ),
+        (
+            BlendMode::Darken,
+            PremultipliedRgba8::try_new(42, 70, 30, 208).unwrap(),
+        ),
+        (
+            BlendMode::Lighten,
+            PremultipliedRgba8::try_new(70, 91, 44, 208).unwrap(),
+        ),
+    ];
+
+    for (mode, expected) in cases {
+        let blended = source.blend_over(destination, mode);
+
+        assert_eq!(blended, expected, "unexpected {mode:?} blend result");
+        assert_premultiplied(blended);
+    }
+}
+
+#[test]
+fn reference_blends_handle_transparent_and_opaque_alpha_edges() {
+    let transparent = PremultipliedRgba8::TRANSPARENT;
+    let source = PremultipliedRgba8::try_new(64, 32, 16, 128).unwrap();
+    let destination = PremultipliedRgba8::try_new(20, 80, 40, 160).unwrap();
+    let opaque_source = PremultipliedRgba8::try_new(200, 100, 50, 255).unwrap();
+    let opaque_destination = PremultipliedRgba8::try_new(50, 150, 200, 255).unwrap();
+
+    assert_eq!(
+        transparent.blend_over(destination, BlendMode::Multiply),
+        destination
+    );
+    assert_eq!(source.blend_over(transparent, BlendMode::Screen), source);
+    assert_eq!(
+        opaque_source.blend_over(opaque_destination, BlendMode::Multiply),
+        PremultipliedRgba8::try_new(39, 59, 39, 255).unwrap()
+    );
+    assert_eq!(
+        opaque_source.blend_over(opaque_destination, BlendMode::Overlay),
+        PremultipliedRgba8::try_new(78, 127, 167, 255).unwrap()
+    );
+}
+
+#[test]
+fn reference_buffer_blend_over_rejects_mismatched_destination_size() {
+    let source = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 1)).unwrap();
+    let destination = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(1, 2)).unwrap();
+
+    let error = source
+        .blend_over(&destination, BlendMode::Multiply)
+        .expect_err("blend buffers must map one-to-one to destination pixels");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("reference blend destination size")
+    );
+}
+
+#[test]
+fn reference_buffer_alpha_composites_reject_mismatched_buffer_sizes() {
+    let source = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 1)).unwrap();
+    let destination = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(1, 2)).unwrap();
+
+    let source_in_error = source
+        .source_in_alpha_of(&destination)
+        .expect_err("source-in buffers must map one-to-one to destination alpha");
+    let source_in_diagnostic = source_in_error
+        .invalid_value_diagnostic()
+        .expect("source-in mismatch should include invalid value details");
+
+    assert_eq!(source_in_error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        source_in_diagnostic.field(),
+        "reference source-in destination size"
+    );
+    assert_eq!(source_in_diagnostic.value(), "1x2");
+    assert_eq!(source_in_diagnostic.invariant(), "must match source size");
+
+    let destination_in_error = destination
+        .destination_in_alpha_of(&source)
+        .expect_err("destination-in buffers must map one-to-one to source alpha");
+    let destination_in_diagnostic = destination_in_error
+        .invalid_value_diagnostic()
+        .expect("destination-in mismatch should include invalid value details");
+
+    assert_eq!(destination_in_error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        destination_in_diagnostic.field(),
+        "reference destination-in source size"
+    );
+    assert_eq!(destination_in_diagnostic.value(), "2x1");
+    assert_eq!(
+        destination_in_diagnostic.invariant(),
+        "must match destination size"
+    );
+}
+
+#[test]
+fn reference_buffer_blend_over_and_alpha_composites_cover_partial_masks() {
+    let red_half = PremultipliedRgba8::try_new(128, 0, 0, 128).unwrap();
+    let green_half = PremultipliedRgba8::try_new(0, 128, 0, 128).unwrap();
+    let blue_opaque = PremultipliedRgba8::try_new(0, 0, 255, 255).unwrap();
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![red_half, PremultipliedRgba8::TRANSPARENT],
+    )
+    .unwrap();
+    let destination = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![green_half, blue_opaque],
+    )
+    .unwrap();
+    let mask = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![
+            PremultipliedRgba8::try_new(0, 0, 0, 128).unwrap(),
+            PremultipliedRgba8::try_new(0, 0, 0, 255).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let blended = source.blend_over(&destination, BlendMode::Lighten).unwrap();
+    let source_in = source.source_in_alpha_of(&mask).unwrap();
+    let destination_in = destination.destination_in_alpha_of(&mask).unwrap();
+
+    assert_eq!(
+        blended.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(128, 128, 0, 192).unwrap()
+    );
+    assert_eq!(blended.pixel(1, 0).unwrap(), blue_opaque);
+    assert_eq!(
+        source_in.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(64, 0, 0, 64).unwrap()
+    );
+    assert_eq!(
+        destination_in.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(0, 64, 0, 64).unwrap()
+    );
+}
+
+#[test]
 fn reference_pixels_apply_source_in_and_destination_in_alpha_multiplication() {
     let source = PremultipliedRgba8::try_new(100, 60, 20, 200).unwrap();
     let destination = PremultipliedRgba8::try_new(0, 80, 40, 128).unwrap();

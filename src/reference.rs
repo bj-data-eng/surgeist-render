@@ -4,6 +4,7 @@ use super::{
     Error, PhysicalSize, PrimitiveFamily, PrimitiveOperation, Result, Shadow, ShadowKind,
     UnsupportedPrimitive,
     filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
+    layer::BlendMode,
     paint::PaintKind,
     style::{ColorFilterOp, ColorFilterPipeline, FilterBlur},
 };
@@ -124,6 +125,68 @@ impl PremultipliedRgba8 {
             green: self.green + scale_channel_by_alpha(destination.green, inverse_source_alpha),
             blue: self.blue + scale_channel_by_alpha(destination.blue, inverse_source_alpha),
             alpha: self.alpha + scale_channel_by_alpha(destination.alpha, inverse_source_alpha),
+        }
+    }
+
+    pub(crate) fn blend_over(self, destination: Self, mode: BlendMode) -> Self {
+        match mode {
+            BlendMode::Normal => self.source_over(destination),
+            BlendMode::Plus => self.plus_lighter(destination),
+            BlendMode::Multiply
+            | BlendMode::Screen
+            | BlendMode::Overlay
+            | BlendMode::Darken
+            | BlendMode::Lighten => self.mix_blend_over(destination, mode),
+        }
+    }
+
+    const fn plus_lighter(self, destination: Self) -> Self {
+        Self {
+            red: self.red.saturating_add(destination.red),
+            green: self.green.saturating_add(destination.green),
+            blue: self.blue.saturating_add(destination.blue),
+            alpha: self.alpha.saturating_add(destination.alpha),
+        }
+    }
+
+    fn mix_blend_over(self, destination: Self, mode: BlendMode) -> Self {
+        if self.alpha == 0 {
+            return destination;
+        }
+        if destination.alpha == 0 {
+            return self;
+        }
+
+        let output_alpha = self.source_over(destination).alpha;
+        let context = MixBlendContext {
+            source_alpha: f64::from(self.alpha) / 255.0,
+            destination_alpha: f64::from(destination.alpha) / 255.0,
+            mode,
+            output_alpha,
+        };
+        Self {
+            red: mix_blend_channel(
+                self.red,
+                self.alpha,
+                destination.red,
+                destination.alpha,
+                context,
+            ),
+            green: mix_blend_channel(
+                self.green,
+                self.alpha,
+                destination.green,
+                destination.alpha,
+                context,
+            ),
+            blue: mix_blend_channel(
+                self.blue,
+                self.alpha,
+                destination.blue,
+                destination.alpha,
+                context,
+            ),
+            alpha: output_alpha,
         }
     }
 
@@ -561,6 +624,72 @@ impl ReferencePremultipliedRgba8Buffer {
         Self::from_pixels(self.physical_size, pixels)
     }
 
+    pub(crate) fn blend_over(&self, destination: &Self, mode: BlendMode) -> Result<Self> {
+        if self.physical_size != destination.physical_size {
+            return Err(Error::invalid_value(
+                "reference blend destination size",
+                format!(
+                    "{}x{}",
+                    destination.physical_size.width(),
+                    destination.physical_size.height()
+                ),
+                "must match source size",
+            ));
+        }
+        let pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .zip(destination.pixels.iter().copied())
+            .map(|(source, destination)| source.blend_over(destination, mode))
+            .collect();
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
+    pub(crate) fn source_in_alpha_of(&self, destination: &Self) -> Result<Self> {
+        if self.physical_size != destination.physical_size {
+            return Err(Error::invalid_value(
+                "reference source-in destination size",
+                format!(
+                    "{}x{}",
+                    destination.physical_size.width(),
+                    destination.physical_size.height()
+                ),
+                "must match source size",
+            ));
+        }
+        let pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .zip(destination.pixels.iter().copied())
+            .map(|(source, destination)| source.source_in_alpha_of(destination))
+            .collect();
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
+    pub(crate) fn destination_in_alpha_of(&self, source: &Self) -> Result<Self> {
+        if self.physical_size != source.physical_size {
+            return Err(Error::invalid_value(
+                "reference destination-in source size",
+                format!(
+                    "{}x{}",
+                    source.physical_size.width(),
+                    source.physical_size.height()
+                ),
+                "must match destination size",
+            ));
+        }
+        let pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .zip(source.pixels.iter().copied())
+            .map(|(destination, source)| destination.destination_in_alpha_of(source))
+            .collect();
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
     fn pixel_index(&self, x: u32, y: u32) -> Result<usize> {
         if x >= self.physical_size.width() {
             return Err(Error::invalid_value(
@@ -789,6 +918,49 @@ fn scale_channel_by_opacity(channel: u8, opacity: f64) -> u8 {
 
 fn premultiply_straight_channel(channel: f64, alpha: u8) -> u8 {
     round_byte(channel * f64::from(alpha))
+}
+
+#[derive(Clone, Copy)]
+struct MixBlendContext {
+    source_alpha: f64,
+    destination_alpha: f64,
+    mode: BlendMode,
+    output_alpha: u8,
+}
+
+fn mix_blend_channel(
+    source_channel: u8,
+    source_alpha_byte: u8,
+    destination_channel: u8,
+    destination_alpha_byte: u8,
+    context: MixBlendContext,
+) -> u8 {
+    let source = f64::from(source_channel) / f64::from(source_alpha_byte);
+    let destination = f64::from(destination_channel) / f64::from(destination_alpha_byte);
+    let blended = blend_straight_channel(source, destination, context.mode);
+    let premultiplied = (1.0 - context.source_alpha) * context.destination_alpha * destination
+        + (1.0 - context.destination_alpha) * context.source_alpha * source
+        + context.source_alpha * context.destination_alpha * blended;
+    round_byte(premultiplied * 255.0).min(context.output_alpha)
+}
+
+fn blend_straight_channel(source: f64, destination: f64, mode: BlendMode) -> f64 {
+    match mode {
+        BlendMode::Multiply => source * destination,
+        BlendMode::Screen => source + destination - source * destination,
+        BlendMode::Overlay => {
+            if destination <= 0.5 {
+                2.0 * source * destination
+            } else {
+                1.0 - 2.0 * (1.0 - source) * (1.0 - destination)
+            }
+        }
+        BlendMode::Darken => source.min(destination),
+        BlendMode::Lighten => source.max(destination),
+        BlendMode::Normal | BlendMode::Plus => {
+            unreachable!("normal and plus are handled before mix blend math")
+        }
+    }
 }
 
 fn round_byte(value: f64) -> u8 {
