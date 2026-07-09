@@ -151,7 +151,7 @@ pub(crate) struct OffscreenBounds {
 }
 
 impl OffscreenBounds {
-    fn try_new(rect: Rect) -> Result<Self> {
+    pub(crate) fn try_new(rect: Rect) -> Result<Self> {
         validate_rect(rect, "offscreen layer bounds")?;
         Ok(Self { rect })
     }
@@ -286,6 +286,12 @@ impl LayerPassPlan {
     #[must_use]
     pub(crate) const fn bounds(self) -> Option<OffscreenBounds> {
         self.bounds
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn requires_offscreen_texture(self) -> bool {
+        matches!(self.kind, LayerPassKind::OffscreenTexture)
     }
 
     #[must_use]

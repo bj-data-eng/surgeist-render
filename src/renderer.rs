@@ -326,6 +326,15 @@ impl Renderer {
         Some((&device_handle.device, &device_handle.queue))
     }
 
+    #[cfg(test)]
+    pub(crate) fn default_offscreen_render_context(
+        &mut self,
+    ) -> Option<OffscreenRenderGpuContext<'_>> {
+        let backend = self.backend.as_mut()?;
+        let dev_id = self.default_device?;
+        Some(OffscreenRenderGpuContext::new(backend, dev_id))
+    }
+
     #[must_use]
     pub const fn stats(&self) -> Stats {
         self.stats

@@ -94,14 +94,23 @@ impl TextureDescriptor {
     }
 
     pub(crate) const fn wgpu_usage(self) -> wgpu::TextureUsages {
-        match self.intent {
-            TextureUsageIntent::OffscreenLayer | TextureUsageIntent::IntermediatePass => {
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-                    .union(wgpu::TextureUsages::TEXTURE_BINDING)
-                    .union(wgpu::TextureUsages::COPY_SRC)
-                    .union(wgpu::TextureUsages::COPY_DST)
-            }
-            TextureUsageIntent::ReadbackReference => {
+        match (self.intent, self.format) {
+            (
+                TextureUsageIntent::OffscreenLayer | TextureUsageIntent::IntermediatePass,
+                Format::Rgba8,
+            ) => wgpu::TextureUsages::RENDER_ATTACHMENT
+                .union(wgpu::TextureUsages::STORAGE_BINDING)
+                .union(wgpu::TextureUsages::TEXTURE_BINDING)
+                .union(wgpu::TextureUsages::COPY_SRC)
+                .union(wgpu::TextureUsages::COPY_DST),
+            (
+                TextureUsageIntent::OffscreenLayer | TextureUsageIntent::IntermediatePass,
+                Format::Bgra8,
+            ) => wgpu::TextureUsages::RENDER_ATTACHMENT
+                .union(wgpu::TextureUsages::TEXTURE_BINDING)
+                .union(wgpu::TextureUsages::COPY_SRC)
+                .union(wgpu::TextureUsages::COPY_DST),
+            (TextureUsageIntent::ReadbackReference, _) => {
                 wgpu::TextureUsages::STORAGE_BINDING.union(wgpu::TextureUsages::COPY_SRC)
             }
         }

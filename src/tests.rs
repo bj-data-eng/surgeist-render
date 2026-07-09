@@ -1,5 +1,6 @@
 use super::{
     backend::*,
+    command,
     encode::*,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     shader::{
@@ -767,6 +768,293 @@ fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
         "blue channel should be cleared: {blue}"
     );
     assert_eq!(alpha, 255);
+}
+
+#[test]
+fn offscreen_texture_allocation_uses_explicit_bounded_layer_descriptor() {
+    let bounds = command::OffscreenBounds::try_new(Rect::new(2.0, 3.0, 10.0, 6.0)).unwrap();
+
+    let descriptor = offscreen_local_scene_texture_descriptor(bounds, 2.0, Format::Rgba8).unwrap();
+
+    assert_eq!(descriptor.physical_size(), PhysicalSize::new(20, 12));
+    assert_eq!(descriptor.format(), Format::Rgba8);
+    assert_eq!(descriptor.intent(), TextureUsageIntent::OffscreenLayer);
+}
+
+#[test]
+fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
+    let mut cache = OffscreenTextureResourceCache::new();
+    let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
+    let mut scene = vello::Scene::new();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::BLACK,
+        None,
+        &kurbo::Rect::new(0.0, 0.0, 1.0, 1.0),
+    );
+
+    let error = render_vello_local_scene_to_offscreen_texture(
+        None,
+        Options::default(),
+        &mut cache,
+        &scene,
+        OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default()),
+    )
+    .expect_err("contract-only offscreen render should report missing GPU context");
+
+    assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+    assert!(error.message.contains("offscreen Vello local scene"));
+    assert_eq!(cache.stats().allocations, 0);
+    assert_eq!(cache.live_count(), 0);
+}
+
+#[test]
+fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let bounds = command::OffscreenBounds::try_new(Rect::new(12.0, 8.0, 2.0, 2.0)).unwrap();
+    let mut scene = vello::Scene::new();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::BLACK,
+        None,
+        &kurbo::Rect::new(0.0, 0.0, 2.0, 2.0),
+    );
+    let request =
+        OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
+    let options = renderer.options();
+    let mut cache = OffscreenTextureResourceCache::new();
+    let Some(context) = renderer.default_offscreen_render_context() else {
+        let error = render_vello_local_scene_to_offscreen_texture(
+            None, options, &mut cache, &scene, request,
+        )
+        .expect_err("no GPU machines should report the explicit diagnostic");
+        assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+        return;
+    };
+
+    let output = render_vello_local_scene_to_offscreen_texture(
+        Some(context),
+        options,
+        &mut cache,
+        &scene,
+        request,
+    )
+    .unwrap();
+    assert_eq!(output.target().bounds(), bounds);
+    assert_eq!(output.target().resource_id(), 1);
+    assert_eq!(
+        output.target().descriptor().physical_size(),
+        PhysicalSize::new(2, 2)
+    );
+    assert_eq!(output.timings().present_time, Duration::ZERO);
+    assert_eq!(cache.stats().allocations, 1);
+    let view_debug = format!("{:?}", output.view());
+    assert!(!view_debug.is_empty());
+
+    let (device, queue) = renderer.default_wgpu_device_queue().unwrap();
+    let image = read_texture_rgba(
+        device,
+        queue,
+        output.texture(),
+        output.target().descriptor().physical_size(),
+    )
+    .unwrap();
+    assert!(pixel_alpha(&image, 0, 0) > 0);
+
+    output.release(&mut cache).unwrap();
+    assert_eq!(cache.live_count(), 0);
+    assert_eq!(cache.released_resource_count(), 1);
+}
+
+#[test]
+fn offscreen_local_scene_texture_descriptor_rejects_bgra8_for_vello_target() {
+    let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
+    let error = offscreen_local_scene_texture_descriptor(bounds, 1.0, Format::Bgra8)
+        .expect_err("minimal offscreen Vello targets are Rgba8-only");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("offscreen Vello scene texture format")
+    );
+}
+
+#[test]
+fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
+    let mut cache = OffscreenTextureResourceCache::new();
+    let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
+    let scene = vello::Scene::new();
+    let request =
+        OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Bgra8, Parameters::default());
+
+    let error = render_vello_local_scene_to_offscreen_texture(
+        None,
+        Options::default(),
+        &mut cache,
+        &scene,
+        request,
+    )
+    .expect_err("Bgra8 should be rejected before GPU context allocation");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(cache.stats().allocations, 0);
+    assert_eq!(cache.live_count(), 0);
+}
+
+#[test]
+fn offscreen_rect_shader_pass_descriptor_targets_offscreen_textures() {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 3),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 3),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(0, 0, 4, 3, source, destination).unwrap();
+
+    let pass = RectShaderPassDescriptor::try_new(
+        "offscreen-layer",
+        "intermediate-pass",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::IdentityCopy,
+    )
+    .unwrap();
+
+    assert_eq!(pass.source().intent(), TextureUsageIntent::OffscreenLayer);
+    assert_eq!(
+        pass.destination().intent(),
+        TextureUsageIntent::IntermediatePass
+    );
+    assert_eq!(pass.kind(), RectShaderPassKind::IdentityCopy);
+}
+
+#[test]
+fn offscreen_nested_layer_opacity_stays_on_direct_vello_surface_path() {
+    let mut scene = Scene::new();
+    scene.layer(Layer::new().try_opacity(0.75).unwrap(), |scene| {
+        scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+        });
+    });
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer {
+        layer: outer,
+        children,
+    } = &normalized.commands[0]
+    else {
+        panic!("expected outer opacity layer");
+    };
+    let command::RenderCommand::Layer { layer: inner, .. } = &children[0] else {
+        panic!("expected inner opacity layer");
+    };
+
+    assert_eq!(
+        outer.pass_plan.kind(),
+        command::LayerPassKind::DirectVelloLayer
+    );
+    assert_eq!(
+        inner.pass_plan.kind(),
+        command::LayerPassKind::DirectVelloLayer
+    );
+    assert!(!outer.pass_plan.requires_offscreen_texture());
+    assert!(!inner.pass_plan.requires_offscreen_texture());
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let stats = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+    let alpha = pixel_alpha(&output, 0, 0);
+
+    assert_eq!(stats.layers, 2);
+    assert!(alpha > 0);
+    assert!(alpha < 255);
+}
+
+#[test]
+fn offscreen_reuses_resources_across_repeated_bounded_requests() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 3.0, 2.0)).unwrap();
+    let mut scene = vello::Scene::new();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::BLACK,
+        None,
+        &kurbo::Rect::new(0.0, 0.0, 3.0, 2.0),
+    );
+    let request =
+        OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
+    let options = renderer.options();
+    let mut cache = OffscreenTextureResourceCache::new();
+    let Some(context) = renderer.default_offscreen_render_context() else {
+        let error = render_vello_local_scene_to_offscreen_texture(
+            None, options, &mut cache, &scene, request,
+        )
+        .expect_err("no GPU machines should report the explicit diagnostic");
+        assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+        return;
+    };
+    let first = render_vello_local_scene_to_offscreen_texture(
+        Some(context),
+        options,
+        &mut cache,
+        &scene,
+        request,
+    )
+    .unwrap();
+    let first_resource_id = first.target().resource_id();
+    let first_descriptor = first.target().descriptor();
+    first.release(&mut cache).unwrap();
+
+    let context = renderer.default_offscreen_render_context().unwrap();
+    let second = render_vello_local_scene_to_offscreen_texture(
+        Some(context),
+        options,
+        &mut cache,
+        &scene,
+        request,
+    )
+    .unwrap();
+
+    assert_eq!(second.target().descriptor(), first_descriptor);
+    assert_eq!(second.target().resource_id(), first_resource_id);
+    assert_eq!(cache.stats().allocations, 1);
+    assert_eq!(cache.stats().misses, 1);
+    assert_eq!(cache.stats().hits, 1);
+    assert_eq!(cache.live_count(), 1);
+    assert_eq!(cache.released_resource_count(), 0);
+    second.release(&mut cache).unwrap();
+    assert_eq!(cache.live_count(), 0);
+    assert_eq!(cache.released_resource_count(), 1);
+}
+
+#[test]
+fn offscreen_no_allocation_when_layer_isolation_is_unnecessary() {
+    let mut scene = Scene::new();
+    scene.layer(Layer::new(), |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    });
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected layer command");
+    };
+    let cache = OffscreenTextureCache::new();
+
+    assert_eq!(layer.pass_plan.kind(), command::LayerPassKind::None);
+    assert!(!layer.pass_plan.requires_offscreen_texture());
+    assert_eq!(cache.stats().allocations, 0);
+    assert_eq!(cache.live_count(), 0);
 }
 
 #[test]
