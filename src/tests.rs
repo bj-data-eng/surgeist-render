@@ -1742,6 +1742,308 @@ fn box_decoration_fragments_preserve_border_clip_override() {
     );
 }
 
+fn box_decoration_edges(
+    top: BorderSide,
+    right: BorderSide,
+    bottom: BorderSide,
+    left: BorderSide,
+) -> BorderEdges {
+    BorderEdges::new(top, right, bottom, left)
+}
+
+fn solid_border(width: f64, color: Color) -> BorderSide {
+    BorderSide::try_new(BorderStyle::Solid, width, color).unwrap()
+}
+
+fn normalized_border_command(command: &NormalizedBoxDecorationCommand) -> &NormalizedBorderCommand {
+    let NormalizedBoxDecorationCommandKind::Border(border) = command.kind();
+    border
+}
+
+#[test]
+fn box_decoration_normalization_emits_four_independent_border_sides_in_order() {
+    let top = BorderSide::try_new(BorderStyle::Solid, 1.0, Color::BLACK).unwrap();
+    let right = BorderSide::try_new(BorderStyle::Dashed, 2.0, Color::TRANSPARENT).unwrap();
+    let bottom = BorderSide::try_new(BorderStyle::Dotted, 3.0, Color::BLACK).unwrap();
+    let left = BorderSide::try_new(BorderStyle::Double, 4.0, Color::TRANSPARENT).unwrap();
+    let fragment = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(6.0).unwrap(),
+        BoxDecorationBreak::Clone,
+    )
+    .unwrap();
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            top.clone(),
+            right.clone(),
+            bottom.clone(),
+            left.clone(),
+        )),
+        None,
+        vec![fragment.clone()],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let commands = normalized.commands();
+
+    assert_eq!(commands.len(), 4);
+    let top_command = normalized_border_command(&commands[0]);
+    let right_command = normalized_border_command(&commands[1]);
+    let bottom_command = normalized_border_command(&commands[2]);
+    let left_command = normalized_border_command(&commands[3]);
+    assert_eq!(top_command.side(), BoxSide::Top);
+    assert_eq!(right_command.side(), BoxSide::Right);
+    assert_eq!(bottom_command.side(), BoxSide::Bottom);
+    assert_eq!(left_command.side(), BoxSide::Left);
+    assert_eq!(top_command.width(), 1.0);
+    assert_eq!(right_command.width(), 2.0);
+    assert_eq!(bottom_command.width(), 3.0);
+    assert_eq!(left_command.width(), 4.0);
+    assert_eq!(top_command.paint(), top.paint());
+    assert_eq!(right_command.paint(), right.paint());
+    assert_eq!(bottom_command.paint(), bottom.paint());
+    assert_eq!(left_command.paint(), left.paint());
+    assert_eq!(top_command.style(), &NormalizedBorderStyle::Solid);
+    assert_eq!(right_command.style(), &NormalizedBorderStyle::Dashed);
+    assert_eq!(bottom_command.style(), &NormalizedBorderStyle::Dotted);
+    assert!(matches!(
+        left_command.style(),
+        NormalizedBorderStyle::Double(_)
+    ));
+    assert_eq!(
+        top_command.target_rect(),
+        box_decoration_test_areas().border_box()
+    );
+    assert_eq!(top_command.fragment_index(), 0);
+    assert_eq!(
+        top_command.clip().rect(),
+        Some(box_decoration_test_areas().border_box())
+    );
+    assert_eq!(top_command.radii(), fragment.radii());
+    assert_eq!(top_command.break_mode(), BoxDecorationBreak::Clone);
+}
+
+#[test]
+fn box_decoration_normalization_suppresses_none_hidden_and_zero_width_borders() {
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            BorderSide::try_new(BorderStyle::None, 2.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::Hidden, 2.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::Solid, 0.0, Color::BLACK).unwrap(),
+            solid_border(3.0, Color::BLACK),
+        )),
+        None,
+        vec![
+            BoxDecorationFragment::try_new(
+                box_decoration_test_areas(),
+                Radii::try_all(0.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands().len(), 1);
+    let border = normalized_border_command(&normalized.commands()[0]);
+    assert_eq!(border.side(), BoxSide::Left);
+    assert_eq!(border.width(), 3.0);
+}
+
+#[test]
+fn box_decoration_normalization_preserves_dashed_and_dotted_styles() {
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            BorderSide::try_new(BorderStyle::Dashed, 2.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::Dotted, 3.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::Hidden, 0.0, Color::BLACK).unwrap(),
+        )),
+        None,
+        vec![
+            BoxDecorationFragment::try_new(
+                box_decoration_test_areas(),
+                Radii::try_all(0.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(
+        normalized_border_command(&normalized.commands()[0]).style(),
+        &NormalizedBorderStyle::Dashed
+    );
+    assert_eq!(
+        normalized_border_command(&normalized.commands()[1]).style(),
+        &NormalizedBorderStyle::Dotted
+    );
+}
+
+fn assert_double_bands(bands: NormalizedDoubleBorderBands, width: f64) {
+    assert_eq!(bands.original_width(), width);
+    assert!(bands.outer_width() >= 0.0);
+    assert!(bands.gap_width() >= 0.0);
+    assert!(bands.inner_width() >= 0.0);
+    let sum = bands.outer_width() + bands.gap_width() + bands.inner_width();
+    assert!(
+        (sum - width).abs() < f64::EPSILON,
+        "double bands should sum to {width}, got {sum}"
+    );
+}
+
+#[test]
+fn box_decoration_normalization_computes_double_bands_for_thin_medium_and_large_widths() {
+    let fragment = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(48.0).unwrap(),
+        BoxDecorationBreak::Slice,
+    )
+    .unwrap();
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            BorderSide::try_new(BorderStyle::Double, 1.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::Double, 2.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::Double, 9.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+        )),
+        None,
+        vec![fragment],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands().len(), 3);
+    let thin = normalized_border_command(&normalized.commands()[0]);
+    let medium = normalized_border_command(&normalized.commands()[1]);
+    let large = normalized_border_command(&normalized.commands()[2]);
+    let NormalizedBorderStyle::Double(thin_bands) = thin.style() else {
+        panic!("expected thin double border bands");
+    };
+    let NormalizedBorderStyle::Double(medium_bands) = medium.style() else {
+        panic!("expected medium double border bands");
+    };
+    let NormalizedBorderStyle::Double(large_bands) = large.style() else {
+        panic!("expected large double border bands");
+    };
+
+    assert_double_bands(*thin_bands, 1.0);
+    assert_double_bands(*medium_bands, 2.0);
+    assert_double_bands(*large_bands, 9.0);
+    assert!(thin_bands.outer_width() > 0.0);
+    assert_eq!(large_bands.outer_width(), 3.0);
+    assert_eq!(large_bands.gap_width(), 3.0);
+    assert_eq!(large_bands.inner_width(), 3.0);
+    assert_eq!(thin.radii().radii(), Radii::try_all(20.0).unwrap());
+}
+
+#[test]
+fn box_decoration_normalization_reports_unsupported_border_styles() {
+    for (style, operation) in [
+        (BorderStyle::Groove, PrimitiveOperation::BorderGrooveStyle),
+        (BorderStyle::Ridge, PrimitiveOperation::BorderRidgeStyle),
+        (BorderStyle::Inset, PrimitiveOperation::BorderInsetStyle),
+        (BorderStyle::Outset, PrimitiveOperation::BorderOutsetStyle),
+    ] {
+        let input = BoxDecorationInput::try_new(
+            Some(box_decoration_edges(
+                BorderSide::try_new(style, 2.0, Color::BLACK).unwrap(),
+                BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+                BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+                BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            )),
+            None,
+            vec![
+                BoxDecorationFragment::try_new(
+                    box_decoration_test_areas(),
+                    Radii::try_all(0.0).unwrap(),
+                    BoxDecorationBreak::Slice,
+                )
+                .unwrap(),
+            ],
+        )
+        .unwrap();
+
+        let error = input
+            .normalize(Capabilities::VELLO_0_9)
+            .expect_err("unsupported border styles should report typed diagnostics");
+
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::BoxDecorations,
+                operation,
+            ))
+        );
+    }
+}
+
+#[test]
+fn box_decoration_normalization_emits_borders_for_multiple_fragments_in_order() {
+    let first = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(2.0).unwrap(),
+        BoxDecorationBreak::Slice,
+    )
+    .unwrap();
+    let second_areas = BackgroundAreas::try_new(
+        Rect::new(120.0, 0.0, 60.0, 40.0),
+        Rect::new(124.0, 4.0, 52.0, 32.0),
+        Rect::new(128.0, 8.0, 44.0, 24.0),
+    )
+    .unwrap();
+    let shape = Shape::rect(Rect::new(120.0, 0.0, 60.0, 40.0));
+    let second = BoxDecorationFragment::try_new(
+        second_areas,
+        Radii::try_all(4.0).unwrap(),
+        BoxDecorationBreak::Clone,
+    )
+    .unwrap()
+    .with_border_clip_override(BackgroundClipGeometry::try_shape(shape.clone()).unwrap());
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            solid_border(1.0, Color::BLACK),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            solid_border(2.0, Color::BLACK),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+        )),
+        None,
+        vec![first, second.clone()],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let commands: Vec<_> = normalized
+        .commands()
+        .iter()
+        .map(normalized_border_command)
+        .collect();
+
+    assert_eq!(
+        commands
+            .iter()
+            .map(|command| (command.fragment_index(), command.side()))
+            .collect::<Vec<_>>(),
+        vec![
+            (0, BoxSide::Top),
+            (0, BoxSide::Bottom),
+            (1, BoxSide::Top),
+            (1, BoxSide::Bottom),
+        ]
+    );
+    assert_eq!(commands[2].target_rect(), second_areas.border_box());
+    assert_eq!(commands[2].clip().shape(), Some(&shape));
+    assert_eq!(commands[2].radii(), second.radii());
+    assert_eq!(commands[2].break_mode(), BoxDecorationBreak::Clone);
+}
+
 #[test]
 fn background_stacks_reject_empty_and_colorless_inputs() {
     let error = BackgroundStack::try_new(None, Vec::new())

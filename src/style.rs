@@ -1851,6 +1851,239 @@ impl BoxDecorationInput {
     pub fn fragments(&self) -> &[BoxDecorationFragment] {
         &self.fragments
     }
+
+    pub fn normalize(&self, _capabilities: Capabilities) -> Result<NormalizedBoxDecoration> {
+        let mut commands = Vec::new();
+
+        if let Some(border_edges) = &self.border_edges {
+            for (fragment_index, fragment) in self.fragments.iter().enumerate() {
+                let target_rect = fragment.areas().border_box();
+                let clip = border_clip_geometry(fragment)?;
+                for (side, border_side) in border_sides(border_edges) {
+                    if let Some(style) = normalize_border_style(border_side)? {
+                        commands.push(NormalizedBoxDecorationCommand {
+                            kind: NormalizedBoxDecorationCommandKind::Border(
+                                NormalizedBorderCommand {
+                                    fragment_index,
+                                    side,
+                                    width: border_side.width(),
+                                    paint: border_side.paint().clone(),
+                                    style,
+                                    target_rect,
+                                    clip: clip.clone(),
+                                    radii: fragment.radii(),
+                                    break_mode: fragment.break_mode(),
+                                },
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(NormalizedBoxDecoration { commands })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoxSide {
+    Top,
+    Right,
+    Bottom,
+    Left,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalizedDoubleBorderBands {
+    original_width: f64,
+    outer_width: f64,
+    gap_width: f64,
+    inner_width: f64,
+}
+
+impl NormalizedDoubleBorderBands {
+    #[must_use]
+    fn from_width(width: f64) -> Self {
+        let outer_width = width / 3.0;
+        let gap_width = width / 3.0;
+        let inner_width = width - outer_width - gap_width;
+        Self {
+            original_width: width,
+            outer_width,
+            gap_width,
+            inner_width,
+        }
+    }
+
+    #[must_use]
+    pub const fn original_width(self) -> f64 {
+        self.original_width
+    }
+
+    #[must_use]
+    pub const fn outer_width(self) -> f64 {
+        self.outer_width
+    }
+
+    #[must_use]
+    pub const fn gap_width(self) -> f64 {
+        self.gap_width
+    }
+
+    #[must_use]
+    pub const fn inner_width(self) -> f64 {
+        self.inner_width
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NormalizedBorderStyle {
+    Solid,
+    Dashed,
+    Dotted,
+    Double(NormalizedDoubleBorderBands),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedBorderCommand {
+    fragment_index: usize,
+    side: BoxSide,
+    width: f64,
+    paint: Paint,
+    style: NormalizedBorderStyle,
+    target_rect: Rect,
+    clip: BackgroundClipGeometry,
+    radii: NormalizedBoxRadii,
+    break_mode: BoxDecorationBreak,
+}
+
+impl NormalizedBorderCommand {
+    #[must_use]
+    pub const fn fragment_index(&self) -> usize {
+        self.fragment_index
+    }
+
+    #[must_use]
+    pub const fn side(&self) -> BoxSide {
+        self.side
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> f64 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn paint(&self) -> &Paint {
+        &self.paint
+    }
+
+    #[must_use]
+    pub const fn style(&self) -> &NormalizedBorderStyle {
+        &self.style
+    }
+
+    #[must_use]
+    pub const fn target_rect(&self) -> Rect {
+        self.target_rect
+    }
+
+    #[must_use]
+    pub const fn clip(&self) -> &BackgroundClipGeometry {
+        &self.clip
+    }
+
+    #[must_use]
+    pub const fn radii(&self) -> NormalizedBoxRadii {
+        self.radii
+    }
+
+    #[must_use]
+    pub const fn break_mode(&self) -> BoxDecorationBreak {
+        self.break_mode
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedBoxDecoration {
+    commands: Vec<NormalizedBoxDecorationCommand>,
+}
+
+impl NormalizedBoxDecoration {
+    #[must_use]
+    pub fn commands(&self) -> &[NormalizedBoxDecorationCommand] {
+        &self.commands
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedBoxDecorationCommand {
+    kind: NormalizedBoxDecorationCommandKind,
+}
+
+impl NormalizedBoxDecorationCommand {
+    #[must_use]
+    pub const fn kind(&self) -> &NormalizedBoxDecorationCommandKind {
+        &self.kind
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum NormalizedBoxDecorationCommandKind {
+    Border(NormalizedBorderCommand),
+}
+
+fn border_sides(edges: &BorderEdges) -> [(BoxSide, &BorderSide); 4] {
+    [
+        (BoxSide::Top, edges.top()),
+        (BoxSide::Right, edges.right()),
+        (BoxSide::Bottom, edges.bottom()),
+        (BoxSide::Left, edges.left()),
+    ]
+}
+
+fn border_clip_geometry(fragment: &BoxDecorationFragment) -> Result<BackgroundClipGeometry> {
+    if let Some(clip) = fragment.border_clip_override() {
+        return Ok(clip.clone());
+    }
+    BackgroundClipGeometry::try_rect(fragment.areas().border_box())
+}
+
+fn normalize_border_style(side: &BorderSide) -> Result<Option<NormalizedBorderStyle>> {
+    if side.width() == 0.0 || matches!(side.style(), BorderStyle::None | BorderStyle::Hidden) {
+        return Ok(None);
+    }
+
+    let style = match side.style() {
+        BorderStyle::None | BorderStyle::Hidden => unreachable!("suppressed before style mapping"),
+        BorderStyle::Solid => NormalizedBorderStyle::Solid,
+        BorderStyle::Dashed => NormalizedBorderStyle::Dashed,
+        BorderStyle::Dotted => NormalizedBorderStyle::Dotted,
+        BorderStyle::Double => {
+            NormalizedBorderStyle::Double(NormalizedDoubleBorderBands::from_width(side.width()))
+        }
+        BorderStyle::Groove => {
+            return unsupported_border_style(PrimitiveOperation::BorderGrooveStyle);
+        }
+        BorderStyle::Ridge => {
+            return unsupported_border_style(PrimitiveOperation::BorderRidgeStyle);
+        }
+        BorderStyle::Inset => {
+            return unsupported_border_style(PrimitiveOperation::BorderInsetStyle);
+        }
+        BorderStyle::Outset => {
+            return unsupported_border_style(PrimitiveOperation::BorderOutsetStyle);
+        }
+    };
+
+    Ok(Some(style))
+}
+
+fn unsupported_border_style(
+    operation: PrimitiveOperation,
+) -> Result<Option<NormalizedBorderStyle>> {
+    let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::BoxDecorations, operation);
+    Err(Error::unsupported_render_primitive(unsupported))
 }
 
 fn validate_box_decoration_radii(radii: Radii) -> Result<()> {
