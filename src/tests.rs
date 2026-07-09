@@ -7252,6 +7252,31 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
 }
 
 #[test]
+fn backdrop_capability_accessors_name_planned_boundaries_without_execution() {
+    let capabilities = Capabilities::VELLO_0_9.offscreen_pipeline();
+
+    assert!(!capabilities.supports_bounded_backdrop_capture());
+    assert!(!capabilities.supports_materialized_backdrop_filter_execution());
+    assert!(!capabilities.supports_backdrop_isolation_composition());
+    assert!(!capabilities.supports_backdrop_execution());
+}
+
+#[test]
+fn blend_capability_accessors_preserve_direct_vello_claims_without_background_blend() {
+    let compositing = Capabilities::VELLO_0_9.compositing();
+    let offscreen = Capabilities::VELLO_0_9.offscreen_pipeline();
+
+    assert!(compositing.supports_layer_opacity());
+    assert!(compositing.supports_blend_modes());
+    assert!(offscreen.supports_direct_vello_opacity_isolation());
+    assert!(offscreen.supports_direct_vello_blend_isolation());
+    assert!(!compositing.supports_root_backdrop_policy());
+    assert!(!compositing.supports_background_blend_modes());
+    assert!(!compositing.supports_additional_mix_blend_modes());
+    assert!(!compositing.supports_porter_duff_composite_modes());
+}
+
+#[test]
 fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution() {
     let capabilities = Capabilities::VELLO_0_9.masks_clips();
 
@@ -7554,6 +7579,9 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         PrimitiveOperation::MaskExecution,
         PrimitiveOperation::FilterExecution,
         PrimitiveOperation::BackdropExecution,
+        PrimitiveOperation::BoundedBackdropCapture,
+        PrimitiveOperation::MaterializedBackdropFilterExecution,
+        PrimitiveOperation::BackdropIsolationComposition,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::OffscreenPipeline, operation);
         let error = Capabilities::VELLO_0_9
@@ -7564,6 +7592,46 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
         assert!(error.message.contains("offscreen pipeline"));
         assert!(error.message.contains(unsupported.label()));
+    }
+}
+
+#[test]
+fn backdrop_and_advanced_compositing_diagnostics_have_granular_names() {
+    let cases = [
+        (
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::RootBackdropPolicy,
+            "root backdrop policy",
+        ),
+        (
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::BackgroundBlendMode,
+            "background blend mode",
+        ),
+        (
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::AdditionalMixBlendMode,
+            "additional mix-blend mode",
+        ),
+        (
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::PorterDuffCompositeMode,
+            "Porter-Duff composite mode",
+        ),
+    ];
+
+    for (family, operation, label) in cases {
+        let unsupported = UnsupportedPrimitive::new(family, operation);
+        assert_eq!(unsupported.label(), label);
+
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("Sequence 13 Task 1 only names future compositing boundaries");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains("compositing"));
+        assert!(error.message.contains(label));
     }
 }
 

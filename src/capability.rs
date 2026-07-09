@@ -102,6 +102,10 @@ impl Capabilities {
         compositing: CompositingCapabilities {
             layer_opacity: true,
             blend_modes: true,
+            root_backdrop_policy: false,
+            background_blend_modes: false,
+            additional_mix_blend_modes: false,
+            porter_duff_composite_modes: false,
         },
         offscreen_pipeline: OffscreenPipelineCapabilities {
             direct_vello_opacity_isolation: true,
@@ -114,6 +118,9 @@ impl Capabilities {
             mask_execution: false,
             filter_execution: false,
             backdrop_execution: false,
+            bounded_backdrop_capture: false,
+            materialized_backdrop_filter_execution: false,
+            backdrop_isolation_composition: false,
         },
         surfaces: SurfaceCapabilities {
             headless_surfaces: true,
@@ -323,6 +330,18 @@ impl Capabilities {
             (PrimitiveFamily::BoxDecorations, PrimitiveOperation::OutlineAutoStyle) => {
                 self.box_decorations.supports_outline_auto_style()
             }
+            (PrimitiveFamily::Compositing, PrimitiveOperation::RootBackdropPolicy) => {
+                self.compositing.supports_root_backdrop_policy()
+            }
+            (PrimitiveFamily::Compositing, PrimitiveOperation::BackgroundBlendMode) => {
+                self.compositing.supports_background_blend_modes()
+            }
+            (PrimitiveFamily::Compositing, PrimitiveOperation::AdditionalMixBlendMode) => {
+                self.compositing.supports_additional_mix_blend_modes()
+            }
+            (PrimitiveFamily::Compositing, PrimitiveOperation::PorterDuffCompositeMode) => {
+                self.compositing.supports_porter_duff_composite_modes()
+            }
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::OffscreenLayerRendering) => {
                 self.offscreen_pipeline.supports_offscreen_layer_rendering()
             }
@@ -351,6 +370,21 @@ impl Capabilities {
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BackdropExecution) => {
                 self.offscreen_pipeline.supports_backdrop_execution()
             }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BoundedBackdropCapture) => {
+                self.offscreen_pipeline.supports_bounded_backdrop_capture()
+            }
+            (
+                PrimitiveFamily::OffscreenPipeline,
+                PrimitiveOperation::MaterializedBackdropFilterExecution,
+            ) => self
+                .offscreen_pipeline
+                .supports_materialized_backdrop_filter_execution(),
+            (
+                PrimitiveFamily::OffscreenPipeline,
+                PrimitiveOperation::BackdropIsolationComposition,
+            ) => self
+                .offscreen_pipeline
+                .supports_backdrop_isolation_composition(),
             (PrimitiveFamily::Surfaces, PrimitiveOperation::WebCanvasSurface) => {
                 self.surfaces.supports_web_canvas_surfaces()
             }
@@ -840,6 +874,10 @@ impl BoxDecorationCapabilities {
 pub struct CompositingCapabilities {
     layer_opacity: bool,
     blend_modes: bool,
+    root_backdrop_policy: bool,
+    background_blend_modes: bool,
+    additional_mix_blend_modes: bool,
+    porter_duff_composite_modes: bool,
 }
 
 impl CompositingCapabilities {
@@ -851,6 +889,26 @@ impl CompositingCapabilities {
     #[must_use]
     pub const fn supports_blend_modes(self) -> bool {
         self.blend_modes
+    }
+
+    #[must_use]
+    pub const fn supports_root_backdrop_policy(self) -> bool {
+        self.root_backdrop_policy
+    }
+
+    #[must_use]
+    pub const fn supports_background_blend_modes(self) -> bool {
+        self.background_blend_modes
+    }
+
+    #[must_use]
+    pub const fn supports_additional_mix_blend_modes(self) -> bool {
+        self.additional_mix_blend_modes
+    }
+
+    #[must_use]
+    pub const fn supports_porter_duff_composite_modes(self) -> bool {
+        self.porter_duff_composite_modes
     }
 }
 
@@ -866,6 +924,9 @@ pub struct OffscreenPipelineCapabilities {
     mask_execution: bool,
     filter_execution: bool,
     backdrop_execution: bool,
+    bounded_backdrop_capture: bool,
+    materialized_backdrop_filter_execution: bool,
+    backdrop_isolation_composition: bool,
 }
 
 impl OffscreenPipelineCapabilities {
@@ -917,6 +978,21 @@ impl OffscreenPipelineCapabilities {
     #[must_use]
     pub const fn supports_backdrop_execution(self) -> bool {
         self.backdrop_execution
+    }
+
+    #[must_use]
+    pub const fn supports_bounded_backdrop_capture(self) -> bool {
+        self.bounded_backdrop_capture
+    }
+
+    #[must_use]
+    pub const fn supports_materialized_backdrop_filter_execution(self) -> bool {
+        self.materialized_backdrop_filter_execution
+    }
+
+    #[must_use]
+    pub const fn supports_backdrop_isolation_composition(self) -> bool {
+        self.backdrop_isolation_composition
     }
 }
 

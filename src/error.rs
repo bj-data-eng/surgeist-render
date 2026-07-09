@@ -222,6 +222,7 @@ pub enum PrimitiveFamily {
     Filters,
     MasksAndClips,
     BoxDecorations,
+    Compositing,
     OffscreenPipeline,
     Surfaces,
     TransformsAndCoordinateSpaces,
@@ -238,6 +239,7 @@ impl PrimitiveFamily {
             Self::Filters => "filters",
             Self::MasksAndClips => "masks and clips",
             Self::BoxDecorations => "box decorations",
+            Self::Compositing => "compositing",
             Self::OffscreenPipeline => "offscreen pipeline",
             Self::Surfaces => "surfaces",
             Self::TransformsAndCoordinateSpaces => "transforms and coordinate spaces",
@@ -302,6 +304,13 @@ pub enum PrimitiveOperation {
     ColorFilterBlur,
     ColorFilterDropShadow,
     BackdropExecution,
+    BoundedBackdropCapture,
+    MaterializedBackdropFilterExecution,
+    BackdropIsolationComposition,
+    RootBackdropPolicy,
+    BackgroundBlendMode,
+    AdditionalMixBlendMode,
+    PorterDuffCompositeMode,
 }
 
 impl PrimitiveOperation {
@@ -367,6 +376,13 @@ impl PrimitiveOperation {
             Self::ColorFilterBlur => "color filter blur",
             Self::ColorFilterDropShadow => "color filter drop-shadow",
             Self::BackdropExecution => "backdrop execution",
+            Self::BoundedBackdropCapture => "bounded backdrop capture",
+            Self::MaterializedBackdropFilterExecution => "materialized backdrop filter execution",
+            Self::BackdropIsolationComposition => "backdrop isolation/composition",
+            Self::RootBackdropPolicy => "root backdrop policy",
+            Self::BackgroundBlendMode => "background blend mode",
+            Self::AdditionalMixBlendMode => "additional mix-blend mode",
+            Self::PorterDuffCompositeMode => "Porter-Duff composite mode",
         }
     }
 }
