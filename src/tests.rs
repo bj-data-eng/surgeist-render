@@ -432,6 +432,63 @@ fn resolved_image_resources_preserve_handle_and_intrinsic_size() {
 }
 
 #[test]
+fn resolved_image_resources_carry_root_resolved_metadata_policy() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(12), Size::new(40.0, 20.0))
+        .unwrap()
+        .with_density(ImageResourceDensity::try_new(2.0).unwrap());
+
+    assert_eq!(resource.id(), ImageId::new(12));
+    assert_eq!(resource.intrinsic_size(), Size::new(40.0, 20.0));
+    assert_eq!(
+        resource.density().map(ImageResourceDensity::value),
+        Some(2.0)
+    );
+    assert_eq!(
+        resource.orientation_policy(),
+        ImageOrientationPolicy::RootResolvedOnly
+    );
+    assert_eq!(
+        resource.color_profile_policy(),
+        ImageColorProfilePolicy::RootResolvedOnly
+    );
+}
+
+#[test]
+fn image_resource_density_rejects_invalid_values() {
+    let error = ImageResourceDensity::try_new(0.0)
+        .expect_err("image density must be positive when supplied");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("image resource density")
+    );
+}
+
+#[test]
+fn unresolved_style_image_sources_report_image_resource_diagnostics() {
+    let reference = StyleResourceRef::try_new("hero.png").unwrap();
+    let source = StyleImageSource::unresolved(reference.clone());
+
+    assert_eq!(
+        source.kind(),
+        &StyleImageSourceKind::Unresolved(reference.clone())
+    );
+
+    let error = source
+        .require_resolved()
+        .expect_err("unresolved image source must report an image resource diagnostic");
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(
+        error.unresolved_resource_diagnostic(),
+        Some(&UnresolvedResource::new(
+            UnresolvedResourceKind::Image,
+            reference.identifier()
+        ))
+    );
+}
+
+#[test]
 fn css_image_layers_preserve_sampling_inputs_without_lowering() {
     let resource = ResolvedImageResource::try_new(ImageId::new(11), Size::new(8.0, 8.0)).unwrap();
     let layer = StyleImageLayer::try_new(StyleImageSource::resolved(resource.clone()))

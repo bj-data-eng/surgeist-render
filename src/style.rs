@@ -1,6 +1,7 @@
 use super::{
-    Color, CoordinateSpaceTag, Error, Image, ImageId, Paint, Result, Shadow, Shape, Size,
-    SymbolicColorPolicy,
+    Color, CoordinateSpaceTag, Error, Image, ImageColorProfilePolicy, ImageId,
+    ImageOrientationPolicy, Paint, Result, Shadow, Shape, Size, SymbolicColorPolicy,
+    UnresolvedResource, UnresolvedResourceKind,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
         validate_size,
@@ -57,12 +58,17 @@ impl StyleResourceRef {
 pub struct ResolvedImageResource {
     id: ImageId,
     intrinsic_size: Size,
+    density: Option<ImageResourceDensity>,
 }
 
 impl ResolvedImageResource {
     pub fn try_new(id: ImageId, intrinsic_size: Size) -> Result<Self> {
         validate_size(intrinsic_size, "resolved image intrinsic size")?;
-        Ok(Self { id, intrinsic_size })
+        Ok(Self {
+            id,
+            intrinsic_size,
+            density: None,
+        })
     }
 
     #[must_use]
@@ -73,6 +79,50 @@ impl ResolvedImageResource {
     #[must_use]
     pub const fn intrinsic_size(&self) -> Size {
         self.intrinsic_size
+    }
+
+    #[must_use]
+    pub const fn with_density(mut self, density: ImageResourceDensity) -> Self {
+        self.density = Some(density);
+        self
+    }
+
+    #[must_use]
+    pub const fn density(&self) -> Option<ImageResourceDensity> {
+        self.density
+    }
+
+    #[must_use]
+    pub const fn orientation_policy(&self) -> ImageOrientationPolicy {
+        ImageOrientationPolicy::RootResolvedOnly
+    }
+
+    #[must_use]
+    pub const fn color_profile_policy(&self) -> ImageColorProfilePolicy {
+        ImageColorProfilePolicy::RootResolvedOnly
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageResourceDensity {
+    value: f64,
+}
+
+impl ImageResourceDensity {
+    pub fn try_new(value: f64) -> Result<Self> {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(Error::invalid_value(
+                "image resource density",
+                value,
+                "must be finite and positive",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.value
     }
 }
 
@@ -86,6 +136,7 @@ pub enum StyleImageSourceKind {
     Image(Image),
     Resolved(ResolvedImageResource),
     Paint(Paint),
+    Unresolved(StyleResourceRef),
 }
 
 impl StyleImageSource {
@@ -108,6 +159,23 @@ impl StyleImageSource {
         Self {
             kind: StyleImageSourceKind::Resolved(resource),
         }
+    }
+
+    #[must_use]
+    pub fn unresolved(reference: StyleResourceRef) -> Self {
+        Self {
+            kind: StyleImageSourceKind::Unresolved(reference),
+        }
+    }
+
+    pub fn require_resolved(&self) -> Result<()> {
+        if let StyleImageSourceKind::Unresolved(reference) = &self.kind {
+            return Err(Error::unresolved_resource(UnresolvedResource::new(
+                UnresolvedResourceKind::Image,
+                reference.identifier(),
+            )));
+        }
+        Ok(())
     }
 
     #[must_use]
