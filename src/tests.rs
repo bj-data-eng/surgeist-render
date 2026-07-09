@@ -850,15 +850,181 @@ fn image_color_filter_execution_changes_image_identity_when_bytes_change() {
 }
 
 #[test]
-fn image_color_filter_execution_rejects_blur_and_drop_shadow_before_bytes_transform() {
+fn image_filter_execution_blurs_one_pixel_transparent_and_opaque_images() {
+    let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 0])).unwrap();
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
+        filters.clone(),
+    )
+    .unwrap();
+
+    let transparent = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+        .unwrap()
+        .execute_to_image()
+        .unwrap();
+
+    assert_eq!(transparent.size(), Size::new(1.0, 1.0));
+    assert_eq!(transparent.bytes.as_ref(), &[0, 0, 0, 0]);
+    assert_eq!(
+        transparent.id(),
+        image.id(),
+        "identity stays stable when blur leaves bytes unchanged"
+    );
+
+    let opaque =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([100, 150, 200, 255])).unwrap();
+    let opaque_paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(opaque.id(), opaque.size()).unwrap(),
+        filters,
+    )
+    .unwrap();
+
+    let blurred = image::ResolvedImageColorFilterExecution::try_new(&opaque_paint, &opaque)
+        .unwrap()
+        .execute_to_image()
+        .unwrap();
+
+    assert_eq!(blurred.size(), Size::new(1.0, 1.0));
+    assert_eq!(blurred.bytes.as_ref(), &[100, 149, 199, 41]);
+    assert_ne!(
+        blurred.id(),
+        opaque.id(),
+        "filtered output identity changes when blur changes bytes"
+    );
+}
+
+#[test]
+fn image_filter_execution_blurs_multi_pixel_image_with_transparent_edges() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(3, 1),
+        rgba: vec![0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0],
+    };
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+
+    let blurred =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(blurred.size, PhysicalSize::new(3, 1));
+    assert_eq!(
+        blurred.rgba,
+        vec![255, 0, 0, 25, 255, 0, 0, 41, 255, 0, 0, 25]
+    );
+}
+
+#[test]
+fn filtered_image_paint_executes_blur_with_matching_materialized_image() {
+    let image = Image::from_rgba(
+        Size::new(2.0, 1.0),
+        Arc::<[u8]>::from([255, 0, 0, 255, 0, 0, 0, 0]),
+    )
+    .unwrap();
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
+        filters.clone(),
+    )
+    .unwrap();
+
+    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+        .unwrap()
+        .execute_to_image()
+        .unwrap();
+
+    assert_eq!(filtered.size(), Size::new(2.0, 1.0));
+    assert_eq!(filtered.bytes.as_ref(), &[255, 0, 0, 41, 255, 0, 0, 25]);
+
+    let wrong_id = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(ImageId::new(image.id().get() + 1), image.size()).unwrap(),
+        filters.clone(),
+    )
+    .unwrap();
+    let wrong_size = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), Size::new(1.0, 1.0)).unwrap(),
+        filters,
+    )
+    .unwrap();
+
+    assert_eq!(
+        image::ResolvedImageColorFilterExecution::try_new(&wrong_id, &image)
+            .expect_err("materialized image id should match resolved resource id")
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("materialized filtered image id")
+    );
+    assert_eq!(
+        image::ResolvedImageColorFilterExecution::try_new(&wrong_size, &image)
+            .expect_err("materialized image size should match resolved resource size")
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("materialized filtered image size")
+    );
+}
+
+#[test]
+fn materialized_image_filters_preserve_color_and_blur_order() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(3, 1),
+        rgba: vec![200, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0],
+    };
+    let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
+    let blur = FilterOp::blur(FilterBlur::try_new(1.0).unwrap());
+    let color_before_blur = FilterList::try_ops(vec![brightness.clone(), blur.clone()]).unwrap();
+    let blur_before_color = FilterList::try_ops(vec![blur, brightness]).unwrap();
+
+    let color_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+        &color_before_blur,
+        &source,
+    )
+    .unwrap()
+    .execute_to_image_buffer()
+    .unwrap();
+    let blur_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+        &blur_before_color,
+        &source,
+    )
+    .unwrap()
+    .execute_to_image_buffer()
+    .unwrap();
+
+    assert_eq!(color_before.size, PhysicalSize::new(3, 1));
+    assert_eq!(blur_before.size, PhysicalSize::new(3, 1));
+    assert_ne!(color_before.rgba, blur_before.rgba);
+}
+
+#[test]
+fn materialized_image_blur_keeps_output_clipped_to_source_region() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 2),
+        rgba: vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    };
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(4.0).unwrap())]).unwrap();
+
+    let blurred =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(
+        blurred.size, source.size,
+        "materialized image blur inflates for sampling but clips output to source image extent"
+    );
+    assert_eq!(blurred.rgba.len(), source.rgba.len());
+}
+
+#[test]
+fn materialized_image_filter_execution_rejects_drop_shadow_until_task5() {
     let image =
         Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([100, 150, 200, 255])).unwrap();
     let resource = ResolvedImageResource::try_new(image.id(), image.size()).unwrap();
-    let blur = FilteredImagePaint::try_new(
-        resource.clone(),
-        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap(),
-    )
-    .unwrap();
     let drop_shadow = FilteredImagePaint::try_new(
         resource,
         FilterList::try_ops(vec![FilterOp::drop_shadow(
@@ -868,23 +1034,16 @@ fn image_color_filter_execution_rejects_blur_and_drop_shadow_before_bytes_transf
     )
     .unwrap();
 
-    let blur_error = image::ResolvedImageColorFilterExecution::try_new(&blur, &image)
-        .expect_err("blur must be rejected before any image bytes are transformed");
     let drop_shadow_error = image::ResolvedImageColorFilterExecution::try_new(&drop_shadow, &image)
-        .expect_err("drop-shadow must be rejected before any image bytes are transformed");
+        .unwrap()
+        .execute_to_image()
+        .expect_err("drop-shadow materialized execution is reserved for Task 5");
 
-    assert_eq!(
-        blur_error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::ColorFilterBlur,
-        ))
-    );
     assert_eq!(
         drop_shadow_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::Filters,
-            PrimitiveOperation::ColorFilterDropShadow,
+            PrimitiveOperation::MaterializedDropShadowFilterExecution,
         ))
     );
 }
@@ -1024,32 +1183,22 @@ fn sequence10_guardrail_later_effect_execution_stays_unsupported() {
         size: PhysicalSize::new(1, 1),
         rgba: vec![100, 150, 200, 255],
     };
-    let blur =
-        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap();
     let shadow = Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
     let drop_shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
 
-    let blur_error =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&blur, &image_buffer)
-            .expect_err("Sequence 10 must not execute blur filters");
     let drop_shadow_error = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &drop_shadow,
         &image_buffer,
     )
-    .expect_err("Sequence 10 must not execute drop-shadow filters");
+    .unwrap()
+    .execute_to_image_buffer()
+    .expect_err("drop-shadow execution is reserved for Sequence 11 Task 5");
 
-    assert_eq!(
-        blur_error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::ColorFilterBlur,
-        ))
-    );
     assert_eq!(
         drop_shadow_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::Filters,
-            PrimitiveOperation::ColorFilterDropShadow,
+            PrimitiveOperation::MaterializedDropShadowFilterExecution,
         ))
     );
 
@@ -5489,7 +5638,7 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
 }
 
 #[test]
-fn pixel_moving_filter_capability_names_do_not_advertise_execution_yet() {
+fn pixel_moving_filter_capability_names_advertise_only_blur_execution() {
     let capabilities = Capabilities::VELLO_0_9;
 
     assert!(
@@ -5498,7 +5647,7 @@ fn pixel_moving_filter_capability_names_do_not_advertise_execution_yet() {
             .supports_materialized_image_filter_classification()
     );
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_materialized_blur_filter_execution()
     );
@@ -5508,12 +5657,12 @@ fn pixel_moving_filter_capability_names_do_not_advertise_execution_yet() {
             .supports_materialized_drop_shadow_filter_execution()
     );
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_filter_region_outset_planning()
     );
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_cpu_reference_blur_fallback()
     );
@@ -5534,16 +5683,11 @@ fn pixel_moving_filter_capability_names_do_not_advertise_execution_yet() {
 
 #[test]
 fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
-    let cases = [
+    let supported_cases = [
         (
             PrimitiveFamily::Filters,
             PrimitiveOperation::MaterializedBlurFilterExecution,
             "materialized blur filter execution",
-        ),
-        (
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::MaterializedDropShadowFilterExecution,
-            "materialized drop-shadow filter execution",
         ),
         (
             PrimitiveFamily::Filters,
@@ -5554,6 +5698,13 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
             PrimitiveFamily::Filters,
             PrimitiveOperation::CpuReferenceBlurFallback,
             "CPU/reference blur fallback",
+        ),
+    ];
+    let unsupported_cases = [
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::MaterializedDropShadowFilterExecution,
+            "materialized drop-shadow filter execution",
         ),
         (
             PrimitiveFamily::Shadows,
@@ -5567,13 +5718,21 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         ),
     ];
 
-    for (family, operation, label) in cases {
+    for (family, operation, label) in supported_cases {
+        let supported = UnsupportedPrimitive::new(family, operation);
+        assert_eq!(supported.label(), label);
+        Capabilities::VELLO_0_9
+            .ensure_supported(supported)
+            .expect("Task 4 enables materialized blur execution and its planning pieces");
+    }
+
+    for (family, operation, label) in unsupported_cases {
         let unsupported = UnsupportedPrimitive::new(family, operation);
         assert_eq!(unsupported.label(), label);
 
         let error = Capabilities::VELLO_0_9
             .ensure_supported(unsupported)
-            .expect_err("Task 1 names diagnostics without enabling execution");
+            .expect_err("later sequence diagnostics stay named without execution");
         assert_eq!(error.code, ErrorCode::UnsupportedBackend);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
         assert!(error.message.contains(label));

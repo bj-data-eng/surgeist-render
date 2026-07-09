@@ -1,6 +1,10 @@
 use super::{
     Error, ErrorCode, FilterList, FilteredImagePaint, PhysicalSize, Result, Size,
-    filter::CompiledColorFilterPipeline,
+    UnsupportedPrimitive,
+    filter::{
+        BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
+        FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
+    },
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
 };
 use std::{hash::Hasher, sync::Arc};
@@ -147,26 +151,31 @@ pub struct ImageBuffer {
 ///
 /// `FilteredImagePaint` names the resolved resource and authored filter list, but the
 /// bytes come from the paired `Image`. The execution phase converts straight RGBA8
-/// image bytes to premultiplied RGBA8 reference pixels, applies the compiled
-/// color-only pipeline, then emits straight RGBA8 again for paint/upload.
+/// image bytes to premultiplied RGBA8 reference pixels, applies the ordered
+/// materialized-image filter pipeline, then emits straight RGBA8 again for
+/// paint/upload.
 #[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
-pub(crate) struct ResolvedImageColorFilterExecution<'a> {
-    source: ResolvedImageColorFilterSource<'a>,
-    pipeline: CompiledColorFilterPipeline,
+pub(crate) struct ResolvedMaterializedImageFilterExecution<'a> {
+    source: ResolvedMaterializedImageFilterSource<'a>,
+    pipeline: MaterializedImageFilterPipeline,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
+pub(crate) type ResolvedImageColorFilterExecution<'a> =
+    ResolvedMaterializedImageFilterExecution<'a>;
+
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug)]
-enum ResolvedImageColorFilterSource<'a> {
+enum ResolvedMaterializedImageFilterSource<'a> {
     Image(&'a Image),
     ImageBuffer(&'a ImageBuffer),
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-impl<'a> ResolvedImageColorFilterExecution<'a> {
+impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
     pub(crate) fn try_new(paint: &FilteredImagePaint, image: &'a Image) -> Result<Self> {
-        let pipeline = compile_color_filter_pipeline(paint.filters())?;
+        let pipeline = compile_materialized_image_filter_pipeline(paint.filters())?;
         if paint.resource().id() != image.id() {
             return Err(Error::invalid_value(
                 "materialized filtered image id",
@@ -182,7 +191,7 @@ impl<'a> ResolvedImageColorFilterExecution<'a> {
             ));
         }
         Ok(Self {
-            source: ResolvedImageColorFilterSource::Image(image),
+            source: ResolvedMaterializedImageFilterSource::Image(image),
             pipeline,
         })
     }
@@ -191,16 +200,16 @@ impl<'a> ResolvedImageColorFilterExecution<'a> {
         filters: &FilterList,
         image_buffer: &'a ImageBuffer,
     ) -> Result<Self> {
-        let pipeline = compile_color_filter_pipeline(filters)?;
+        let pipeline = compile_materialized_image_filter_pipeline(filters)?;
         validate_image_buffer_rgba_len(image_buffer.size, image_buffer.rgba.len())?;
         Ok(Self {
-            source: ResolvedImageColorFilterSource::ImageBuffer(image_buffer),
+            source: ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer),
             pipeline,
         })
     }
 
     pub(crate) fn execute_to_image(&self) -> Result<Image> {
-        let ResolvedImageColorFilterSource::Image(image) = self.source else {
+        let ResolvedMaterializedImageFilterSource::Image(image) = self.source else {
             return Err(Error::invalid_value(
                 "color-filtered image execution source",
                 "image buffer",
@@ -208,7 +217,7 @@ impl<'a> ResolvedImageColorFilterExecution<'a> {
             ));
         };
         let premultiplied = straight_rgba8_image_to_premultiplied_rgba8_reference(image)?;
-        let filtered = premultiplied.apply_compiled_color_filter_pipeline(&self.pipeline)?;
+        let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
         let straight = premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)?;
         let mut filtered_image = Image::from_rgba(image.size(), Arc::<[u8]>::from(straight.rgba))?;
         filtered_image.quality = image.quality;
@@ -217,7 +226,7 @@ impl<'a> ResolvedImageColorFilterExecution<'a> {
     }
 
     pub(crate) fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
-        let ResolvedImageColorFilterSource::ImageBuffer(image_buffer) = self.source else {
+        let ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer) = self.source else {
             return Err(Error::invalid_value(
                 "color-filtered image buffer execution source",
                 "image",
@@ -226,7 +235,7 @@ impl<'a> ResolvedImageColorFilterExecution<'a> {
         };
         let premultiplied =
             straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(image_buffer)?;
-        let filtered = premultiplied.apply_compiled_color_filter_pipeline(&self.pipeline)?;
+        let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
         premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)
     }
 }
@@ -275,18 +284,89 @@ pub(crate) fn premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-fn compile_color_filter_pipeline(filters: &FilterList) -> Result<CompiledColorFilterPipeline> {
+fn compile_materialized_image_filter_pipeline(
+    filters: &FilterList,
+) -> Result<MaterializedImageFilterPipeline> {
     let pipeline = filters
-        .color_filter_pipeline()
-        .map_err(Error::unsupported_render_primitive)?
+        .materialized_image_filter_pipeline()?
         .ok_or_else(|| {
             Error::invalid_value(
-                "color-filtered image filters",
+                "materialized image filters",
                 "none",
-                "must contain at least one color filter operation",
+                "must contain at least one filter operation",
             )
         })?;
-    CompiledColorFilterPipeline::try_from_pipeline(&pipeline)
+    Ok(pipeline)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn execute_materialized_filter_pipeline(
+    source: &ReferencePremultipliedRgba8Buffer,
+    pipeline: &MaterializedImageFilterPipeline,
+) -> Result<ReferencePremultipliedRgba8Buffer> {
+    let mut current = source.clone();
+    for step in pipeline.steps() {
+        current = match step {
+            MaterializedImageFilterStep::ColorFilters(pipeline) => {
+                current.apply_compiled_color_filter_pipeline(pipeline)?
+            }
+            MaterializedImageFilterStep::Blur(blur) => {
+                let planned_size = plan_clipped_materialized_blur_output_size(
+                    current.physical_size(),
+                    *blur,
+                    BlurPolicy::css_filter_default(),
+                )?;
+                let blurred = current.apply_blur(*blur, BlurPolicy::css_filter_default())?;
+                if blurred.physical_size() != planned_size {
+                    return Err(Error::invalid_value(
+                        "materialized blur output size",
+                        format!(
+                            "{}x{}",
+                            blurred.physical_size().width(),
+                            blurred.physical_size().height()
+                        ),
+                        "must match the clipped materialized image filter region",
+                    ));
+                }
+                blurred
+            }
+            MaterializedImageFilterStep::DropShadow(_) => {
+                return Err(Error::unsupported_render_primitive(
+                    UnsupportedPrimitive::new(
+                        super::PrimitiveFamily::Filters,
+                        super::PrimitiveOperation::MaterializedDropShadowFilterExecution,
+                    ),
+                ));
+            }
+        };
+    }
+    Ok(current)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn plan_clipped_materialized_blur_output_size(
+    size: PhysicalSize,
+    blur: super::FilterBlur,
+    policy: BlurPolicy,
+) -> Result<PhysicalSize> {
+    let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));
+    let source = FilterSourceBounds::try_new(source_rect)?;
+    let outset = FilterOutset::from_blur(blur, policy)?;
+    let clip = FilterClipBounds::try_new(source_rect)?;
+    let region = FilterRegionPlan::try_new(source, outset, Some(clip))?;
+    let device_bounds =
+        DevicePixelConversionPolicy::outward().convert_region(region.execution_region(), 1.0)?;
+    if device_bounds.x() != 0 || device_bounds.y() != 0 {
+        return Err(Error::invalid_value(
+            "materialized blur output origin",
+            format!("{},{}", device_bounds.x(), device_bounds.y()),
+            "must remain anchored to the source image origin after clipping",
+        ));
+    }
+    Ok(PhysicalSize::new(
+        device_bounds.width(),
+        device_bounds.height(),
+    ))
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
