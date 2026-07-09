@@ -4274,6 +4274,78 @@ fn masks_and_clips_can_carry_coordinate_space_tags() {
 }
 
 #[test]
+fn clip_inputs_diagnose_unresolved_reference_boundaries() {
+    let clip = ClipInput::reference(StyleResourceRef::try_new("#content-clip").unwrap());
+
+    let error = clip
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("clip references must be root-resolved before render execution");
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    let diagnostic = error
+        .unresolved_resource_diagnostic()
+        .expect("clip references should report an unresolved resource");
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Clip);
+    assert_eq!(diagnostic.identifier(), "#content-clip");
+}
+
+#[test]
+fn shape_clip_inputs_match_current_capability_contract() {
+    let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0))).unwrap();
+
+    clip.ensure_supported(Capabilities::VELLO_0_9)
+        .expect("shape clips are supported by the current Vello layer path");
+    assert!(Capabilities::VELLO_0_9.masks_clips().supports_shape_clips());
+}
+
+#[test]
+fn mask_inputs_diagnose_current_unexecuted_boundaries() {
+    let alpha_mask =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0)), MaskMode::Alpha).unwrap();
+    let luminance_mask = MaskInput::try_shape(
+        Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0)),
+        MaskMode::Luminance,
+    )
+    .unwrap();
+    let reference_mask = MaskInput::reference(
+        StyleResourceRef::try_new("#alpha-mask").unwrap(),
+        MaskMode::Alpha,
+    );
+
+    let alpha_error = alpha_mask
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("alpha mask execution is not implemented in Task 1");
+    assert_eq!(
+        alpha_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::AlphaMaskExecution,
+        ))
+    );
+
+    let luminance_error = luminance_mask
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("luminance mask mode is not implemented in Task 1");
+    assert_eq!(
+        luminance_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LuminanceMaskMode,
+        ))
+    );
+
+    let reference_error = reference_mask
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("mask references must be root-resolved before render execution");
+    assert_eq!(reference_error.code, ErrorCode::UnresolvedResource);
+    let diagnostic = reference_error
+        .unresolved_resource_diagnostic()
+        .expect("mask references should report an unresolved resource");
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Mask);
+    assert_eq!(diagnostic.identifier(), "#alpha-mask");
+}
+
+#[test]
 fn clip_inputs_reject_invalid_shape_points() {
     let mut path = Path::new();
     path.move_to(Point::new(f64::NAN, 0.0));
@@ -6159,6 +6231,19 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
 }
 
 #[test]
+fn mask_clip_capabilities_name_sequence12_boundaries_without_execution_claims() {
+    let capabilities = Capabilities::VELLO_0_9.masks_clips();
+
+    assert!(capabilities.supports_shape_clips());
+    assert!(!capabilities.supports_clip_reference_execution());
+    assert!(!capabilities.supports_layer_masks());
+    assert!(!capabilities.supports_alpha_mask_execution());
+    assert!(!capabilities.supports_luminance_mask_mode());
+    assert!(!capabilities.supports_multi_layer_mask_composition());
+    assert!(!capabilities.supports_mask_composite_modes());
+}
+
+#[test]
 fn color_filter_capability_names_granular_execution_without_broad_effects() {
     let capabilities = Capabilities::VELLO_0_9;
 
@@ -6451,6 +6536,28 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         assert_eq!(error.code, ErrorCode::UnsupportedBackend);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
         assert!(error.message.contains("offscreen pipeline"));
+        assert!(error.message.contains(unsupported.label()));
+    }
+}
+
+#[test]
+fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
+    for operation in [
+        PrimitiveOperation::ClipReferenceExecution,
+        PrimitiveOperation::LayerMask,
+        PrimitiveOperation::AlphaMaskExecution,
+        PrimitiveOperation::LuminanceMaskMode,
+        PrimitiveOperation::MultiLayerMaskComposition,
+        PrimitiveOperation::MaskCompositeMode,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::MasksAndClips, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("Sequence 12 Task 1 should only name unsupported mask/clip boundaries");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains("masks and clips"));
         assert!(error.message.contains(unsupported.label()));
     }
 }

@@ -1533,6 +1533,18 @@ impl ClipInput {
     pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
         self.coordinate_space
     }
+
+    pub fn ensure_supported(&self, capabilities: Capabilities) -> Result<()> {
+        match &self.kind {
+            ClipInputKind::Shape(_) => capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::ShapeClip,
+            )),
+            ClipInputKind::Reference(reference) => Err(Error::unresolved_resource(
+                UnresolvedResource::new(UnresolvedResourceKind::Clip, reference.identifier()),
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1606,6 +1618,32 @@ impl MaskInput {
     #[must_use]
     pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
         self.coordinate_space
+    }
+
+    pub fn ensure_supported(&self, capabilities: Capabilities) -> Result<()> {
+        match self.source.kind() {
+            MaskSourceKind::Reference(reference) => {
+                return Err(Error::unresolved_resource(UnresolvedResource::new(
+                    UnresolvedResourceKind::Mask,
+                    reference.identifier(),
+                )));
+            }
+            MaskSourceKind::ImageLayer(layer) => {
+                layer.source().require_resolved()?;
+            }
+            MaskSourceKind::Shape(_) => {}
+        }
+
+        match self.mode {
+            MaskMode::Alpha => capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::AlphaMaskExecution,
+            )),
+            MaskMode::Luminance => capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::LuminanceMaskMode,
+            )),
+        }
     }
 }
 

@@ -248,7 +248,13 @@ impl PrimitiveFamily {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrimitiveOperation {
     LayerFilter,
+    ShapeClip,
+    ClipReferenceExecution,
     LayerMask,
+    AlphaMaskExecution,
+    LuminanceMaskMode,
+    MultiLayerMaskComposition,
+    MaskCompositeMode,
     NonSolidShadowPaint,
     UnresolvedSymbolicColor,
     ColorMixFunction,
@@ -302,7 +308,13 @@ impl PrimitiveOperation {
     pub const fn label(self) -> &'static str {
         match self {
             Self::LayerFilter => "layer filter",
+            Self::ShapeClip => "shape clip",
+            Self::ClipReferenceExecution => "clip reference execution",
             Self::LayerMask => "layer mask",
+            Self::AlphaMaskExecution => "alpha mask execution",
+            Self::LuminanceMaskMode => "luminance mask mode",
+            Self::MultiLayerMaskComposition => "multi-layer mask composition",
+            Self::MaskCompositeMode => "mask composite mode",
             Self::NonSolidShadowPaint => "non-solid shadow paint",
             Self::UnresolvedSymbolicColor => "unresolved symbolic color",
             Self::ColorMixFunction => "color-mix function",

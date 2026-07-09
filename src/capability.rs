@@ -74,7 +74,12 @@ impl Capabilities {
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,
+            clip_reference_execution: false,
             layer_masks: false,
+            alpha_mask_execution: false,
+            luminance_mask_mode: false,
+            multi_layer_mask_composition: false,
+            mask_composite_modes: false,
         },
         box_decorations: BoxDecorationCapabilities {
             border_none_hidden_styles: true,
@@ -275,8 +280,26 @@ impl Capabilities {
                 PrimitiveFamily::Filters,
                 PrimitiveOperation::ColorFilterBlur | PrimitiveOperation::ColorFilterDropShadow,
             ) => false,
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ShapeClip) => {
+                self.masks_clips.supports_shape_clips()
+            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ClipReferenceExecution) => {
+                self.masks_clips.supports_clip_reference_execution()
+            }
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LayerMask) => {
                 self.masks_clips.supports_layer_masks()
+            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::AlphaMaskExecution) => {
+                self.masks_clips.supports_alpha_mask_execution()
+            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LuminanceMaskMode) => {
+                self.masks_clips.supports_luminance_mask_mode()
+            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::MultiLayerMaskComposition) => {
+                self.masks_clips.supports_multi_layer_mask_composition()
+            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::MaskCompositeMode) => {
+                self.masks_clips.supports_mask_composite_modes()
             }
             (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderGrooveStyle) => {
                 self.box_decorations.supports_border_groove_style()
@@ -662,7 +685,12 @@ impl FilterCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MaskClipCapabilities {
     shape_clips: bool,
+    clip_reference_execution: bool,
     layer_masks: bool,
+    alpha_mask_execution: bool,
+    luminance_mask_mode: bool,
+    multi_layer_mask_composition: bool,
+    mask_composite_modes: bool,
 }
 
 impl MaskClipCapabilities {
@@ -672,8 +700,33 @@ impl MaskClipCapabilities {
     }
 
     #[must_use]
+    pub const fn supports_clip_reference_execution(self) -> bool {
+        self.clip_reference_execution
+    }
+
+    #[must_use]
     pub const fn supports_layer_masks(self) -> bool {
         self.layer_masks
+    }
+
+    #[must_use]
+    pub const fn supports_alpha_mask_execution(self) -> bool {
+        self.alpha_mask_execution
+    }
+
+    #[must_use]
+    pub const fn supports_luminance_mask_mode(self) -> bool {
+        self.luminance_mask_mode
+    }
+
+    #[must_use]
+    pub const fn supports_multi_layer_mask_composition(self) -> bool {
+        self.multi_layer_mask_composition
+    }
+
+    #[must_use]
+    pub const fn supports_mask_composite_modes(self) -> bool {
+        self.mask_composite_modes
     }
 }
 
