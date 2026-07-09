@@ -297,6 +297,27 @@ impl Transform {
         Ok(Self(values))
     }
 
+    pub fn translation(x: f64, y: f64) -> Result<Self> {
+        Self::try_new([1.0, 0.0, 0.0, 1.0, x, y])
+    }
+
+    pub fn scale(x: f64, y: f64) -> Result<Self> {
+        Self::try_new([x, 0.0, 0.0, y, 0.0, 0.0])
+    }
+
+    pub fn rotation(radians: f64) -> Result<Self> {
+        let (sin, cos) = radians.sin_cos();
+        Self::try_new([cos, sin, -sin, cos, 0.0, 0.0])
+    }
+
+    pub fn skew_x(radians: f64) -> Result<Self> {
+        Self::try_new([1.0, 0.0, radians.tan(), 1.0, 0.0, 0.0])
+    }
+
+    pub fn skew_y(radians: f64) -> Result<Self> {
+        Self::try_new([1.0, radians.tan(), 0.0, 1.0, 0.0, 0.0])
+    }
+
     #[must_use]
     pub const fn as_array(self) -> [f64; 6] {
         self.0

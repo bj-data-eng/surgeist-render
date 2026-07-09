@@ -1084,6 +1084,38 @@ fn geometry_try_constructors_reject_invalid_values() {
 }
 
 #[test]
+fn transform_helpers_preserve_affine_coefficients() {
+    let translate = Transform::translation(2.0, 3.0).unwrap();
+    let scale = Transform::scale(2.0, 4.0).unwrap();
+    let rotate = Transform::rotation(std::f64::consts::FRAC_PI_2).unwrap();
+
+    assert_eq!(translate.as_array(), [1.0, 0.0, 0.0, 1.0, 2.0, 3.0]);
+    assert_eq!(scale.as_array(), [2.0, 0.0, 0.0, 4.0, 0.0, 0.0]);
+    assert!(rotate.as_array()[0].abs() < 1.0e-12);
+    assert!((rotate.as_array()[1] - 1.0).abs() < 1.0e-12);
+    assert!((rotate.as_array()[2] + 1.0).abs() < 1.0e-12);
+    assert!(rotate.as_array()[3].abs() < 1.0e-12);
+}
+
+#[test]
+fn transform_skew_helpers_preserve_tangent_coefficients() {
+    let skew_x = Transform::skew_x(std::f64::consts::FRAC_PI_4).unwrap();
+    let skew_y = Transform::skew_y(std::f64::consts::FRAC_PI_4).unwrap();
+
+    assert!((skew_x.as_array()[2] - 1.0).abs() < 1.0e-12);
+    assert!((skew_y.as_array()[1] - 1.0).abs() < 1.0e-12);
+}
+
+#[test]
+fn transform_helpers_reject_non_finite_inputs() {
+    assert!(Transform::translation(f64::NAN, 0.0).is_err());
+    assert!(Transform::scale(1.0, f64::INFINITY).is_err());
+    assert!(Transform::rotation(f64::NAN).is_err());
+    assert!(Transform::skew_x(f64::INFINITY).is_err());
+    assert!(Transform::skew_y(f64::NAN).is_err());
+}
+
+#[test]
 fn rect_try_from_kurbo_rejects_invalid_bounds() {
     let rect = kurbo::Rect {
         x0: 1.0,
