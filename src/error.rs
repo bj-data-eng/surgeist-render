@@ -221,6 +221,7 @@ pub enum PrimitiveFamily {
     Shadows,
     Filters,
     MasksAndClips,
+    BoxDecorations,
     Surfaces,
     TransformsAndCoordinateSpaces,
 }
@@ -235,6 +236,7 @@ impl PrimitiveFamily {
             Self::Shadows => "shadows",
             Self::Filters => "filters",
             Self::MasksAndClips => "masks and clips",
+            Self::BoxDecorations => "box decorations",
             Self::Surfaces => "surfaces",
             Self::TransformsAndCoordinateSpaces => "transforms and coordinate spaces",
         }
@@ -265,6 +267,12 @@ pub enum PrimitiveOperation {
     Rotate3dTransform,
     TranslateZTransform,
     ScaleZTransform,
+    BorderGrooveStyle,
+    BorderRidgeStyle,
+    BorderInsetStyle,
+    BorderOutsetStyle,
+    OutlineDoubleStyle,
+    OutlineAutoStyle,
 }
 
 impl PrimitiveOperation {
@@ -293,6 +301,12 @@ impl PrimitiveOperation {
             Self::Rotate3dTransform => "rotate3d transform",
             Self::TranslateZTransform => "translateZ transform",
             Self::ScaleZTransform => "scaleZ transform",
+            Self::BorderGrooveStyle => "border groove style",
+            Self::BorderRidgeStyle => "border ridge style",
+            Self::BorderInsetStyle => "border inset style",
+            Self::BorderOutsetStyle => "border outset style",
+            Self::OutlineDoubleStyle => "outline double style",
+            Self::OutlineAutoStyle => "outline auto style",
         }
     }
 }

@@ -8,6 +8,7 @@ pub struct Capabilities {
     shadows: ShadowCapabilities,
     filters: FilterCapabilities,
     masks_clips: MaskClipCapabilities,
+    box_decorations: BoxDecorationCapabilities,
     compositing: CompositingCapabilities,
     surfaces: SurfaceCapabilities,
     transform_coordinate_spaces: TransformCoordinateSpaceCapabilities,
@@ -64,6 +65,24 @@ impl Capabilities {
             shape_clips: true,
             layer_masks: false,
         },
+        box_decorations: BoxDecorationCapabilities {
+            border_none_hidden_styles: true,
+            border_solid_style: true,
+            border_dashed_dotted_styles: true,
+            border_double_style: true,
+            border_groove_style: false,
+            border_ridge_style: false,
+            border_inset_style: false,
+            border_outset_style: false,
+            border_radii: true,
+            outlines: true,
+            outline_none_style: true,
+            outline_solid_style: true,
+            outline_dashed_dotted_styles: true,
+            outline_double_style: false,
+            outline_auto_style: false,
+            fragments: true,
+        },
         compositing: CompositingCapabilities {
             layer_opacity: true,
             blend_modes: true,
@@ -109,6 +128,11 @@ impl Capabilities {
     #[must_use]
     pub const fn masks_clips(self) -> MaskClipCapabilities {
         self.masks_clips
+    }
+
+    #[must_use]
+    pub const fn box_decorations(self) -> BoxDecorationCapabilities {
+        self.box_decorations
     }
 
     #[must_use]
@@ -185,6 +209,24 @@ impl Capabilities {
             }
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LayerMask) => {
                 self.masks_clips.supports_layer_masks()
+            }
+            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderGrooveStyle) => {
+                self.box_decorations.supports_border_groove_style()
+            }
+            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderRidgeStyle) => {
+                self.box_decorations.supports_border_ridge_style()
+            }
+            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderInsetStyle) => {
+                self.box_decorations.supports_border_inset_style()
+            }
+            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderOutsetStyle) => {
+                self.box_decorations.supports_border_outset_style()
+            }
+            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::OutlineDoubleStyle) => {
+                self.box_decorations.supports_outline_double_style()
+            }
+            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::OutlineAutoStyle) => {
+                self.box_decorations.supports_outline_auto_style()
             }
             (PrimitiveFamily::Surfaces, PrimitiveOperation::WebCanvasSurface) => {
                 self.surfaces.supports_web_canvas_surfaces()
@@ -476,6 +518,108 @@ impl MaskClipCapabilities {
     #[must_use]
     pub const fn supports_layer_masks(self) -> bool {
         self.layer_masks
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BoxDecorationCapabilities {
+    border_none_hidden_styles: bool,
+    border_solid_style: bool,
+    border_dashed_dotted_styles: bool,
+    border_double_style: bool,
+    border_groove_style: bool,
+    border_ridge_style: bool,
+    border_inset_style: bool,
+    border_outset_style: bool,
+    border_radii: bool,
+    outlines: bool,
+    outline_none_style: bool,
+    outline_solid_style: bool,
+    outline_dashed_dotted_styles: bool,
+    outline_double_style: bool,
+    outline_auto_style: bool,
+    fragments: bool,
+}
+
+impl BoxDecorationCapabilities {
+    #[must_use]
+    pub const fn supports_border_none_hidden_styles(self) -> bool {
+        self.border_none_hidden_styles
+    }
+
+    #[must_use]
+    pub const fn supports_border_solid_style(self) -> bool {
+        self.border_solid_style
+    }
+
+    #[must_use]
+    pub const fn supports_border_dashed_dotted_styles(self) -> bool {
+        self.border_dashed_dotted_styles
+    }
+
+    #[must_use]
+    pub const fn supports_border_double_style(self) -> bool {
+        self.border_double_style
+    }
+
+    #[must_use]
+    pub const fn supports_border_groove_style(self) -> bool {
+        self.border_groove_style
+    }
+
+    #[must_use]
+    pub const fn supports_border_ridge_style(self) -> bool {
+        self.border_ridge_style
+    }
+
+    #[must_use]
+    pub const fn supports_border_inset_style(self) -> bool {
+        self.border_inset_style
+    }
+
+    #[must_use]
+    pub const fn supports_border_outset_style(self) -> bool {
+        self.border_outset_style
+    }
+
+    #[must_use]
+    pub const fn supports_border_radii(self) -> bool {
+        self.border_radii
+    }
+
+    #[must_use]
+    pub const fn supports_outlines(self) -> bool {
+        self.outlines
+    }
+
+    #[must_use]
+    pub const fn supports_outline_none_style(self) -> bool {
+        self.outline_none_style
+    }
+
+    #[must_use]
+    pub const fn supports_outline_solid_style(self) -> bool {
+        self.outline_solid_style
+    }
+
+    #[must_use]
+    pub const fn supports_outline_dashed_dotted_styles(self) -> bool {
+        self.outline_dashed_dotted_styles
+    }
+
+    #[must_use]
+    pub const fn supports_outline_double_style(self) -> bool {
+        self.outline_double_style
+    }
+
+    #[must_use]
+    pub const fn supports_outline_auto_style(self) -> bool {
+        self.outline_auto_style
+    }
+
+    #[must_use]
+    pub const fn supports_fragments(self) -> bool {
+        self.fragments
     }
 }
 

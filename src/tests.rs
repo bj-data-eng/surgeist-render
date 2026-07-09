@@ -2015,6 +2015,34 @@ fn image_sampling_capabilities_name_css_sampling_boundaries() {
 }
 
 #[test]
+fn box_decoration_capability_accessors_name_supported_paint_boundaries() {
+    let capabilities = Capabilities::VELLO_0_9.box_decorations();
+
+    assert!(capabilities.supports_border_none_hidden_styles());
+    assert!(capabilities.supports_border_solid_style());
+    assert!(capabilities.supports_border_dashed_dotted_styles());
+    assert!(capabilities.supports_border_double_style());
+    assert!(capabilities.supports_border_radii());
+    assert!(capabilities.supports_outlines());
+    assert!(capabilities.supports_outline_none_style());
+    assert!(capabilities.supports_outline_solid_style());
+    assert!(capabilities.supports_outline_dashed_dotted_styles());
+    assert!(capabilities.supports_fragments());
+}
+
+#[test]
+fn box_decoration_capability_accessors_name_unsupported_style_boundaries() {
+    let capabilities = Capabilities::VELLO_0_9.box_decorations();
+
+    assert!(!capabilities.supports_border_groove_style());
+    assert!(!capabilities.supports_border_ridge_style());
+    assert!(!capabilities.supports_border_inset_style());
+    assert!(!capabilities.supports_border_outset_style());
+    assert!(!capabilities.supports_outline_double_style());
+    assert!(!capabilities.supports_outline_auto_style());
+}
+
+#[test]
 fn hit_test_geometry_is_root_owned_not_render_lowered() {
     assert_eq!(
         Capabilities::VELLO_0_9.geometry_targets().hit_testing(),
@@ -2111,6 +2139,28 @@ fn unsupported_image_sampling_operations_report_typed_diagnostics() {
 }
 
 #[test]
+fn unsupported_box_decoration_style_capability_diagnostics_are_typed() {
+    for operation in [
+        PrimitiveOperation::BorderGrooveStyle,
+        PrimitiveOperation::BorderRidgeStyle,
+        PrimitiveOperation::BorderInsetStyle,
+        PrimitiveOperation::BorderOutsetStyle,
+        PrimitiveOperation::OutlineDoubleStyle,
+        PrimitiveOperation::OutlineAutoStyle,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::BoxDecorations, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("Vello baseline should reject this box-decoration style");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains("box decorations"));
+        assert!(error.message.contains(unsupported.label()));
+    }
+}
+
+#[test]
 fn unsupported_3d_transforms_report_typed_diagnostics() {
     for operation in [
         PrimitiveOperation::Matrix3dTransform,
@@ -2151,6 +2201,14 @@ fn vello_baseline_reports_current_unsupported_primitives() {
         UnsupportedPrimitive::new(
             PrimitiveFamily::Shadows,
             PrimitiveOperation::EllipsePathShadowShape,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::BoxDecorations,
+            PrimitiveOperation::BorderGrooveStyle,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::BoxDecorations,
+            PrimitiveOperation::OutlineAutoStyle,
         ),
     ];
 
