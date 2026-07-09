@@ -1151,6 +1151,58 @@ fn background_stacks_preserve_color_behind_ordered_layers() {
 }
 
 #[test]
+fn background_areas_select_origin_and_clip_boxes() {
+    let areas = BackgroundAreas::try_new(
+        Rect::new(0.0, 0.0, 120.0, 80.0),
+        Rect::new(10.0, 8.0, 100.0, 60.0),
+        Rect::new(20.0, 18.0, 80.0, 40.0),
+    )
+    .unwrap();
+
+    assert_eq!(
+        areas.rect_for(BackgroundBox::Border),
+        Rect::new(0.0, 0.0, 120.0, 80.0)
+    );
+    assert_eq!(
+        areas.rect_for(BackgroundBox::Padding),
+        Rect::new(10.0, 8.0, 100.0, 60.0)
+    );
+    assert_eq!(
+        areas.rect_for(BackgroundBox::Content),
+        Rect::new(20.0, 18.0, 80.0, 40.0)
+    );
+}
+
+#[test]
+fn background_areas_reject_invalid_rects() {
+    let error = BackgroundAreas::try_new(
+        Rect::new(0.0, 0.0, 100.0, 100.0),
+        Rect::new(0.0, 0.0, 0.0, 50.0),
+        Rect::new(0.0, 0.0, 10.0, 10.0),
+    )
+    .expect_err("background areas require positive boxes");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background padding box")
+    );
+}
+
+#[test]
+fn background_clip_geometry_preserves_box_or_shape_inputs() {
+    let rect_clip = BackgroundClipGeometry::try_rect(Rect::new(0.0, 0.0, 12.0, 8.0)).unwrap();
+    assert_eq!(
+        rect_clip.kind(),
+        &BackgroundClipGeometryKind::Rect(Rect::new(0.0, 0.0, 12.0, 8.0))
+    );
+
+    let shape = Shape::rect(Rect::new(1.0, 2.0, 3.0, 4.0));
+    let shape_clip = BackgroundClipGeometry::try_shape(shape.clone()).unwrap();
+    assert_eq!(shape_clip.shape(), Some(&shape));
+}
+
+#[test]
 fn core_style_models_compose_without_backend_lowering() {
     let color = StyleColor::new(Color::BLACK);
     let paint = Paint::from(color.color());

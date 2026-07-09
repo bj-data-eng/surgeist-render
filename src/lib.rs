@@ -50,7 +50,8 @@ pub use shape::{
 };
 pub use stats::Stats;
 pub use style::{
-    BackgroundAttachment, BackgroundBox, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
+    BackgroundAreas, BackgroundAttachment, BackgroundBox, BackgroundClipGeometry,
+    BackgroundClipGeometryKind, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
     BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide, BorderStyle,
     ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur, FilterList, FilterOp,
     FilterOpKind, FilteredImagePaint, ImageAttachmentPlan, ImagePlacementInput, ImageRepeatMode,

@@ -994,6 +994,115 @@ pub enum BackgroundBox {
     Content,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundAreas {
+    border_box: Rect,
+    padding_box: Rect,
+    content_box: Rect,
+}
+
+impl BackgroundAreas {
+    pub fn try_new(border_box: Rect, padding_box: Rect, content_box: Rect) -> Result<Self> {
+        validate_background_rect(border_box, "background border box")?;
+        validate_background_rect(padding_box, "background padding box")?;
+        validate_background_rect(content_box, "background content box")?;
+        Ok(Self {
+            border_box,
+            padding_box,
+            content_box,
+        })
+    }
+
+    #[must_use]
+    pub const fn border_box(self) -> Rect {
+        self.border_box
+    }
+
+    #[must_use]
+    pub const fn padding_box(self) -> Rect {
+        self.padding_box
+    }
+
+    #[must_use]
+    pub const fn content_box(self) -> Rect {
+        self.content_box
+    }
+
+    #[must_use]
+    pub const fn rect_for(self, box_kind: BackgroundBox) -> Rect {
+        match box_kind {
+            BackgroundBox::Border => self.border_box,
+            BackgroundBox::Padding => self.padding_box,
+            BackgroundBox::Content => self.content_box,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundClipGeometry {
+    kind: BackgroundClipGeometryKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackgroundClipGeometryKind {
+    Rect(Rect),
+    Shape(Shape),
+}
+
+impl BackgroundClipGeometry {
+    pub fn try_rect(rect: Rect) -> Result<Self> {
+        validate_background_rect(rect, "background clip rect")?;
+        Ok(Self {
+            kind: BackgroundClipGeometryKind::Rect(rect),
+        })
+    }
+
+    pub fn try_shape(shape: Shape) -> Result<Self> {
+        validate_shape(&shape)?;
+        Ok(Self {
+            kind: BackgroundClipGeometryKind::Shape(shape),
+        })
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> &BackgroundClipGeometryKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub fn rect(&self) -> Option<Rect> {
+        match &self.kind {
+            BackgroundClipGeometryKind::Rect(rect) => Some(*rect),
+            BackgroundClipGeometryKind::Shape(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> Option<&Shape> {
+        match &self.kind {
+            BackgroundClipGeometryKind::Rect(_) => None,
+            BackgroundClipGeometryKind::Shape(shape) => Some(shape),
+        }
+    }
+}
+
+fn validate_background_rect(rect: Rect, field: &str) -> Result<()> {
+    validate_finite_f64(rect.x(), &format!("{field} x"))?;
+    validate_finite_f64(rect.y(), &format!("{field} y"))?;
+    if !rect.width().is_finite()
+        || !rect.height().is_finite()
+        || rect.width() <= 0.0
+        || rect.height() <= 0.0
+    {
+        return Err(Error::invalid_value(
+            field,
+            format!("{rect:?}"),
+            "must have finite positive width and height",
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackgroundAttachment {
     Scroll,
