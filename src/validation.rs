@@ -24,27 +24,29 @@ pub(crate) fn validate_shape(shape: &Shape) -> Result<()> {
             validate_point(*center, "ellipse center")?;
             validate_size(*radii, "ellipse radii")
         }
-        ShapeKind::Path(path) => {
-            for element in &path.elements {
-                match *element {
-                    PathElement::MoveTo(point) | PathElement::LineTo(point) => {
-                        validate_point(point, "path point")?;
-                    }
-                    PathElement::QuadTo(control, point) => {
-                        validate_point(control, "path control point")?;
-                        validate_point(point, "path point")?;
-                    }
-                    PathElement::CubicTo(a, b, point) => {
-                        validate_point(a, "path control point")?;
-                        validate_point(b, "path control point")?;
-                        validate_point(point, "path point")?;
-                    }
-                    PathElement::Close => {}
-                }
+        ShapeKind::Path(path) => validate_path(path),
+    }
+}
+
+pub(crate) fn validate_path(path: &Path) -> Result<()> {
+    for element in path.elements() {
+        match *element {
+            PathElement::MoveTo(point) | PathElement::LineTo(point) => {
+                validate_point(point, "path point")?;
             }
-            Ok(())
+            PathElement::QuadTo(control, point) => {
+                validate_point(control, "path control point")?;
+                validate_point(point, "path point")?;
+            }
+            PathElement::CubicTo(a, b, point) => {
+                validate_point(a, "path control point")?;
+                validate_point(b, "path control point")?;
+                validate_point(point, "path point")?;
+            }
+            PathElement::Close => {}
         }
     }
+    Ok(())
 }
 
 pub(crate) fn validate_stroke(stroke: Stroke) -> Result<()> {

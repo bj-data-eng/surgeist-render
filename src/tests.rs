@@ -495,6 +495,45 @@ fn mask_inputs_reject_invalid_shape_points() {
 }
 
 #[test]
+fn paths_expose_elements_without_exposing_mutation() {
+    let mut path = Path::new();
+    path.move_to(Point::try_new(0.0, 0.0).unwrap())
+        .line_to(Point::try_new(4.0, 0.0).unwrap())
+        .close();
+
+    assert_eq!(path.elements().len(), 3);
+    assert!(matches!(path.elements()[0], PathElement::MoveTo(_)));
+}
+
+#[test]
+fn filled_paths_preserve_fill_rule_intent() {
+    let mut path = Path::new();
+    path.move_to(Point::try_new(0.0, 0.0).unwrap())
+        .line_to(Point::try_new(4.0, 0.0).unwrap())
+        .line_to(Point::try_new(4.0, 4.0).unwrap())
+        .close();
+    let filled = FilledPath::try_new(path.clone(), FillRule::EvenOdd).unwrap();
+
+    assert_eq!(filled.path(), &path);
+    assert_eq!(filled.fill_rule(), FillRule::EvenOdd);
+}
+
+#[test]
+fn filled_paths_reject_invalid_path_points() {
+    let mut path = Path::new();
+    path.move_to(Point::new(f64::NAN, 0.0));
+
+    let error = FilledPath::try_new(path, FillRule::NonZero)
+        .expect_err("filled paths validate stored path elements");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("path point x")
+    );
+}
+
+#[test]
 fn border_edges_preserve_four_independent_sides() {
     let top = BorderSide::try_new(BorderStyle::Solid, 1.0, Color::BLACK).unwrap();
     let right = BorderSide::try_new(BorderStyle::Dashed, 2.0, Color::BLACK).unwrap();

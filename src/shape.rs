@@ -1,8 +1,8 @@
 use super::{
     Point, Radii, Rect, Result, Size,
     validation::{
-        validate_dash, validate_finite_f64, validate_non_negative_f64, validate_point,
-        validate_positive_f64, validate_radii, validate_rect, validate_size,
+        validate_dash, validate_finite_f64, validate_non_negative_f64, validate_path,
+        validate_point, validate_positive_f64, validate_radii, validate_rect, validate_size,
     },
 };
 
@@ -77,13 +77,18 @@ impl From<Rect> for Shape {
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Path {
-    pub(crate) elements: Vec<PathElement>,
+    elements: Vec<PathElement>,
 }
 
 impl Path {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    #[must_use]
+    pub fn elements(&self) -> &[PathElement] {
+        &self.elements
     }
 
     pub fn move_to(&mut self, point: Point) -> &mut Self {
@@ -119,6 +124,36 @@ pub enum PathElement {
     QuadTo(Point, Point),
     CubicTo(Point, Point, Point),
     Close,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FillRule {
+    #[default]
+    NonZero,
+    EvenOdd,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilledPath {
+    path: Path,
+    fill_rule: FillRule,
+}
+
+impl FilledPath {
+    pub fn try_new(path: Path, fill_rule: FillRule) -> Result<Self> {
+        validate_path(&path)?;
+        Ok(Self { path, fill_rule })
+    }
+
+    #[must_use]
+    pub const fn path(&self) -> &Path {
+        &self.path
+    }
+
+    #[must_use]
+    pub const fn fill_rule(&self) -> FillRule {
+        self.fill_rule
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]

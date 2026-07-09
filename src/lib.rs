@@ -38,7 +38,9 @@ pub use layer::{BlendMode, Filter, Layer, Shadow};
 pub use paint::{Color, Gradient, GradientStop, Paint};
 pub use renderer::{Antialiasing, Options, Renderer};
 pub use scene::Scene;
-pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign};
+pub use shape::{
+    Dash, FillRule, FilledPath, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign,
+};
 pub use stats::Stats;
 pub use style::{
     BackgroundAttachment, BackgroundBox, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
