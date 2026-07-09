@@ -18,6 +18,7 @@ mod renderer;
 mod scene;
 mod shape;
 mod stats;
+mod style;
 mod surface;
 mod text;
 mod validation;
@@ -38,6 +39,7 @@ pub use renderer::{Antialiasing, Options, Renderer};
 pub use scene::Scene;
 pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign};
 pub use stats::Stats;
+pub use style::{StyleColor, StyleResourceRef};
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,
     SurfaceState, WebCanvas,

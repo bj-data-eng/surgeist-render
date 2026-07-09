@@ -286,6 +286,25 @@ fn error_type_stays_below_clippy_large_err_threshold() {
 }
 
 #[test]
+fn style_color_inputs_are_root_resolved_concrete_colors() {
+    let color = Color::try_rgba(0.25, 0.5, 0.75, 0.8).unwrap();
+    let input = StyleColor::new(color);
+
+    assert_eq!(input.color(), color);
+}
+
+#[test]
+fn style_reference_identifiers_must_not_be_empty() {
+    let error = StyleResourceRef::try_new("  ").expect_err("empty identifiers are invalid");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("style resource reference")
+    );
+}
+
+#[test]
 fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");
