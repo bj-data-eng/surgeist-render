@@ -338,6 +338,23 @@ fn css_image_layers_preserve_sampling_inputs_without_lowering() {
 }
 
 #[test]
+fn fixed_background_layers_can_carry_viewport_coordinate_space() {
+    let layer =
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap()
+            .with_attachment(BackgroundAttachment::Fixed)
+            .with_coordinate_space(
+                CoordinateSpaceTag::viewport(Transform::translation(10.0, 20.0).unwrap()).unwrap(),
+            );
+
+    assert_eq!(layer.attachment(), BackgroundAttachment::Fixed);
+    assert_eq!(
+        layer.coordinate_space().map(CoordinateSpaceTag::kind),
+        Some(CoordinateSpaceKind::Viewport)
+    );
+}
+
+#[test]
 fn resolved_image_resources_reject_invalid_intrinsic_size() {
     let error = ResolvedImageResource::try_new(ImageId::new(7), Size::new(f64::NAN, 12.0))
         .expect_err("invalid intrinsic size should be rejected");
@@ -463,6 +480,20 @@ fn mask_inputs_preserve_mode_and_source() {
 
     assert_eq!(mask.mode(), MaskMode::Luminance);
     assert!(matches!(mask.source().kind(), MaskSourceKind::Shape(_)));
+}
+
+#[test]
+fn masks_and_clips_can_carry_coordinate_space_tags() {
+    let tag = CoordinateSpaceTag::surface(Transform::identity()).unwrap();
+    let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
+        .unwrap()
+        .with_coordinate_space(tag);
+    let mask = MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)), MaskMode::Alpha)
+        .unwrap()
+        .with_coordinate_space(tag);
+
+    assert_eq!(clip.coordinate_space(), Some(tag));
+    assert_eq!(mask.coordinate_space(), Some(tag));
 }
 
 #[test]
@@ -1162,6 +1193,35 @@ fn transform_around_wraps_transform_origin() {
     let transform = Transform::scale(2.0, 3.0).unwrap().around(origin).unwrap();
 
     assert_eq!(transform.as_array(), [2.0, 0.0, 0.0, 3.0, -10.0, -10.0]);
+}
+
+#[test]
+fn coordinate_space_tags_preserve_kind_and_transform() {
+    let named = CoordinateSpaceId::try_new(7).unwrap();
+    let transform = Transform::translation(3.0, 4.0).unwrap();
+    let tag = CoordinateSpaceTag::try_new(CoordinateSpaceKind::Named(named), transform).unwrap();
+
+    assert_eq!(tag.kind(), CoordinateSpaceKind::Named(named));
+    assert_eq!(tag.transform(), transform);
+}
+
+#[test]
+fn coordinate_space_ids_reject_reserved_zero() {
+    let error = CoordinateSpaceId::try_new(0).expect_err("zero is reserved");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("coordinate space id")
+    );
+}
+
+#[test]
+fn coordinate_space_tags_model_future_backdrop_capture_space() {
+    let tag = CoordinateSpaceTag::viewport(Transform::translation(4.0, 6.0).unwrap()).unwrap();
+
+    assert_eq!(tag.kind(), CoordinateSpaceKind::Viewport);
+    assert_eq!(tag.transform().as_array(), [1.0, 0.0, 0.0, 1.0, 4.0, 6.0]);
 }
 
 #[test]

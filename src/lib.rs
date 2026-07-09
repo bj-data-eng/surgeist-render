@@ -32,7 +32,10 @@ pub use error::{
     DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,
     PrimitiveOperation, Result, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
-pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
+pub use geometry::{
+    CoordinateSpaceId, CoordinateSpaceKind, CoordinateSpaceTag, PhysicalSize, Point, Radii, Rect,
+    Size, Transform,
+};
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
 pub use layer::{BlendMode, Filter, Layer, Shadow};
 pub use paint::{Color, Gradient, GradientStop, Paint};

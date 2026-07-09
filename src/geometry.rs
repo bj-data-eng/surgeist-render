@@ -355,6 +355,76 @@ impl From<Transform> for kurbo::Affine {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CoordinateSpaceId {
+    value: u64,
+}
+
+impl CoordinateSpaceId {
+    pub fn try_new(value: u64) -> Result<Self> {
+        if value == 0 {
+            return Err(Error::invalid_value(
+                "coordinate space id",
+                value,
+                "must be non-zero",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.value
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CoordinateSpaceKind {
+    Local,
+    Viewport,
+    Surface,
+    Named(CoordinateSpaceId),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CoordinateSpaceTag {
+    kind: CoordinateSpaceKind,
+    transform: Transform,
+}
+
+impl CoordinateSpaceTag {
+    pub fn try_new(kind: CoordinateSpaceKind, transform: Transform) -> Result<Self> {
+        let transform = Transform::try_new(transform.as_array())?;
+        Ok(Self { kind, transform })
+    }
+
+    #[must_use]
+    pub fn local() -> Self {
+        Self {
+            kind: CoordinateSpaceKind::Local,
+            transform: Transform::identity(),
+        }
+    }
+
+    pub fn viewport(transform: Transform) -> Result<Self> {
+        Self::try_new(CoordinateSpaceKind::Viewport, transform)
+    }
+
+    pub fn surface(transform: Transform) -> Result<Self> {
+        Self::try_new(CoordinateSpaceKind::Surface, transform)
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> CoordinateSpaceKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn transform(self) -> Transform {
+        self.transform
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct PhysicalSize {
     width: u32,

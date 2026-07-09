@@ -1,5 +1,5 @@
 use super::{
-    Color, Error, Image, ImageId, Paint, Result, Shadow, Shape, Size,
+    Color, CoordinateSpaceTag, Error, Image, ImageId, Paint, Result, Shadow, Shape, Size,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
         validate_size,
@@ -119,6 +119,7 @@ pub struct StyleImageLayer {
     origin: BackgroundBox,
     clip: BackgroundBox,
     attachment: BackgroundAttachment,
+    coordinate_space: Option<CoordinateSpaceTag>,
 }
 
 impl StyleImageLayer {
@@ -131,6 +132,7 @@ impl StyleImageLayer {
             origin: BackgroundBox::Padding,
             clip: BackgroundBox::Border,
             attachment: BackgroundAttachment::Scroll,
+            coordinate_space: None,
         })
     }
 
@@ -171,6 +173,12 @@ impl StyleImageLayer {
     }
 
     #[must_use]
+    pub fn with_coordinate_space(mut self, coordinate_space: CoordinateSpaceTag) -> Self {
+        self.coordinate_space = Some(coordinate_space);
+        self
+    }
+
+    #[must_use]
     pub const fn source(&self) -> &StyleImageSource {
         &self.source
     }
@@ -203,6 +211,11 @@ impl StyleImageLayer {
     #[must_use]
     pub const fn attachment(&self) -> BackgroundAttachment {
         self.attachment
+    }
+
+    #[must_use]
+    pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
     }
 }
 
@@ -699,6 +712,7 @@ impl FilterAngle {
 #[derive(Clone, Debug, PartialEq)]
 pub struct ClipInput {
     kind: ClipInputKind,
+    coordinate_space: Option<CoordinateSpaceTag>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -712,6 +726,7 @@ impl ClipInput {
         validate_shape(&shape)?;
         Ok(Self {
             kind: ClipInputKind::Shape(shape),
+            coordinate_space: None,
         })
     }
 
@@ -719,7 +734,14 @@ impl ClipInput {
     pub const fn reference(reference: StyleResourceRef) -> Self {
         Self {
             kind: ClipInputKind::Reference(reference),
+            coordinate_space: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_coordinate_space(mut self, coordinate_space: CoordinateSpaceTag) -> Self {
+        self.coordinate_space = Some(coordinate_space);
+        self
     }
 
     #[must_use]
@@ -742,12 +764,18 @@ impl ClipInput {
             ClipInputKind::Reference(reference) => Some(reference),
         }
     }
+
+    #[must_use]
+    pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaskInput {
     source: MaskSource,
     mode: MaskMode,
+    coordinate_space: Option<CoordinateSpaceTag>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -773,6 +801,7 @@ impl MaskInput {
         Ok(Self {
             source: MaskSource::try_shape(shape)?,
             mode,
+            coordinate_space: None,
         })
     }
 
@@ -781,6 +810,7 @@ impl MaskInput {
         Self {
             source: MaskSource::image_layer(layer),
             mode,
+            coordinate_space: None,
         }
     }
 
@@ -789,7 +819,14 @@ impl MaskInput {
         Self {
             source: MaskSource::reference(reference),
             mode,
+            coordinate_space: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_coordinate_space(mut self, coordinate_space: CoordinateSpaceTag) -> Self {
+        self.coordinate_space = Some(coordinate_space);
+        self
     }
 
     #[must_use]
@@ -800,6 +837,11 @@ impl MaskInput {
     #[must_use]
     pub const fn mode(&self) -> MaskMode {
         self.mode
+    }
+
+    #[must_use]
+    pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
     }
 }
 
