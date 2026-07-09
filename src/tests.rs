@@ -4662,6 +4662,172 @@ fn mask_inputs_preserve_mode_and_source() {
 }
 
 #[test]
+fn repeated_mask_layers_remain_distinct_in_authored_order() {
+    let mask =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha).unwrap();
+
+    let stack = MaskLayerStack::try_new([
+        MaskLayer::new(mask.clone()),
+        MaskLayer::new(mask.clone()),
+        MaskLayer::new(mask),
+    ])
+    .unwrap();
+
+    assert_eq!(stack.len(), 3);
+    assert_eq!(stack.layers()[0], stack.layers()[1]);
+    assert_eq!(stack.layers()[1], stack.layers()[2]);
+}
+
+#[test]
+fn ordered_mask_layer_stacks_preserve_layer_and_composite_lists() {
+    let first =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha).unwrap();
+    let second =
+        MaskInput::try_shape(Shape::rect(Rect::new(1.0, 0.0, 3.0, 4.0)), MaskMode::Alpha).unwrap();
+
+    let stack = MaskLayerStack::try_new([
+        MaskLayer::new(first.clone()),
+        MaskLayer::try_new(second.clone(), MaskCompositeMode::Add).unwrap(),
+    ])
+    .unwrap();
+
+    assert_eq!(stack.layers()[0].input(), &first);
+    assert_eq!(stack.layers()[1].input(), &second);
+    assert_eq!(stack.layers()[0].composite_mode(), MaskCompositeMode::Add);
+    assert_eq!(stack.layers()[1].composite_mode(), MaskCompositeMode::Add);
+}
+
+#[test]
+fn mask_layer_stacks_validate_empty_lists_and_single_layer_diagnostics() {
+    let error = MaskLayerStack::try_new([]).expect_err("mask layer lists must not be empty");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("mask layer stack")
+    );
+
+    let stack = MaskLayerStack::single(
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha).unwrap(),
+    );
+    let error = stack
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("single authored alpha masks still stop at source execution");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::AlphaMaskSourceExecution,
+        ))
+    );
+}
+
+#[test]
+fn mask_layer_stacks_report_specific_luminance_and_composite_diagnostics() {
+    let luminance = MaskLayerStack::single(
+        MaskInput::try_shape(
+            Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)),
+            MaskMode::Luminance,
+        )
+        .unwrap(),
+    );
+    let luminance_error = luminance
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("luminance mask stacks need a typed unsupported diagnostic");
+    assert_eq!(
+        luminance_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LuminanceMaskMode,
+        ))
+    );
+
+    let composite = MaskLayerStack::single(
+        MaskLayer::try_new(
+            MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha)
+                .unwrap(),
+            MaskCompositeMode::Intersect,
+        )
+        .unwrap(),
+    );
+    let composite_error = composite
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("non-default mask composite modes are not implemented");
+    assert_eq!(
+        composite_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaskCompositeMode,
+        ))
+    );
+}
+
+#[test]
+fn multi_layer_mask_stacks_report_composition_boundary_after_input_validation() {
+    let first =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha).unwrap();
+    let second =
+        MaskInput::try_shape(Shape::rect(Rect::new(1.0, 0.0, 3.0, 4.0)), MaskMode::Alpha).unwrap();
+    let stack = MaskLayerStack::try_new([MaskLayer::new(first), MaskLayer::new(second)]).unwrap();
+
+    let error = stack
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("true multi-layer mask composition is not implemented");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MultiLayerMaskComposition,
+        ))
+    );
+
+    let unresolved = MaskLayerStack::try_new([
+        MaskLayer::new(
+            MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha)
+                .unwrap(),
+        ),
+        MaskLayer::new(MaskInput::reference(
+            StyleResourceRef::try_new("#stack-mask").unwrap(),
+            MaskMode::Alpha,
+        )),
+    ])
+    .unwrap();
+
+    let error = unresolved
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("unresolved references remain a narrower diagnostic than composition");
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(
+        error
+            .unresolved_resource_diagnostic()
+            .map(UnresolvedResource::identifier),
+        Some("#stack-mask")
+    );
+}
+
+#[test]
+fn mask_layer_stack_model_does_not_change_unmasked_render_paths() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(Layer::new(), |scene| {
+            scene.fill(Rect::new(1.0, 1.0, 2.0, 2.0), Color::BLACK);
+        });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(scene.stats().fills, 2);
+    assert_eq!(scene.stats().layers, 1);
+    assert!(matches!(
+        normalized.commands.as_slice(),
+        [
+            command::RenderCommand::Fill { .. },
+            command::RenderCommand::Layer { .. }
+        ]
+    ));
+}
+
+#[test]
 fn masks_and_clips_can_carry_coordinate_space_tags() {
     let tag = CoordinateSpaceTag::surface(Transform::identity()).unwrap();
     let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
