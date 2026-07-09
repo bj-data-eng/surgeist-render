@@ -1736,6 +1736,53 @@ fn origin_wrapped_layer_transform_renders_about_origin() {
 }
 
 #[test]
+fn transformed_shape_clips_render_in_layer_space() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_transform(Transform::translation(2.0, 0.0).unwrap())
+            .unwrap()
+            .try_clip(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 4.0, 2.0), Color::BLACK);
+        },
+    );
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("transformed clip should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert_eq!(pixel_alpha(&output, 1, 0), 0);
+    assert!(pixel_alpha(&output, 2, 0) > 0);
+    assert!(pixel_alpha(&output, 3, 0) > 0);
+}
+
+#[test]
+fn transformed_images_render_in_layer_space() {
+    let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255])).unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.transform(Transform::translation(2.0, 0.0).unwrap(), |scene| {
+        scene.image(image, Rect::new(0.0, 0.0, 2.0, 2.0), ImageFit::Stretch);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("transformed image should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert_eq!(pixel_alpha(&output, 1, 0), 0);
+    assert!(pixel_alpha(&output, 2, 0) > 0);
+}
+
+#[test]
 fn pure_transform_does_not_require_backend_layer() {
     let transform = Layer::new()
         .try_transform(Transform::try_new([1.0, 0.0, 0.0, 1.0, 1.0, 1.0]).unwrap())
