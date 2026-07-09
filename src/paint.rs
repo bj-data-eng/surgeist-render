@@ -1,6 +1,9 @@
 use super::{
     Error, Image, Point, Result,
-    validation::{validate_color, validate_gradient_stops, validate_point, validate_positive_f64},
+    validation::{
+        validate_color, validate_gradient_stops, validate_paint, validate_point,
+        validate_positive_f64,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -215,6 +218,23 @@ impl From<Gradient> for Paint {
 impl From<Image> for Paint {
     fn from(image: Image) -> Self {
         Self::image(image)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct NormalizedPaintLayer {
+    paint: Paint,
+}
+
+impl NormalizedPaintLayer {
+    pub fn try_new(paint: Paint) -> Result<Self> {
+        validate_paint(&paint)?;
+        Ok(Self { paint })
+    }
+
+    #[must_use]
+    pub const fn paint(&self) -> &Paint {
+        &self.paint
     }
 }
 

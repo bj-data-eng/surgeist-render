@@ -340,6 +340,38 @@ fn paint_colors_reject_invalid_conversion_inputs() {
 }
 
 #[test]
+fn normalized_paint_layers_preserve_valid_paint_sources() {
+    let color = NormalizedPaintLayer::try_new(Paint::from(Color::BLACK)).unwrap();
+    let gradient_paint = Paint::from(
+        Gradient::try_linear(
+            Point::try_new(0.0, 0.0).unwrap(),
+            Point::try_new(10.0, 0.0).unwrap(),
+            vec![
+                GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+                GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+            ],
+        )
+        .unwrap(),
+    );
+    let gradient = NormalizedPaintLayer::try_new(gradient_paint.clone()).unwrap();
+
+    assert_eq!(color.paint(), &Paint::from(Color::BLACK));
+    assert_eq!(gradient.paint(), &gradient_paint);
+}
+
+#[test]
+fn normalized_paint_layers_reject_invalid_paint_sources() {
+    let error = Gradient::try_linear(
+        Point::new(f64::NAN, 0.0),
+        Point::try_new(1.0, 0.0).unwrap(),
+        vec![GradientStop::try_new(0.0, Color::BLACK).unwrap()],
+    )
+    .expect_err("invalid gradient construction should fail before paint layer");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+}
+
+#[test]
 fn style_reference_identifiers_must_not_be_empty() {
     let error = StyleResourceRef::try_new("  ").expect_err("empty identifiers are invalid");
 
