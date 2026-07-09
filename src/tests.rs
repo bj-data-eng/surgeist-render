@@ -1449,6 +1449,94 @@ fn background_stack_reports_unresolved_image_layers() {
 }
 
 #[test]
+fn background_normalization_rejects_clip_override_length_mismatch() {
+    let layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap(),
+    );
+    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
+    let error = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .with_layer_clip_overrides(Vec::new())
+    .expect_err("clip override list must match background layer count");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background layer clip overrides")
+    );
+}
+
+#[test]
+fn background_normalization_accepts_shape_clip_overrides() {
+    let layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap(),
+    );
+    let shape = Shape::rect(Rect::new(1.0, 1.0, 8.0, 8.0));
+    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
+    let normalized = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .with_layer_clip_overrides(vec![Some(
+        BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
+    )])
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    assert_eq!(normalized.commands()[0].clip().shape(), Some(&shape));
+}
+
+#[test]
+fn background_normalization_accepts_path_clip_overrides() {
+    let layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap(),
+    );
+    let mut path = Path::new();
+    path.move_to(Point::new(0.0, 0.0))
+        .line_to(Point::new(10.0, 0.0))
+        .line_to(Point::new(10.0, 10.0))
+        .close();
+    let shape = Shape::path(path);
+    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
+    let normalized = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+            Rect::new(0.0, 0.0, 20.0, 20.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .with_layer_clip_overrides(vec![Some(
+        BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
+    )])
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    assert_eq!(normalized.commands()[0].clip().shape(), Some(&shape));
+}
+
+#[test]
 fn core_style_models_compose_without_backend_lowering() {
     let color = StyleColor::new(Color::BLACK);
     let paint = Paint::from(color.color());

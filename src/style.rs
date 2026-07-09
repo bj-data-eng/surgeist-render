@@ -1839,6 +1839,21 @@ impl BackgroundNormalizationInput {
         &self.layer_clip_overrides
     }
 
+    pub fn with_layer_clip_overrides(
+        mut self,
+        layer_clip_overrides: Vec<Option<BackgroundClipGeometry>>,
+    ) -> Result<Self> {
+        if layer_clip_overrides.len() != self.stack.layers().len() {
+            return Err(Error::invalid_value(
+                "background layer clip overrides",
+                layer_clip_overrides.len(),
+                "must match background layer count",
+            ));
+        }
+        self.layer_clip_overrides = layer_clip_overrides;
+        Ok(self)
+    }
+
     pub fn normalize(&self, capabilities: Capabilities) -> Result<NormalizedBackgroundStack> {
         let mut commands = Vec::new();
         if let Some(color) = self.stack.color() {
