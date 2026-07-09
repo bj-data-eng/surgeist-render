@@ -20,6 +20,9 @@ impl Capabilities {
             arbitrary_path_fill: true,
             arbitrary_path_centered_stroke: true,
             arbitrary_path_inside_outside_stroke: false,
+            geometry_booleans: false,
+            geometry_offsets: false,
+            hit_testing: HitTestOwnership::RootOwned,
         },
         paint_sources: PaintSourceCapabilities {
             solid_rgba: true,
@@ -99,6 +102,12 @@ impl Capabilities {
             ) => self
                 .geometry_targets
                 .supports_arbitrary_path_inside_outside_stroke(),
+            (PrimitiveFamily::GeometryTargets, PrimitiveOperation::GeometryBooleanOperation) => {
+                self.geometry_targets.supports_geometry_booleans()
+            }
+            (PrimitiveFamily::GeometryTargets, PrimitiveOperation::GeometryOffsetOperation) => {
+                self.geometry_targets.supports_geometry_offsets()
+            }
             (PrimitiveFamily::PaintSources, PrimitiveOperation::NonSolidShadowPaint) => {
                 self.paint_sources.supports_non_solid_shadow_paint()
             }
@@ -120,6 +129,11 @@ impl Capabilities {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HitTestOwnership {
+    RootOwned,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometryTargetCapabilities {
     rect_fill_stroke: bool,
     rounded_rect_fill_stroke: bool,
@@ -127,6 +141,9 @@ pub struct GeometryTargetCapabilities {
     arbitrary_path_fill: bool,
     arbitrary_path_centered_stroke: bool,
     arbitrary_path_inside_outside_stroke: bool,
+    geometry_booleans: bool,
+    geometry_offsets: bool,
+    hit_testing: HitTestOwnership,
 }
 
 impl GeometryTargetCapabilities {
@@ -158,6 +175,21 @@ impl GeometryTargetCapabilities {
     #[must_use]
     pub const fn supports_arbitrary_path_inside_outside_stroke(self) -> bool {
         self.arbitrary_path_inside_outside_stroke
+    }
+
+    #[must_use]
+    pub const fn supports_geometry_booleans(self) -> bool {
+        self.geometry_booleans
+    }
+
+    #[must_use]
+    pub const fn supports_geometry_offsets(self) -> bool {
+        self.geometry_offsets
+    }
+
+    #[must_use]
+    pub const fn hit_testing(self) -> HitTestOwnership {
+        self.hit_testing
     }
 }
 

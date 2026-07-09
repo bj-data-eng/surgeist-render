@@ -244,6 +244,8 @@ pub enum PrimitiveOperation {
     NonSolidShadowPaint,
     EllipsePathShadowShape,
     InsideOutsidePathStrokeAlignment,
+    GeometryBooleanOperation,
+    GeometryOffsetOperation,
     WebCanvasSurface,
 }
 
@@ -256,6 +258,8 @@ impl PrimitiveOperation {
             Self::NonSolidShadowPaint => "non-solid shadow paint",
             Self::EllipsePathShadowShape => "ellipse/path shadow shape",
             Self::InsideOutsidePathStrokeAlignment => "inside/outside path stroke alignment",
+            Self::GeometryBooleanOperation => "geometry boolean operation",
+            Self::GeometryOffsetOperation => "geometry offset operation",
             Self::WebCanvasSurface => "web canvas surface",
         }
     }

@@ -885,6 +885,19 @@ fn renderer_reports_backend_capabilities_by_family() {
 }
 
 #[test]
+fn geometry_capabilities_name_boolean_offset_and_hit_test_boundaries() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    assert!(!capabilities.geometry_targets().supports_geometry_booleans());
+    assert!(!capabilities.geometry_targets().supports_geometry_offsets());
+    assert_eq!(
+        capabilities.geometry_targets().hit_testing(),
+        HitTestOwnership::RootOwned
+    );
+    assert_eq!(HitTestOwnership::RootOwned, HitTestOwnership::RootOwned);
+}
+
+#[test]
 fn capabilities_map_unsupported_primitives_to_typed_errors() {
     let capabilities = Capabilities::VELLO_0_9;
     let unsupported = UnsupportedPrimitive::new(
@@ -898,6 +911,26 @@ fn capabilities_map_unsupported_primitives_to_typed_errors() {
     assert_eq!(error.code, ErrorCode::UnsupportedBackend);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
     assert!(error.message.contains("layer mask"));
+}
+
+#[test]
+fn unsupported_geometry_operations_report_typed_diagnostics() {
+    let boolean = UnsupportedPrimitive::new(
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryBooleanOperation,
+    );
+    let offset = UnsupportedPrimitive::new(
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryOffsetOperation,
+    );
+
+    for unsupported in [boolean, offset] {
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("geometry operation should be explicitly unsupported");
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
 }
 
 #[test]
