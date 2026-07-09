@@ -4,6 +4,7 @@
 ))]
 use super::surface::PresentedLifecycle;
 use super::surface::{HeadlessResources, SurfaceBackend};
+use super::texture::{TextureDescriptor, headless_texture_descriptor};
 use super::*;
 use std::{
     num::NonZeroUsize,
@@ -38,7 +39,7 @@ pub(crate) fn render_vello_surface(
                     &backend.context.devices[*dev_id].device,
                     *physical_size,
                     surface.options.format,
-                );
+                )?;
                 *resources = HeadlessResources::Ready {
                     texture: next_texture,
                     view: next_view,
@@ -292,19 +293,32 @@ pub(crate) fn create_headless_texture(
     device: &wgpu::Device,
     physical_size: PhysicalSize,
     format: Format,
+) -> Result<(wgpu::Texture, wgpu::TextureView)> {
+    let descriptor = headless_texture_descriptor(physical_size, format)?;
+    Ok(create_texture(
+        device,
+        "Surgeist headless target",
+        descriptor,
+    ))
+}
+
+pub(crate) fn create_texture(
+    device: &wgpu::Device,
+    label: &'static str,
+    descriptor: TextureDescriptor,
 ) -> (wgpu::Texture, wgpu::TextureView) {
     let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Surgeist headless target"),
+        label: Some(label),
         size: wgpu::Extent3d {
-            width: physical_size.width().max(1),
-            height: physical_size.height().max(1),
+            width: descriptor.physical_size().width(),
+            height: descriptor.physical_size().height(),
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: format.into(),
-        usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        format: descriptor.format().into(),
+        usage: descriptor.wgpu_usage(),
         view_formats: &[],
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());

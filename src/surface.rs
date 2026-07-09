@@ -403,7 +403,7 @@ pub enum PresentMode {
     Immediate,
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Format {
     #[default]
     Rgba8,

@@ -175,7 +175,7 @@ impl Renderer {
                     &backend.context.devices[dev_id].device,
                     physical_size,
                     options.format,
-                );
+                )?;
                 SurfaceBackend::Headless {
                     dev_id,
                     resources: HeadlessResources::Ready { texture, view },

@@ -2,6 +2,10 @@ use super::{
     backend::*,
     encode::*,
     surface::{HeadlessResources, SurfaceBackend},
+    texture::{
+        OffscreenTextureCache, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
+        headless_texture_descriptor,
+    },
 };
 use std::{sync::Arc, time::Duration};
 
@@ -57,6 +61,238 @@ fn scene_stats_report_facts_without_renderer() {
     assert_eq!(stats.layers, 1);
     assert_eq!(stats.cache_misses, 1);
     assert_eq!(stats.cache_hits, 0);
+}
+
+#[test]
+fn texture_descriptor_equality_uses_size_format_and_intent() {
+    let size = PhysicalSize::new(32, 16);
+    let layer = TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::OffscreenLayer)
+        .unwrap();
+    let same = TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::OffscreenLayer)
+        .unwrap();
+    let different_intent =
+        TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::IntermediatePass)
+            .unwrap();
+
+    assert_eq!(layer, same);
+    assert_ne!(layer, different_intent);
+    assert_eq!(layer.physical_size(), size);
+    assert_eq!(layer.format(), Format::Rgba8);
+    assert_eq!(layer.intent(), TextureUsageIntent::OffscreenLayer);
+    assert_eq!(layer.byte_len(), 32 * 16 * 4);
+}
+
+#[test]
+fn texture_cache_keys_are_stable_without_raw_resources() {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 4),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+
+    assert_eq!(
+        TextureCacheKey::from_descriptor(descriptor),
+        TextureCacheKey::from_descriptor(descriptor)
+    );
+    assert_ne!(
+        TextureCacheKey::from_descriptor(descriptor),
+        TextureCacheKey::from_descriptor(
+            TextureDescriptor::try_new(
+                PhysicalSize::new(8, 4),
+                Format::Rgba8,
+                TextureUsageIntent::ReadbackReference,
+            )
+            .unwrap()
+        )
+    );
+}
+
+#[test]
+fn texture_cache_records_misses_reuse_hits_and_live_count() {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 4),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let mut cache = OffscreenTextureCache::new();
+
+    let first = cache.acquire(descriptor).unwrap();
+    assert_eq!(cache.stats().allocations, 1);
+    assert_eq!(cache.stats().misses, 1);
+    assert_eq!(cache.stats().hits, 0);
+    assert_eq!(cache.live_count(), 1);
+
+    cache.release(first).unwrap();
+    let second = cache.acquire(descriptor).unwrap();
+
+    assert_eq!(second.descriptor(), descriptor);
+    assert_eq!(cache.stats().allocations, 1);
+    assert_eq!(cache.stats().misses, 1);
+    assert_eq!(cache.stats().hits, 1);
+    assert_eq!(cache.live_count(), 1);
+}
+
+#[test]
+fn texture_cache_release_and_eviction_accounting_is_deterministic() {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(2, 2),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let mut cache = OffscreenTextureCache::new();
+
+    let handle = cache.acquire(descriptor).unwrap();
+    cache.release(handle).unwrap();
+    let evicted = cache.evict_released();
+
+    assert_eq!(evicted, 1);
+    assert_eq!(cache.live_count(), 0);
+    assert_eq!(cache.retained_count(), 0);
+    assert_eq!(cache.stats().releases, 1);
+    assert_eq!(cache.stats().evictions, 1);
+}
+
+#[test]
+fn texture_cache_rejects_stale_handle_after_reuse() {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(3, 3),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let mut cache = OffscreenTextureCache::new();
+
+    let stale = cache.acquire(descriptor).unwrap();
+    cache.release(stale).unwrap();
+    let current = cache.acquire(descriptor).unwrap();
+    let error = cache
+        .release(stale)
+        .expect_err("stale handles must not release a new lease");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(cache.live_count(), 1);
+    assert_eq!(cache.stats().releases, 1);
+    cache.release(current).unwrap();
+    assert_eq!(cache.stats().releases, 2);
+}
+
+#[test]
+fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(5, 5),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let mut first_cache = OffscreenTextureCache::new();
+    let mut second_cache = OffscreenTextureCache::new();
+
+    let foreign = first_cache.acquire(descriptor).unwrap();
+    let local = second_cache.acquire(descriptor).unwrap();
+    let error = second_cache
+        .release(foreign)
+        .expect_err("foreign handles must not release matching local entries");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(second_cache.live_count(), 1);
+    assert_eq!(second_cache.stats().releases, 0);
+    second_cache.release(local).unwrap();
+    assert_eq!(second_cache.stats().releases, 1);
+}
+
+#[test]
+fn texture_cache_default_construction_rejects_same_descriptor_foreign_release() {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(7, 7),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let mut first_cache = OffscreenTextureCache::default();
+    let mut second_cache = OffscreenTextureCache::default();
+
+    let foreign = first_cache.acquire(descriptor).unwrap();
+    let local = second_cache.acquire(descriptor).unwrap();
+    let error = second_cache
+        .release(foreign)
+        .expect_err("default-constructed caches must still have unique identities");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(second_cache.live_count(), 1);
+    assert_eq!(second_cache.stats().releases, 0);
+    second_cache.release(local).unwrap();
+    assert_eq!(second_cache.stats().releases, 1);
+}
+
+#[test]
+fn texture_descriptors_reject_zero_size_and_overflow() {
+    let zero_width = TextureDescriptor::try_new(
+        PhysicalSize::new(0, 1),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .expect_err("zero-width textures should be rejected");
+    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+
+    let overflow = TextureDescriptor::try_new(
+        PhysicalSize::new(u32::MAX, u32::MAX),
+        Format::Rgba8,
+        TextureUsageIntent::ReadbackReference,
+    )
+    .expect_err("overflow-sized textures should be rejected");
+    assert_eq!(overflow.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn headless_texture_descriptor_uses_allocation_size_without_surface_rewrite() {
+    let zero_surface_descriptor =
+        headless_texture_descriptor(PhysicalSize::new(0, 0), Format::Rgba8).unwrap();
+    let nonzero_surface_descriptor =
+        headless_texture_descriptor(PhysicalSize::new(12, 6), Format::Rgba8).unwrap();
+
+    assert_eq!(
+        zero_surface_descriptor.physical_size(),
+        PhysicalSize::new(1, 1)
+    );
+    assert_eq!(
+        zero_surface_descriptor.intent(),
+        TextureUsageIntent::ReadbackReference
+    );
+    assert_eq!(
+        nonzero_surface_descriptor.physical_size(),
+        PhysicalSize::new(12, 6)
+    );
+}
+
+#[test]
+fn texture_lifecycle_accounting_is_separate_from_image_cache_stats() {
+    let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 0, 0, 255])).unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 1.0, 1.0), Paint::image(image.clone()))
+        .fill(Rect::new(1.0, 0.0, 1.0, 1.0), Paint::image(image));
+    let image_stats = scene.stats();
+
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 4),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let mut cache = OffscreenTextureCache::new();
+    let handle = cache.acquire(descriptor).unwrap();
+    cache.release(handle).unwrap();
+    let _ = cache.acquire(descriptor).unwrap();
+
+    assert_eq!(image_stats.images, 2);
+    assert_eq!(image_stats.cache_misses, 1);
+    assert_eq!(image_stats.cache_hits, 1);
+    assert_eq!(image_stats.uploaded_bytes, 4);
+    assert_eq!(cache.stats().misses, 1);
+    assert_eq!(cache.stats().hits, 1);
 }
 
 #[test]

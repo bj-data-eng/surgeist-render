@@ -21,6 +21,7 @@ mod stats;
 mod style;
 mod surface;
 mod text;
+mod texture;
 mod validation;
 
 pub use capability::{

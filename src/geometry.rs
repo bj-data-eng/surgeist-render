@@ -425,7 +425,7 @@ impl CoordinateSpaceTag {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct PhysicalSize {
     width: u32,
     height: u32,
