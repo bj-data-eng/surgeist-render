@@ -1242,6 +1242,58 @@ fn background_stack_normalization_paints_color_behind_layers() {
 }
 
 #[test]
+fn background_normalization_mixes_color_paint_and_image_layers_in_render_order() {
+    let image = Image::from_rgba(Size::new(10.0, 10.0), vec![255; 10 * 10 * 4]).unwrap();
+    let top_image = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::image(image).unwrap())
+            .unwrap()
+            .with_size(BackgroundSize::auto())
+            .with_repeat(BackgroundRepeat::no_repeat()),
+    );
+    let back_paint = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::TRANSPARENT)).unwrap())
+            .unwrap(),
+    );
+    let stack = BackgroundStack::try_new(Some(Color::BLACK), vec![top_image, back_paint]).unwrap();
+    let normalized = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 40.0, 40.0),
+            Rect::new(0.0, 0.0, 40.0, 40.0),
+            Rect::new(0.0, 0.0, 40.0, 40.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    assert!(matches!(
+        normalized.commands()[0].kind(),
+        NormalizedBackgroundCommandKind::ColorFill { .. }
+    ));
+    let NormalizedBackgroundCommandKind::Layer { layer: back_layer } =
+        normalized.commands()[1].kind()
+    else {
+        panic!("expected back layer command");
+    };
+    assert!(matches!(
+        back_layer.source(),
+        NormalizedBackgroundLayerSource::Paint(_)
+    ));
+
+    let NormalizedBackgroundCommandKind::Layer { layer: top_layer } =
+        normalized.commands()[2].kind()
+    else {
+        panic!("expected top layer command");
+    };
+    assert!(matches!(
+        top_layer.source(),
+        NormalizedBackgroundLayerSource::Image(_)
+    ));
+}
+
+#[test]
 fn background_stack_normalization_preserves_top_layer_as_last_render_command() {
     let top = BackgroundLayer::new(
         StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
