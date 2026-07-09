@@ -1203,6 +1203,126 @@ fn background_clip_geometry_preserves_box_or_shape_inputs() {
 }
 
 #[test]
+fn background_stack_normalization_paints_color_behind_layers() {
+    let top = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap(),
+    );
+    let back = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::TRANSPARENT)).unwrap())
+            .unwrap(),
+    );
+    let stack = BackgroundStack::try_new(Some(Color::BLACK), vec![top, back]).unwrap();
+    let input = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            Rect::new(4.0, 4.0, 92.0, 52.0),
+            Rect::new(8.0, 8.0, 84.0, 44.0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    assert_eq!(normalized.commands().len(), 3);
+    let NormalizedBackgroundCommandKind::ColorFill { color, .. } = normalized.commands()[0].kind()
+    else {
+        panic!("expected background color command");
+    };
+    assert_eq!(*color, Color::BLACK);
+    assert!(matches!(
+        normalized.commands()[1].kind(),
+        NormalizedBackgroundCommandKind::Layer { .. }
+    ));
+    assert!(matches!(
+        normalized.commands()[2].kind(),
+        NormalizedBackgroundCommandKind::Layer { .. }
+    ));
+}
+
+#[test]
+fn background_stack_normalization_preserves_top_layer_as_last_render_command() {
+    let top = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap()
+            .with_clip(BackgroundBox::Content),
+    );
+    let back = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::TRANSPARENT)).unwrap())
+            .unwrap()
+            .with_clip(BackgroundBox::Padding),
+    );
+    let stack = BackgroundStack::try_new(None, vec![top, back]).unwrap();
+    let normalized = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            Rect::new(4.0, 4.0, 92.0, 52.0),
+            Rect::new(8.0, 8.0, 84.0, 44.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    let last = normalized.commands().last().unwrap();
+    assert_eq!(last.clip().rect(), Some(Rect::new(8.0, 8.0, 84.0, 44.0)));
+}
+
+#[test]
+fn background_stack_normalization_preserves_paint_layer_sampling_semantics() {
+    let paint_layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap()
+            .with_origin(BackgroundBox::Content)
+            .with_clip(BackgroundBox::Padding)
+            .with_position(BackgroundPosition::percent(1.0, 1.0).unwrap())
+            .with_size(BackgroundSize::explicit(
+                SizeComponent::try_percent(0.5).unwrap(),
+                SizeComponent::auto(),
+            ))
+            .with_repeat(BackgroundRepeat::repeat_y())
+            .with_attachment(BackgroundAttachment::Local)
+            .with_coordinate_space(CoordinateSpaceTag::local()),
+    );
+    let normalized = BackgroundNormalizationInput::try_new(
+        BackgroundStack::try_new(None, vec![paint_layer]).unwrap(),
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 120.0, 80.0),
+            Rect::new(10.0, 10.0, 100.0, 60.0),
+            Rect::new(20.0, 20.0, 80.0, 40.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    let NormalizedBackgroundCommandKind::Layer { layer } = normalized.commands()[0].kind() else {
+        panic!("expected normalized paint-backed layer");
+    };
+    assert!(matches!(
+        layer.source(),
+        NormalizedBackgroundLayerSource::Paint(_)
+    ));
+    assert_eq!(
+        layer.placement().paint_rect(),
+        Rect::new(20.0, 20.0, 80.0, 40.0)
+    );
+    assert_eq!(
+        layer.placement().tile_rect(),
+        Rect::new(60.0, 40.0, 40.0, 20.0)
+    );
+    assert_eq!(
+        layer.repeat().clip_rect(),
+        Rect::new(20.0, 20.0, 80.0, 40.0)
+    );
+    assert_eq!(layer.attachment().attachment(), BackgroundAttachment::Local);
+}
+
+#[test]
 fn core_style_models_compose_without_backend_lowering() {
     let color = StyleColor::new(Color::BLACK);
     let paint = Paint::from(color.color());

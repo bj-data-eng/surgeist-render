@@ -51,15 +51,17 @@ pub use shape::{
 pub use stats::Stats;
 pub use style::{
     BackgroundAreas, BackgroundAttachment, BackgroundBox, BackgroundClipGeometry,
-    BackgroundClipGeometryKind, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
-    BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide, BorderStyle,
-    ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur, FilterList, FilterOp,
-    FilterOpKind, FilteredImagePaint, ImageAttachmentPlan, ImagePlacementInput, ImageRepeatMode,
-    ImageRepeatPlan, ImageResourceDensity, MaskInput, MaskMode, MaskSource, MaskSourceKind,
-    Outline, OutlineStyle, PositionComponent, PositionComponentKind, PositionEdge,
-    PositionEdgeOffset, RepeatMode, ResolvedImagePlacement, ResolvedImageRepeat,
-    ResolvedImageResource, SizeComponent, SizeComponentKind, StyleColor, StyleImageLayer,
-    StyleImageSource, StyleImageSourceKind, StyleResourceRef, UnitFilterAmount,
+    BackgroundClipGeometryKind, BackgroundLayer, BackgroundNormalizationInput, BackgroundPosition,
+    BackgroundRepeat, BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide,
+    BorderStyle, ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur, FilterList,
+    FilterOp, FilterOpKind, FilteredImagePaint, ImageAttachmentPlan, ImagePlacementInput,
+    ImageRepeatMode, ImageRepeatPlan, ImageResourceDensity, MaskInput, MaskMode, MaskSource,
+    MaskSourceKind, NormalizedBackgroundCommand, NormalizedBackgroundCommandKind,
+    NormalizedBackgroundLayer, NormalizedBackgroundLayerSource, NormalizedBackgroundStack, Outline,
+    OutlineStyle, PositionComponent, PositionComponentKind, PositionEdge, PositionEdgeOffset,
+    RepeatMode, ResolvedImagePlacement, ResolvedImageRepeat, ResolvedImageResource, SizeComponent,
+    SizeComponentKind, StyleColor, StyleImageLayer, StyleImageSource, StyleImageSourceKind,
+    StyleResourceRef, UnitFilterAmount,
 };
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,
