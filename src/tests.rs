@@ -689,6 +689,54 @@ fn image_repeat_plan_includes_tiles_before_the_anchor_when_visible() {
 }
 
 #[test]
+fn css_image_layer_normalizes_placement_repeat_and_attachment_together() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(90), Size::new(25.0, 10.0)).unwrap();
+    let layer = StyleImageLayer::try_new(StyleImageSource::resolved(resource.clone()))
+        .unwrap()
+        .with_position(BackgroundPosition::percent(1.0, 0.0).unwrap())
+        .with_size(BackgroundSize::explicit(
+            SizeComponent::try_length(50.0).unwrap(),
+            SizeComponent::auto(),
+        ))
+        .with_repeat(BackgroundRepeat::repeat_x())
+        .with_attachment(BackgroundAttachment::Fixed)
+        .with_coordinate_space(
+            CoordinateSpaceTag::viewport(Transform::translation(2.0, 3.0).unwrap()).unwrap(),
+        );
+
+    let placement = ImagePlacementInput::try_new(
+        Rect::new(0.0, 0.0, 120.0, 80.0),
+        resource.intrinsic_size(),
+        layer.position(),
+        layer.size(),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+    let repeat = ImageRepeatPlan::try_new(layer.repeat(), Capabilities::VELLO_0_9)
+        .unwrap()
+        .resolve(placement)
+        .unwrap();
+    let attachment =
+        ImageAttachmentPlan::try_new(layer.attachment(), layer.coordinate_space()).unwrap();
+
+    assert_eq!(placement.tile_rect(), Rect::new(70.0, 0.0, 50.0, 20.0));
+    assert_eq!(repeat.clip_rect(), Rect::new(0.0, 0.0, 120.0, 80.0));
+    assert_eq!(
+        repeat.tile_rects(),
+        &[
+            Rect::new(-30.0, 0.0, 50.0, 20.0),
+            Rect::new(20.0, 0.0, 50.0, 20.0),
+            Rect::new(70.0, 0.0, 50.0, 20.0),
+        ]
+    );
+    assert_eq!(
+        attachment.coordinate_space().map(CoordinateSpaceTag::kind),
+        Some(CoordinateSpaceKind::Viewport)
+    );
+}
+
+#[test]
 fn image_repeat_plan_rejects_round_and_space_with_typed_diagnostics() {
     let round = ImageRepeatPlan::try_new(
         BackgroundRepeat::new(RepeatMode::Round, RepeatMode::Repeat),
