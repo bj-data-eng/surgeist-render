@@ -1323,6 +1323,132 @@ fn background_stack_normalization_preserves_paint_layer_sampling_semantics() {
 }
 
 #[test]
+fn background_stack_normalizes_image_layers_with_origin_clip_repeat_and_attachment() {
+    let image = Image::from_rgba(Size::new(20.0, 10.0), vec![255; 20 * 10 * 4]).unwrap();
+    let layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::image(image.clone()).unwrap())
+            .unwrap()
+            .with_origin(BackgroundBox::Content)
+            .with_clip(BackgroundBox::Padding)
+            .with_position(BackgroundPosition::percent(1.0, 0.0).unwrap())
+            .with_size(BackgroundSize::explicit(
+                SizeComponent::try_length(40.0).unwrap(),
+                SizeComponent::auto(),
+            ))
+            .with_repeat(BackgroundRepeat::repeat_x())
+            .with_attachment(BackgroundAttachment::Fixed)
+            .with_coordinate_space(
+                CoordinateSpaceTag::viewport(Transform::translation(1.0, 2.0).unwrap()).unwrap(),
+            ),
+    );
+    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
+    let normalized = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            Rect::new(5.0, 5.0, 90.0, 50.0),
+            Rect::new(10.0, 10.0, 80.0, 40.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    let command = normalized.commands().first().unwrap();
+    assert_eq!(command.clip().rect(), Some(Rect::new(5.0, 5.0, 90.0, 50.0)));
+    let NormalizedBackgroundCommandKind::Layer { layer } = command.kind() else {
+        panic!("expected normalized image layer");
+    };
+    assert!(matches!(
+        layer.source(),
+        NormalizedBackgroundLayerSource::Image(_)
+    ));
+    assert_eq!(
+        layer.placement().paint_rect(),
+        Rect::new(10.0, 10.0, 80.0, 40.0)
+    );
+    assert_eq!(
+        layer.placement().tile_rect(),
+        Rect::new(50.0, 10.0, 40.0, 20.0)
+    );
+    assert_eq!(
+        layer.repeat().clip_rect(),
+        Rect::new(10.0, 10.0, 80.0, 40.0)
+    );
+    assert_eq!(
+        layer.repeat().tile_rects(),
+        &[
+            Rect::new(10.0, 10.0, 40.0, 20.0),
+            Rect::new(50.0, 10.0, 40.0, 20.0),
+        ]
+    );
+    assert_eq!(layer.attachment().attachment(), BackgroundAttachment::Fixed);
+}
+
+#[test]
+fn background_stack_normalizes_resolved_image_layers_with_intrinsic_size() {
+    let resource =
+        ResolvedImageResource::try_new(ImageId::new(400), Size::new(30.0, 10.0)).unwrap();
+    let layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::resolved(resource.clone()))
+            .unwrap()
+            .with_origin(BackgroundBox::Padding)
+            .with_position(BackgroundPosition::percent(0.5, 0.5).unwrap())
+            .with_size(BackgroundSize::contain())
+            .with_repeat(BackgroundRepeat::no_repeat()),
+    );
+    let normalized = BackgroundNormalizationInput::try_new(
+        BackgroundStack::try_new(None, vec![layer]).unwrap(),
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 120.0, 80.0),
+            Rect::new(10.0, 10.0, 100.0, 50.0),
+            Rect::new(20.0, 20.0, 80.0, 30.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    let NormalizedBackgroundCommandKind::Layer { layer } = normalized.commands()[0].kind() else {
+        panic!("expected normalized layer");
+    };
+    assert!(matches!(
+        layer.source(),
+        NormalizedBackgroundLayerSource::ResolvedImage(_)
+    ));
+    assert_eq!(
+        layer.placement().tile_rect(),
+        Rect::new(10.0, 18.333333333333332, 100.0, 33.333333333333336)
+    );
+}
+
+#[test]
+fn background_stack_reports_unresolved_image_layers() {
+    let source = StyleImageSource::unresolved(StyleResourceRef::try_new("hero.png").unwrap());
+    let layer = BackgroundLayer::new(StyleImageLayer::try_new(source).unwrap());
+    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
+    let error = BackgroundNormalizationInput::try_new(
+        stack,
+        BackgroundAreas::try_new(
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+            Rect::new(0.0, 0.0, 100.0, 60.0),
+        )
+        .unwrap(),
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .expect_err("unresolved image layer should fail normalization");
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    let diagnostic = error.unresolved_resource_diagnostic().unwrap();
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Image);
+    assert_eq!(diagnostic.identifier(), "hero.png");
+}
+
+#[test]
 fn core_style_models_compose_without_backend_lowering() {
     let color = StyleColor::new(Color::BLACK);
     let paint = Paint::from(color.color());
