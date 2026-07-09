@@ -4946,6 +4946,278 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
 }
 
 #[test]
+fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() {
+    let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
+    let rounded = Shape::try_rounded_rect(rect, Radii::try_all(0.5).unwrap()).unwrap();
+    let circle = Shape::try_circle(Point::new(1.0, 1.0), 1.0).unwrap();
+    let ellipse = Shape::try_ellipse(Point::new(1.0, 1.0), Size::new(1.0, 0.75)).unwrap();
+    let clips = [
+        (Shape::rect(rect), ClipGeometryKind::Rect(rect)),
+        (
+            rounded,
+            ClipGeometryKind::RoundedRect {
+                rect,
+                radii: Radii::try_all(0.5).unwrap(),
+            },
+        ),
+        (
+            circle,
+            ClipGeometryKind::Circle {
+                center: Point::new(1.0, 1.0),
+                radius: 1.0,
+            },
+        ),
+        (
+            ellipse,
+            ClipGeometryKind::Ellipse {
+                center: Point::new(1.0, 1.0),
+                radii: Size::new(1.0, 0.75),
+            },
+        ),
+    ];
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    for (shape, expected_geometry) in clips {
+        let normalized = ClipInput::try_shape(shape.clone())
+            .unwrap()
+            .normalize(Capabilities::VELLO_0_9)
+            .unwrap();
+        assert_eq!(normalized.geometry().kind(), &expected_geometry);
+
+        let mut surface = renderer.create_headless(Size::new(3.0, 2.0), 1.0).unwrap();
+        let mut scene = Scene::new();
+        scene.layer(Layer::new().try_clip(shape).unwrap(), |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 3.0, 2.0), Color::BLACK);
+        });
+
+        renderer
+            .render(&mut surface, &scene, Parameters::default())
+            .expect("Sequence 12 shape/basic-shape clips should execute through layer clipping");
+        let output = renderer.read_headless(&surface).unwrap();
+
+        assert!(pixel_alpha(&output, 0, 0) > 0);
+        assert_eq!(pixel_alpha(&output, 2, 0), 0);
+    }
+}
+
+#[test]
+fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
+    fn nested_rect_path() -> Path {
+        let mut path = Path::new();
+        path.move_to(Point::new(0.0, 0.0))
+            .line_to(Point::new(5.0, 0.0))
+            .line_to(Point::new(5.0, 5.0))
+            .line_to(Point::new(0.0, 5.0))
+            .close()
+            .move_to(Point::new(1.0, 1.0))
+            .line_to(Point::new(4.0, 1.0))
+            .line_to(Point::new(4.0, 4.0))
+            .line_to(Point::new(1.0, 4.0))
+            .close();
+        path
+    }
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut outputs = Vec::new();
+    for fill_rule in [FillRule::EvenOdd, FillRule::NonZero] {
+        let filled_path = FilledPath::try_new(nested_rect_path(), fill_rule).unwrap();
+        let normalized = ClipInput::try_filled_path(filled_path.clone())
+            .unwrap()
+            .normalize(Capabilities::VELLO_0_9)
+            .unwrap();
+        assert_eq!(
+            normalized.geometry().kind(),
+            &ClipGeometryKind::Path(filled_path.clone())
+        );
+
+        let mut surface = renderer.create_headless(Size::new(5.0, 5.0), 1.0).unwrap();
+        let mut scene = Scene::new();
+        scene.layer(
+            Layer::new()
+                .try_clip_input(ClipInput::try_filled_path(filled_path).unwrap())
+                .unwrap(),
+            |scene| {
+                scene.fill(Rect::new(0.0, 0.0, 5.0, 5.0), Color::BLACK);
+            },
+        );
+
+        renderer
+            .render(&mut surface, &scene, Parameters::default())
+            .expect("Sequence 12 path clips should execute with their authored fill rule");
+        outputs.push(renderer.read_headless(&surface).unwrap());
+    }
+
+    assert_eq!(pixel_alpha(&outputs[0], 2, 2), 0);
+    assert!(pixel_alpha(&outputs[1], 2, 2) > 0);
+}
+
+#[test]
+fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_inputs() {
+    let clip = ClipInput::reference(StyleResourceRef::try_new("#clip").unwrap());
+    let clip_error = clip
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("unresolved clip references remain root-owned");
+    assert_eq!(clip_error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(
+        clip_error
+            .unresolved_resource_diagnostic()
+            .map(UnresolvedResource::kind),
+        Some(UnresolvedResourceKind::Clip)
+    );
+
+    let luminance_stack = MaskLayerStack::single(
+        MaskInput::try_shape(
+            Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)),
+            MaskMode::Luminance,
+        )
+        .unwrap(),
+    );
+    let luminance_error = luminance_stack
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("luminance mask conversion is outside Sequence 12");
+    assert_eq!(
+        luminance_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LuminanceMaskMode,
+        ))
+    );
+
+    let alpha_mask =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)), MaskMode::Alpha).unwrap();
+    let source_error = MaskLayerStack::single(alpha_mask.clone())
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("authored alpha mask sources still need materialization before execution");
+    assert_eq!(
+        source_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::AlphaMaskSourceExecution,
+        ))
+    );
+
+    let multi_layer_error = MaskLayerStack::try_new([
+        MaskLayer::new(alpha_mask.clone()),
+        MaskLayer::new(alpha_mask.clone()),
+    ])
+    .unwrap()
+    .ensure_supported(Capabilities::VELLO_0_9)
+    .expect_err("multi-layer mask composition has a typed Sequence 12 boundary");
+    assert_eq!(
+        multi_layer_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MultiLayerMaskComposition,
+        ))
+    );
+
+    let composite_error =
+        MaskLayerStack::single(MaskLayer::try_new(alpha_mask, MaskCompositeMode::Exclude).unwrap())
+            .ensure_supported(Capabilities::VELLO_0_9)
+            .expect_err("non-default mask composites have a typed Sequence 12 boundary");
+    assert_eq!(
+        composite_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaskCompositeMode,
+        ))
+    );
+}
+
+#[test]
+fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+    };
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 255, 255, 255, 0, 0, 0, 128],
+    };
+    let masked = ResolvedAlphaMaskExecution::try_new(&source, &mask)
+        .unwrap()
+        .execute_to_image_buffer()
+        .unwrap();
+    assert_eq!(masked.rgba, vec![255, 0, 0, 255, 0, 255, 0, 128]);
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(2.0, 1.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_resolved_alpha_mask(mask).unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
+        },
+    );
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("Sequence 12 resolved layer alpha masks should execute");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert!(pixel_alpha(&output, 0, 0) > 200);
+    assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
+}
+
+#[test]
+fn sequence12_capabilities_claim_only_implemented_mask_clip_and_no_broad_backdrop_behavior() {
+    let capabilities = Capabilities::VELLO_0_9;
+    let masks_clips = capabilities.masks_clips();
+    assert!(masks_clips.supports_shape_clips());
+    assert!(masks_clips.supports_materialized_alpha_mask_execution());
+    assert!(!masks_clips.supports_clip_reference_execution());
+    assert!(!masks_clips.supports_layer_masks());
+    assert!(!masks_clips.supports_luminance_mask_mode());
+    assert!(!masks_clips.supports_multi_layer_mask_composition());
+    assert!(!masks_clips.supports_mask_composite_modes());
+
+    capabilities
+        .ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaterializedAlphaMaskExecution,
+        ))
+        .expect("materialized alpha-mask execution is the narrow supported mask execution path");
+    for operation in [
+        PrimitiveOperation::ClipReferenceExecution,
+        PrimitiveOperation::LayerMask,
+        PrimitiveOperation::AlphaMaskSourceExecution,
+        PrimitiveOperation::LuminanceMaskMode,
+        PrimitiveOperation::MultiLayerMaskComposition,
+        PrimitiveOperation::MaskCompositeMode,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::MasksAndClips, operation);
+        assert_eq!(
+            capabilities
+                .ensure_supported(unsupported)
+                .expect_err("broader mask/clip behavior must not be claimed early")
+                .unsupported_primitive(),
+            Some(unsupported)
+        );
+    }
+
+    let offscreen = capabilities.offscreen_pipeline();
+    assert!(offscreen.supports_direct_vello_opacity_isolation());
+    assert!(offscreen.supports_direct_vello_blend_isolation());
+    assert!(!offscreen.supports_offscreen_layer_rendering());
+    assert!(!offscreen.supports_mask_execution());
+    assert!(!offscreen.supports_filter_execution());
+    assert!(!offscreen.supports_backdrop_execution());
+
+    assert!(
+        capabilities
+            .filters()
+            .supports_materialized_blur_filter_execution()
+    );
+    assert!(
+        capabilities
+            .filters()
+            .supports_materialized_drop_shadow_filter_execution()
+    );
+    assert!(!capabilities.filters().supports_layer_filters());
+    assert!(!capabilities.shadows().supports_text_shadows());
+}
+
+#[test]
 fn clip_inputs_reject_invalid_shape_points() {
     let mut path = Path::new();
     path.move_to(Point::new(f64::NAN, 0.0));
