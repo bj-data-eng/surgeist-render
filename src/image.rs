@@ -1,6 +1,5 @@
 use super::{
     Error, ErrorCode, FilterList, FilteredImagePaint, PhysicalSize, Result, Size,
-    UnsupportedPrimitive,
     filter::{
         BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
         FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
@@ -330,13 +329,26 @@ fn execute_materialized_filter_pipeline(
                 }
                 blurred
             }
-            MaterializedImageFilterStep::DropShadow(_) => {
-                return Err(Error::unsupported_render_primitive(
-                    UnsupportedPrimitive::new(
-                        super::PrimitiveFamily::Filters,
-                        super::PrimitiveOperation::MaterializedDropShadowFilterExecution,
-                    ),
-                ));
+            MaterializedImageFilterStep::DropShadow(shadow) => {
+                let planned_size = plan_clipped_materialized_drop_shadow_output_size(
+                    current.physical_size(),
+                    shadow,
+                    BlurPolicy::css_filter_default(),
+                )?;
+                let shadowed =
+                    current.apply_drop_shadow(shadow, BlurPolicy::css_filter_default())?;
+                if shadowed.physical_size() != planned_size {
+                    return Err(Error::invalid_value(
+                        "materialized drop-shadow output size",
+                        format!(
+                            "{}x{}",
+                            shadowed.physical_size().width(),
+                            shadowed.physical_size().height()
+                        ),
+                        "must match the clipped materialized image filter region",
+                    ));
+                }
+                shadowed
             }
         };
     }
@@ -359,6 +371,32 @@ fn plan_clipped_materialized_blur_output_size(
     if device_bounds.x() != 0 || device_bounds.y() != 0 {
         return Err(Error::invalid_value(
             "materialized blur output origin",
+            format!("{},{}", device_bounds.x(), device_bounds.y()),
+            "must remain anchored to the source image origin after clipping",
+        ));
+    }
+    Ok(PhysicalSize::new(
+        device_bounds.width(),
+        device_bounds.height(),
+    ))
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn plan_clipped_materialized_drop_shadow_output_size(
+    size: PhysicalSize,
+    shadow: &super::Shadow,
+    policy: BlurPolicy,
+) -> Result<PhysicalSize> {
+    let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));
+    let source = FilterSourceBounds::try_new(source_rect)?;
+    let outset = FilterOutset::from_drop_shadow(shadow, policy)?;
+    let clip = FilterClipBounds::try_new(source_rect)?;
+    let region = FilterRegionPlan::try_new(source, outset, Some(clip))?;
+    let device_bounds =
+        DevicePixelConversionPolicy::outward().convert_region(region.execution_region(), 1.0)?;
+    if device_bounds.x() != 0 || device_bounds.y() != 0 {
+        return Err(Error::invalid_value(
+            "materialized drop-shadow output origin",
             format!("{},{}", device_bounds.x(), device_bounds.y()),
             "must remain anchored to the source image origin after clipping",
         ));

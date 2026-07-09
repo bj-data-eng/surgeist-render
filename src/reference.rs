@@ -1,8 +1,9 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::{
-    Error, PhysicalSize, Result,
+    Error, PhysicalSize, PrimitiveFamily, PrimitiveOperation, Result, Shadow, UnsupportedPrimitive,
     filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
+    paint::PaintKind,
     style::{ColorFilterOp, ColorFilterPipeline, FilterBlur},
 };
 
@@ -401,6 +402,76 @@ impl ReferencePremultipliedRgba8Buffer {
         }
     }
 
+    pub(crate) fn apply_drop_shadow(&self, shadow: &Shadow, policy: BlurPolicy) -> Result<Self> {
+        if shadow.spread() != 0.0 {
+            return Err(Error::invalid_value(
+                "filter drop-shadow spread",
+                shadow.spread(),
+                "must be zero for CSS drop-shadow filter execution",
+            ));
+        }
+
+        let color = solid_shadow_color(shadow)?;
+        let shifted_alpha = self.offset_alpha_mask(shadow)?;
+        let blurred_alpha =
+            shifted_alpha.apply_blur(FilterBlur::try_new(shadow.blur())?, policy)?;
+        let shadow = blurred_alpha.colorize_alpha_mask(color)?;
+        self.source_over(&shadow)
+    }
+
+    fn offset_alpha_mask(&self, shadow: &Shadow) -> Result<Self> {
+        let offset = shadow.offset();
+        let offset_policy =
+            MaterializedDropShadowOffsetQuantizationPolicy::materialized_cpu_reference();
+        let offset_x = offset_policy.quantize(offset.x(), "filter drop-shadow offset x")?;
+        let offset_y = offset_policy.quantize(offset.y(), "filter drop-shadow offset y")?;
+        let width = self.physical_size.width();
+        let height = self.physical_size.height();
+        let mut buffer = Self::try_new(self.physical_size)?;
+
+        for y in 0..height {
+            for x in 0..width {
+                let sample_x = i64::from(x) - i64::from(offset_x);
+                let sample_y = i64::from(y) - i64::from(offset_y);
+                if sample_x < 0
+                    || sample_y < 0
+                    || sample_x >= i64::from(width)
+                    || sample_y >= i64::from(height)
+                {
+                    continue;
+                }
+                let alpha = self
+                    .pixel(
+                        u32::try_from(sample_x).expect("validated x should fit u32"),
+                        u32::try_from(sample_y).expect("validated y should fit u32"),
+                    )?
+                    .alpha();
+                if alpha != 0 {
+                    buffer.set_pixel(
+                        x,
+                        y,
+                        PremultipliedRgba8::try_new(0, 0, 0, alpha)
+                            .expect("alpha-only mask pixels are valid premultiplied colors"),
+                    )?;
+                }
+            }
+        }
+
+        Ok(buffer)
+    }
+
+    fn colorize_alpha_mask(&self, color: super::Color) -> Result<Self> {
+        self.map_pixels(|pixel| {
+            let alpha = round_byte(f64::from(pixel.alpha()) * f64::from(color.a()));
+            Ok(PremultipliedRgba8::from_straight_color_channels(
+                f64::from(color.r()),
+                f64::from(color.g()),
+                f64::from(color.b()),
+                alpha,
+            ))
+        })
+    }
+
     pub(crate) fn map_pixels(
         &self,
         mut map_pixel: impl FnMut(PremultipliedRgba8) -> Result<PremultipliedRgba8>,
@@ -468,6 +539,46 @@ impl ReferencePremultipliedRgba8Buffer {
                 "must fit addressable memory",
             )
         })
+    }
+}
+
+/// Offset quantization policy for materialized CSS drop-shadow execution.
+///
+/// The materialized CPU/reference path deterministically snaps authored
+/// drop-shadow offsets to the nearest device pixel before shifting the alpha
+/// mask. Half-device-pixel values follow Rust `f64::round` semantics, which
+/// round away from zero. This is the staged materialized CPU path policy until a
+/// future subpixel sampling model exists.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MaterializedDropShadowOffsetQuantizationPolicy;
+
+impl MaterializedDropShadowOffsetQuantizationPolicy {
+    pub(crate) const fn materialized_cpu_reference() -> Self {
+        Self
+    }
+
+    pub(crate) fn quantize(self, value: f64, name: &'static str) -> Result<i32> {
+        let rounded = value.round();
+        if !rounded.is_finite() || rounded < f64::from(i32::MIN) || rounded > f64::from(i32::MAX) {
+            return Err(Error::invalid_value(
+                name,
+                value,
+                "must quantize to an i32 nearest-device-pixel offset",
+            ));
+        }
+        Ok(rounded as i32)
+    }
+}
+
+fn solid_shadow_color(shadow: &Shadow) -> Result<super::Color> {
+    match shadow.paint().kind() {
+        PaintKind::Color(color) => Ok(*color),
+        PaintKind::Gradient(_) | PaintKind::Image(_) => Err(Error::unsupported_render_primitive(
+            UnsupportedPrimitive::new(
+                PrimitiveFamily::PaintSources,
+                PrimitiveOperation::NonSolidShadowPaint,
+            ),
+        )),
     }
 }
 

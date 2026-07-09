@@ -2,7 +2,10 @@ use super::{
     backend::*,
     command,
     encode::*,
-    reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
+    reference::{
+        MaterializedDropShadowOffsetQuantizationPolicy, PremultipliedRgba8,
+        ReferencePremultipliedRgba8Buffer,
+    },
     shader::{
         RectPassBounds, RectShaderPassDescriptor, RectShaderPassGpuContext, RectShaderPassKind,
         RectShaderPipelineKey, encode_clear_fill_pass,
@@ -1021,29 +1024,311 @@ fn materialized_image_blur_keeps_output_clipped_to_source_region() {
 }
 
 #[test]
-fn materialized_image_filter_execution_rejects_drop_shadow_until_task5() {
-    let image =
-        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([100, 150, 200, 255])).unwrap();
-    let resource = ResolvedImageResource::try_new(image.id(), image.size()).unwrap();
-    let drop_shadow = FilteredImagePaint::try_new(
-        resource,
-        FilterList::try_ops(vec![FilterOp::drop_shadow(
-            Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
-        )])
-        .unwrap(),
+fn materialized_drop_shadow_quantizes_positive_fractional_offsets_to_nearest_device_pixel() {
+    let policy = MaterializedDropShadowOffsetQuantizationPolicy::materialized_cpu_reference();
+
+    assert_eq!(
+        policy
+            .quantize(1.25, "filter drop-shadow offset x")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        policy
+            .quantize(1.75, "filter drop-shadow offset x")
+            .unwrap(),
+        2
+    );
+}
+
+#[test]
+fn materialized_drop_shadow_quantizes_negative_fractional_offsets_to_nearest_device_pixel() {
+    let policy = MaterializedDropShadowOffsetQuantizationPolicy::materialized_cpu_reference();
+
+    assert_eq!(
+        policy
+            .quantize(-1.25, "filter drop-shadow offset x")
+            .unwrap(),
+        -1
+    );
+    assert_eq!(
+        policy
+            .quantize(-1.75, "filter drop-shadow offset x")
+            .unwrap(),
+        -2
+    );
+}
+
+#[test]
+fn materialized_drop_shadow_quantizes_half_pixel_offsets_away_from_zero() {
+    let policy = MaterializedDropShadowOffsetQuantizationPolicy::materialized_cpu_reference();
+
+    assert_eq!(
+        policy.quantize(0.5, "filter drop-shadow offset x").unwrap(),
+        1
+    );
+    assert_eq!(
+        policy
+            .quantize(-0.5, "filter drop-shadow offset x")
+            .unwrap(),
+        -1
+    );
+}
+
+#[test]
+fn materialized_drop_shadow_uses_alpha_mask_not_source_bounds() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(3, 3),
+        rgba: vec![
+            0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    };
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.size, PhysicalSize::new(3, 3));
+    assert_eq!(pixel_rgba(&filtered, 1, 0), [255, 0, 0, 255]);
+    assert_eq!(pixel_rgba(&filtered, 2, 0), [0, 0, 0, 255]);
+    assert_eq!(pixel_rgba(&filtered, 2, 1), [0, 0, 0, 255]);
+    assert_eq!(
+        pixel_rgba(&filtered, 1, 2),
+        [0, 0, 0, 0],
+        "CSS drop-shadow follows the source alpha mask, not the image border box"
+    );
+}
+
+#[test]
+fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(3, 3),
+        rgba: vec![
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0,
+            0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        ],
+    };
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(1.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.size, source.size);
+    assert_eq!(filtered.rgba.len(), source.rgba.len());
+    assert_eq!(pixel_rgba(&filtered, 1, 1), [255, 255, 255, 255]);
+    assert!(
+        pixel_alpha(&filtered, 2, 0) > 0,
+        "blurred offset shadow should contribute inside the clipped source extent"
+    );
+}
+
+#[test]
+fn materialized_drop_shadow_composites_shadow_behind_source() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 0, 0, 128],
+    };
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.rgba, vec![170, 0, 0, 192]);
+}
+
+#[test]
+fn filtered_image_paint_executes_drop_shadow_with_matching_materialized_image() {
+    let image = Image::from_rgba(
+        Size::new(2.0, 1.0),
+        Arc::<[u8]>::from([255, 0, 0, 255, 0, 0, 0, 0]),
+    )
+    .unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
+        filters.clone(),
     )
     .unwrap();
 
-    let drop_shadow_error = image::ResolvedImageColorFilterExecution::try_new(&drop_shadow, &image)
+    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
-        .expect_err("drop-shadow materialized execution is reserved for Task 5");
+        .unwrap();
+
+    assert_eq!(filtered.size(), Size::new(2.0, 1.0));
+    assert_eq!(filtered.bytes.as_ref(), &[255, 0, 0, 255, 0, 0, 0, 255]);
+
+    let wrong_id = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(ImageId::new(image.id().get() + 1), image.size()).unwrap(),
+        filters.clone(),
+    )
+    .unwrap();
+    let wrong_size = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), Size::new(1.0, 1.0)).unwrap(),
+        filters,
+    )
+    .unwrap();
 
     assert_eq!(
-        drop_shadow_error.unsupported_primitive(),
+        image::ResolvedImageColorFilterExecution::try_new(&wrong_id, &image)
+            .expect_err("materialized image id should match resolved resource id")
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("materialized filtered image id")
+    );
+    assert_eq!(
+        image::ResolvedImageColorFilterExecution::try_new(&wrong_size, &image)
+            .expect_err("materialized image size should match resolved resource size")
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("materialized filtered image size")
+    );
+}
+
+#[test]
+fn resource_only_drop_shadow_filtered_image_paint_stays_rejected() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(41), Size::new(2.0, 1.0)).unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(resource, filters).unwrap();
+
+    let unsupported = paint
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("resource-only filtered image paint is not materialized bytes");
+
+    assert_eq!(
+        unsupported.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::MaterializedDropShadowFilterExecution,
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::FilteredImagePaint
+        ))
+    );
+}
+
+#[test]
+fn materialized_filters_after_drop_shadow_apply_to_composed_output() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
+    };
+    let filters = FilterList::try_ops(vec![
+        FilterOp::drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ),
+        FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
+    ])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.rgba, vec![0, 255, 255, 255, 255, 255, 255, 255]);
+}
+
+#[test]
+fn materialized_filters_before_drop_shadow_shape_current_alpha_mask() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
+    };
+    let filters = FilterList::try_ops(vec![
+        FilterOp::opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+        FilterOp::drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ),
+    ])
+    .unwrap();
+
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered.rgba, vec![255, 0, 0, 128, 0, 0, 0, 128]);
+}
+
+#[test]
+fn css_drop_shadow_rejects_non_zero_spread() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 0, 0, 255],
+    };
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(0.0, 0.0), 0.0, 1.0, Color::BLACK).unwrap(),
+    )])
+    .unwrap();
+
+    let error =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .expect_err("CSS drop-shadow must not silently treat spread like box-shadow spread");
+
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter drop-shadow spread")
+    );
+}
+
+#[test]
+fn css_drop_shadow_rejects_non_solid_shadow_paint() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 0, 0, 255],
+    };
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+        Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Paint::gradient(gradient)).unwrap(),
+    )])
+    .unwrap();
+
+    let error =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .expect_err("CSS drop-shadow currently requires a solid shadow paint");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::PaintSources,
+            PrimitiveOperation::NonSolidShadowPaint,
         ))
     );
 }
@@ -1178,7 +1463,7 @@ fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
 }
 
 #[test]
-fn sequence10_guardrail_later_effect_execution_stays_unsupported() {
+fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
     let image_buffer = ImageBuffer {
         size: PhysicalSize::new(1, 1),
         rgba: vec![100, 150, 200, 255],
@@ -1186,21 +1471,14 @@ fn sequence10_guardrail_later_effect_execution_stays_unsupported() {
     let shadow = Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
     let drop_shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
 
-    let drop_shadow_error = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+    let drop_shadow_output = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &drop_shadow,
         &image_buffer,
     )
     .unwrap()
     .execute_to_image_buffer()
-    .expect_err("drop-shadow execution is reserved for Sequence 11 Task 5");
-
-    assert_eq!(
-        drop_shadow_error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::MaterializedDropShadowFilterExecution,
-        ))
-    );
+    .unwrap();
+    assert_eq!(drop_shadow_output.size, image_buffer.size);
 
     let layer_filter_error = normalize_single_layer_error(
         Layer::new()
