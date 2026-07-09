@@ -527,6 +527,29 @@ fn background_stacks_preserve_color_behind_ordered_layers() {
 }
 
 #[test]
+fn core_style_models_compose_without_backend_lowering() {
+    let color = StyleColor::new(Color::BLACK);
+    let paint = Paint::from(color.color());
+    let image_layer = StyleImageLayer::try_new(StyleImageSource::paint(paint).unwrap()).unwrap();
+    let background = BackgroundStack::try_new(
+        Some(Color::TRANSPARENT),
+        vec![BackgroundLayer::new(image_layer.clone())],
+    )
+    .unwrap();
+    let filter = FilterList::try_ops(vec![FilterOp::opacity(
+        UnitFilterAmount::try_new(0.5).unwrap(),
+    )])
+    .unwrap();
+    let mask = MaskInput::image_layer(image_layer, MaskMode::Alpha);
+    let outline = Outline::try_new(OutlineStyle::Solid, 1.0, Color::BLACK, 2.0).unwrap();
+
+    assert_eq!(background.layers().len(), 1);
+    assert_eq!(filter.ops().len(), 1);
+    assert_eq!(mask.mode(), MaskMode::Alpha);
+    assert_eq!(outline.offset(), 2.0);
+}
+
+#[test]
 fn border_sides_reject_negative_width() {
     let error = BorderSide::try_new(BorderStyle::Solid, -1.0, Color::BLACK)
         .expect_err("negative border widths should be rejected");
