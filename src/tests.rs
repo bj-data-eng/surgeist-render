@@ -1116,6 +1116,23 @@ fn transform_helpers_reject_non_finite_inputs() {
 }
 
 #[test]
+fn transform_then_composes_in_application_order() {
+    let translate = Transform::translation(2.0, 3.0).unwrap();
+    let scale = Transform::scale(2.0, 2.0).unwrap();
+    let composed = translate.then(scale).unwrap();
+
+    assert_eq!(composed.as_array(), [2.0, 0.0, 0.0, 2.0, 4.0, 6.0]);
+}
+
+#[test]
+fn transform_around_wraps_transform_origin() {
+    let origin = Point::try_new(10.0, 5.0).unwrap();
+    let transform = Transform::scale(2.0, 3.0).unwrap().around(origin).unwrap();
+
+    assert_eq!(transform.as_array(), [2.0, 0.0, 0.0, 3.0, -10.0, -10.0]);
+}
+
+#[test]
 fn rect_try_from_kurbo_rejects_invalid_bounds() {
     let rect = kurbo::Rect {
         x0: 1.0,
@@ -1577,6 +1594,53 @@ fn layer_transform_moves_child_content() {
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
     assert!(pixel_alpha(&output, 2, 0) > 0);
     assert!(pixel_alpha(&output, 3, 0) > 0);
+}
+
+#[test]
+fn composed_layer_transforms_render_in_order() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(6.0, 2.0), 1.0).unwrap();
+    let transform = Transform::translation(1.0, 0.0)
+        .unwrap()
+        .then(Transform::scale(2.0, 1.0).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.transform(transform, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 1.0, 2.0), Color::BLACK);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("composed transform should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert_eq!(pixel_alpha(&output, 1, 0), 0);
+    assert!(pixel_alpha(&output, 2, 0) > 0);
+    assert!(pixel_alpha(&output, 3, 0) > 0);
+}
+
+#[test]
+fn origin_wrapped_layer_transform_renders_about_origin() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let transform = Transform::scale(2.0, 2.0)
+        .unwrap()
+        .around(Point::try_new(1.0, 1.0).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.transform(transform, |scene| {
+        scene.fill(Rect::new(1.0, 1.0, 1.0, 1.0), Color::BLACK);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("origin-wrapped transform should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert!(pixel_alpha(&output, 1, 1) > 0);
+    assert!(pixel_alpha(&output, 2, 2) > 0);
 }
 
 #[test]

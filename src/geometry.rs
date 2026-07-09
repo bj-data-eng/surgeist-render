@@ -318,6 +318,25 @@ impl Transform {
         Self::try_new([1.0, radians.tan(), 0.0, 1.0, 0.0, 0.0])
     }
 
+    pub fn then(self, next: Self) -> Result<Self> {
+        let [a, b, c, d, e, f] = self.0;
+        let [na, nb, nc, nd, ne, nf] = next.0;
+        Self::try_new([
+            na * a + nc * b,
+            nb * a + nd * b,
+            na * c + nc * d,
+            nb * c + nd * d,
+            na * e + nc * f + ne,
+            nb * e + nd * f + nf,
+        ])
+    }
+
+    pub fn around(self, origin: Point) -> Result<Self> {
+        Transform::translation(-origin.x(), -origin.y())?
+            .then(self)?
+            .then(Transform::translation(origin.x(), origin.y())?)
+    }
+
     #[must_use]
     pub const fn as_array(self) -> [f64; 6] {
         self.0
