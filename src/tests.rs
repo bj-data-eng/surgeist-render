@@ -9381,6 +9381,66 @@ fn ordinary_text_run_normalization_remains_unaffected_by_text_shadow_boundary() 
 }
 
 #[test]
+fn text_fill_paint_matches_concrete_render_paint_surface() {
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(4.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 0, 0, 255])).unwrap();
+    let cases = [
+        ("solid color", Paint::color(Color::BLACK)),
+        ("gradient", Paint::gradient(gradient)),
+        ("image", Paint::image(image)),
+    ];
+
+    for (label, paint) in cases {
+        let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+        let run = TextRun::try_new(
+            FontRef::new(1).named(label),
+            16.0,
+            Transform::identity(),
+            TextPaint::try_fill(paint.clone()).unwrap(),
+            &glyphs,
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.text_run(run);
+
+        let brush = glyph_paint_brush(&paint)
+            .unwrap_or_else(|_| panic!("{label} should encode as a glyph brush"));
+        match (&paint, brush) {
+            (paint, peniko::Brush::Solid(_)) if paint == &Paint::color(Color::BLACK) => {}
+            (paint, peniko::Brush::Gradient(_))
+                if matches!(paint.kind(), paint::PaintKind::Gradient(_)) => {}
+            (paint, peniko::Brush::Image(_))
+                if matches!(paint.kind(), paint::PaintKind::Image(_)) => {}
+            _ => panic!("{label} encoded to the wrong glyph brush kind"),
+        }
+
+        let normalized = scene
+            .normalize(Capabilities::VELLO_0_9)
+            .unwrap_or_else(|_| panic!("{label} text fill should normalize"));
+
+        match &normalized.commands[0] {
+            command::RenderCommand::TextRun {
+                paint: text_paint,
+                glyphs,
+                ..
+            } => {
+                assert_eq!(text_paint.fill(), &paint);
+                assert_eq!(glyphs.len(), 1);
+            }
+            command => panic!("{label} should normalize to a text run, got {command:?}"),
+        }
+    }
+}
+
+#[test]
 fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
     let capabilities = Capabilities::VELLO_0_9;
     assert!(capabilities.geometry_targets().supports_rect_fill_stroke());
@@ -10690,6 +10750,43 @@ fn text_run_requires_font_data() {
         .expect_err("prepared glyphs cannot render without font data");
 
     assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert!(error.message.contains("font data"));
+}
+
+#[test]
+fn text_run_with_gradient_fill_still_requires_font_data_before_brush_encoding() {
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let mut scene = Scene::new();
+    scene.text_run(
+        TextRun::try_new(
+            FontRef::new(1).named("Test"),
+            16.0,
+            Transform::identity(),
+            TextPaint::try_fill(Paint::gradient(gradient)).unwrap(),
+            &glyphs,
+        )
+        .unwrap(),
+    );
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer
+        .create_headless(Size::new(10.0, 10.0), 1.0)
+        .unwrap();
+
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("prepared glyphs cannot render without font data");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.unsupported_primitive(), None);
     assert!(error.message.contains("font data"));
 }
 

@@ -298,7 +298,7 @@ fn encode_text_run(
             "text run font data is required for rendering prepared glyphs",
         ));
     };
-    let brush = paint_brush(paint.fill())?;
+    let brush = glyph_paint_brush(paint.fill())?;
     scene
         .draw_glyphs(data)
         .font_size(size)
@@ -402,7 +402,7 @@ fn push_vello_layer(
     }
 }
 
-fn paint_brush(paint: &Paint) -> Result<peniko::Brush> {
+pub(crate) fn glyph_paint_brush(paint: &Paint) -> Result<peniko::Brush> {
     match paint.kind() {
         PaintKind::Color(color) => Ok(peniko::Brush::Solid((*color).into())),
         PaintKind::Gradient(gradient) => Ok(peniko::Brush::Gradient(gradient.clone().into())),
