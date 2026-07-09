@@ -1747,6 +1747,45 @@ fn rejects_malformed_scene_values() {
 }
 
 #[test]
+fn concrete_color_paint_renders_without_color_realization() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.fill(
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
+    );
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("concrete color paint should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert!(pixel_alpha(&output, 0, 0) > 0);
+}
+
+#[test]
+fn gradient_paint_renders_with_transparent_stop() {
+    let gradient = Gradient::try_linear(
+        Point::try_new(0.0, 0.0).unwrap(),
+        Point::try_new(2.0, 0.0).unwrap(),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), gradient);
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("gradient paint should render");
+}
+
+#[test]
 fn image_paint_lowers_to_brush() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
