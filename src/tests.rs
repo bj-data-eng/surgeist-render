@@ -1334,6 +1334,240 @@ fn css_drop_shadow_rejects_non_solid_shadow_paint() {
 }
 
 #[test]
+fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_effects() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    assert!(
+        capabilities
+            .filters()
+            .supports_materialized_image_filter_classification()
+    );
+    assert!(
+        capabilities
+            .filters()
+            .supports_materialized_blur_filter_execution()
+    );
+    assert!(
+        capabilities
+            .filters()
+            .supports_materialized_drop_shadow_filter_execution()
+    );
+    assert!(
+        capabilities
+            .filters()
+            .supports_filter_region_outset_planning()
+    );
+    assert!(
+        capabilities
+            .filters()
+            .supports_cpu_reference_blur_fallback()
+    );
+    assert!(!capabilities.filters().supports_layer_filters());
+    assert!(
+        !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+    );
+    assert!(!capabilities.shadows().supports_inset_box_shadows());
+    assert!(!capabilities.shadows().supports_text_shadows());
+    assert!(!capabilities.masks_clips().supports_layer_masks());
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_filter_execution()
+    );
+    assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_backdrop_execution()
+    );
+}
+
+#[test]
+fn sequence11_filtered_image_executes_nonzero_blur_then_drop_shadow_with_materialized_image() {
+    let image = Image::from_rgba(
+        Size::new(2.0, 1.0),
+        Arc::<[u8]>::from([255, 0, 0, 255, 0, 0, 0, 0]),
+    )
+    .unwrap();
+    let filters = FilterList::try_ops(vec![
+        FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let paint = FilteredImagePaint::try_new(
+        ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
+        filters,
+    )
+    .unwrap();
+
+    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+        .unwrap()
+        .execute_to_image()
+        .unwrap();
+
+    assert_eq!(filtered.size(), Size::new(2.0, 1.0));
+    assert_eq!(filtered.bytes.as_ref(), &[255, 0, 0, 41, 103, 0, 0, 62]);
+    assert_ne!(
+        filtered.id(),
+        image.id(),
+        "materialized filtered output identity should reflect nonzero blur/drop-shadow bytes"
+    );
+}
+
+#[test]
+fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
+    let blur = FilterBlur::try_new(2.0).unwrap();
+    let source = FilterSourceBounds::try_new(Rect::new(10.0, 10.0, 4.0, 4.0)).unwrap();
+    let clip = FilterClipBounds::try_new(Rect::new(8.0, 8.0, 12.0, 12.0)).unwrap();
+    let blur_outset = FilterOutset::from_blur(blur, BlurPolicy::css_filter_default()).unwrap();
+    let blur_region = FilterRegionPlan::try_new(source, blur_outset, Some(clip)).unwrap();
+    assert_eq!(
+        blur_region.inflated_bounds().rect(),
+        Rect::new(5.0, 5.0, 14.0, 14.0)
+    );
+    assert_eq!(
+        blur_region.execution_region().rect(),
+        Rect::new(8.0, 8.0, 11.0, 11.0)
+    );
+
+    let shadow = Shadow::try_new(Point::new(2.0, -1.0), 4.0, 0.0, Color::BLACK).unwrap();
+    let shadow_outset =
+        FilterOutset::from_drop_shadow(&shadow, BlurPolicy::css_filter_default()).unwrap();
+    assert_eq!(shadow_outset.left(), 8.0);
+    assert_eq!(shadow_outset.top(), 11.0);
+    assert_eq!(shadow_outset.right(), 12.0);
+    assert_eq!(shadow_outset.bottom(), 9.0);
+
+    let image_buffer = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
+    };
+    let color_before_pixel = FilterList::try_ops(vec![
+        FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ),
+    ])
+    .unwrap();
+    let pixel_before_color = FilterList::try_ops(vec![
+        FilterOp::drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ),
+        FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
+    ])
+    .unwrap();
+    let color_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+        &color_before_pixel,
+        &image_buffer,
+    )
+    .unwrap()
+    .execute_to_image_buffer()
+    .unwrap();
+    let pixel_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+        &pixel_before_color,
+        &image_buffer,
+    )
+    .unwrap()
+    .execute_to_image_buffer()
+    .unwrap();
+    assert_ne!(
+        color_before.rgba, pixel_before.rgba,
+        "mixed color and pixel-moving filters must preserve authored order"
+    );
+
+    let mut scene = Scene::new();
+    scene.shadows(
+        Rect::new(1.0, 1.0, 6.0, 6.0),
+        ShadowList::try_new(vec![
+            Shadow::try_new(Point::new(1.0, 0.0), 2.0, 1.0, Color::BLACK).unwrap(),
+            Shadow::try_new(Point::new(-1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ])
+        .unwrap(),
+    );
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    assert_eq!(normalized.stats().shadows, 2);
+    assert!(matches!(
+        normalized.commands.as_slice(),
+        [
+            command::RenderCommand::Shadow { .. },
+            command::RenderCommand::Shadow { .. }
+        ]
+    ));
+
+    let mut inset_scene = Scene::new();
+    inset_scene.shadow(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Shadow::try_inset(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+    );
+    let inset_error = inset_scene.normalize(Capabilities::VELLO_0_9).unwrap_err();
+    assert_eq!(
+        inset_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::InsetBoxShadow,
+        ))
+    );
+
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let text_run = TextRun::try_new(
+        FontRef::new(1).named("Test"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let text_shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut text_scene = Scene::new();
+    text_scene.text_shadow_run(TextShadowRun::try_new(text_run, text_shadows).unwrap());
+    let text_error = text_scene.normalize(Capabilities::VELLO_0_9).unwrap_err();
+    assert_eq!(
+        text_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
+    assert!(
+        text_error
+            .message
+            .contains("glyph-alpha/offscreen text capture")
+    );
+
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mut non_solid_scene = Scene::new();
+    non_solid_scene.shadow(
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Paint::gradient(gradient)).unwrap(),
+    );
+    let non_solid_error = non_solid_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .unwrap_err();
+    assert_eq!(
+        non_solid_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::PaintSources,
+            PrimitiveOperation::NonSolidShadowPaint,
+        ))
+    );
+}
+
+#[test]
 fn sequence10_matrix_color_filters_execute_with_cpu_reference_bytes() {
     let source = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
     let cases = [
@@ -5916,7 +6150,7 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
 }
 
 #[test]
-fn pixel_moving_filter_capability_names_advertise_only_blur_execution() {
+fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() {
     let capabilities = Capabilities::VELLO_0_9;
 
     assert!(
@@ -5930,7 +6164,7 @@ fn pixel_moving_filter_capability_names_advertise_only_blur_execution() {
             .supports_materialized_blur_filter_execution()
     );
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_materialized_drop_shadow_filter_execution()
     );
@@ -5969,6 +6203,11 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         ),
         (
             PrimitiveFamily::Filters,
+            PrimitiveOperation::MaterializedDropShadowFilterExecution,
+            "materialized drop-shadow filter execution",
+        ),
+        (
+            PrimitiveFamily::Filters,
             PrimitiveOperation::FilterRegionOutsetPlanning,
             "filter-region/outset planning",
         ),
@@ -5979,11 +6218,6 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         ),
     ];
     let unsupported_cases = [
-        (
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::MaterializedDropShadowFilterExecution,
-            "materialized drop-shadow filter execution",
-        ),
         (
             PrimitiveFamily::Shadows,
             PrimitiveOperation::InsetBoxShadow,

@@ -68,7 +68,7 @@ impl Capabilities {
             color_filter_pipeline_execution: true,
             materialized_image_filter_classification: true,
             materialized_blur_filter_execution: true,
-            materialized_drop_shadow_filter_execution: false,
+            materialized_drop_shadow_filter_execution: true,
             filter_region_outset_planning: true,
             cpu_reference_blur_fallback: true,
         },
