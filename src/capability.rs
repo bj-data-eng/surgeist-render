@@ -76,7 +76,7 @@ impl Capabilities {
             shape_clips: true,
             clip_reference_execution: false,
             layer_masks: false,
-            alpha_mask_execution: false,
+            materialized_alpha_mask_execution: true,
             luminance_mask_mode: false,
             multi_layer_mask_composition: false,
             mask_composite_modes: false,
@@ -289,9 +289,13 @@ impl Capabilities {
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LayerMask) => {
                 self.masks_clips.supports_layer_masks()
             }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::AlphaMaskExecution) => {
-                self.masks_clips.supports_alpha_mask_execution()
-            }
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::AlphaMaskSourceExecution) => false,
+            (
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::MaterializedAlphaMaskExecution,
+            ) => self
+                .masks_clips
+                .supports_materialized_alpha_mask_execution(),
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LuminanceMaskMode) => {
                 self.masks_clips.supports_luminance_mask_mode()
             }
@@ -687,7 +691,7 @@ pub struct MaskClipCapabilities {
     shape_clips: bool,
     clip_reference_execution: bool,
     layer_masks: bool,
-    alpha_mask_execution: bool,
+    materialized_alpha_mask_execution: bool,
     luminance_mask_mode: bool,
     multi_layer_mask_composition: bool,
     mask_composite_modes: bool,
@@ -710,8 +714,8 @@ impl MaskClipCapabilities {
     }
 
     #[must_use]
-    pub const fn supports_alpha_mask_execution(self) -> bool {
-        self.alpha_mask_execution
+    pub const fn supports_materialized_alpha_mask_execution(self) -> bool {
+        self.materialized_alpha_mask_execution
     }
 
     #[must_use]

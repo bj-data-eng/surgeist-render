@@ -1,5 +1,6 @@
 use super::{
-    Error, ErrorCode, FilterList, FilteredImagePaint, PhysicalSize, Result, Size,
+    Error, ErrorCode, FilterList, FilteredImagePaint, MaskMode, PhysicalSize, PrimitiveFamily,
+    PrimitiveOperation, Result, Size, UnsupportedPrimitive,
     filter::{
         BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
         FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
@@ -144,6 +145,61 @@ pub enum ImageFit {
 pub struct ImageBuffer {
     pub size: PhysicalSize,
     pub rgba: Vec<u8>,
+}
+
+/// Executable boundary for an already-resolved alpha mask over materialized pixels.
+///
+/// This type does not resolve CSS mask sources, resource references, placement,
+/// shape rasterization, transforms, or luminance conversion. Callers must supply
+/// the source pixels and the alpha-mask pixels at the same physical size.
+#[derive(Debug)]
+pub struct ResolvedAlphaMaskExecution<'a> {
+    source: &'a ImageBuffer,
+    alpha_mask: &'a ImageBuffer,
+}
+
+impl<'a> ResolvedAlphaMaskExecution<'a> {
+    pub fn try_new(source: &'a ImageBuffer, alpha_mask: &'a ImageBuffer) -> Result<Self> {
+        Self::try_new_with_mode(source, alpha_mask, MaskMode::Alpha)
+    }
+
+    pub fn try_new_with_mode(
+        source: &'a ImageBuffer,
+        alpha_mask: &'a ImageBuffer,
+        mode: MaskMode,
+    ) -> Result<Self> {
+        match mode {
+            MaskMode::Alpha => {}
+            MaskMode::Luminance => {
+                return Err(Error::unsupported_render_primitive(
+                    UnsupportedPrimitive::new(
+                        PrimitiveFamily::MasksAndClips,
+                        PrimitiveOperation::LuminanceMaskMode,
+                    ),
+                ));
+            }
+        }
+
+        validate_image_buffer_rgba_len(source.size, source.rgba.len())?;
+        validate_image_buffer_rgba_len(alpha_mask.size, alpha_mask.rgba.len())?;
+        if source.size != alpha_mask.size {
+            return Err(Error::invalid_value(
+                "resolved alpha mask size",
+                format!("{}x{}", alpha_mask.size.width(), alpha_mask.size.height()),
+                "must match source size",
+            ));
+        }
+
+        Ok(Self { source, alpha_mask })
+    }
+
+    pub fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
+        let source = straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(self.source)?;
+        let alpha_mask =
+            straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(self.alpha_mask)?;
+        let masked = source.apply_alpha_mask(&alpha_mask)?;
+        premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&masked)
+    }
 }
 
 /// Render-local boundary for a resolved image/filter intent plus materialized RGBA bytes.

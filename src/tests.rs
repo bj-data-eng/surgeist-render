@@ -348,6 +348,85 @@ fn reference_alpha_masks_reject_mismatched_mask_buffer_size() {
 }
 
 #[test]
+fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(3, 1),
+        rgba: vec![
+            255, 0, 0, 255, //
+            0, 255, 0, 255, //
+            0, 0, 255, 255,
+        ],
+    };
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(3, 1),
+        rgba: vec![
+            0, 0, 0, 255, //
+            0, 0, 0, 0, //
+            0, 0, 0, 128,
+        ],
+    };
+
+    let masked = ResolvedAlphaMaskExecution::try_new(&source, &mask)
+        .unwrap()
+        .execute_to_image_buffer()
+        .unwrap();
+
+    assert_eq!(masked.size, source.size);
+    assert_eq!(
+        masked.rgba,
+        vec![
+            255, 0, 0, 255, //
+            0, 0, 0, 0, //
+            0, 0, 255, 128,
+        ]
+    );
+}
+
+#[test]
+fn resolved_alpha_mask_execution_rejects_non_materialized_luminance_policy() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 0, 0, 255],
+    };
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![255, 255, 255, 255],
+    };
+
+    let error = ResolvedAlphaMaskExecution::try_new_with_mode(&source, &mask, MaskMode::Luminance)
+        .expect_err("luminance masks need an explicit conversion policy before execution");
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LuminanceMaskMode,
+        ))
+    );
+}
+
+#[test]
+fn resolved_alpha_mask_execution_rejects_mismatched_buffers() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
+    };
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(1, 2),
+        rgba: vec![0, 0, 0, 255, 0, 0, 0, 255],
+    };
+
+    let error = ResolvedAlphaMaskExecution::try_new(&source, &mask)
+        .expect_err("materialized alpha masks must match source buffer size");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("resolved alpha mask size")
+    );
+}
+
+#[test]
 fn reference_blur_zero_radius_is_identity() {
     let pixels = vec![
         PremultipliedRgba8::TRANSPARENT,
@@ -1545,6 +1624,11 @@ fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_e
     assert!(!capabilities.shadows().supports_inset_box_shadows());
     assert!(!capabilities.shadows().supports_text_shadows());
     assert!(!capabilities.masks_clips().supports_layer_masks());
+    assert!(
+        capabilities
+            .masks_clips()
+            .supports_materialized_alpha_mask_execution()
+    );
     assert!(
         !capabilities
             .offscreen_pipeline()
@@ -4450,11 +4534,21 @@ fn shape_clip_inputs_match_current_capability_contract() {
 fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     let alpha_mask =
         MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0)), MaskMode::Alpha).unwrap();
+    let image =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 255, 255, 255])).unwrap();
+    let image_layer = StyleImageLayer::try_new(StyleImageSource::image(image).unwrap()).unwrap();
+    let image_mask = MaskInput::image_layer(image_layer, MaskMode::Alpha);
     let luminance_mask = MaskInput::try_shape(
         Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0)),
         MaskMode::Luminance,
     )
     .unwrap();
+    let transformed_mask =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0)), MaskMode::Alpha)
+            .unwrap()
+            .with_coordinate_space(
+                CoordinateSpaceTag::surface(Transform::translation(1.0, 0.0).unwrap()).unwrap(),
+            );
     let reference_mask = MaskInput::reference(
         StyleResourceRef::try_new("#alpha-mask").unwrap(),
         MaskMode::Alpha,
@@ -4462,12 +4556,34 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
 
     let alpha_error = alpha_mask
         .ensure_supported(Capabilities::VELLO_0_9)
-        .expect_err("alpha mask execution is not implemented in Task 1");
+        .expect_err("shape masks need a real rasterization path before execution");
     assert_eq!(
         alpha_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::AlphaMaskExecution,
+            PrimitiveOperation::AlphaMaskSourceExecution,
+        ))
+    );
+
+    let image_error = image_mask
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("image-layer masks need materialized placement before execution");
+    assert_eq!(
+        image_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::AlphaMaskSourceExecution,
+        ))
+    );
+
+    let transformed_error = transformed_mask
+        .ensure_supported(Capabilities::VELLO_0_9)
+        .expect_err("transformed authored masks need materialized execution inputs");
+    assert_eq!(
+        transformed_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::AlphaMaskSourceExecution,
         ))
     );
 
@@ -6390,6 +6506,11 @@ fn renderer_reports_backend_capabilities_by_family() {
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(capabilities.masks_clips().supports_shape_clips());
     assert!(!capabilities.masks_clips().supports_layer_masks());
+    assert!(
+        capabilities
+            .masks_clips()
+            .supports_materialized_alpha_mask_execution()
+    );
     assert!(capabilities.compositing().supports_layer_opacity());
     assert!(capabilities.compositing().supports_blend_modes());
     assert!(
@@ -6523,13 +6644,19 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
 }
 
 #[test]
-fn mask_clip_capabilities_name_sequence12_boundaries_without_execution_claims() {
+fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution() {
     let capabilities = Capabilities::VELLO_0_9.masks_clips();
 
     assert!(capabilities.supports_shape_clips());
     assert!(!capabilities.supports_clip_reference_execution());
     assert!(!capabilities.supports_layer_masks());
-    assert!(!capabilities.supports_alpha_mask_execution());
+    assert!(capabilities.supports_materialized_alpha_mask_execution());
+    Capabilities::VELLO_0_9
+        .ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaterializedAlphaMaskExecution,
+        ))
+        .expect("materialized alpha-mask execution is supported by the current CPU boundary");
     assert!(!capabilities.supports_luminance_mask_mode());
     assert!(!capabilities.supports_multi_layer_mask_composition());
     assert!(!capabilities.supports_mask_composite_modes());
@@ -6837,7 +6964,7 @@ fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
     for operation in [
         PrimitiveOperation::ClipReferenceExecution,
         PrimitiveOperation::LayerMask,
-        PrimitiveOperation::AlphaMaskExecution,
+        PrimitiveOperation::AlphaMaskSourceExecution,
         PrimitiveOperation::LuminanceMaskMode,
         PrimitiveOperation::MultiLayerMaskComposition,
         PrimitiveOperation::MaskCompositeMode,

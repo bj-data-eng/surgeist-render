@@ -50,7 +50,9 @@ pub use geometry::{
     CoordinateSpaceId, CoordinateSpaceKind, CoordinateSpaceTag, PhysicalSize, Point, Radii, Rect,
     Size, Transform,
 };
-pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
+pub use image::{
+    Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality, ResolvedAlphaMaskExecution,
+};
 pub use layer::{BlendMode, Filter, Layer, Shadow, ShadowKind, ShadowList};
 pub use paint::{
     Color, Gradient, GradientStop, NormalizedPaintLayer, Paint, PaintColor, PaintColorSpace,

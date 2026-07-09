@@ -1879,9 +1879,11 @@ impl MaskInput {
         }
 
         match self.mode {
-            MaskMode::Alpha => capabilities.ensure_supported(UnsupportedPrimitive::new(
-                PrimitiveFamily::MasksAndClips,
-                PrimitiveOperation::AlphaMaskExecution,
+            MaskMode::Alpha => Err(Error::unsupported_render_primitive(
+                UnsupportedPrimitive::new(
+                    PrimitiveFamily::MasksAndClips,
+                    PrimitiveOperation::AlphaMaskSourceExecution,
+                ),
             )),
             MaskMode::Luminance => capabilities.ensure_supported(UnsupportedPrimitive::new(
                 PrimitiveFamily::MasksAndClips,
