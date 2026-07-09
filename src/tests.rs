@@ -200,6 +200,154 @@ fn reference_buffer_source_over_preserves_transparent_edges() {
 }
 
 #[test]
+fn reference_pixels_apply_source_in_and_destination_in_alpha_multiplication() {
+    let source = PremultipliedRgba8::try_new(100, 60, 20, 200).unwrap();
+    let destination = PremultipliedRgba8::try_new(0, 80, 40, 128).unwrap();
+
+    assert_eq!(
+        source.source_in_alpha_of(destination),
+        PremultipliedRgba8::try_new(50, 30, 10, 100).unwrap()
+    );
+    assert_eq!(
+        destination.destination_in_alpha_of(source),
+        PremultipliedRgba8::try_new(0, 63, 31, 100).unwrap()
+    );
+}
+
+#[test]
+fn reference_alpha_masks_handle_opaque_transparent_and_partial_mask_pixels() {
+    let red = PremultipliedRgba8::try_new(255, 0, 0, 255).unwrap();
+    let green = PremultipliedRgba8::try_new(0, 128, 0, 128).unwrap();
+    let blue = PremultipliedRgba8::try_new(0, 0, 200, 200).unwrap();
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(3, 1),
+        vec![red, green, blue],
+    )
+    .unwrap();
+    let mask = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(3, 1),
+        vec![
+            PremultipliedRgba8::try_new(255, 255, 255, 255).unwrap(),
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::try_new(16, 8, 4, 64).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let masked = source.apply_alpha_mask(&mask).unwrap();
+
+    assert_eq!(masked.pixel(0, 0).unwrap(), red);
+    assert_eq!(masked.pixel(1, 0).unwrap(), PremultipliedRgba8::TRANSPARENT);
+    assert_eq!(
+        masked.pixel(2, 0).unwrap(),
+        PremultipliedRgba8::try_new(0, 0, 50, 50).unwrap()
+    );
+}
+
+#[test]
+fn reference_alpha_masks_preserve_premultiplied_color_ratios() {
+    let source_pixel = PremultipliedRgba8::try_new(100, 50, 25, 200).unwrap();
+    let source =
+        ReferencePremultipliedRgba8Buffer::from_pixels(PhysicalSize::new(1, 1), vec![source_pixel])
+            .unwrap();
+    let mask = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(1, 1),
+        vec![PremultipliedRgba8::try_new(0, 0, 0, 128).unwrap()],
+    )
+    .unwrap();
+
+    let masked = source.apply_alpha_mask(&mask).unwrap();
+
+    assert_eq!(
+        masked.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(50, 25, 13, 100).unwrap()
+    );
+    assert_premultiplied(masked.pixel(0, 0).unwrap());
+}
+
+#[test]
+fn reference_alpha_masks_preserve_transparent_edges() {
+    let red = PremultipliedRgba8::try_new(255, 0, 0, 255).unwrap();
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 2),
+        vec![
+            PremultipliedRgba8::TRANSPARENT,
+            red,
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+        ],
+    )
+    .unwrap();
+    let mask = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 2),
+        vec![
+            PremultipliedRgba8::try_new(0, 0, 0, 255).unwrap(),
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::try_new(0, 0, 0, 128).unwrap(),
+            PremultipliedRgba8::try_new(0, 0, 0, 255).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let masked = source.apply_alpha_mask(&mask).unwrap();
+
+    for y in 0..2 {
+        for x in 0..2 {
+            assert_eq!(
+                masked.pixel(x, y).unwrap(),
+                PremultipliedRgba8::TRANSPARENT,
+                "unexpected masked edge at {x},{y}"
+            );
+        }
+    }
+}
+
+#[test]
+fn reference_alpha_masks_are_deterministic_across_repeated_runs() {
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 2),
+        vec![
+            PremultipliedRgba8::try_new(100, 20, 10, 100).unwrap(),
+            PremultipliedRgba8::try_new(0, 64, 128, 128).unwrap(),
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::try_new(10, 40, 80, 160).unwrap(),
+        ],
+    )
+    .unwrap();
+    let mask = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 2),
+        vec![
+            PremultipliedRgba8::try_new(0, 0, 0, 255).unwrap(),
+            PremultipliedRgba8::try_new(0, 0, 0, 128).unwrap(),
+            PremultipliedRgba8::try_new(0, 0, 0, 64).unwrap(),
+            PremultipliedRgba8::TRANSPARENT,
+        ],
+    )
+    .unwrap();
+
+    let first = source.apply_alpha_mask(&mask).unwrap();
+    let second = source.apply_alpha_mask(&mask).unwrap();
+
+    assert_eq!(first, second);
+}
+
+#[test]
+fn reference_alpha_masks_reject_mismatched_mask_buffer_size() {
+    let source = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 1)).unwrap();
+    let mask = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(1, 2)).unwrap();
+
+    let error = source
+        .apply_alpha_mask(&mask)
+        .expect_err("mask buffers must map one-to-one to source pixels");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("reference alpha mask size")
+    );
+}
+
+#[test]
 fn reference_blur_zero_radius_is_identity() {
     let pixels = vec![
         PremultipliedRgba8::TRANSPARENT,

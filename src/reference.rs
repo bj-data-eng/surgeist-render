@@ -127,6 +127,29 @@ impl PremultipliedRgba8 {
         }
     }
 
+    pub(crate) const fn source_in_alpha_of(self, destination: Self) -> Self {
+        self.scale_by_alpha(destination.alpha)
+    }
+
+    pub(crate) const fn destination_in_alpha_of(self, source: Self) -> Self {
+        self.scale_by_alpha(source.alpha)
+    }
+
+    const fn scale_by_alpha(self, alpha: u8) -> Self {
+        if alpha == 0 || self.alpha == 0 {
+            return Self::TRANSPARENT;
+        }
+        if alpha == u8::MAX {
+            return self;
+        }
+        Self {
+            red: scale_channel_by_alpha(self.red, alpha),
+            green: scale_channel_by_alpha(self.green, alpha),
+            blue: scale_channel_by_alpha(self.blue, alpha),
+            alpha: scale_channel_by_alpha(self.alpha, alpha),
+        }
+    }
+
     fn apply_color_filter_op(self, op: ColorFilterOp) -> Self {
         match op {
             ColorFilterOp::Brightness(amount) => {
@@ -356,6 +379,28 @@ impl ReferencePremultipliedRgba8Buffer {
         pipeline: &CompiledColorFilterPipeline,
     ) -> Result<Self> {
         pipeline.apply_to_buffer(self)
+    }
+
+    pub(crate) fn apply_alpha_mask(&self, mask: &Self) -> Result<Self> {
+        if self.physical_size != mask.physical_size {
+            return Err(Error::invalid_value(
+                "reference alpha mask size",
+                format!(
+                    "{}x{}",
+                    mask.physical_size.width(),
+                    mask.physical_size.height()
+                ),
+                "must match source size",
+            ));
+        }
+        let pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .zip(mask.pixels.iter().copied())
+            .map(|(source, mask)| source.destination_in_alpha_of(mask))
+            .collect();
+        Self::from_pixels(self.physical_size, pixels)
     }
 
     pub(crate) fn apply_blur(&self, blur: FilterBlur, policy: BlurPolicy) -> Result<Self> {
