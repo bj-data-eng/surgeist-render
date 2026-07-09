@@ -1,6 +1,6 @@
 use super::{
-    Color, Error, Image, ImageId, Paint, Result, Shadow, Size,
-    validation::{validate_paint, validate_size},
+    Color, Error, Image, ImageId, Paint, Result, Shadow, Shape, Size,
+    validation::{validate_paint, validate_shape, validate_size},
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -690,5 +690,138 @@ impl FilterAngle {
     #[must_use]
     pub const fn radians(self) -> f64 {
         self.radians
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ClipInput {
+    kind: ClipInputKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClipInputKind {
+    Shape(Shape),
+    Reference(StyleResourceRef),
+}
+
+impl ClipInput {
+    pub fn try_shape(shape: Shape) -> Result<Self> {
+        validate_shape(&shape)?;
+        Ok(Self {
+            kind: ClipInputKind::Shape(shape),
+        })
+    }
+
+    #[must_use]
+    pub const fn reference(reference: StyleResourceRef) -> Self {
+        Self {
+            kind: ClipInputKind::Reference(reference),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &ClipInputKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub const fn shape(&self) -> Option<&Shape> {
+        match &self.kind {
+            ClipInputKind::Shape(shape) => Some(shape),
+            ClipInputKind::Reference(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub const fn reference_ref(&self) -> Option<&StyleResourceRef> {
+        match &self.kind {
+            ClipInputKind::Shape(_) => None,
+            ClipInputKind::Reference(reference) => Some(reference),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskInput {
+    source: MaskSource,
+    mode: MaskMode,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaskSource {
+    kind: MaskSourceKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaskSourceKind {
+    Shape(Shape),
+    ImageLayer(StyleImageLayer),
+    Reference(StyleResourceRef),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MaskMode {
+    Alpha,
+    Luminance,
+}
+
+impl MaskInput {
+    pub fn try_shape(shape: Shape, mode: MaskMode) -> Result<Self> {
+        Ok(Self {
+            source: MaskSource::try_shape(shape)?,
+            mode,
+        })
+    }
+
+    #[must_use]
+    pub const fn image_layer(layer: StyleImageLayer, mode: MaskMode) -> Self {
+        Self {
+            source: MaskSource::image_layer(layer),
+            mode,
+        }
+    }
+
+    #[must_use]
+    pub const fn reference(reference: StyleResourceRef, mode: MaskMode) -> Self {
+        Self {
+            source: MaskSource::reference(reference),
+            mode,
+        }
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> &MaskSource {
+        &self.source
+    }
+
+    #[must_use]
+    pub const fn mode(&self) -> MaskMode {
+        self.mode
+    }
+}
+
+impl MaskSource {
+    fn try_shape(shape: Shape) -> Result<Self> {
+        validate_shape(&shape)?;
+        Ok(Self {
+            kind: MaskSourceKind::Shape(shape),
+        })
+    }
+
+    const fn image_layer(layer: StyleImageLayer) -> Self {
+        Self {
+            kind: MaskSourceKind::ImageLayer(layer),
+        }
+    }
+
+    const fn reference(reference: StyleResourceRef) -> Self {
+        Self {
+            kind: MaskSourceKind::Reference(reference),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &MaskSourceKind {
+        &self.kind
     }
 }

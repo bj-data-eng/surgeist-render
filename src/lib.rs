@@ -41,7 +41,8 @@ pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, Strok
 pub use stats::Stats;
 pub use style::{
     BackgroundAttachment, BackgroundBox, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundSizeKind, FilterAmount, FilterAngle, FilterBlur, FilterList, FilterOp, FilterOpKind,
+    BackgroundSizeKind, ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur,
+    FilterList, FilterOp, FilterOpKind, MaskInput, MaskMode, MaskSource, MaskSourceKind,
     PositionComponent, PositionComponentKind, RepeatMode, ResolvedImageResource, SizeComponent,
     SizeComponentKind, StyleColor, StyleImageLayer, StyleImageSource, StyleImageSourceKind,
     StyleResourceRef, UnitFilterAmount,

@@ -441,6 +441,60 @@ fn filter_angle_rejects_nan() {
 }
 
 #[test]
+fn clip_inputs_preserve_shape_or_unresolved_reference() {
+    let shape = Shape::rect(Rect::try_new(0.0, 0.0, 10.0, 10.0).unwrap());
+    let clip = ClipInput::try_shape(shape.clone()).unwrap();
+    let reference = ClipInput::reference(StyleResourceRef::try_new("#clip").unwrap());
+
+    assert_eq!(clip.shape(), Some(&shape));
+    assert_eq!(
+        reference.reference_ref().map(StyleResourceRef::identifier),
+        Some("#clip")
+    );
+}
+
+#[test]
+fn mask_inputs_preserve_mode_and_source() {
+    let mask = MaskInput::try_shape(
+        Shape::rect(Rect::try_new(0.0, 0.0, 10.0, 10.0).unwrap()),
+        MaskMode::Luminance,
+    )
+    .unwrap();
+
+    assert_eq!(mask.mode(), MaskMode::Luminance);
+    assert!(matches!(mask.source().kind(), MaskSourceKind::Shape(_)));
+}
+
+#[test]
+fn clip_inputs_reject_invalid_shape_points() {
+    let mut path = Path::new();
+    path.move_to(Point::new(f64::NAN, 0.0));
+
+    let error = ClipInput::try_shape(Shape::path(path)).expect_err("invalid clip paths fail");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("path point x")
+    );
+}
+
+#[test]
+fn mask_inputs_reject_invalid_shape_points() {
+    let mut path = Path::new();
+    path.move_to(Point::new(f64::NAN, 0.0));
+
+    let error = MaskInput::try_shape(Shape::path(path), MaskMode::Alpha)
+        .expect_err("invalid mask paths fail");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("path point x")
+    );
+}
+
+#[test]
 fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");
