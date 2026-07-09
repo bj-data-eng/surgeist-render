@@ -27,8 +27,9 @@ pub use capability::{
     BackgroundAttachmentCoordinatePolicy, BoxDecorationCapabilities, Capabilities,
     CompositingCapabilities, FilterCapabilities, GeometryTargetCapabilities, HitTestOwnership,
     ImageColorProfilePolicy, ImageOrientationPolicy, ImageSamplingCapabilities,
-    MaskClipCapabilities, PaintSourceCapabilities, ShadowCapabilities, SurfaceCapabilities,
-    SymbolicColorPolicy, TransformCoordinateSpaceCapabilities,
+    MaskClipCapabilities, OffscreenPipelineCapabilities, PaintSourceCapabilities,
+    ShadowCapabilities, SurfaceCapabilities, SymbolicColorPolicy,
+    TransformCoordinateSpaceCapabilities,
 };
 pub use error::{
     DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,

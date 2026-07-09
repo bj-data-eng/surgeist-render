@@ -2805,6 +2805,16 @@ fn renderer_reports_backend_capabilities_by_family() {
     assert!(!capabilities.masks_clips().supports_layer_masks());
     assert!(capabilities.compositing().supports_layer_opacity());
     assert!(capabilities.compositing().supports_blend_modes());
+    assert!(
+        capabilities
+            .offscreen_pipeline()
+            .supports_direct_vello_opacity_isolation()
+    );
+    assert!(
+        capabilities
+            .offscreen_pipeline()
+            .supports_direct_vello_blend_isolation()
+    );
     assert!(capabilities.surfaces().supports_headless_surfaces());
     assert_eq!(
         capabilities.surfaces().supports_web_canvas_surfaces(),
@@ -2906,6 +2916,22 @@ fn box_decoration_capability_accessors_name_unsupported_style_boundaries() {
     assert!(!capabilities.supports_border_outset_style());
     assert!(!capabilities.supports_outline_double_style());
     assert!(!capabilities.supports_outline_auto_style());
+}
+
+#[test]
+fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
+    let capabilities = Capabilities::VELLO_0_9.offscreen_pipeline();
+
+    assert!(capabilities.supports_direct_vello_opacity_isolation());
+    assert!(capabilities.supports_direct_vello_blend_isolation());
+    assert!(!capabilities.supports_offscreen_layer_rendering());
+    assert!(!capabilities.supports_texture_cache_upload_lifecycle());
+    assert!(!capabilities.supports_rect_fullscreen_shader_passes());
+    assert!(!capabilities.supports_cpu_reference_buffers());
+    assert!(!capabilities.supports_nested_opacity_planning());
+    assert!(!capabilities.supports_mask_execution());
+    assert!(!capabilities.supports_filter_execution());
+    assert!(!capabilities.supports_backdrop_execution());
 }
 
 #[test]
@@ -3044,6 +3070,30 @@ fn unsupported_3d_transforms_report_typed_diagnostics() {
 
         assert_eq!(error.code, ErrorCode::UnsupportedBackend);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
+}
+
+#[test]
+fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
+    for operation in [
+        PrimitiveOperation::OffscreenLayerRendering,
+        PrimitiveOperation::TextureCacheUploadLifecycle,
+        PrimitiveOperation::RectFullscreenShaderPass,
+        PrimitiveOperation::CpuReferenceBuffer,
+        PrimitiveOperation::NestedOpacityPlanning,
+        PrimitiveOperation::MaskExecution,
+        PrimitiveOperation::FilterExecution,
+        PrimitiveOperation::BackdropExecution,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::OffscreenPipeline, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("offscreen pipeline operation is not implemented in this phase");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains("offscreen pipeline"));
+        assert!(error.message.contains(unsupported.label()));
     }
 }
 

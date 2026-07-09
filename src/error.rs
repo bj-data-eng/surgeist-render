@@ -222,6 +222,7 @@ pub enum PrimitiveFamily {
     Filters,
     MasksAndClips,
     BoxDecorations,
+    OffscreenPipeline,
     Surfaces,
     TransformsAndCoordinateSpaces,
 }
@@ -237,6 +238,7 @@ impl PrimitiveFamily {
             Self::Filters => "filters",
             Self::MasksAndClips => "masks and clips",
             Self::BoxDecorations => "box decorations",
+            Self::OffscreenPipeline => "offscreen pipeline",
             Self::Surfaces => "surfaces",
             Self::TransformsAndCoordinateSpaces => "transforms and coordinate spaces",
         }
@@ -273,6 +275,14 @@ pub enum PrimitiveOperation {
     BorderOutsetStyle,
     OutlineDoubleStyle,
     OutlineAutoStyle,
+    OffscreenLayerRendering,
+    TextureCacheUploadLifecycle,
+    RectFullscreenShaderPass,
+    CpuReferenceBuffer,
+    NestedOpacityPlanning,
+    MaskExecution,
+    FilterExecution,
+    BackdropExecution,
 }
 
 impl PrimitiveOperation {
@@ -307,6 +317,14 @@ impl PrimitiveOperation {
             Self::BorderOutsetStyle => "border outset style",
             Self::OutlineDoubleStyle => "outline double style",
             Self::OutlineAutoStyle => "outline auto style",
+            Self::OffscreenLayerRendering => "offscreen layer rendering",
+            Self::TextureCacheUploadLifecycle => "texture cache/upload lifecycle",
+            Self::RectFullscreenShaderPass => "rect/fullscreen shader pass",
+            Self::CpuReferenceBuffer => "CPU reference buffer",
+            Self::NestedOpacityPlanning => "nested opacity planning",
+            Self::MaskExecution => "mask execution",
+            Self::FilterExecution => "filter execution",
+            Self::BackdropExecution => "backdrop execution",
         }
     }
 }

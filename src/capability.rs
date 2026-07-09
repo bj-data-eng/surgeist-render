@@ -10,6 +10,7 @@ pub struct Capabilities {
     masks_clips: MaskClipCapabilities,
     box_decorations: BoxDecorationCapabilities,
     compositing: CompositingCapabilities,
+    offscreen_pipeline: OffscreenPipelineCapabilities,
     surfaces: SurfaceCapabilities,
     transform_coordinate_spaces: TransformCoordinateSpaceCapabilities,
 }
@@ -87,6 +88,18 @@ impl Capabilities {
             layer_opacity: true,
             blend_modes: true,
         },
+        offscreen_pipeline: OffscreenPipelineCapabilities {
+            direct_vello_opacity_isolation: true,
+            direct_vello_blend_isolation: true,
+            offscreen_layer_rendering: false,
+            texture_cache_upload_lifecycle: false,
+            rect_fullscreen_shader_passes: false,
+            cpu_reference_buffers: false,
+            nested_opacity_planning: false,
+            mask_execution: false,
+            filter_execution: false,
+            backdrop_execution: false,
+        },
         surfaces: SurfaceCapabilities {
             headless_surfaces: true,
             web_canvas_surfaces: cfg!(all(feature = "render-web", target_arch = "wasm32")),
@@ -138,6 +151,11 @@ impl Capabilities {
     #[must_use]
     pub const fn compositing(self) -> CompositingCapabilities {
         self.compositing
+    }
+
+    #[must_use]
+    pub const fn offscreen_pipeline(self) -> OffscreenPipelineCapabilities {
+        self.offscreen_pipeline
     }
 
     #[must_use]
@@ -227,6 +245,34 @@ impl Capabilities {
             }
             (PrimitiveFamily::BoxDecorations, PrimitiveOperation::OutlineAutoStyle) => {
                 self.box_decorations.supports_outline_auto_style()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::OffscreenLayerRendering) => {
+                self.offscreen_pipeline.supports_offscreen_layer_rendering()
+            }
+            (
+                PrimitiveFamily::OffscreenPipeline,
+                PrimitiveOperation::TextureCacheUploadLifecycle,
+            ) => self
+                .offscreen_pipeline
+                .supports_texture_cache_upload_lifecycle(),
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::RectFullscreenShaderPass) => {
+                self.offscreen_pipeline
+                    .supports_rect_fullscreen_shader_passes()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::CpuReferenceBuffer) => {
+                self.offscreen_pipeline.supports_cpu_reference_buffers()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::NestedOpacityPlanning) => {
+                self.offscreen_pipeline.supports_nested_opacity_planning()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::MaskExecution) => {
+                self.offscreen_pipeline.supports_mask_execution()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::FilterExecution) => {
+                self.offscreen_pipeline.supports_filter_execution()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BackdropExecution) => {
+                self.offscreen_pipeline.supports_backdrop_execution()
             }
             (PrimitiveFamily::Surfaces, PrimitiveOperation::WebCanvasSurface) => {
                 self.surfaces.supports_web_canvas_surfaces()
@@ -638,6 +684,72 @@ impl CompositingCapabilities {
     #[must_use]
     pub const fn supports_blend_modes(self) -> bool {
         self.blend_modes
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct OffscreenPipelineCapabilities {
+    direct_vello_opacity_isolation: bool,
+    direct_vello_blend_isolation: bool,
+    offscreen_layer_rendering: bool,
+    texture_cache_upload_lifecycle: bool,
+    rect_fullscreen_shader_passes: bool,
+    cpu_reference_buffers: bool,
+    nested_opacity_planning: bool,
+    mask_execution: bool,
+    filter_execution: bool,
+    backdrop_execution: bool,
+}
+
+impl OffscreenPipelineCapabilities {
+    #[must_use]
+    pub const fn supports_direct_vello_opacity_isolation(self) -> bool {
+        self.direct_vello_opacity_isolation
+    }
+
+    #[must_use]
+    pub const fn supports_direct_vello_blend_isolation(self) -> bool {
+        self.direct_vello_blend_isolation
+    }
+
+    #[must_use]
+    pub const fn supports_offscreen_layer_rendering(self) -> bool {
+        self.offscreen_layer_rendering
+    }
+
+    #[must_use]
+    pub const fn supports_texture_cache_upload_lifecycle(self) -> bool {
+        self.texture_cache_upload_lifecycle
+    }
+
+    #[must_use]
+    pub const fn supports_rect_fullscreen_shader_passes(self) -> bool {
+        self.rect_fullscreen_shader_passes
+    }
+
+    #[must_use]
+    pub const fn supports_cpu_reference_buffers(self) -> bool {
+        self.cpu_reference_buffers
+    }
+
+    #[must_use]
+    pub const fn supports_nested_opacity_planning(self) -> bool {
+        self.nested_opacity_planning
+    }
+
+    #[must_use]
+    pub const fn supports_mask_execution(self) -> bool {
+        self.mask_execution
+    }
+
+    #[must_use]
+    pub const fn supports_filter_execution(self) -> bool {
+        self.filter_execution
+    }
+
+    #[must_use]
+    pub const fn supports_backdrop_execution(self) -> bool {
+        self.backdrop_execution
     }
 }
 
