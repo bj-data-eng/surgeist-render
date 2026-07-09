@@ -40,9 +40,10 @@ pub use scene::Scene;
 pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign};
 pub use stats::Stats;
 pub use style::{
-    BackgroundAttachment, BackgroundBox, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundSizeKind, ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur,
-    FilterList, FilterOp, FilterOpKind, MaskInput, MaskMode, MaskSource, MaskSourceKind,
+    BackgroundAttachment, BackgroundBox, BackgroundLayer, BackgroundPosition, BackgroundRepeat,
+    BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide, BorderStyle,
+    ClipInput, ClipInputKind, FilterAmount, FilterAngle, FilterBlur, FilterList, FilterOp,
+    FilterOpKind, MaskInput, MaskMode, MaskSource, MaskSourceKind, Outline, OutlineStyle,
     PositionComponent, PositionComponentKind, RepeatMode, ResolvedImageResource, SizeComponent,
     SizeComponentKind, StyleColor, StyleImageLayer, StyleImageSource, StyleImageSourceKind,
     StyleResourceRef, UnitFilterAmount,

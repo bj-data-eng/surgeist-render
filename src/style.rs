@@ -1,6 +1,9 @@
 use super::{
     Color, Error, Image, ImageId, Paint, Result, Shadow, Shape, Size,
-    validation::{validate_paint, validate_shape, validate_size},
+    validation::{
+        validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
+        validate_size,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -823,5 +826,203 @@ impl MaskSource {
     #[must_use]
     pub const fn kind(&self) -> &MaskSourceKind {
         &self.kind
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BorderSide {
+    style: BorderStyle,
+    width: f64,
+    paint: Paint,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BorderStyle {
+    None,
+    Hidden,
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+    Groove,
+    Ridge,
+    Inset,
+    Outset,
+}
+
+impl BorderSide {
+    pub fn try_new(style: BorderStyle, width: f64, paint: impl Into<Paint>) -> Result<Self> {
+        validate_non_negative_f64(width, "border side width")?;
+        let paint = paint.into();
+        validate_paint(&paint)?;
+        Ok(Self {
+            style,
+            width,
+            paint,
+        })
+    }
+
+    #[must_use]
+    pub const fn style(&self) -> BorderStyle {
+        self.style
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> f64 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn paint(&self) -> &Paint {
+        &self.paint
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BorderEdges {
+    top: BorderSide,
+    right: BorderSide,
+    bottom: BorderSide,
+    left: BorderSide,
+}
+
+impl BorderEdges {
+    #[must_use]
+    pub const fn new(
+        top: BorderSide,
+        right: BorderSide,
+        bottom: BorderSide,
+        left: BorderSide,
+    ) -> Self {
+        Self {
+            top,
+            right,
+            bottom,
+            left,
+        }
+    }
+
+    #[must_use]
+    pub const fn top(&self) -> &BorderSide {
+        &self.top
+    }
+
+    #[must_use]
+    pub const fn right(&self) -> &BorderSide {
+        &self.right
+    }
+
+    #[must_use]
+    pub const fn bottom(&self) -> &BorderSide {
+        &self.bottom
+    }
+
+    #[must_use]
+    pub const fn left(&self) -> &BorderSide {
+        &self.left
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Outline {
+    style: OutlineStyle,
+    width: f64,
+    paint: Paint,
+    offset: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum OutlineStyle {
+    None,
+    Solid,
+    Dashed,
+    Dotted,
+    Double,
+    Auto,
+}
+
+impl Outline {
+    pub fn try_new(
+        style: OutlineStyle,
+        width: f64,
+        paint: impl Into<Paint>,
+        offset: f64,
+    ) -> Result<Self> {
+        validate_non_negative_f64(width, "outline width")?;
+        validate_finite_f64(offset, "outline offset")?;
+        let paint = paint.into();
+        validate_paint(&paint)?;
+        Ok(Self {
+            style,
+            width,
+            paint,
+            offset,
+        })
+    }
+
+    #[must_use]
+    pub const fn style(&self) -> OutlineStyle {
+        self.style
+    }
+
+    #[must_use]
+    pub const fn width(&self) -> f64 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn paint(&self) -> &Paint {
+        &self.paint
+    }
+
+    #[must_use]
+    pub const fn offset(&self) -> f64 {
+        self.offset
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundLayer {
+    image: StyleImageLayer,
+}
+
+impl BackgroundLayer {
+    #[must_use]
+    pub const fn new(image: StyleImageLayer) -> Self {
+        Self { image }
+    }
+
+    #[must_use]
+    pub const fn image(&self) -> &StyleImageLayer {
+        &self.image
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundStack {
+    color: Option<Color>,
+    layers: Vec<BackgroundLayer>,
+}
+
+impl BackgroundStack {
+    pub fn try_new(color: Option<Color>, layers: Vec<BackgroundLayer>) -> Result<Self> {
+        if color.is_none() && layers.is_empty() {
+            return Err(Error::invalid_value(
+                "background stack",
+                "none + []",
+                "must include a color or at least one layer",
+            ));
+        }
+        Ok(Self { color, layers })
+    }
+
+    #[must_use]
+    pub const fn color(&self) -> Option<Color> {
+        self.color
+    }
+
+    #[must_use]
+    pub fn layers(&self) -> &[BackgroundLayer] {
+        &self.layers
     }
 }

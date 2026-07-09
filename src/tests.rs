@@ -495,6 +495,74 @@ fn mask_inputs_reject_invalid_shape_points() {
 }
 
 #[test]
+fn border_edges_preserve_four_independent_sides() {
+    let top = BorderSide::try_new(BorderStyle::Solid, 1.0, Color::BLACK).unwrap();
+    let right = BorderSide::try_new(BorderStyle::Dashed, 2.0, Color::BLACK).unwrap();
+    let bottom = BorderSide::try_new(BorderStyle::Dotted, 3.0, Color::BLACK).unwrap();
+    let left = BorderSide::try_new(BorderStyle::Double, 4.0, Color::BLACK).unwrap();
+    let edges = BorderEdges::new(top.clone(), right.clone(), bottom.clone(), left.clone());
+
+    assert_eq!(edges.top(), &top);
+    assert_eq!(edges.right(), &right);
+    assert_eq!(edges.bottom(), &bottom);
+    assert_eq!(edges.left(), &left);
+}
+
+#[test]
+fn background_stacks_preserve_color_behind_ordered_layers() {
+    let layer_a = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap(),
+    );
+    let layer_b = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::TRANSPARENT)).unwrap())
+            .unwrap(),
+    );
+    let stack =
+        BackgroundStack::try_new(Some(Color::BLACK), vec![layer_a.clone(), layer_b.clone()])
+            .unwrap();
+
+    assert_eq!(stack.color(), Some(Color::BLACK));
+    assert_eq!(stack.layers(), &[layer_a, layer_b]);
+}
+
+#[test]
+fn border_sides_reject_negative_width() {
+    let error = BorderSide::try_new(BorderStyle::Solid, -1.0, Color::BLACK)
+        .expect_err("negative border widths should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("border side width")
+    );
+}
+
+#[test]
+fn outlines_reject_non_finite_offset() {
+    let error = Outline::try_new(OutlineStyle::Solid, 1.0, Color::BLACK, f64::NAN)
+        .expect_err("outline offset must be finite");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("outline offset")
+    );
+}
+
+#[test]
+fn background_stacks_reject_empty_and_colorless_inputs() {
+    let error = BackgroundStack::try_new(None, Vec::new())
+        .expect_err("empty transparent background stacks should use no value");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background stack")
+    );
+}
+
+#[test]
 fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");
