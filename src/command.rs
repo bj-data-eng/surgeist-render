@@ -660,7 +660,11 @@ fn shadow_bounds(shape: &ShadowShape, shadow: &RenderShadow) -> Option<Offscreen
         base.width(),
         base.height(),
     );
-    let support = shadow.spread + shadow.blur * 1.25;
+    let blur = FilterBlur::try_new(shadow.blur).ok()?;
+    let blur_support = BlurPolicy::vello_outer_shadow_compatibility()
+        .support_radius(blur)
+        .ok()?;
+    let support = shadow.spread + blur_support;
     OffscreenBounds::try_new(geometry::expand_rect(offset, support)).ok()
 }
 

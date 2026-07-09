@@ -3057,6 +3057,168 @@ fn materialized_filter_classification_does_not_make_resource_handles_bytes() {
 }
 
 #[test]
+fn filter_blur_policy_zero_radius_produces_zero_outset() {
+    let policy = BlurPolicy::css_filter_default();
+    let outset = FilterOutset::from_blur(FilterBlur::try_new(0.0).unwrap(), policy).unwrap();
+
+    assert_eq!(outset, FilterOutset::zero());
+    assert_eq!(
+        policy.radius_interpretation(),
+        BlurRadiusInterpretation::CssLengthAsStandardDeviation
+    );
+    assert_eq!(
+        policy.edge_sampling(),
+        TransparentEdgeSamplingPolicy::TransparentBlack
+    );
+}
+
+#[test]
+fn filter_blur_region_inflates_bounds_deterministically() {
+    let source = FilterSourceBounds::try_new(Rect::new(10.0, 20.0, 30.0, 40.0)).unwrap();
+    let outset = FilterOutset::from_blur(
+        FilterBlur::try_new(4.0).unwrap(),
+        BlurPolicy::css_filter_default(),
+    )
+    .unwrap();
+
+    let plan = FilterRegionPlan::try_new(source, outset, None).unwrap();
+
+    assert_eq!(outset, FilterOutset::try_uniform(10.0).unwrap());
+    assert_eq!(
+        plan.inflated_bounds().rect(),
+        Rect::new(0.0, 10.0, 50.0, 60.0)
+    );
+    assert_eq!(
+        plan.execution_region().rect(),
+        Rect::new(0.0, 10.0, 50.0, 60.0)
+    );
+}
+
+#[test]
+fn drop_shadow_outset_combines_offset_and_blur_support() {
+    let source = FilterSourceBounds::try_new(Rect::new(10.0, 10.0, 20.0, 10.0)).unwrap();
+    let shadow = Shadow::try_new(Point::new(3.0, -2.0), 2.0, 0.0, Color::BLACK).unwrap();
+    let outset = FilterOutset::from_drop_shadow(&shadow, BlurPolicy::css_filter_default()).unwrap();
+
+    let plan = FilterRegionPlan::try_new(source, outset, None).unwrap();
+
+    assert_eq!(outset, FilterOutset::try_new(2.0, 7.0, 8.0, 3.0).unwrap());
+    assert_eq!(
+        plan.inflated_bounds().rect(),
+        Rect::new(8.0, 3.0, 30.0, 20.0)
+    );
+}
+
+#[test]
+fn filter_region_plan_clips_inflated_bounds_to_explicit_filter_region() {
+    let source = FilterSourceBounds::try_new(Rect::new(0.0, 0.0, 20.0, 20.0)).unwrap();
+    let clip = FilterClipBounds::try_new(Rect::new(-5.0, -2.0, 30.0, 18.0)).unwrap();
+    let outset = FilterOutset::from_blur(
+        FilterBlur::try_new(4.0).unwrap(),
+        BlurPolicy::css_filter_default(),
+    )
+    .unwrap();
+
+    let plan = FilterRegionPlan::try_new(source, outset, Some(clip)).unwrap();
+
+    assert_eq!(
+        plan.inflated_bounds().rect(),
+        Rect::new(-10.0, -10.0, 40.0, 40.0)
+    );
+    assert_eq!(plan.clip_bounds(), Some(clip));
+    assert_eq!(
+        plan.execution_region().rect(),
+        Rect::new(-5.0, -2.0, 30.0, 18.0)
+    );
+}
+
+#[test]
+fn filter_blur_policy_names_large_radius_clamp_and_rejection() {
+    let clamp = BlurPolicy::try_new(
+        BlurRadiusInterpretation::CssLengthAsStandardDeviation,
+        KernelSupportRadius::try_standard_deviation_multiple(2.5).unwrap(),
+        LargeBlurRadiusPolicy::try_clamp_to(8.0).unwrap(),
+        TransparentEdgeSamplingPolicy::TransparentBlack,
+    )
+    .unwrap();
+    let reject = BlurPolicy::try_new(
+        BlurRadiusInterpretation::CssLengthAsStandardDeviation,
+        KernelSupportRadius::try_standard_deviation_multiple(2.5).unwrap(),
+        LargeBlurRadiusPolicy::try_reject_above(8.0).unwrap(),
+        TransparentEdgeSamplingPolicy::TransparentBlack,
+    )
+    .unwrap();
+
+    assert_eq!(
+        clamp.large_radius_policy().action(),
+        LargeBlurRadiusAction::Clamp
+    );
+    assert_eq!(
+        FilterOutset::from_blur(FilterBlur::try_new(12.0).unwrap(), clamp).unwrap(),
+        FilterOutset::try_uniform(20.0).unwrap()
+    );
+
+    let error = FilterOutset::from_blur(FilterBlur::try_new(12.0).unwrap(), reject)
+        .expect_err("rejecting large blur radii should report a typed invalid value");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter blur radius")
+    );
+}
+
+#[test]
+fn filter_region_models_reject_invalid_bounds_and_radii() {
+    let zero_source = FilterSourceBounds::try_new(Rect::new(0.0, 0.0, 0.0, 10.0))
+        .expect_err("filter source bounds must have area");
+    assert_eq!(zero_source.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        zero_source
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("filter source bounds width")
+    );
+
+    let non_finite_clip = FilterClipBounds::try_new(Rect::new(f64::INFINITY, 0.0, 1.0, 1.0))
+        .expect_err("unbounded sentinel filter regions should be rejected");
+    assert_eq!(
+        non_finite_clip
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("filter clip bounds x")
+    );
+
+    let negative_outset =
+        FilterOutset::try_new(-1.0, 0.0, 0.0, 0.0).expect_err("outsets cannot be negative");
+    assert_eq!(
+        negative_outset
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("filter outset left")
+    );
+
+    let negative_radius =
+        FilterBlur::try_new(-0.1).expect_err("negative blur radius should be rejected");
+    assert_eq!(
+        negative_radius
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("filter blur radius")
+    );
+
+    let source = FilterSourceBounds::try_new(Rect::new(0.0, 0.0, 10.0, 10.0)).unwrap();
+    let clip = FilterClipBounds::try_new(Rect::new(20.0, 20.0, 5.0, 5.0)).unwrap();
+    let empty_execution = FilterRegionPlan::try_new(source, FilterOutset::zero(), Some(clip))
+        .expect_err("clipping to an empty region should be rejected");
+    assert_eq!(
+        empty_execution
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("filter execution region")
+    );
+}
+
+#[test]
 fn filter_color_pipeline_rejects_blur_with_typed_diagnostic() {
     let list = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(1.0).unwrap()),

@@ -1,5 +1,5 @@
 use super::{
-    Error, Result, Shadow,
+    Error, Rect, Result, Shadow,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     style::{
         ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterList, FilterOpKind, UnitFilterAmount,
@@ -9,6 +9,585 @@ use super::{
 const LUMA_RED: f64 = 0.213;
 const LUMA_GREEN: f64 = 0.715;
 const LUMA_BLUE: f64 = 0.072;
+const DEFAULT_KERNEL_STD_DEV_MULTIPLE: f64 = 2.5;
+const DEFAULT_MAX_BLUR_RADIUS: f64 = 256.0;
+
+/// Source bounds for a pixel-moving filter operation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterSourceBounds {
+    rect: Rect,
+}
+
+impl FilterSourceBounds {
+    pub fn try_new(rect: Rect) -> Result<Self> {
+        validate_filter_bounds(rect, "filter source bounds")?;
+        Ok(Self { rect })
+    }
+
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        self.rect
+    }
+}
+
+/// Inflated bounds after applying blur, drop-shadow, or future pixel-moving outsets.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterInflatedBounds {
+    rect: Rect,
+}
+
+impl FilterInflatedBounds {
+    fn try_new(rect: Rect) -> Result<Self> {
+        validate_filter_bounds(rect, "filter inflated bounds")?;
+        Ok(Self { rect })
+    }
+
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        self.rect
+    }
+}
+
+/// Explicit filter-region clip bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterClipBounds {
+    rect: Rect,
+}
+
+impl FilterClipBounds {
+    pub fn try_new(rect: Rect) -> Result<Self> {
+        validate_filter_bounds(rect, "filter clip bounds")?;
+        Ok(Self { rect })
+    }
+
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        self.rect
+    }
+}
+
+/// Non-empty execution region after inflated bounds are clipped.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterExecutionRegion {
+    rect: Rect,
+}
+
+impl FilterExecutionRegion {
+    fn try_new(rect: Rect) -> Result<Self> {
+        validate_filter_bounds(rect, "filter execution region")?;
+        Ok(Self { rect })
+    }
+
+    #[must_use]
+    pub const fn rect(self) -> Rect {
+        self.rect
+    }
+}
+
+/// Complete region plan for one pixel-moving filter step.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterRegionPlan {
+    source: FilterSourceBounds,
+    inflated: FilterInflatedBounds,
+    clip: Option<FilterClipBounds>,
+    execution: FilterExecutionRegion,
+}
+
+impl FilterRegionPlan {
+    pub fn try_new(
+        source: FilterSourceBounds,
+        outset: FilterOutset,
+        clip: Option<FilterClipBounds>,
+    ) -> Result<Self> {
+        let inflated = FilterInflatedBounds::try_new(outset.inflate_rect(source.rect()))?;
+        let execution_rect = match clip {
+            Some(clip) => intersect_rects(inflated.rect(), clip.rect()).ok_or_else(|| {
+                Error::invalid_value(
+                    "filter execution region",
+                    "empty",
+                    "must have positive width and height after clipping",
+                )
+            })?,
+            None => inflated.rect(),
+        };
+        let execution = FilterExecutionRegion::try_new(execution_rect)?;
+        Ok(Self {
+            source,
+            inflated,
+            clip,
+            execution,
+        })
+    }
+
+    #[must_use]
+    pub const fn source_bounds(self) -> FilterSourceBounds {
+        self.source
+    }
+
+    #[must_use]
+    pub const fn inflated_bounds(self) -> FilterInflatedBounds {
+        self.inflated
+    }
+
+    #[must_use]
+    pub const fn clip_bounds(self) -> Option<FilterClipBounds> {
+        self.clip
+    }
+
+    #[must_use]
+    pub const fn execution_region(self) -> FilterExecutionRegion {
+        self.execution
+    }
+}
+
+/// Directional pixel-moving filter outset in logical pixels.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FilterOutset {
+    left: f64,
+    top: f64,
+    right: f64,
+    bottom: f64,
+}
+
+impl FilterOutset {
+    #[must_use]
+    pub const fn zero() -> Self {
+        Self {
+            left: 0.0,
+            top: 0.0,
+            right: 0.0,
+            bottom: 0.0,
+        }
+    }
+
+    pub fn try_uniform(amount: f64) -> Result<Self> {
+        Self::try_new(amount, amount, amount, amount)
+    }
+
+    pub fn try_new(left: f64, top: f64, right: f64, bottom: f64) -> Result<Self> {
+        validate_filter_outset_value(left, "filter outset left")?;
+        validate_filter_outset_value(top, "filter outset top")?;
+        validate_filter_outset_value(right, "filter outset right")?;
+        validate_filter_outset_value(bottom, "filter outset bottom")?;
+        Ok(Self {
+            left,
+            top,
+            right,
+            bottom,
+        })
+    }
+
+    pub fn from_blur(blur: FilterBlur, policy: BlurPolicy) -> Result<Self> {
+        Self::try_uniform(policy.support_radius(blur)?)
+    }
+
+    pub fn from_drop_shadow(shadow: &Shadow, policy: BlurPolicy) -> Result<Self> {
+        if shadow.spread() != 0.0 {
+            return Err(Error::invalid_value(
+                "filter drop-shadow spread",
+                shadow.spread(),
+                "must be zero for CSS drop-shadow filter planning",
+            ));
+        }
+        let blur = FilterBlur::try_new(shadow.blur())?;
+        let support = policy.support_radius(blur)?;
+        let offset = shadow.offset();
+        Self::try_new(
+            (support - offset.x()).max(0.0),
+            (support - offset.y()).max(0.0),
+            (support + offset.x()).max(0.0),
+            (support + offset.y()).max(0.0),
+        )
+    }
+
+    #[must_use]
+    pub const fn left(self) -> f64 {
+        self.left
+    }
+
+    #[must_use]
+    pub const fn top(self) -> f64 {
+        self.top
+    }
+
+    #[must_use]
+    pub const fn right(self) -> f64 {
+        self.right
+    }
+
+    #[must_use]
+    pub const fn bottom(self) -> f64 {
+        self.bottom
+    }
+
+    fn inflate_rect(self, rect: Rect) -> Rect {
+        Rect::new(
+            rect.x() - self.left,
+            rect.y() - self.top,
+            rect.width() + self.left + self.right,
+            rect.height() + self.top + self.bottom,
+        )
+    }
+}
+
+/// How a blur radius value maps to Gaussian standard deviation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlurRadiusInterpretation {
+    CssLengthAsStandardDeviation,
+    VelloShadowBlurRadiusAsDiameter,
+}
+
+impl BlurRadiusInterpretation {
+    const fn standard_deviation(self, radius: f64) -> f64 {
+        match self {
+            Self::CssLengthAsStandardDeviation => radius,
+            Self::VelloShadowBlurRadiusAsDiameter => radius * 0.5,
+        }
+    }
+}
+
+/// Kernel support radius measured as a multiple of Gaussian standard deviation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct KernelSupportRadius {
+    standard_deviation_multiple: f64,
+}
+
+impl KernelSupportRadius {
+    pub fn try_standard_deviation_multiple(standard_deviation_multiple: f64) -> Result<Self> {
+        if !standard_deviation_multiple.is_finite() || standard_deviation_multiple <= 0.0 {
+            return Err(Error::invalid_value(
+                "blur kernel support radius",
+                standard_deviation_multiple,
+                "must be finite and greater than 0",
+            ));
+        }
+        Ok(Self {
+            standard_deviation_multiple,
+        })
+    }
+
+    #[must_use]
+    pub const fn standard_deviation_multiple(self) -> f64 {
+        self.standard_deviation_multiple
+    }
+
+    fn support_radius(self, standard_deviation: f64) -> f64 {
+        standard_deviation * self.standard_deviation_multiple
+    }
+}
+
+/// Whether large blur radii are rejected or clamped before kernel planning.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LargeBlurRadiusAction {
+    Reject,
+    Clamp,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LargeBlurRadiusPolicy {
+    action: LargeBlurRadiusAction,
+    max_radius: f64,
+}
+
+impl LargeBlurRadiusPolicy {
+    pub fn try_reject_above(max_radius: f64) -> Result<Self> {
+        Self::try_new(LargeBlurRadiusAction::Reject, max_radius)
+    }
+
+    pub fn try_clamp_to(max_radius: f64) -> Result<Self> {
+        Self::try_new(LargeBlurRadiusAction::Clamp, max_radius)
+    }
+
+    fn try_new(action: LargeBlurRadiusAction, max_radius: f64) -> Result<Self> {
+        if !max_radius.is_finite() || max_radius <= 0.0 {
+            return Err(Error::invalid_value(
+                "large blur radius limit",
+                max_radius,
+                "must be finite and greater than 0",
+            ));
+        }
+        Ok(Self { action, max_radius })
+    }
+
+    #[must_use]
+    pub const fn action(self) -> LargeBlurRadiusAction {
+        self.action
+    }
+
+    #[must_use]
+    pub const fn max_radius(self) -> f64 {
+        self.max_radius
+    }
+
+    fn resolve_radius(self, radius: f64) -> Result<f64> {
+        if radius <= self.max_radius {
+            return Ok(radius);
+        }
+        match self.action {
+            LargeBlurRadiusAction::Reject => Err(Error::invalid_value(
+                "filter blur radius",
+                radius,
+                "must be less than or equal to configured large blur radius limit",
+            )),
+            LargeBlurRadiusAction::Clamp => Ok(self.max_radius),
+        }
+    }
+}
+
+/// Sampling outside source bounds for blur kernels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TransparentEdgeSamplingPolicy {
+    TransparentBlack,
+}
+
+/// Blur planning policy for CPU/reference and backend-compatible blur models.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlurPolicy {
+    radius_interpretation: BlurRadiusInterpretation,
+    kernel_support: KernelSupportRadius,
+    large_radius: LargeBlurRadiusPolicy,
+    edge_sampling: TransparentEdgeSamplingPolicy,
+}
+
+impl BlurPolicy {
+    pub fn try_new(
+        radius_interpretation: BlurRadiusInterpretation,
+        kernel_support: KernelSupportRadius,
+        large_radius: LargeBlurRadiusPolicy,
+        edge_sampling: TransparentEdgeSamplingPolicy,
+    ) -> Result<Self> {
+        if kernel_support.standard_deviation_multiple() <= 0.0 {
+            return Err(Error::invalid_value(
+                "blur kernel support radius",
+                kernel_support.standard_deviation_multiple(),
+                "must be finite and greater than 0",
+            ));
+        }
+        if large_radius.max_radius() <= 0.0 {
+            return Err(Error::invalid_value(
+                "large blur radius limit",
+                large_radius.max_radius(),
+                "must be finite and greater than 0",
+            ));
+        }
+        Ok(Self {
+            radius_interpretation,
+            kernel_support,
+            large_radius,
+            edge_sampling,
+        })
+    }
+
+    pub fn css_filter_default() -> Self {
+        Self::try_new(
+            BlurRadiusInterpretation::CssLengthAsStandardDeviation,
+            KernelSupportRadius::try_standard_deviation_multiple(DEFAULT_KERNEL_STD_DEV_MULTIPLE)
+                .expect("default kernel support radius is valid"),
+            LargeBlurRadiusPolicy::try_reject_above(DEFAULT_MAX_BLUR_RADIUS)
+                .expect("default large-radius policy is valid"),
+            TransparentEdgeSamplingPolicy::TransparentBlack,
+        )
+        .expect("default CSS filter blur policy is valid")
+    }
+
+    pub(crate) fn vello_outer_shadow_compatibility() -> Self {
+        Self::try_new(
+            BlurRadiusInterpretation::VelloShadowBlurRadiusAsDiameter,
+            KernelSupportRadius::try_standard_deviation_multiple(DEFAULT_KERNEL_STD_DEV_MULTIPLE)
+                .expect("default kernel support radius is valid"),
+            LargeBlurRadiusPolicy::try_reject_above(DEFAULT_MAX_BLUR_RADIUS)
+                .expect("default large-radius policy is valid"),
+            TransparentEdgeSamplingPolicy::TransparentBlack,
+        )
+        .expect("default Vello shadow blur policy is valid")
+    }
+
+    #[must_use]
+    pub const fn radius_interpretation(self) -> BlurRadiusInterpretation {
+        self.radius_interpretation
+    }
+
+    #[must_use]
+    pub const fn kernel_support(self) -> KernelSupportRadius {
+        self.kernel_support
+    }
+
+    #[must_use]
+    pub const fn large_radius_policy(self) -> LargeBlurRadiusPolicy {
+        self.large_radius
+    }
+
+    #[must_use]
+    pub const fn edge_sampling(self) -> TransparentEdgeSamplingPolicy {
+        self.edge_sampling
+    }
+
+    pub fn support_radius(self, blur: FilterBlur) -> Result<f64> {
+        let radius = self.large_radius.resolve_radius(blur.radius())?;
+        let standard_deviation = self.radius_interpretation.standard_deviation(radius);
+        Ok(self.kernel_support.support_radius(standard_deviation))
+    }
+}
+
+/// Outward device-pixel conversion policy for planned filter execution regions.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DevicePixelConversionPolicy;
+
+impl DevicePixelConversionPolicy {
+    #[must_use]
+    pub const fn outward() -> Self {
+        Self
+    }
+
+    pub fn convert_region(
+        self,
+        region: FilterExecutionRegion,
+        scale: f64,
+    ) -> Result<FilterDeviceBounds> {
+        if !scale.is_finite() || scale <= 0.0 {
+            return Err(Error::invalid_value(
+                "filter device-pixel scale",
+                scale,
+                "must be finite and greater than 0",
+            ));
+        }
+
+        let rect = region.rect();
+        let max = rect.max();
+        let x = checked_floor_i32(rect.x() * scale, "filter device bounds x")?;
+        let y = checked_floor_i32(rect.y() * scale, "filter device bounds y")?;
+        let max_x = checked_ceil_i32(max.x() * scale, "filter device bounds max x")?;
+        let max_y = checked_ceil_i32(max.y() * scale, "filter device bounds max y")?;
+        let width = u32::try_from(i64::from(max_x) - i64::from(x)).map_err(|_| {
+            Error::invalid_value(
+                "filter device bounds width",
+                i64::from(max_x) - i64::from(x),
+                "must fit in u32 device pixels",
+            )
+        })?;
+        let height = u32::try_from(i64::from(max_y) - i64::from(y)).map_err(|_| {
+            Error::invalid_value(
+                "filter device bounds height",
+                i64::from(max_y) - i64::from(y),
+                "must fit in u32 device pixels",
+            )
+        })?;
+        if width == 0 || height == 0 {
+            return Err(Error::invalid_value(
+                "filter device bounds",
+                format!("{width}x{height}"),
+                "must have positive width and height",
+            ));
+        }
+        Ok(FilterDeviceBounds {
+            x,
+            y,
+            width,
+            height,
+        })
+    }
+}
+
+/// Device-pixel bounds for a planned execution region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilterDeviceBounds {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+impl FilterDeviceBounds {
+    #[must_use]
+    pub const fn x(self) -> i32 {
+        self.x
+    }
+
+    #[must_use]
+    pub const fn y(self) -> i32 {
+        self.y
+    }
+
+    #[must_use]
+    pub const fn width(self) -> u32 {
+        self.width
+    }
+
+    #[must_use]
+    pub const fn height(self) -> u32 {
+        self.height
+    }
+}
+
+fn validate_filter_bounds(rect: Rect, name: &str) -> Result<()> {
+    validate_finite(rect.x(), &format!("{name} x"))?;
+    validate_finite(rect.y(), &format!("{name} y"))?;
+    validate_positive_dimension(rect.width(), &format!("{name} width"))?;
+    validate_positive_dimension(rect.height(), &format!("{name} height"))
+}
+
+fn validate_filter_outset_value(value: f64, name: &str) -> Result<()> {
+    if !value.is_finite() || value < 0.0 {
+        return Err(Error::invalid_value(
+            name,
+            value,
+            "must be finite and non-negative",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_finite(value: f64, name: &str) -> Result<()> {
+    if !value.is_finite() {
+        return Err(Error::invalid_value(name, value, "must be finite"));
+    }
+    Ok(())
+}
+
+fn validate_positive_dimension(value: f64, name: &str) -> Result<()> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(Error::invalid_value(
+            name,
+            value,
+            "must be finite and greater than 0",
+        ));
+    }
+    Ok(())
+}
+
+fn intersect_rects(a: Rect, b: Rect) -> Option<Rect> {
+    let a_max = a.max();
+    let b_max = b.max();
+    let min_x = a.x().max(b.x());
+    let min_y = a.y().max(b.y());
+    let max_x = a_max.x().min(b_max.x());
+    let max_y = a_max.y().min(b_max.y());
+    let width = max_x - min_x;
+    let height = max_y - min_y;
+    if width <= 0.0 || height <= 0.0 {
+        return None;
+    }
+    Some(Rect::new(min_x, min_y, width, height))
+}
+
+fn checked_floor_i32(value: f64, name: &str) -> Result<i32> {
+    checked_rounded_i32(value.floor(), name)
+}
+
+fn checked_ceil_i32(value: f64, name: &str) -> Result<i32> {
+    checked_rounded_i32(value.ceil(), name)
+}
+
+fn checked_rounded_i32(value: f64, name: &str) -> Result<i32> {
+    if !value.is_finite() || value < f64::from(i32::MIN) || value > f64::from(i32::MAX) {
+        return Err(Error::invalid_value(
+            name,
+            value,
+            "must fit in i32 device pixels",
+        ));
+    }
+    Ok(value as i32)
+}
 
 /// Render-owned ordered classifier for materialized image filters.
 ///

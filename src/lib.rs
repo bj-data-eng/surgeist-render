@@ -40,7 +40,11 @@ pub use error::{
     PrimitiveOperation, Result, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
 pub use filter::{
-    CompiledColorFilterPipeline, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
+    BlurPolicy, BlurRadiusInterpretation, CompiledColorFilterPipeline, DevicePixelConversionPolicy,
+    FilterClipBounds, FilterDeviceBounds, FilterExecutionRegion, FilterInflatedBounds,
+    FilterOutset, FilterRegionPlan, FilterSourceBounds, KernelSupportRadius, LargeBlurRadiusAction,
+    LargeBlurRadiusPolicy, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
+    TransparentEdgeSamplingPolicy,
 };
 pub use geometry::{
     CoordinateSpaceId, CoordinateSpaceKind, CoordinateSpaceTag, PhysicalSize, Point, Radii, Rect,
