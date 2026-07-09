@@ -1,6 +1,6 @@
 use super::{
     Color, CoordinateSpaceTag, Error, Image, ImageColorProfilePolicy, ImageId,
-    ImageOrientationPolicy, Paint, Result, Shadow, Shape, Size, SymbolicColorPolicy,
+    ImageOrientationPolicy, Paint, Rect, Result, Shadow, Shape, Size, SymbolicColorPolicy,
     UnresolvedResource, UnresolvedResourceKind,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
@@ -319,6 +319,14 @@ impl BackgroundPosition {
     }
 
     #[must_use]
+    pub const fn edge_offsets(x: PositionEdgeOffset, y: PositionEdgeOffset) -> Self {
+        Self {
+            x: PositionComponent::edge_offset(x),
+            y: PositionComponent::edge_offset(y),
+        }
+    }
+
+    #[must_use]
     pub const fn x(self) -> PositionComponent {
         self.x
     }
@@ -348,6 +356,7 @@ pub struct PositionComponent {
 pub enum PositionComponentKind {
     Length,
     Percent,
+    EdgeOffset(PositionEdge),
 }
 
 impl PositionComponent {
@@ -384,6 +393,14 @@ impl PositionComponent {
     }
 
     #[must_use]
+    pub const fn edge_offset(offset: PositionEdgeOffset) -> Self {
+        Self {
+            kind: PositionComponentKind::EdgeOffset(offset.edge()),
+            value: offset.offset(),
+        }
+    }
+
+    #[must_use]
     pub const fn kind(self) -> PositionComponentKind {
         self.kind
     }
@@ -391,6 +408,49 @@ impl PositionComponent {
     #[must_use]
     pub const fn value(self) -> f64 {
         self.value
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PositionEdge {
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionEdgeOffset {
+    edge: PositionEdge,
+    offset: f64,
+}
+
+impl PositionEdgeOffset {
+    pub fn start(offset: f64) -> Result<Self> {
+        Self::try_new(PositionEdge::Start, offset)
+    }
+
+    pub fn end(offset: f64) -> Result<Self> {
+        Self::try_new(PositionEdge::End, offset)
+    }
+
+    fn try_new(edge: PositionEdge, offset: f64) -> Result<Self> {
+        if !offset.is_finite() {
+            return Err(Error::invalid_value(
+                "background position edge offset",
+                offset,
+                "must be finite",
+            ));
+        }
+        Ok(Self { edge, offset })
+    }
+
+    #[must_use]
+    pub const fn edge(self) -> PositionEdge {
+        self.edge
+    }
+
+    #[must_use]
+    pub const fn offset(self) -> f64 {
+        self.offset
     }
 }
 
@@ -494,6 +554,183 @@ impl SizeComponent {
     #[must_use]
     pub const fn kind(self) -> SizeComponentKind {
         self.kind
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImagePlacementInput {
+    paint_rect: Rect,
+    intrinsic_size: Size,
+    position: BackgroundPosition,
+    size: BackgroundSize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedImagePlacement {
+    paint_rect: Rect,
+    tile_rect: Rect,
+}
+
+impl ImagePlacementInput {
+    pub fn try_new(
+        paint_rect: Rect,
+        intrinsic_size: Size,
+        position: BackgroundPosition,
+        size: BackgroundSize,
+    ) -> Result<Self> {
+        validate_placement_rect(paint_rect, "image placement paint rect")?;
+        validate_positive_size(intrinsic_size, "image placement intrinsic size")?;
+        Ok(Self {
+            paint_rect,
+            intrinsic_size,
+            position,
+            size,
+        })
+    }
+
+    #[must_use]
+    pub const fn paint_rect(self) -> Rect {
+        self.paint_rect
+    }
+
+    #[must_use]
+    pub const fn intrinsic_size(self) -> Size {
+        self.intrinsic_size
+    }
+
+    #[must_use]
+    pub const fn position(self) -> BackgroundPosition {
+        self.position
+    }
+
+    #[must_use]
+    pub const fn size(self) -> BackgroundSize {
+        self.size
+    }
+
+    pub fn resolve(self) -> Result<ResolvedImagePlacement> {
+        let tile_size = resolve_background_size(self.paint_rect, self.intrinsic_size, self.size);
+        let tile_rect = Rect::new(
+            resolve_position_component(
+                self.paint_rect.x(),
+                self.paint_rect.width(),
+                tile_size.width(),
+                self.position.x(),
+            ),
+            resolve_position_component(
+                self.paint_rect.y(),
+                self.paint_rect.height(),
+                tile_size.height(),
+                self.position.y(),
+            ),
+            tile_size.width(),
+            tile_size.height(),
+        );
+        ResolvedImagePlacement::from_parts(self.paint_rect, tile_rect)
+    }
+}
+
+impl ResolvedImagePlacement {
+    pub fn from_parts(paint_rect: Rect, tile_rect: Rect) -> Result<Self> {
+        validate_placement_rect(paint_rect, "image placement paint rect")?;
+        validate_placement_rect(tile_rect, "image placement tile rect")?;
+        Ok(Self {
+            paint_rect,
+            tile_rect,
+        })
+    }
+
+    #[must_use]
+    pub const fn paint_rect(self) -> Rect {
+        self.paint_rect
+    }
+
+    #[must_use]
+    pub const fn tile_rect(self) -> Rect {
+        self.tile_rect
+    }
+}
+
+fn validate_placement_rect(rect: Rect, field: &str) -> Result<()> {
+    validate_finite_f64(rect.x(), &format!("{field} x"))?;
+    validate_finite_f64(rect.y(), &format!("{field} y"))?;
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Err(Error::invalid_value(
+            field,
+            format!("{rect:?}"),
+            "must have finite positive width and height",
+        ));
+    }
+    validate_positive_size(rect.size(), field)
+}
+
+fn validate_positive_size(size: Size, field: &str) -> Result<()> {
+    if !size.width().is_finite()
+        || !size.height().is_finite()
+        || size.width() <= 0.0
+        || size.height() <= 0.0
+    {
+        return Err(Error::invalid_value(
+            field,
+            format!("{size:?}"),
+            "must have finite positive width and height",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_background_size(paint_rect: Rect, intrinsic_size: Size, size: BackgroundSize) -> Size {
+    let intrinsic_width = intrinsic_size.width();
+    let intrinsic_height = intrinsic_size.height();
+    let scale_x = paint_rect.width() / intrinsic_width;
+    let scale_y = paint_rect.height() / intrinsic_height;
+
+    match size.kind() {
+        BackgroundSizeKind::Auto => intrinsic_size,
+        BackgroundSizeKind::Cover => {
+            let scale = scale_x.max(scale_y);
+            Size::new(intrinsic_width * scale, intrinsic_height * scale)
+        }
+        BackgroundSizeKind::Contain => {
+            let scale = scale_x.min(scale_y);
+            Size::new(intrinsic_width * scale, intrinsic_height * scale)
+        }
+        BackgroundSizeKind::Explicit { width, height } => {
+            let width = resolve_size_component(width, paint_rect.width());
+            let height = resolve_size_component(height, paint_rect.height());
+            match (width, height) {
+                (Some(width), Some(height)) => Size::new(width, height),
+                (Some(width), None) => Size::new(width, width * intrinsic_height / intrinsic_width),
+                (None, Some(height)) => {
+                    Size::new(height * intrinsic_width / intrinsic_height, height)
+                }
+                (None, None) => intrinsic_size,
+            }
+        }
+    }
+}
+
+fn resolve_size_component(component: SizeComponent, axis: f64) -> Option<f64> {
+    match component.kind() {
+        SizeComponentKind::Auto => None,
+        SizeComponentKind::Length(value) => Some(value),
+        SizeComponentKind::Percent(value) => Some(axis * value),
+    }
+}
+
+fn resolve_position_component(
+    origin: f64,
+    axis: f64,
+    tile_axis: f64,
+    component: PositionComponent,
+) -> f64 {
+    match component.kind() {
+        PositionComponentKind::Length => origin + component.value(),
+        PositionComponentKind::Percent => origin + (axis - tile_axis) * component.value(),
+        PositionComponentKind::EdgeOffset(PositionEdge::Start) => origin + component.value(),
+        PositionComponentKind::EdgeOffset(PositionEdge::End) => {
+            origin + axis - tile_axis - component.value()
+        }
     }
 }
 

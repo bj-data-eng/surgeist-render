@@ -514,6 +514,103 @@ fn css_image_layers_preserve_sampling_inputs_without_lowering() {
 }
 
 #[test]
+fn image_placement_auto_uses_intrinsic_size_and_position_ratio() {
+    let input = ImagePlacementInput::try_new(
+        Rect::new(10.0, 20.0, 100.0, 50.0),
+        Size::new(20.0, 10.0),
+        BackgroundPosition::percent(0.5, 1.0).unwrap(),
+        BackgroundSize::auto(),
+    )
+    .unwrap();
+
+    let placement = input.resolve().unwrap();
+
+    assert_eq!(placement.paint_rect(), Rect::new(10.0, 20.0, 100.0, 50.0));
+    assert_eq!(placement.tile_rect(), Rect::new(50.0, 60.0, 20.0, 10.0));
+}
+
+#[test]
+fn image_placement_cover_and_contain_preserve_aspect_ratio() {
+    let paint_rect = Rect::new(0.0, 0.0, 100.0, 50.0);
+    let intrinsic = Size::new(20.0, 20.0);
+
+    let cover = ImagePlacementInput::try_new(
+        paint_rect,
+        intrinsic,
+        BackgroundPosition::percent(0.5, 0.5).unwrap(),
+        BackgroundSize::cover(),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+    assert_eq!(cover.tile_rect(), Rect::new(0.0, -25.0, 100.0, 100.0));
+
+    let contain = ImagePlacementInput::try_new(
+        paint_rect,
+        intrinsic,
+        BackgroundPosition::percent(0.5, 0.5).unwrap(),
+        BackgroundSize::contain(),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+    assert_eq!(contain.tile_rect(), Rect::new(25.0, 0.0, 50.0, 50.0));
+}
+
+#[test]
+fn image_placement_explicit_size_resolves_lengths_percents_and_auto_axis() {
+    let placement = ImagePlacementInput::try_new(
+        Rect::new(0.0, 0.0, 200.0, 100.0),
+        Size::new(40.0, 20.0),
+        BackgroundPosition::length(5.0, 10.0).unwrap(),
+        BackgroundSize::explicit(
+            SizeComponent::try_percent(0.5).unwrap(),
+            SizeComponent::auto(),
+        ),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+
+    assert_eq!(placement.tile_rect(), Rect::new(5.0, 10.0, 100.0, 50.0));
+}
+
+#[test]
+fn image_placement_edge_offsets_represent_four_component_positions() {
+    let placement = ImagePlacementInput::try_new(
+        Rect::new(-20.0, -10.0, 200.0, 100.0),
+        Size::new(40.0, 20.0),
+        BackgroundPosition::edge_offsets(
+            PositionEdgeOffset::end(15.0).unwrap(),
+            PositionEdgeOffset::end(5.0).unwrap(),
+        ),
+        BackgroundSize::auto(),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+
+    assert_eq!(placement.tile_rect(), Rect::new(125.0, 65.0, 40.0, 20.0));
+}
+
+#[test]
+fn image_placement_rejects_invalid_paint_or_intrinsic_size() {
+    let error = ImagePlacementInput::try_new(
+        Rect::new(0.0, 0.0, 0.0, 100.0),
+        Size::new(10.0, 10.0),
+        BackgroundPosition::default(),
+        BackgroundSize::auto(),
+    )
+    .expect_err("paint rect must be positive");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("image placement paint rect")
+    );
+}
+
+#[test]
 fn fixed_background_layers_can_carry_viewport_coordinate_space() {
     let layer =
         StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
