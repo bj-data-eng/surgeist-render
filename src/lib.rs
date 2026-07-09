@@ -41,9 +41,10 @@ pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, Strok
 pub use stats::Stats;
 pub use style::{
     BackgroundAttachment, BackgroundBox, BackgroundPosition, BackgroundRepeat, BackgroundSize,
-    BackgroundSizeKind, PositionComponent, PositionComponentKind, RepeatMode,
-    ResolvedImageResource, SizeComponent, SizeComponentKind, StyleColor, StyleImageLayer,
-    StyleImageSource, StyleImageSourceKind, StyleResourceRef,
+    BackgroundSizeKind, FilterAmount, FilterAngle, FilterBlur, FilterList, FilterOp, FilterOpKind,
+    PositionComponent, PositionComponentKind, RepeatMode, ResolvedImageResource, SizeComponent,
+    SizeComponentKind, StyleColor, StyleImageLayer, StyleImageSource, StyleImageSourceKind,
+    StyleResourceRef, UnitFilterAmount,
 };
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,

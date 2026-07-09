@@ -1,5 +1,5 @@
 use super::{
-    Color, Error, Image, ImageId, Paint, Result, Size,
+    Color, Error, Image, ImageId, Paint, Result, Shadow, Size,
     validation::{validate_paint, validate_size},
 };
 
@@ -470,4 +470,225 @@ pub enum BackgroundAttachment {
     Scroll,
     Fixed,
     Local,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterList {
+    ops: Option<Vec<FilterOp>>,
+}
+
+impl FilterList {
+    #[must_use]
+    pub const fn none() -> Self {
+        Self { ops: None }
+    }
+
+    pub fn try_ops(ops: Vec<FilterOp>) -> Result<Self> {
+        if ops.is_empty() {
+            return Err(Error::invalid_value(
+                "filter operations",
+                "[]",
+                "must not be empty",
+            ));
+        }
+        Ok(Self { ops: Some(ops) })
+    }
+
+    #[must_use]
+    pub const fn is_none(&self) -> bool {
+        self.ops.is_none()
+    }
+
+    #[must_use]
+    pub fn ops(&self) -> &[FilterOp] {
+        self.ops.as_deref().unwrap_or(&[])
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct FilterOp {
+    kind: FilterOpKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum FilterOpKind {
+    Blur(FilterBlur),
+    Brightness(FilterAmount),
+    Contrast(FilterAmount),
+    Grayscale(UnitFilterAmount),
+    HueRotate(FilterAngle),
+    Invert(UnitFilterAmount),
+    Opacity(UnitFilterAmount),
+    Saturate(FilterAmount),
+    Sepia(UnitFilterAmount),
+    DropShadow(Shadow),
+}
+
+impl FilterOp {
+    #[must_use]
+    pub const fn blur(blur: FilterBlur) -> Self {
+        Self {
+            kind: FilterOpKind::Blur(blur),
+        }
+    }
+
+    #[must_use]
+    pub const fn brightness(amount: FilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Brightness(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn contrast(amount: FilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Contrast(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn grayscale(amount: UnitFilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Grayscale(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn hue_rotate(angle: FilterAngle) -> Self {
+        Self {
+            kind: FilterOpKind::HueRotate(angle),
+        }
+    }
+
+    #[must_use]
+    pub const fn invert(amount: UnitFilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Invert(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn opacity(amount: UnitFilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Opacity(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn saturate(amount: FilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Saturate(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn sepia(amount: UnitFilterAmount) -> Self {
+        Self {
+            kind: FilterOpKind::Sepia(amount),
+        }
+    }
+
+    #[must_use]
+    pub const fn drop_shadow(shadow: Shadow) -> Self {
+        Self {
+            kind: FilterOpKind::DropShadow(shadow),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &FilterOpKind {
+        &self.kind
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterBlur {
+    radius: f64,
+}
+
+impl FilterBlur {
+    pub fn try_new(radius: f64) -> Result<Self> {
+        if !radius.is_finite() || radius < 0.0 {
+            return Err(Error::invalid_value(
+                "filter blur radius",
+                radius,
+                "must be finite and non-negative",
+            ));
+        }
+        Ok(Self { radius })
+    }
+
+    #[must_use]
+    pub const fn radius(self) -> f64 {
+        self.radius
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterAmount {
+    value: f64,
+}
+
+impl FilterAmount {
+    pub fn try_new(value: f64) -> Result<Self> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::invalid_value(
+                "filter amount",
+                value,
+                "must be finite and non-negative",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.value
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnitFilterAmount {
+    value: f64,
+}
+
+impl UnitFilterAmount {
+    pub fn try_new(value: f64) -> Result<Self> {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(Error::invalid_value(
+                "filter unit amount",
+                value,
+                "must be finite and between 0 and 1",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.value
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterAngle {
+    radians: f64,
+}
+
+impl FilterAngle {
+    pub fn try_radians(radians: f64) -> Result<Self> {
+        if !radians.is_finite() {
+            return Err(Error::invalid_value(
+                "filter angle",
+                radians,
+                "must be finite",
+            ));
+        }
+        Ok(Self { radians })
+    }
+
+    #[must_use]
+    pub const fn radians(self) -> f64 {
+        self.radians
+    }
 }

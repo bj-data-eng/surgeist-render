@@ -374,6 +374,73 @@ fn background_size_rejects_negative_length() {
 }
 
 #[test]
+fn filter_lists_distinguish_none_from_ordered_ops() {
+    let list = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.2).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(4.0).unwrap()),
+    ])
+    .unwrap();
+
+    assert!(!list.is_none());
+    assert_eq!(list.ops().len(), 2);
+    assert!(matches!(
+        list.ops()[0].kind(),
+        FilterOpKind::Brightness(amount) if amount.value() == 1.2
+    ));
+    assert!(matches!(
+        list.ops()[1].kind(),
+        FilterOpKind::Blur(blur) if blur.radius() == 4.0
+    ));
+    assert!(FilterList::none().is_none());
+    assert!(FilterList::none().ops().is_empty());
+}
+
+#[test]
+fn filter_lists_reject_empty_ordered_ops() {
+    let error = FilterList::try_ops(Vec::new()).expect_err("empty op lists must use none");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter operations")
+    );
+}
+
+#[test]
+fn filter_blur_rejects_negative_radius() {
+    let error = FilterBlur::try_new(-0.1).expect_err("negative blur radius should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter blur radius")
+    );
+}
+
+#[test]
+fn filter_unit_amount_rejects_out_of_range_value() {
+    let error = UnitFilterAmount::try_new(1.5)
+        .expect_err("unit filter amounts must be clamped before render");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter unit amount")
+    );
+}
+
+#[test]
+fn filter_angle_rejects_nan() {
+    let error = FilterAngle::try_radians(f64::NAN).expect_err("filter angles must be finite");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter angle")
+    );
+}
+
+#[test]
 fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");
