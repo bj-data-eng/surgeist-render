@@ -244,7 +244,12 @@ impl Renderer {
             ..Stats::default()
         };
         let normalized = scene.normalize(self.capabilities())?;
-        reject_backdrop_execution(&normalized.commands)?;
+        let normalized = RenderCommands::new(self.materialize_resolved_backdrops(
+            normalized.commands,
+            surface.scale(),
+            surface.options.format,
+            parameters,
+        )?);
         let normalized = RenderCommands::new(self.materialize_resolved_layer_masks(
             normalized.commands,
             surface.scale(),
@@ -349,6 +354,115 @@ impl Renderer {
     #[must_use]
     pub const fn options(&self) -> Options {
         self.options
+    }
+
+    fn materialize_resolved_backdrops(
+        &mut self,
+        commands: Vec<RenderCommand>,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Result<Vec<RenderCommand>> {
+        commands
+            .into_iter()
+            .map(|command| self.materialize_resolved_backdrop(command, scale, format, parameters))
+            .collect()
+    }
+
+    fn materialize_resolved_backdrop(
+        &mut self,
+        command: RenderCommand,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Result<RenderCommand> {
+        let RenderCommand::Layer {
+            mut layer,
+            children,
+        } = command
+        else {
+            return Ok(command);
+        };
+        let mut children =
+            self.materialize_resolved_backdrops(children, scale, format, parameters)?;
+        let Some(backdrop) = layer.backdrop.clone() else {
+            return Ok(RenderCommand::Layer { layer, children });
+        };
+
+        reject_backdrop_execution(backdrop.source_commands())?;
+        let source_commands = self.materialize_resolved_layer_masks(
+            backdrop.source_commands().to_vec(),
+            scale,
+            format,
+            parameters,
+        )?;
+        let bounds = backdrop.capture_bounds();
+        let physical_size = physical_size(bounds.rect().size(), scale)?;
+        let local_scene = self.backdrop_source_scene(&layer, source_commands, bounds, scale)?;
+        let request = OffscreenLocalSceneRenderRequest::new(bounds, scale, format, parameters);
+        let options = self.options;
+        let mut cache = OffscreenTextureResourceCache::new();
+        let Some(context) = self.default_offscreen_render_context() else {
+            return Err(Error::new(
+                ErrorCode::AdapterUnavailable,
+                "materialized backdrop captures require an available wgpu device context",
+            ));
+        };
+        let rendered = render_vello_local_scene_to_offscreen_texture(
+            Some(context),
+            options,
+            &mut cache,
+            &local_scene,
+            request,
+        )?;
+        let source = {
+            let Some((device, queue)) = self.default_wgpu_device_queue() else {
+                return Err(Error::new(
+                    ErrorCode::AdapterUnavailable,
+                    "materialized backdrop captures require an available wgpu device queue",
+                ));
+            };
+            read_texture_rgba(device, queue, rendered.texture(), physical_size)?
+        };
+        rendered.release(&mut cache)?;
+        let filtered = image::ResolvedMaterializedImageFilterExecution::try_new_for_image_buffer(
+            backdrop.filters(),
+            &source,
+        )?
+        .execute_to_image_buffer()?;
+        let image = Image::from_rgba(
+            Size::new(
+                f64::from(filtered.size.width()),
+                f64::from(filtered.size.height()),
+            ),
+            filtered.rgba,
+        )?;
+        let image_command = RenderCommand::Image {
+            image,
+            rect: bounds.rect(),
+            fit: ImageFit::Stretch,
+        };
+        let backdrop_command = if let Some(clip) = backdrop.clip().cloned() {
+            RenderCommand::Layer {
+                layer: command::NormalizedLayer {
+                    clip: Some(clip),
+                    transform: Transform::identity(),
+                    opacity: 1.0,
+                    blend: BlendMode::Normal,
+                    mask: None,
+                    backdrop: None,
+                    isolation: command::LayerIsolation::ClipOnly,
+                    pass_plan: layer.pass_plan,
+                },
+                children: vec![image_command],
+            }
+        } else {
+            image_command
+        };
+        children.insert(0, backdrop_command);
+        layer.backdrop = None;
+
+        Ok(RenderCommand::Layer { layer, children })
     }
 
     fn materialize_resolved_layer_masks(
@@ -479,6 +593,30 @@ impl Renderer {
         let commands = RenderCommands::new(vec![RenderCommand::Layer {
             layer: source_layer,
             children,
+        }]);
+        encode_vello_scene(&commands, scale)
+    }
+
+    fn backdrop_source_scene(
+        &self,
+        layer: &command::NormalizedLayer,
+        source_commands: Vec<RenderCommand>,
+        bounds: command::OffscreenBounds,
+        scale: f64,
+    ) -> Result<vello::Scene> {
+        let source_layer = command::NormalizedLayer {
+            clip: None,
+            transform: Transform::translation(-bounds.rect().x(), -bounds.rect().y())?,
+            opacity: 1.0,
+            blend: BlendMode::Normal,
+            mask: None,
+            backdrop: None,
+            isolation: command::LayerIsolation::None,
+            pass_plan: layer.pass_plan,
+        };
+        let commands = RenderCommands::new(vec![RenderCommand::Layer {
+            layer: source_layer,
+            children: source_commands,
         }]);
         encode_vello_scene(&commands, scale)
     }

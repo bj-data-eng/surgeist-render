@@ -118,8 +118,8 @@ impl Capabilities {
             mask_execution: false,
             filter_execution: false,
             backdrop_execution: false,
-            bounded_backdrop_capture: false,
-            materialized_backdrop_filter_execution: false,
+            bounded_backdrop_capture: true,
+            materialized_backdrop_filter_execution: true,
             backdrop_isolation_composition: false,
         },
         surfaces: SurfaceCapabilities {

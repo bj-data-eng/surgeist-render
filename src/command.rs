@@ -191,25 +191,21 @@ impl RenderBackdropCapture {
         })
     }
 
-    #[cfg(test)]
     #[must_use]
     pub(crate) const fn filters(&self) -> &FilterList {
         &self.filters
     }
 
-    #[cfg(test)]
     #[must_use]
     pub(crate) const fn capture_bounds(&self) -> OffscreenBounds {
         self.capture_bounds
     }
 
-    #[cfg(test)]
     #[must_use]
     pub(crate) const fn clip(&self) -> Option<&RenderClip> {
         self.clip.as_ref()
     }
 
-    #[cfg(test)]
     #[must_use]
     pub(crate) fn source_commands(&self) -> &[RenderCommand] {
         &self.source_commands
@@ -294,7 +290,7 @@ impl LayerPassPlan {
             let bounds = OffscreenBounds::try_new(backdrop.capture_bounds().rect())?;
             return Ok(Self::new(
                 LayerPassRequirement::BoundedBackdropCapture,
-                LayerPassKind::DiagnosticBoundary,
+                LayerPassKind::OffscreenTexture,
                 Some(bounds),
             ));
         }
@@ -513,7 +509,15 @@ fn normalize_commands_in_context(
                 if layer.backdrop_filter().is_some() && layer_depth > 0 {
                     return Err(nested_backdrop_capture_error());
                 }
+                if layer.backdrop_filter().is_some() && layer.transform() != Transform::identity() {
+                    return Err(transformed_backdrop_capture_error());
+                }
                 let previous_siblings = normalized.clone();
+                if layer.backdrop_filter().is_some()
+                    && commands_contain_backdrop_capture(&previous_siblings)
+                {
+                    return Err(repeated_top_level_backdrop_capture_error());
+                }
                 let children =
                     normalize_commands_in_context(children, capabilities, layer_depth + 1)?;
                 RenderCommand::Layer {
@@ -531,6 +535,23 @@ fn normalize_commands_in_context(
     Ok(normalized)
 }
 
+fn commands_contain_backdrop_capture(commands: &[RenderCommand]) -> bool {
+    commands.iter().any(command_contains_backdrop_capture)
+}
+
+fn command_contains_backdrop_capture(command: &RenderCommand) -> bool {
+    match command {
+        RenderCommand::Layer { layer, children } => {
+            layer.backdrop.is_some() || commands_contain_backdrop_capture(children)
+        }
+        RenderCommand::Fill { .. }
+        | RenderCommand::Stroke { .. }
+        | RenderCommand::Shadow { .. }
+        | RenderCommand::Image { .. }
+        | RenderCommand::TextRun { .. } => false,
+    }
+}
+
 fn nested_backdrop_capture_error() -> Error {
     let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
@@ -538,6 +559,28 @@ fn nested_backdrop_capture_error() -> Error {
     ));
     error.message.push_str(
         ": nested backdrop capture crosses a layer isolation boundary and is not normalized in this task",
+    );
+    error
+}
+
+fn transformed_backdrop_capture_error() -> Error {
+    let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropExecution,
+    ));
+    error.message.push_str(
+        ": transformed backdrop capture requires coordinate-space reconciliation before materialized execution",
+    );
+    error
+}
+
+fn repeated_top_level_backdrop_capture_error() -> Error {
+    let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropExecution,
+    ));
+    error.message.push_str(
+        ": repeated top-level backdrop capture requires staged source reconciliation before materialized execution",
     );
     error
 }

@@ -1376,10 +1376,6 @@ impl BackdropFilterInput {
         capabilities.ensure_supported(UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::MaterializedBackdropFilterExecution,
-        ))?;
-        capabilities.ensure_supported(UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropIsolationComposition,
         ))
     }
 
