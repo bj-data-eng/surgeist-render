@@ -398,6 +398,67 @@ fn unsupported_operation_errors_name_capability() {
 }
 
 #[test]
+fn unresolved_resource_diagnostics_name_image_resources() {
+    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Image, "hero.png");
+    let error = Error::unresolved_resource(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Image);
+    assert_eq!(diagnostic.kind().label(), "image");
+    assert_eq!(diagnostic.identifier(), "hero.png");
+    assert_eq!(
+        error.message,
+        "image resource hero.png could not be resolved"
+    );
+}
+
+#[test]
+fn unresolved_resource_diagnostics_name_mask_resources() {
+    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Mask, "#avatar-mask");
+    let error = Error::unresolved_resource(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Mask);
+    assert_eq!(diagnostic.kind().label(), "mask");
+    assert_eq!(diagnostic.identifier(), "#avatar-mask");
+    assert_eq!(
+        error.message,
+        "mask resource #avatar-mask could not be resolved"
+    );
+}
+
+#[test]
+fn unresolved_resource_diagnostics_name_filter_resources() {
+    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#blur");
+    let error = Error::unresolved_resource(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Filter);
+    assert_eq!(diagnostic.kind().label(), "filter");
+    assert_eq!(diagnostic.identifier(), "#blur");
+    assert_eq!(error.message, "filter resource #blur could not be resolved");
+}
+
+#[test]
+fn unresolved_resource_diagnostics_name_clip_resources() {
+    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Clip, "#content-clip");
+    let error = Error::unresolved_resource(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
+    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Clip);
+    assert_eq!(diagnostic.kind().label(), "clip");
+    assert_eq!(diagnostic.identifier(), "#content-clip");
+    assert_eq!(
+        error.message,
+        "clip resource #content-clip could not be resolved"
+    );
+}
+
+#[test]
 fn renderer_reports_backend_capabilities_by_family() {
     let renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let capabilities = renderer.capabilities();

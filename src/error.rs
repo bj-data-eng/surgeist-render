@@ -10,6 +10,7 @@ pub struct Error {
     pub source: Option<Box<dyn error::Error + Send + Sync>>,
     invalid_value: Option<InvalidValue>,
     unsupported_primitive: Option<UnsupportedPrimitive>,
+    unresolved_resource: Option<UnresolvedResource>,
 }
 
 impl Error {
@@ -21,6 +22,7 @@ impl Error {
             source: None,
             invalid_value: None,
             unsupported_primitive: None,
+            unresolved_resource: None,
         }
     }
 
@@ -61,6 +63,13 @@ impl Error {
     }
 
     #[must_use]
+    pub fn unresolved_resource(resource: UnresolvedResource) -> Self {
+        let mut error = Self::new(ErrorCode::UnresolvedResource, resource.message());
+        error.unresolved_resource = Some(resource);
+        error
+    }
+
+    #[must_use]
     pub const fn unsupported_primitive(&self) -> Option<UnsupportedPrimitive> {
         self.unsupported_primitive
     }
@@ -68,6 +77,11 @@ impl Error {
     #[must_use]
     pub const fn invalid_value_diagnostic(&self) -> Option<&InvalidValue> {
         self.invalid_value.as_ref()
+    }
+
+    #[must_use]
+    pub const fn unresolved_resource_diagnostic(&self) -> Option<&UnresolvedResource> {
+        self.unresolved_resource.as_ref()
     }
 }
 
@@ -96,6 +110,7 @@ pub enum ErrorCode {
     SurfaceOutdated,
     SurfaceUnavailable,
     InvalidInput,
+    UnresolvedResource,
     ImageUploadFailed,
     RenderFailed,
     PresentFailed,
@@ -214,6 +229,60 @@ impl PrimitiveOperation {
             Self::NonSolidShadowPaint => "non-solid shadow paint",
             Self::InsideOutsidePathStrokeAlignment => "inside/outside path stroke alignment",
             Self::WebCanvasSurface => "web canvas surface",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnresolvedResource {
+    kind: UnresolvedResourceKind,
+    identifier: String,
+}
+
+impl UnresolvedResource {
+    #[must_use]
+    pub fn new(kind: UnresolvedResourceKind, identifier: impl Into<String>) -> Self {
+        Self {
+            kind,
+            identifier: identifier.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> UnresolvedResourceKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "{} resource {} could not be resolved",
+            self.kind.label(),
+            self.identifier
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum UnresolvedResourceKind {
+    Image,
+    Mask,
+    Filter,
+    Clip,
+}
+
+impl UnresolvedResourceKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Image => "image",
+            Self::Mask => "mask",
+            Self::Filter => "filter",
+            Self::Clip => "clip",
         }
     }
 }

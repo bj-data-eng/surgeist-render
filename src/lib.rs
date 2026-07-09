@@ -28,7 +28,7 @@ pub use capability::{
 };
 pub use error::{
     Error, ErrorCode, InvalidValue, PrimitiveFamily, PrimitiveOperation, Result,
-    UnsupportedPrimitive,
+    UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
 pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
