@@ -704,7 +704,249 @@ fn image_color_filter_execution_rejects_blur_and_drop_shadow_before_bytes_transf
     );
 }
 
+#[test]
+fn sequence10_matrix_color_filters_execute_with_cpu_reference_bytes() {
+    let source = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
+    let cases = [
+        (
+            ColorFilterOp::Brightness(FilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(50, 75, 100, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Contrast(FilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(114, 139, 164, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Grayscale(UnitFilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(121, 146, 171, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::HueRotate(
+                FilterAngle::try_radians(std::f64::consts::FRAC_PI_2).unwrap(),
+            ),
+            PremultipliedRgba8::try_new(200, 122, 186, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Invert(UnitFilterAmount::try_new(0.25).unwrap()),
+            PremultipliedRgba8::try_new(114, 139, 164, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(50, 75, 100, 128).unwrap(),
+        ),
+        (
+            ColorFilterOp::Saturate(FilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(121, 146, 171, 255).unwrap(),
+        ),
+        (
+            ColorFilterOp::Sepia(UnitFilterAmount::try_new(0.5).unwrap()),
+            PremultipliedRgba8::try_new(146, 161, 167, 255).unwrap(),
+        ),
+    ];
+
+    for (op, expected) in cases {
+        let pipeline = color_filter_pipeline([op]);
+        let compiled = CompiledColorFilterPipeline::try_from_pipeline(&pipeline).unwrap();
+
+        assert_eq!(
+            source
+                .apply_compiled_color_filter_pipeline(&compiled)
+                .unwrap(),
+            expected,
+            "unexpected compiled output for {op:?}"
+        );
+        assert_eq!(
+            source
+                .apply_compiled_color_filter_pipeline(&compiled)
+                .unwrap(),
+            source.apply_color_filter_pipeline(&pipeline).unwrap(),
+            "compiled and CPU reference paths should agree for {op:?}"
+        );
+    }
+}
+
+#[test]
+fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_image() {
+    let source = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![100, 150, 200, 255, 64, 128, 255, 128],
+    };
+    let filters = color_filter_list([
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.25).unwrap()),
+        ColorFilterOp::Contrast(FilterAmount::try_new(0.8).unwrap()),
+        ColorFilterOp::Saturate(FilterAmount::try_new(1.5).unwrap()),
+    ]);
+    let pipeline = filters
+        .color_filter_pipeline()
+        .unwrap()
+        .expect("color-only filters should produce a sequence10 pipeline");
+    let compiled = CompiledColorFilterPipeline::try_from_pipeline(&pipeline).unwrap();
+
+    assert_eq!(compiled.executable_step_count(), 1);
+
+    let premultiplied =
+        image::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
+    let reference = premultiplied
+        .apply_compiled_color_filter_pipeline(&compiled)
+        .unwrap();
+    let expected =
+        image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&reference).unwrap();
+    let filtered =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+            .unwrap()
+            .execute_to_image_buffer()
+            .unwrap();
+
+    assert_eq!(filtered, expected);
+    assert_ne!(filtered.rgba, source.rgba);
+}
+
+#[test]
+fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    assert!(
+        capabilities
+            .filters()
+            .supports_color_filter_classification()
+    );
+    assert!(
+        capabilities
+            .filters()
+            .supports_color_filter_pipeline_execution()
+    );
+    assert!(
+        capabilities
+            .image_sampling()
+            .supports_color_filtered_image_paint()
+    );
+    assert!(!capabilities.filters().supports_layer_filters());
+    assert!(
+        !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+    );
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_filter_execution()
+    );
+}
+
+#[test]
+fn sequence10_guardrail_later_effect_execution_stays_unsupported() {
+    let image_buffer = ImageBuffer {
+        size: PhysicalSize::new(1, 1),
+        rgba: vec![100, 150, 200, 255],
+    };
+    let blur =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(2.0).unwrap())]).unwrap();
+    let shadow = Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
+    let drop_shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
+
+    let blur_error =
+        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&blur, &image_buffer)
+            .expect_err("Sequence 10 must not execute blur filters");
+    let drop_shadow_error = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+        &drop_shadow,
+        &image_buffer,
+    )
+    .expect_err("Sequence 10 must not execute drop-shadow filters");
+
+    assert_eq!(
+        blur_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::ColorFilterBlur,
+        ))
+    );
+    assert_eq!(
+        drop_shadow_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::ColorFilterDropShadow,
+        ))
+    );
+
+    let layer_filter_error = normalize_single_layer_error(
+        Layer::new()
+            .try_filter(Filter::try_blur(2.0).unwrap())
+            .unwrap(),
+    );
+    assert_eq!(
+        layer_filter_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::LayerFilter,
+        ))
+    );
+
+    let layer_mask_error = normalize_single_layer_error(
+        Layer::new()
+            .try_mask(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
+            .unwrap(),
+    );
+    assert_eq!(
+        layer_mask_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ))
+    );
+
+    for unsupported in [
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::MaskExecution,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropExecution,
+        ),
+    ] {
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("later compositor execution should remain unsupported");
+
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
+}
+
+#[test]
+fn sequence10_guardrail_unfiltered_images_stay_on_direct_sampling_path() {
+    let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 0, 0, 255])).unwrap();
+    let mut scene = Scene::new();
+    scene.image(image, Rect::new(0.0, 0.0, 2.0, 2.0), ImageFit::Stretch);
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(scene.stats().images, 1);
+    assert_eq!(scene.stats().layers, 0);
+    assert!(matches!(
+        normalized.commands.as_slice(),
+        [command::RenderCommand::Image { .. }]
+    ));
+
+    let placement = ImagePlacementInput::try_new(
+        Rect::new(0.0, 0.0, 10.0, 4.0),
+        Size::new(2.0, 2.0),
+        BackgroundPosition::percent(0.5, 0.5).unwrap(),
+        BackgroundSize::contain(),
+    )
+    .unwrap()
+    .resolve()
+    .unwrap();
+
+    assert_eq!(placement.tile_rect(), Rect::new(3.0, 0.0, 4.0, 4.0));
+}
+
 fn color_filter_pipeline<const N: usize>(ops: [ColorFilterOp; N]) -> ColorFilterPipeline {
+    color_filter_list(ops)
+        .color_filter_pipeline()
+        .unwrap()
+        .unwrap()
+}
+
+fn color_filter_list<const N: usize>(ops: [ColorFilterOp; N]) -> FilterList {
     let ops = ops
         .into_iter()
         .map(|op| match op {
@@ -718,11 +960,17 @@ fn color_filter_pipeline<const N: usize>(ops: [ColorFilterOp; N]) -> ColorFilter
             ColorFilterOp::Sepia(amount) => FilterOp::sepia(amount),
         })
         .collect();
-    FilterList::try_ops(ops)
-        .unwrap()
-        .color_filter_pipeline()
-        .unwrap()
-        .unwrap()
+    FilterList::try_ops(ops).unwrap()
+}
+
+fn normalize_single_layer_error(layer: Layer) -> Error {
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+    });
+    scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("Sequence 10 guardrail layer should reject during normalization")
 }
 
 fn assert_premultiplied(pixel: PremultipliedRgba8) {
@@ -4702,6 +4950,7 @@ fn image_sampling_capabilities_name_css_sampling_boundaries() {
     assert!(!capabilities.supports_repeat_round());
     assert!(!capabilities.supports_repeat_space());
     assert!(!capabilities.supports_filtered_image_paint());
+    assert!(capabilities.supports_color_filtered_image_paint());
     assert!(!capabilities.supports_image_orientation_conversion());
     assert!(!capabilities.supports_image_color_profile_conversion());
 }
@@ -4751,7 +5000,7 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
 }
 
 #[test]
-fn color_filter_capability_names_classification_without_overclaiming_execution() {
+fn color_filter_capability_names_granular_execution_without_broad_effects() {
     let capabilities = Capabilities::VELLO_0_9;
 
     assert!(
@@ -4760,7 +5009,7 @@ fn color_filter_capability_names_classification_without_overclaiming_execution()
             .supports_color_filter_classification()
     );
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_color_filter_pipeline_execution()
     );
@@ -4771,7 +5020,7 @@ fn color_filter_capability_names_classification_without_overclaiming_execution()
             .supports_filtered_image_paint()
     );
     assert!(
-        !capabilities
+        capabilities
             .image_sampling()
             .supports_color_filtered_image_paint()
     );

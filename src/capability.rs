@@ -48,7 +48,7 @@ impl Capabilities {
             repeat_round: false,
             repeat_space: false,
             filtered_image_paint: false,
-            color_filtered_image_paint: false,
+            color_filtered_image_paint: true,
             image_orientation_conversion: false,
             image_color_profile_conversion: false,
             attachment_coordinate_policy:
@@ -63,7 +63,7 @@ impl Capabilities {
         filters: FilterCapabilities {
             layer_filters: false,
             color_filter_classification: true,
-            color_filter_pipeline_execution: false,
+            color_filter_pipeline_execution: true,
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,
