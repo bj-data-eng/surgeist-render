@@ -1,7 +1,8 @@
 use super::{
     command::{
-        LayerIsolation, NormalizedLayer, RenderCommand, RenderCommands, RenderPaint, RenderShadow,
-        RenderShape, RenderStroke, RenderStrokeShape, ShadowShape, kurbo_rounded_rect,
+        LayerIsolation, NormalizedLayer, RenderClipGeometry, RenderCommand, RenderCommands,
+        RenderPaint, RenderShadow, RenderShape, RenderStroke, RenderStrokeShape, ShadowShape,
+        kurbo_rounded_rect,
     },
     geometry::{expand_rect, offset_radii},
     paint::PaintKind,
@@ -318,63 +319,86 @@ fn encode_layer_start(scene: &mut vello::Scene, layer: &NormalizedLayer, transfo
     let blend = vello_blend(layer.blend);
     let alpha = layer.opacity.clamp(0.0, 1.0);
     let use_clip = layer.isolation == LayerIsolation::ClipOnly;
-    let default_clip = RenderShape::Rect(Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9));
-    let clip = layer.clip.as_ref().unwrap_or(&default_clip);
+    let default_clip = RenderClipGeometry::Rect(Rect::new(-1.0e9, -1.0e9, 2.0e9, 2.0e9));
+    let (clip, clip_transform) = layer
+        .clip
+        .as_ref()
+        .map(|clip| {
+            let clip_transform = clip
+                .coordinate_space()
+                .map(|coordinate_space| {
+                    transform * kurbo::Affine::from(coordinate_space.transform())
+                })
+                .unwrap_or(transform);
+            (clip.geometry(), clip_transform)
+        })
+        .unwrap_or((&default_clip, transform));
     match clip {
-        RenderShape::Rect(rect) => push_vello_layer(
+        RenderClipGeometry::Rect(rect) => push_vello_layer(
             scene,
             use_clip,
+            peniko::Fill::NonZero,
             blend,
             alpha,
-            transform,
+            clip_transform,
             &kurbo::Rect::from(*rect),
         ),
-        RenderShape::RoundedRect { rect, radii } => push_vello_layer(
+        RenderClipGeometry::RoundedRect { rect, radii } => push_vello_layer(
             scene,
             use_clip,
+            peniko::Fill::NonZero,
             blend,
             alpha,
-            transform,
+            clip_transform,
             &kurbo_rounded_rect(*rect, *radii),
         ),
-        RenderShape::Circle { center, radius } => push_vello_layer(
+        RenderClipGeometry::Circle { center, radius } => push_vello_layer(
             scene,
             use_clip,
+            peniko::Fill::NonZero,
             blend,
             alpha,
-            transform,
+            clip_transform,
             &kurbo::Circle::new((center.x(), center.y()), *radius),
         ),
-        RenderShape::Ellipse { center, radii } => push_vello_layer(
+        RenderClipGeometry::Ellipse { center, radii } => push_vello_layer(
             scene,
             use_clip,
+            peniko::Fill::NonZero,
             blend,
             alpha,
-            transform,
+            clip_transform,
             &kurbo::Ellipse::new(
                 (center.x(), center.y()),
                 (radii.width(), radii.height()),
                 0.0,
             ),
         ),
-        RenderShape::Path(path) => {
-            push_vello_layer(scene, use_clip, blend, alpha, transform, &path.to_kurbo())
-        }
+        RenderClipGeometry::Path { path, fill_rule } => push_vello_layer(
+            scene,
+            use_clip,
+            vello_fill_rule(*fill_rule),
+            blend,
+            alpha,
+            clip_transform,
+            &path.to_kurbo(),
+        ),
     }
 }
 
 fn push_vello_layer(
     scene: &mut vello::Scene,
     use_clip: bool,
+    fill: peniko::Fill,
     blend: peniko::BlendMode,
     alpha: f32,
     transform: kurbo::Affine,
     shape: &impl kurbo::Shape,
 ) {
     if use_clip {
-        scene.push_clip_layer(peniko::Fill::NonZero, transform, shape);
+        scene.push_clip_layer(fill, transform, shape);
     } else {
-        scene.push_layer(peniko::Fill::NonZero, blend, alpha, transform, shape);
+        scene.push_layer(fill, blend, alpha, transform, shape);
     }
 }
 
@@ -416,6 +440,13 @@ fn vello_blend(blend: BlendMode) -> peniko::BlendMode {
         BlendMode::Darken => peniko::Mix::Darken.into(),
         BlendMode::Lighten => peniko::Mix::Lighten.into(),
         BlendMode::Plus => peniko::Compose::Plus.into(),
+    }
+}
+
+fn vello_fill_rule(fill_rule: FillRule) -> peniko::Fill {
+    match fill_rule {
+        FillRule::NonZero => peniko::Fill::NonZero,
+        FillRule::EvenOdd => peniko::Fill::EvenOdd,
     }
 }
 

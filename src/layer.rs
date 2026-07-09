@@ -1,5 +1,6 @@
 use super::{
-    Error, Paint, Point, Result, Shape, Transform,
+    ClipInput, Error, Paint, Point, Result, Shape, Transform,
+    style::validate_clip_input,
     validation::{
         validate_filter, validate_finite_f64, validate_non_negative_f64, validate_paint,
         validate_point, validate_shape, validate_transform,
@@ -8,7 +9,7 @@ use super::{
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Layer {
-    clip: Option<Shape>,
+    clip: Option<ClipInput>,
     transform: Transform,
     opacity: f32,
     blend: BlendMode,
@@ -24,6 +25,12 @@ impl Layer {
 
     pub fn try_clip(mut self, clip: Shape) -> Result<Self> {
         validate_shape(&clip)?;
+        self.clip = Some(ClipInput::try_shape(clip)?);
+        Ok(self)
+    }
+
+    pub fn try_clip_input(mut self, clip: ClipInput) -> Result<Self> {
+        validate_clip_input(&clip)?;
         self.clip = Some(clip);
         Ok(self)
     }
@@ -66,6 +73,11 @@ impl Layer {
 
     #[must_use]
     pub fn clip(&self) -> Option<&Shape> {
+        self.clip.as_ref().and_then(ClipInput::shape)
+    }
+
+    #[must_use]
+    pub fn clip_input(&self) -> Option<&ClipInput> {
         self.clip.as_ref()
     }
 

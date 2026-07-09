@@ -4414,6 +4414,150 @@ fn filled_paths_reject_invalid_path_points() {
 }
 
 #[test]
+fn clip_input_normalization_lowers_concrete_shape_geometry() {
+    let rect = Rect::new(1.0, 2.0, 3.0, 4.0);
+    let radii = Radii::new(1.0, 2.0, 3.0, 4.0);
+    let circle_center = Point::new(8.0, 9.0);
+    let ellipse_center = Point::new(12.0, 13.0);
+    let ellipse_radii = Size::new(4.0, 5.0);
+    let cases = [
+        (
+            ClipInput::try_shape(Shape::rect(rect)).unwrap(),
+            ClipGeometryKind::Rect(rect),
+        ),
+        (
+            ClipInput::try_shape(Shape::try_rounded_rect(rect, radii).unwrap()).unwrap(),
+            ClipGeometryKind::RoundedRect { rect, radii },
+        ),
+        (
+            ClipInput::try_shape(Shape::try_circle(circle_center, 3.0).unwrap()).unwrap(),
+            ClipGeometryKind::Circle {
+                center: circle_center,
+                radius: 3.0,
+            },
+        ),
+        (
+            ClipInput::try_shape(Shape::try_ellipse(ellipse_center, ellipse_radii).unwrap())
+                .unwrap(),
+            ClipGeometryKind::Ellipse {
+                center: ellipse_center,
+                radii: ellipse_radii,
+            },
+        ),
+    ];
+
+    for (input, expected) in cases {
+        let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+        assert_eq!(normalized.geometry().kind(), &expected);
+        assert_eq!(normalized.coordinate_space(), None);
+    }
+}
+
+#[test]
+fn clip_input_normalization_preserves_path_fill_rules_and_bounds() {
+    let mut path = Path::new();
+    path.move_to(Point::new(2.0, 3.0))
+        .line_to(Point::new(6.0, 3.0))
+        .line_to(Point::new(6.0, 8.0))
+        .close();
+    let filled = FilledPath::try_new(path.clone(), FillRule::EvenOdd).unwrap();
+    let input = ClipInput::try_filled_path(filled.clone()).unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(
+        normalized.geometry().kind(),
+        &ClipGeometryKind::Path(filled)
+    );
+
+    let layer = Layer::new()
+        .try_clip_input(
+            ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::NonZero).unwrap())
+                .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(-10.0, -10.0, 40.0, 40.0), Color::BLACK);
+    });
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected layer command");
+    };
+
+    assert_eq!(
+        layer.pass_plan.bounds().map(command::OffscreenBounds::rect),
+        Some(Rect::new(2.0, 3.0, 4.0, 5.0))
+    );
+    assert!(matches!(
+        layer.clip.as_ref().map(|clip| clip.geometry()),
+        Some(command::RenderClipGeometry::Path {
+            fill_rule: FillRule::NonZero,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn clip_input_normalization_reports_reference_and_invalid_path_diagnostics() {
+    let reference = ClipInput::reference(StyleResourceRef::try_new("#clip").unwrap());
+    let error = reference
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("unresolved clip references should stay a typed diagnostic");
+
+    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(
+        error
+            .unresolved_resource_diagnostic()
+            .map(UnresolvedResource::kind),
+        Some(UnresolvedResourceKind::Clip)
+    );
+    assert_eq!(
+        error
+            .unresolved_resource_diagnostic()
+            .map(UnresolvedResource::identifier),
+        Some("#clip")
+    );
+
+    let mut path = Path::new();
+    path.move_to(Point::new(f64::NAN, 0.0));
+    let error = ClipInput::try_shape(Shape::path(path)).expect_err("invalid path points fail");
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("path point x")
+    );
+}
+
+#[test]
+fn clip_input_normalization_preserves_coordinate_space_tags_and_rejects_nonfinite_bounds() {
+    let tag = CoordinateSpaceTag::surface(Transform::translation(4.0, 5.0).unwrap()).unwrap();
+    let normalized = ClipInput::try_shape(Shape::rect(Rect::new(1.0, 2.0, 3.0, 4.0)))
+        .unwrap()
+        .with_coordinate_space(tag)
+        .normalize(Capabilities::VELLO_0_9)
+        .unwrap();
+
+    assert_eq!(normalized.coordinate_space(), Some(tag));
+
+    let huge = ClipInput::try_shape(Shape::rect(Rect::new(f64::MAX, 0.0, 1.0, 1.0)))
+        .unwrap()
+        .with_coordinate_space(
+            CoordinateSpaceTag::surface(Transform::scale(2.0, 1.0).unwrap()).unwrap(),
+        );
+    let error = huge
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("transformed clip bounds must remain finite");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("clip transformed bounds")
+    );
+}
+
+#[test]
 fn border_edges_preserve_four_independent_sides() {
     let top = BorderSide::try_new(BorderStyle::Solid, 1.0, Color::BLACK).unwrap();
     let right = BorderSide::try_new(BorderStyle::Dashed, 2.0, Color::BLACK).unwrap();
@@ -7444,6 +7588,177 @@ fn transformed_shape_clips_render_in_layer_space() {
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
     assert!(pixel_alpha(&output, 2, 0) > 0);
     assert!(pixel_alpha(&output, 3, 0) > 0);
+}
+
+#[test]
+fn path_clip_fill_rules_execute_even_odd_and_nonzero() {
+    fn nested_rect_path() -> Path {
+        let mut path = Path::new();
+        path.move_to(Point::new(0.0, 0.0))
+            .line_to(Point::new(5.0, 0.0))
+            .line_to(Point::new(5.0, 5.0))
+            .line_to(Point::new(0.0, 5.0))
+            .close()
+            .move_to(Point::new(1.0, 1.0))
+            .line_to(Point::new(4.0, 1.0))
+            .line_to(Point::new(4.0, 4.0))
+            .line_to(Point::new(1.0, 4.0))
+            .close();
+        path
+    }
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut even_odd_surface = renderer.create_headless(Size::new(6.0, 5.0), 1.0).unwrap();
+    let even_odd_clip = ClipInput::try_filled_path(
+        FilledPath::try_new(nested_rect_path(), FillRule::EvenOdd).unwrap(),
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_clip_input(even_odd_clip).unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 6.0, 5.0), Color::BLACK);
+        },
+    );
+    renderer
+        .render(&mut even_odd_surface, &scene, Parameters::default())
+        .expect("even-odd path clip should render");
+    let even_odd = renderer.read_headless(&even_odd_surface).unwrap();
+
+    let mut nonzero_surface = renderer.create_headless(Size::new(6.0, 5.0), 1.0).unwrap();
+    let nonzero_clip = ClipInput::try_filled_path(
+        FilledPath::try_new(nested_rect_path(), FillRule::NonZero).unwrap(),
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_clip_input(nonzero_clip).unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 6.0, 5.0), Color::BLACK);
+        },
+    );
+    renderer
+        .render(&mut nonzero_surface, &scene, Parameters::default())
+        .expect("nonzero path clip should render");
+    let nonzero = renderer.read_headless(&nonzero_surface).unwrap();
+
+    assert!(pixel_alpha(&even_odd, 0, 0) > 0);
+    assert_eq!(pixel_alpha(&even_odd, 2, 2), 0);
+    assert!(pixel_alpha(&nonzero, 2, 2) > 0);
+}
+
+#[test]
+fn builtin_shape_clips_execute_for_layer_clipping() {
+    let clips = [
+        Shape::try_rounded_rect(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            Radii::new(1.0, 1.0, 1.0, 1.0),
+        )
+        .unwrap(),
+        Shape::try_circle(Point::new(2.0, 2.0), 2.0).unwrap(),
+        Shape::try_ellipse(Point::new(2.0, 2.0), Size::new(2.0, 1.5)).unwrap(),
+    ];
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    for clip in clips {
+        let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+        let mut scene = Scene::new();
+        scene.layer(Layer::new().try_clip(clip).unwrap(), |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+        });
+
+        renderer
+            .render(&mut surface, &scene, Parameters::default())
+            .expect("builtin shape clip should render as a layer clip");
+        let output = renderer.read_headless(&surface).unwrap();
+
+        assert!(
+            output.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0),
+            "builtin shape clip should leave visible clipped content"
+        );
+    }
+}
+
+#[test]
+fn nested_clips_render_only_the_intersection() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(5.0, 2.0), 1.0).unwrap();
+    let mut inner_path = Path::new();
+    inner_path
+        .move_to(Point::new(2.0, 0.0))
+        .line_to(Point::new(5.0, 0.0))
+        .line_to(Point::new(5.0, 2.0))
+        .line_to(Point::new(2.0, 2.0))
+        .close();
+    let inner_clip =
+        ClipInput::try_filled_path(FilledPath::try_new(inner_path, FillRule::NonZero).unwrap())
+            .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_clip(Shape::rect(Rect::new(1.0, 0.0, 3.0, 2.0)))
+            .unwrap(),
+        |scene| {
+            scene.layer(Layer::new().try_clip_input(inner_clip).unwrap(), |scene| {
+                scene.fill(Rect::new(0.0, 0.0, 5.0, 2.0), Color::BLACK);
+            });
+        },
+    );
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("nested clips should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert_eq!(pixel_alpha(&output, 1, 0), 0);
+    assert!(pixel_alpha(&output, 2, 0) > 0);
+    assert!(pixel_alpha(&output, 3, 0) > 0);
+    assert_eq!(pixel_alpha(&output, 4, 0), 0);
+}
+
+#[test]
+fn coordinate_space_tag_transform_affects_layer_clip() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+        .unwrap()
+        .with_coordinate_space(
+            CoordinateSpaceTag::surface(Transform::translation(2.0, 0.0).unwrap()).unwrap(),
+        );
+    let mut scene = Scene::new();
+    scene.layer(Layer::new().try_clip_input(clip).unwrap(), |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 4.0, 2.0), Color::BLACK);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("coordinate-space clip transform should render");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert_eq!(pixel_alpha(&output, 1, 0), 0);
+    assert!(pixel_alpha(&output, 2, 0) > 0);
+    assert!(pixel_alpha(&output, 3, 0) > 0);
+}
+
+#[test]
+fn scene_clip_convenience_still_uses_shape_layer_clips() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.clip(Rect::new(1.0, 0.0, 1.0, 1.0), |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
+    });
+
+    renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect("existing Scene::clip convenience should keep working");
+    let output = renderer.read_headless(&surface).unwrap();
+
+    assert_eq!(pixel_alpha(&output, 0, 0), 0);
+    assert!(pixel_alpha(&output, 1, 0) > 0);
+    assert_eq!(pixel_alpha(&output, 2, 0), 0);
 }
 
 #[test]

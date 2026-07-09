@@ -128,8 +128,8 @@ pub(crate) fn validate_layer(layer: &Layer) -> Result<()> {
     if !layer.opacity().is_finite() {
         return Err(invalid_input("layer opacity must be finite"));
     }
-    if let Some(clip) = layer.clip() {
-        validate_shape(clip)?;
+    if let Some(clip) = layer.clip_input() {
+        super::style::validate_clip_input(clip)?;
     }
     if let Some(mask) = layer.mask() {
         validate_shape(mask)?;

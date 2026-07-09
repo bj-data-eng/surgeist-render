@@ -1,6 +1,12 @@
 use super::{
-    geometry::offset_radii, paint::PaintKind, scene::Command, shape::ShapeKind,
-    stats::collect_render_stats, validation::*, *,
+    geometry::offset_radii,
+    paint::PaintKind,
+    scene::Command,
+    shape::ShapeKind,
+    stats::collect_render_stats,
+    style::{ClipGeometryKind, NormalizedClip},
+    validation::*,
+    *,
 };
 use kurbo::Shape as KurboShape;
 
@@ -68,6 +74,21 @@ pub(crate) enum RenderShape {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RenderClip {
+    geometry: RenderClipGeometry,
+    coordinate_space: Option<CoordinateSpaceTag>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RenderClipGeometry {
+    Rect(Rect),
+    RoundedRect { rect: Rect, radii: Radii },
+    Circle { center: Point, radius: f64 },
+    Ellipse { center: Point, radii: Size },
+    Path { path: Path, fill_rule: FillRule },
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RenderStrokeShape {
     Rect(kurbo::Rect),
     RoundedRect(kurbo::RoundedRect),
@@ -110,7 +131,7 @@ pub(crate) struct RenderShadow {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct NormalizedLayer {
-    pub(crate) clip: Option<RenderShape>,
+    pub(crate) clip: Option<RenderClip>,
     pub(crate) transform: Transform,
     pub(crate) opacity: f32,
     pub(crate) blend: BlendMode,
@@ -184,7 +205,7 @@ impl LayerPassPlan {
 
     fn from_authored(
         layer: &Layer,
-        clip: Option<&RenderShape>,
+        clip: Option<&RenderClip>,
         children: &[RenderCommand],
         capabilities: Capabilities,
     ) -> Result<Self> {
@@ -419,6 +440,48 @@ impl TryFrom<Shape> for RenderShape {
     }
 }
 
+impl RenderClip {
+    fn from_input(input: &ClipInput, capabilities: Capabilities) -> Result<Self> {
+        let normalized = input.normalize(capabilities)?;
+        Ok(Self::from_normalized(&normalized))
+    }
+
+    fn from_normalized(clip: &NormalizedClip) -> Self {
+        Self {
+            geometry: match clip.geometry().kind() {
+                ClipGeometryKind::Rect(rect) => RenderClipGeometry::Rect(*rect),
+                ClipGeometryKind::RoundedRect { rect, radii } => RenderClipGeometry::RoundedRect {
+                    rect: *rect,
+                    radii: *radii,
+                },
+                ClipGeometryKind::Circle { center, radius } => RenderClipGeometry::Circle {
+                    center: *center,
+                    radius: *radius,
+                },
+                ClipGeometryKind::Ellipse { center, radii } => RenderClipGeometry::Ellipse {
+                    center: *center,
+                    radii: *radii,
+                },
+                ClipGeometryKind::Path(path) => RenderClipGeometry::Path {
+                    path: path.path().clone(),
+                    fill_rule: path.fill_rule(),
+                },
+            },
+            coordinate_space: clip.coordinate_space(),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn geometry(&self) -> &RenderClipGeometry {
+        &self.geometry
+    }
+
+    #[must_use]
+    pub(crate) const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
+    }
+}
+
 impl RenderStrokeShape {
     fn from_authored(shape: &Shape, stroke: Stroke, capabilities: Capabilities) -> Result<Self> {
         validate_shape(shape)?;
@@ -546,9 +609,8 @@ impl NormalizedLayer {
     ) -> Result<Self> {
         validate_layer(layer)?;
         let clip = layer
-            .clip()
-            .cloned()
-            .map(RenderShape::try_from)
+            .clip_input()
+            .map(|clip| RenderClip::from_input(clip, capabilities))
             .transpose()?;
         let pass_plan = LayerPassPlan::from_authored(layer, clip.as_ref(), children, capabilities)?;
         Ok(Self {
@@ -611,8 +673,8 @@ fn unsupported_layer_effect(layer: &Layer) -> Option<UnsupportedPrimitive> {
     None
 }
 
-fn clip_bounds(clip: Option<&RenderShape>) -> Option<OffscreenBounds> {
-    clip.and_then(render_shape_bounds)
+fn clip_bounds(clip: Option<&RenderClip>) -> Option<OffscreenBounds> {
+    clip.and_then(render_clip_bounds)
 }
 
 fn commands_bounds(commands: &[RenderCommand]) -> Option<OffscreenBounds> {
@@ -656,6 +718,33 @@ fn render_shape_bounds(shape: &RenderShape) -> Option<OffscreenBounds> {
         ))
         .ok(),
         RenderShape::Path(path) => kurbo_bounds(path.to_kurbo().bounding_box()),
+    }
+}
+
+fn render_clip_bounds(clip: &RenderClip) -> Option<OffscreenBounds> {
+    let bounds = match clip.geometry() {
+        RenderClipGeometry::Rect(rect) | RenderClipGeometry::RoundedRect { rect, .. } => {
+            OffscreenBounds::try_new(*rect).ok()
+        }
+        RenderClipGeometry::Circle { center, radius } => OffscreenBounds::try_new(Rect::new(
+            center.x() - radius,
+            center.y() - radius,
+            radius * 2.0,
+            radius * 2.0,
+        ))
+        .ok(),
+        RenderClipGeometry::Ellipse { center, radii } => OffscreenBounds::try_new(Rect::new(
+            center.x() - radii.width(),
+            center.y() - radii.height(),
+            radii.width() * 2.0,
+            radii.height() * 2.0,
+        ))
+        .ok(),
+        RenderClipGeometry::Path { path, .. } => kurbo_bounds(path.to_kurbo().bounding_box()),
+    }?;
+    match clip.coordinate_space() {
+        Some(coordinate_space) => transform_bounds(bounds.rect(), coordinate_space.transform()),
+        None => Some(bounds),
     }
 }
 
