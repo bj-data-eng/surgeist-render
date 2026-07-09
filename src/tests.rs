@@ -1058,6 +1058,226 @@ fn offscreen_no_allocation_when_layer_isolation_is_unnecessary() {
 }
 
 #[test]
+fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_baseline() {
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.0, 0.0, 2.0, 2.0),
+            Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
+        )
+        .fill(
+            Rect::new(2.0, 0.0, 2.0, 2.0),
+            Color::try_rgba(0.0, 1.0, 0.0, 1.0).unwrap(),
+        );
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    assert!(
+        normalized
+            .commands
+            .iter()
+            .all(|command| { !matches!(command, command::RenderCommand::Layer { .. }) })
+    );
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut first_surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut second_surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+
+    let first_stats = renderer
+        .render(&mut first_surface, &scene, Parameters::default())
+        .unwrap();
+    let first_output = renderer.read_headless(&first_surface).unwrap();
+    let second_stats = renderer
+        .render(&mut second_surface, &scene, Parameters::default())
+        .unwrap();
+    let second_output = renderer.read_headless(&second_surface).unwrap();
+
+    assert_eq!(first_stats.layers, 0);
+    assert_eq!(second_stats.layers, 0);
+    assert_eq!(first_output.rgba, second_output.rgba);
+    assert!(pixel_rgba(&first_output, 0, 0)[0] > 200);
+    assert!(pixel_rgba(&first_output, 3, 0)[1] > 200);
+}
+
+#[test]
+fn sequence9_guardrail_layer_pass_plans_keep_finite_bounds_without_offscreen_texture() {
+    let mut scene = Scene::new();
+    scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+        scene.fill(Rect::new(1.0, 2.0, 4.0, 3.0), Color::BLACK);
+        scene.layer(
+            Layer::new()
+                .try_transform(Transform::translation(6.0, 0.0).unwrap())
+                .unwrap()
+                .blend(BlendMode::Screen),
+            |scene| {
+                scene.fill(Rect::new(0.0, 1.0, 2.0, 2.0), Color::BLACK);
+            },
+        );
+    });
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Layer {
+        layer: outer,
+        children,
+    } = &normalized.commands[0]
+    else {
+        panic!("expected outer direct Vello layer");
+    };
+    let command::RenderCommand::Layer { layer: inner, .. } = &children[1] else {
+        panic!("expected inner direct Vello layer");
+    };
+
+    for layer in [outer, inner] {
+        let bounds = layer
+            .pass_plan
+            .bounds()
+            .expect("direct layer plans should carry explicit child bounds")
+            .rect();
+        assert_finite_positive_rect(bounds);
+        assert_eq!(
+            layer.pass_plan.kind(),
+            command::LayerPassKind::DirectVelloLayer
+        );
+        assert!(!layer.pass_plan.requires_offscreen_texture());
+    }
+    assert_eq!(
+        outer.pass_plan.bounds().map(command::OffscreenBounds::rect),
+        Some(Rect::new(1.0, 1.0, 7.0, 4.0))
+    );
+}
+
+#[test]
+fn sequence9_guardrail_texture_lifecycle_is_deterministic_for_nested_layer_bounds() {
+    let outer_bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap();
+    let inner_bounds = command::OffscreenBounds::try_new(Rect::new(2.0, 1.0, 3.0, 2.0)).unwrap();
+    let outer = offscreen_local_scene_texture_descriptor(outer_bounds, 1.0, Format::Rgba8).unwrap();
+    let inner = offscreen_local_scene_texture_descriptor(inner_bounds, 1.0, Format::Rgba8).unwrap();
+    let mut cache = OffscreenTextureCache::new();
+
+    let outer_first = cache.acquire(outer).unwrap();
+    let inner_first = cache.acquire(inner).unwrap();
+    cache.release(inner_first).unwrap();
+    cache.release(outer_first).unwrap();
+    let outer_second = cache.acquire(outer).unwrap();
+    let inner_second = cache.acquire(inner).unwrap();
+
+    assert_eq!(outer_second.descriptor(), outer);
+    assert_eq!(inner_second.descriptor(), inner);
+    assert_eq!(cache.stats().allocations, 2);
+    assert_eq!(cache.stats().misses, 2);
+    assert_eq!(cache.stats().hits, 2);
+    assert_eq!(cache.stats().releases, 2);
+    assert_eq!(cache.live_count(), 2);
+    assert_eq!(cache.retained_count(), 2);
+}
+
+#[test]
+fn sequence9_guardrail_rect_shader_plumbing_accepts_offscreen_to_intermediate_without_filter_semantics()
+ {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(5, 4),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(5, 4),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(0, 0, 5, 4, source, destination).unwrap();
+
+    let pass = RectShaderPassDescriptor::try_new(
+        "sequence9-layer-source",
+        "sequence9-intermediate",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::IdentityCopy,
+    )
+    .unwrap();
+
+    assert_eq!(pass.kind(), RectShaderPassKind::IdentityCopy);
+    assert_eq!(pass.source().intent(), TextureUsageIntent::OffscreenLayer);
+    assert_eq!(
+        pass.destination().intent(),
+        TextureUsageIntent::IntermediatePass
+    );
+    assert_eq!(
+        RectShaderPipelineKey::from_descriptor(pass),
+        RectShaderPipelineKey::from_descriptor(pass)
+    );
+}
+
+#[test]
+fn sequence9_guardrail_reference_buffers_are_deterministic_composition_oracles() {
+    let red_half = PremultipliedRgba8::try_new(128, 0, 0, 128).unwrap();
+    let blue_half = PremultipliedRgba8::try_new(0, 0, 128, 128).unwrap();
+    let green = PremultipliedRgba8::try_new(0, 255, 0, 255).unwrap();
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![red_half, PremultipliedRgba8::TRANSPARENT],
+    )
+    .unwrap();
+    let destination = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![blue_half, green],
+    )
+    .unwrap();
+
+    let first = source.source_over(&destination).unwrap();
+    let second = source.source_over(&destination).unwrap();
+    let faded = first.apply_opacity(0.5).unwrap();
+
+    assert_eq!(first, second);
+    assert_eq!(
+        first.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(128, 0, 64, 192).unwrap()
+    );
+    assert_eq!(first.pixel(1, 0).unwrap(), green);
+    assert_eq!(
+        faded.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(64, 0, 32, 96).unwrap()
+    );
+}
+
+#[test]
+fn sequence9_guardrail_layer_mask_and_filter_inputs_keep_typed_diagnostics() {
+    let cases = [
+        (
+            Layer::new()
+                .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+                .unwrap(),
+            UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::LayerMask,
+            ),
+        ),
+        (
+            Layer::new()
+                .try_filter(Filter::try_blur(2.0).unwrap())
+                .unwrap(),
+            UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        ),
+    ];
+
+    for (layer, unsupported) in cases {
+        let mut scene = Scene::new();
+        scene.layer(layer, |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+        });
+
+        let error = scene
+            .normalize(Capabilities::VELLO_0_9)
+            .expect_err("Sequence 9 must not execute mask or layer effect semantics");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains(unsupported.label()));
+    }
+}
+
+#[test]
 fn scene_normalization_rejects_unsupported_commands_before_encoding() {
     let mut scene = Scene::new();
     scene.layer(
@@ -5686,4 +5906,13 @@ fn pixel_rgba(image: &ImageBuffer, x: u32, y: u32) -> [u8; 4] {
         image.rgba[index - 1],
         image.rgba[index],
     ]
+}
+
+fn assert_finite_positive_rect(rect: Rect) {
+    assert!(rect.x().is_finite());
+    assert!(rect.y().is_finite());
+    assert!(rect.width().is_finite());
+    assert!(rect.height().is_finite());
+    assert!(rect.width() > 0.0);
+    assert!(rect.height() > 0.0);
 }
