@@ -459,6 +459,64 @@ fn unresolved_resource_diagnostics_name_clip_resources() {
 }
 
 #[test]
+fn degraded_quality_diagnostics_name_fast_blur_clamps() {
+    let diagnostic =
+        DegradedQuality::new(DegradedQualityKind::FastBlurClamp, "radius 512px -> 128px");
+    let error = Error::degraded_quality(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::DegradedQuality);
+    assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
+    assert_eq!(diagnostic.kind(), DegradedQualityKind::FastBlurClamp);
+    assert_eq!(diagnostic.kind().label(), "fast blur clamp");
+    assert_eq!(diagnostic.value(), "radius 512px -> 128px");
+    assert_eq!(
+        error.message,
+        "render quality degraded: fast blur clamp (radius 512px -> 128px)"
+    );
+}
+
+#[test]
+fn degraded_quality_diagnostics_name_software_fallbacks() {
+    let diagnostic = DegradedQuality::new(DegradedQualityKind::SoftwareFallback, "layer filter");
+    let error = Error::degraded_quality(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::DegradedQuality);
+    assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
+    assert_eq!(diagnostic.kind(), DegradedQualityKind::SoftwareFallback);
+    assert_eq!(diagnostic.kind().label(), "software fallback");
+    assert_eq!(diagnostic.value(), "layer filter");
+    assert_eq!(
+        error.message,
+        "render quality degraded: software fallback (layer filter)"
+    );
+}
+
+#[test]
+fn degraded_quality_diagnostics_name_unsupported_paint_space_conversions() {
+    let diagnostic = DegradedQuality::new(
+        DegradedQualityKind::UnsupportedPaintSpaceConversion,
+        "display-p3 -> srgb",
+    );
+    let error = Error::degraded_quality(diagnostic.clone());
+
+    assert_eq!(error.code, ErrorCode::DegradedQuality);
+    assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
+    assert_eq!(
+        diagnostic.kind(),
+        DegradedQualityKind::UnsupportedPaintSpaceConversion
+    );
+    assert_eq!(
+        diagnostic.kind().label(),
+        "unsupported paint-space conversion"
+    );
+    assert_eq!(diagnostic.value(), "display-p3 -> srgb");
+    assert_eq!(
+        error.message,
+        "render quality degraded: unsupported paint-space conversion (display-p3 -> srgb)"
+    );
+}
+
+#[test]
 fn renderer_reports_backend_capabilities_by_family() {
     let renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let capabilities = renderer.capabilities();

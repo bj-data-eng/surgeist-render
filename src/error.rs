@@ -11,6 +11,7 @@ pub struct Error {
     invalid_value: Option<InvalidValue>,
     unsupported_primitive: Option<UnsupportedPrimitive>,
     unresolved_resource: Option<UnresolvedResource>,
+    degraded_quality: Option<DegradedQuality>,
 }
 
 impl Error {
@@ -23,6 +24,7 @@ impl Error {
             invalid_value: None,
             unsupported_primitive: None,
             unresolved_resource: None,
+            degraded_quality: None,
         }
     }
 
@@ -70,6 +72,13 @@ impl Error {
     }
 
     #[must_use]
+    pub fn degraded_quality(diagnostic: DegradedQuality) -> Self {
+        let mut error = Self::new(ErrorCode::DegradedQuality, diagnostic.message());
+        error.degraded_quality = Some(diagnostic);
+        error
+    }
+
+    #[must_use]
     pub const fn unsupported_primitive(&self) -> Option<UnsupportedPrimitive> {
         self.unsupported_primitive
     }
@@ -82,6 +91,11 @@ impl Error {
     #[must_use]
     pub const fn unresolved_resource_diagnostic(&self) -> Option<&UnresolvedResource> {
         self.unresolved_resource.as_ref()
+    }
+
+    #[must_use]
+    pub const fn degraded_quality_diagnostic(&self) -> Option<&DegradedQuality> {
+        self.degraded_quality.as_ref()
     }
 }
 
@@ -111,6 +125,7 @@ pub enum ErrorCode {
     SurfaceUnavailable,
     InvalidInput,
     UnresolvedResource,
+    DegradedQuality,
     ImageUploadFailed,
     RenderFailed,
     PresentFailed,
@@ -283,6 +298,58 @@ impl UnresolvedResourceKind {
             Self::Mask => "mask",
             Self::Filter => "filter",
             Self::Clip => "clip",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DegradedQuality {
+    kind: DegradedQualityKind,
+    value: String,
+}
+
+impl DegradedQuality {
+    #[must_use]
+    pub fn new(kind: DegradedQualityKind, value: impl Into<String>) -> Self {
+        Self {
+            kind,
+            value: value.into(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> DegradedQualityKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "render quality degraded: {} ({})",
+            self.kind.label(),
+            self.value
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DegradedQualityKind {
+    FastBlurClamp,
+    SoftwareFallback,
+    UnsupportedPaintSpaceConversion,
+}
+
+impl DegradedQualityKind {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::FastBlurClamp => "fast blur clamp",
+            Self::SoftwareFallback => "software fallback",
+            Self::UnsupportedPaintSpaceConversion => "unsupported paint-space conversion",
         }
     }
 }

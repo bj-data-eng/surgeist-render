@@ -27,8 +27,8 @@ pub use capability::{
     MaskClipCapabilities, PaintSourceCapabilities, SurfaceCapabilities,
 };
 pub use error::{
-    Error, ErrorCode, InvalidValue, PrimitiveFamily, PrimitiveOperation, Result,
-    UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
+    DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,
+    PrimitiveOperation, Result, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
 pub use geometry::{PhysicalSize, Point, Radii, Rect, Size, Transform};
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
