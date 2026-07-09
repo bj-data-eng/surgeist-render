@@ -208,6 +208,7 @@ impl UnsupportedPrimitive {
 pub enum PrimitiveFamily {
     GeometryTargets,
     PaintSources,
+    Shadows,
     Filters,
     MasksAndClips,
     Surfaces,
@@ -219,6 +220,7 @@ impl PrimitiveFamily {
         match self {
             Self::GeometryTargets => "geometry targets",
             Self::PaintSources => "paint sources",
+            Self::Shadows => "shadows",
             Self::Filters => "filters",
             Self::MasksAndClips => "masks and clips",
             Self::Surfaces => "surfaces",
@@ -231,6 +233,7 @@ pub enum PrimitiveOperation {
     LayerFilter,
     LayerMask,
     NonSolidShadowPaint,
+    EllipsePathShadowShape,
     InsideOutsidePathStrokeAlignment,
     WebCanvasSurface,
 }
@@ -242,6 +245,7 @@ impl PrimitiveOperation {
             Self::LayerFilter => "layer filter",
             Self::LayerMask => "layer mask",
             Self::NonSolidShadowPaint => "non-solid shadow paint",
+            Self::EllipsePathShadowShape => "ellipse/path shadow shape",
             Self::InsideOutsidePathStrokeAlignment => "inside/outside path stroke alignment",
             Self::WebCanvasSurface => "web canvas surface",
         }

@@ -4,6 +4,7 @@ use super::{Error, PrimitiveFamily, PrimitiveOperation, Result, UnsupportedPrimi
 pub struct Capabilities {
     geometry_targets: GeometryTargetCapabilities,
     paint_sources: PaintSourceCapabilities,
+    shadows: ShadowCapabilities,
     filters: FilterCapabilities,
     masks_clips: MaskClipCapabilities,
     compositing: CompositingCapabilities,
@@ -25,6 +26,10 @@ impl Capabilities {
             gradients: true,
             image_paint: true,
             non_solid_shadow_paint: false,
+        },
+        shadows: ShadowCapabilities {
+            rect_rounded_circle_shadows: true,
+            ellipse_path_shadows: false,
         },
         filters: FilterCapabilities {
             layer_filters: false,
@@ -51,6 +56,11 @@ impl Capabilities {
     #[must_use]
     pub const fn paint_sources(self) -> PaintSourceCapabilities {
         self.paint_sources
+    }
+
+    #[must_use]
+    pub const fn shadows(self) -> ShadowCapabilities {
+        self.shadows
     }
 
     #[must_use]
@@ -91,6 +101,9 @@ impl Capabilities {
                 .supports_arbitrary_path_inside_outside_stroke(),
             (PrimitiveFamily::PaintSources, PrimitiveOperation::NonSolidShadowPaint) => {
                 self.paint_sources.supports_non_solid_shadow_paint()
+            }
+            (PrimitiveFamily::Shadows, PrimitiveOperation::EllipsePathShadowShape) => {
+                self.shadows.supports_ellipse_path_shadows()
             }
             (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter) => {
                 self.filters.supports_layer_filters()
@@ -175,6 +188,24 @@ impl PaintSourceCapabilities {
     #[must_use]
     pub const fn supports_non_solid_shadow_paint(self) -> bool {
         self.non_solid_shadow_paint
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ShadowCapabilities {
+    rect_rounded_circle_shadows: bool,
+    ellipse_path_shadows: bool,
+}
+
+impl ShadowCapabilities {
+    #[must_use]
+    pub const fn supports_rect_rounded_circle_shadows(self) -> bool {
+        self.rect_rounded_circle_shadows
+    }
+
+    #[must_use]
+    pub const fn supports_ellipse_path_shadows(self) -> bool {
+        self.ellipse_path_shadows
     }
 }
 

@@ -144,7 +144,7 @@ pub(crate) fn normalize_commands(
                 paint: RenderPaint::try_from(paint.clone())?,
             },
             Command::Shadow { shape, shadow } => RenderCommand::Shadow {
-                shape: ShadowShape::try_from(shape.clone())?,
+                shape: ShadowShape::from_authored(shape.clone(), capabilities)?,
                 shadow: RenderShadow::from_authored(shadow.clone(), capabilities)?,
             },
             Command::Image { image, rect, fit } => {
@@ -281,10 +281,8 @@ impl TryFrom<Paint> for RenderPaint {
     }
 }
 
-impl TryFrom<Shape> for ShadowShape {
-    type Error = Error;
-
-    fn try_from(shape: Shape) -> Result<Self> {
+impl ShadowShape {
+    fn from_authored(shape: Shape, capabilities: Capabilities) -> Result<Self> {
         validate_shape(&shape)?;
         Ok(match shape.kind() {
             ShapeKind::Rect(rect) => Self::Rect(*rect),
@@ -297,10 +295,11 @@ impl TryFrom<Shape> for ShadowShape {
                 radius: *radius,
             },
             ShapeKind::Ellipse { .. } | ShapeKind::Path(_) => {
-                return Err(Error::new(
-                    ErrorCode::UnsupportedBackend,
-                    "only rectangle, rounded rectangle, and circle shadows lower to Vello in this milestone",
-                ));
+                capabilities.ensure_supported(UnsupportedPrimitive::new(
+                    PrimitiveFamily::Shadows,
+                    PrimitiveOperation::EllipsePathShadowShape,
+                ))?;
+                unreachable!("ellipse/path shadow support requires shadow geometry lowering");
             }
         })
     }

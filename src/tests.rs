@@ -381,7 +381,7 @@ fn invalid_value_existing_empty_list_constructor_preserves_invalid_input_message
 }
 
 #[test]
-fn unsupported_operation_errors_name_capability() {
+fn unsupported_primitive_errors_name_operation() {
     let unsupported = UnsupportedPrimitive::new(
         PrimitiveFamily::MasksAndClips,
         PrimitiveOperation::LayerMask,
@@ -556,6 +556,12 @@ fn renderer_reports_backend_capabilities_by_family() {
             .paint_sources()
             .supports_non_solid_shadow_paint()
     );
+    assert!(
+        capabilities
+            .shadows()
+            .supports_rect_rounded_circle_shadows()
+    );
+    assert!(!capabilities.shadows().supports_ellipse_path_shadows());
 
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(capabilities.masks_clips().supports_shape_clips());
@@ -602,6 +608,10 @@ fn vello_baseline_reports_current_unsupported_primitives() {
             PrimitiveFamily::PaintSources,
             PrimitiveOperation::NonSolidShadowPaint,
         ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::EllipsePathShadowShape,
+        ),
     ];
 
     for unsupported in cases {
@@ -645,7 +655,7 @@ fn vello_baseline_reports_web_canvas_surface_as_supported_on_wasm_web() {
 }
 
 #[test]
-fn unsupported_layer_masks_report_capability_error() {
+fn unsupported_layer_masks_report_typed_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
         .create_headless(Size::try_new(4.0, 2.0).unwrap(), 1.0)
@@ -1489,7 +1499,7 @@ fn unsupported_layer_filters_report_explicit_error() {
 }
 
 #[test]
-fn unsupported_non_solid_shadow_paint_reports_capability_error() {
+fn unsupported_non_solid_shadow_paint_reports_typed_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
     let gradient = Gradient::try_linear(
@@ -1520,6 +1530,61 @@ fn unsupported_non_solid_shadow_paint_reports_capability_error() {
         ))
     );
     assert!(error.message.contains("non-solid shadow paint"));
+}
+
+#[test]
+fn unsupported_shadow_shapes_report_typed_error() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.shadow(
+        Shape::try_ellipse(Point::new(4.0, 4.0), Size::new(2.0, 1.0)).unwrap(),
+        Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
+    );
+
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("ellipse shadows should remain unsupported in this milestone");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::EllipsePathShadowShape,
+        ))
+    );
+    assert!(error.message.contains("ellipse/path shadow shape"));
+}
+
+#[test]
+fn unsupported_path_shadows_report_typed_error() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut path = Path::new();
+    path.move_to(Point::new(1.0, 1.0))
+        .line_to(Point::new(6.0, 1.0))
+        .line_to(Point::new(6.0, 6.0))
+        .close();
+    let mut scene = Scene::new();
+    scene.shadow(
+        Shape::path(path),
+        Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
+    );
+
+    let error = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .expect_err("path shadows should remain unsupported in this milestone");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::EllipsePathShadowShape,
+        ))
+    );
+    assert!(error.message.contains("ellipse/path shadow shape"));
 }
 
 #[test]

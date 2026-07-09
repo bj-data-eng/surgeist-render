@@ -24,7 +24,7 @@ mod validation;
 
 pub use capability::{
     Capabilities, CompositingCapabilities, FilterCapabilities, GeometryTargetCapabilities,
-    MaskClipCapabilities, PaintSourceCapabilities, SurfaceCapabilities,
+    MaskClipCapabilities, PaintSourceCapabilities, ShadowCapabilities, SurfaceCapabilities,
 };
 pub use error::{
     DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,
