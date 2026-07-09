@@ -689,6 +689,50 @@ fn image_repeat_plan_includes_tiles_before_the_anchor_when_visible() {
 }
 
 #[test]
+fn image_repeat_plan_fast_forwards_from_huge_negative_tile_origin() {
+    let placement = ResolvedImagePlacement::from_parts(
+        Rect::new(0.0, 0.0, 40.0, 10.0),
+        Rect::new(-1_000_000_000_000.0, 0.0, 10.0, 10.0),
+    )
+    .unwrap();
+
+    let repeated = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::VELLO_0_9)
+        .unwrap()
+        .resolve(placement)
+        .unwrap();
+
+    assert_eq!(
+        repeated.tile_rects(),
+        &[
+            Rect::new(0.0, 0.0, 10.0, 10.0),
+            Rect::new(10.0, 0.0, 10.0, 10.0),
+            Rect::new(20.0, 0.0, 10.0, 10.0),
+            Rect::new(30.0, 0.0, 10.0, 10.0),
+        ]
+    );
+}
+
+#[test]
+fn image_repeat_plan_rejects_excessive_resolved_tile_count() {
+    let placement = ResolvedImagePlacement::from_parts(
+        Rect::new(0.0, 0.0, 250.25, 1_000.0),
+        Rect::new(0.0, 0.0, 0.25, 1.0),
+    )
+    .unwrap();
+
+    let error = ImageRepeatPlan::try_new(BackgroundRepeat::repeat(), Capabilities::VELLO_0_9)
+        .unwrap()
+        .resolve(placement)
+        .expect_err("excessive repeat tiling must be rejected before allocation");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("image repeat tile count")
+    );
+}
+
+#[test]
 fn css_image_layer_normalizes_placement_repeat_and_attachment_together() {
     let resource = ResolvedImageResource::try_new(ImageId::new(90), Size::new(25.0, 10.0)).unwrap();
     let layer = StyleImageLayer::try_new(StyleImageSource::resolved(resource.clone()))

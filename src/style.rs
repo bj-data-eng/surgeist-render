@@ -9,6 +9,9 @@ use super::{
     },
 };
 
+const MAX_IMAGE_REPEAT_TILES: usize = 1_000_000;
+const MAX_IMAGE_REPEAT_TILES_RULE: &str = "must not exceed 1000000";
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StyleColor {
     color: Color,
@@ -868,8 +871,13 @@ impl ImageRepeatPlan {
             placement.tile_rect().height(),
             repeats_y,
         )?;
+        let tile_count = x_positions
+            .len()
+            .checked_mul(y_positions.len())
+            .ok_or_else(|| image_repeat_tile_count_error("overflow"))?;
+        validate_image_repeat_tile_count(tile_count)?;
 
-        let mut tile_rects = Vec::new();
+        let mut tile_rects = Vec::with_capacity(tile_count);
         for y in y_positions {
             for x in &x_positions {
                 tile_rects.push(Rect::new(
@@ -916,6 +924,13 @@ fn repeat_positions(
     }
 
     let clip_end = clip_origin + clip_axis;
+    if !clip_end.is_finite() {
+        return Err(Error::invalid_value(
+            "image repeat geometry",
+            format!("origin {clip_origin}, axis {clip_axis}"),
+            "resolved clip extent must be finite",
+        ));
+    }
     if !repeats {
         return Ok(
             if tile_origin < clip_end && tile_origin + tile_axis > clip_origin {
@@ -926,19 +941,50 @@ fn repeat_positions(
         );
     }
 
-    let mut origin = tile_origin;
-    while origin > clip_origin {
-        origin -= tile_axis;
-    }
+    let origin = first_repeated_tile_origin(clip_origin, tile_origin, tile_axis);
+    let count = repeat_position_count(origin, clip_end, tile_axis)?;
+    validate_image_repeat_tile_count(count)?;
 
-    let mut positions = Vec::new();
-    while origin < clip_end {
-        if origin + tile_axis > clip_origin {
-            positions.push(origin);
-        }
-        origin += tile_axis;
+    let mut positions = Vec::with_capacity(count);
+    for index in 0..count {
+        positions.push(origin + tile_axis * index as f64);
     }
     Ok(positions)
+}
+
+fn first_repeated_tile_origin(clip_origin: f64, tile_origin: f64, tile_axis: f64) -> f64 {
+    let offset = ((clip_origin - tile_origin) / tile_axis).floor();
+    let mut origin = tile_origin + offset * tile_axis;
+    if origin + tile_axis <= clip_origin {
+        origin += tile_axis;
+    }
+    origin
+}
+
+fn repeat_position_count(origin: f64, clip_end: f64, tile_axis: f64) -> Result<usize> {
+    if origin >= clip_end {
+        return Ok(0);
+    }
+    let count = ((clip_end - origin) / tile_axis).ceil();
+    if !count.is_finite() || count < 0.0 || count > usize::MAX as f64 {
+        return Err(image_repeat_tile_count_error(count));
+    }
+    Ok(count as usize)
+}
+
+fn validate_image_repeat_tile_count(tile_count: usize) -> Result<()> {
+    if tile_count > MAX_IMAGE_REPEAT_TILES {
+        return Err(image_repeat_tile_count_error(tile_count));
+    }
+    Ok(())
+}
+
+fn image_repeat_tile_count_error(value: impl std::fmt::Display) -> Error {
+    Error::invalid_value(
+        "image repeat tile count",
+        value,
+        MAX_IMAGE_REPEAT_TILES_RULE,
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
