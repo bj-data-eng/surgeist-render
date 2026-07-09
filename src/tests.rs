@@ -260,6 +260,124 @@ fn invalid_value_errors_name_rejected_value() {
         "error should include the rejected value: {}",
         error.message
     );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("rectangle width")
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::value),
+        Some("NaN")
+    );
+    assert_eq!(
+        error
+            .invalid_value_diagnostic()
+            .map(InvalidValue::invariant),
+        Some("must be finite and non-negative")
+    );
+}
+
+#[test]
+fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
+    let error =
+        Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.message,
+        "point x value NaN is invalid: must be finite"
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("point x")
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::value),
+        Some("NaN")
+    );
+    assert_eq!(
+        error
+            .invalid_value_diagnostic()
+            .map(InvalidValue::invariant),
+        Some("must be finite")
+    );
+}
+
+#[test]
+fn invalid_value_diagnostic_captures_impossible_geometry_constructor_value() {
+    let error = Rect::try_new(0.0, 0.0, -1.0, 1.0)
+        .expect_err("negative rectangle dimensions should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.message,
+        "rectangle width value -1 is invalid: must be finite and non-negative"
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("rectangle width")
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::value),
+        Some("-1")
+    );
+    assert_eq!(
+        error
+            .invalid_value_diagnostic()
+            .map(InvalidValue::invariant),
+        Some("must be finite and non-negative")
+    );
+}
+
+#[test]
+fn invalid_value_constructor_captures_empty_list_invariant() {
+    let error = Error::invalid_value("gradient stops", "[]", "must not be empty");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.message,
+        "gradient stops value [] is invalid: must not be empty"
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("gradient stops")
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::value),
+        Some("[]")
+    );
+    assert_eq!(
+        error
+            .invalid_value_diagnostic()
+            .map(InvalidValue::invariant),
+        Some("must not be empty")
+    );
+}
+
+#[test]
+fn invalid_value_existing_empty_list_constructor_preserves_invalid_input_message() {
+    let error = Gradient::try_linear(
+        Point::try_new(0.0, 0.0).unwrap(),
+        Point::try_new(1.0, 1.0).unwrap(),
+        vec![],
+    )
+    .expect_err("empty gradient stop lists should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.message, "gradient stops must not be empty");
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("gradient stops")
+    );
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::value),
+        Some("[]")
+    );
+    assert_eq!(
+        error
+            .invalid_value_diagnostic()
+            .map(InvalidValue::invariant),
+        Some("must not be empty")
+    );
 }
 
 #[test]

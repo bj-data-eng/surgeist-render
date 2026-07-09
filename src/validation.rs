@@ -97,7 +97,9 @@ pub(crate) fn validate_gradient(gradient: &Gradient) -> Result<()> {
 
 pub(crate) fn validate_gradient_stops(stops: &[GradientStop]) -> Result<()> {
     if stops.is_empty() {
-        return Err(invalid_input("gradient stops must not be empty"));
+        let mut error = Error::invalid_value("gradient stops", "[]", "must not be empty");
+        error.message = "gradient stops must not be empty".to_owned();
+        return Err(error);
     }
     for stop in stops {
         if !stop.offset().is_finite() || !(0.0..=1.0).contains(&stop.offset()) {

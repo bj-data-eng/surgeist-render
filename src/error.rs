@@ -8,6 +8,7 @@ pub struct Error {
     pub code: ErrorCode,
     pub message: String,
     pub source: Option<Box<dyn error::Error + Send + Sync>>,
+    invalid_value: Option<InvalidValue>,
     unsupported_primitive: Option<UnsupportedPrimitive>,
 }
 
@@ -18,6 +19,7 @@ impl Error {
             code,
             message: message.into(),
             source: None,
+            invalid_value: None,
             unsupported_primitive: None,
         }
     }
@@ -34,10 +36,14 @@ impl Error {
         value: impl std::fmt::Display,
         rule: &'static str,
     ) -> Self {
-        Self::new(
-            ErrorCode::InvalidInput,
-            format!("{} value {value} is invalid: {rule}", name.into()),
-        )
+        Self::from_invalid_value(InvalidValue::new(name, value, rule))
+    }
+
+    #[must_use]
+    pub fn from_invalid_value(invalid_value: InvalidValue) -> Self {
+        let mut error = Self::new(ErrorCode::InvalidInput, invalid_value.message());
+        error.invalid_value = Some(invalid_value);
+        error
     }
 
     #[must_use]
@@ -57,6 +63,11 @@ impl Error {
     #[must_use]
     pub const fn unsupported_primitive(&self) -> Option<UnsupportedPrimitive> {
         self.unsupported_primitive
+    }
+
+    #[must_use]
+    pub const fn invalid_value_diagnostic(&self) -> Option<&InvalidValue> {
+        self.invalid_value.as_ref()
     }
 }
 
@@ -89,6 +100,50 @@ pub enum ErrorCode {
     RenderFailed,
     PresentFailed,
     UnsupportedBackend,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InvalidValue {
+    field: String,
+    value: String,
+    invariant: &'static str,
+}
+
+impl InvalidValue {
+    #[must_use]
+    pub fn new(
+        field: impl Into<String>,
+        value: impl std::fmt::Display,
+        invariant: &'static str,
+    ) -> Self {
+        Self {
+            field: field.into(),
+            value: format!("{value}"),
+            invariant,
+        }
+    }
+
+    #[must_use]
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
+    #[must_use]
+    pub fn value(&self) -> &str {
+        &self.value
+    }
+
+    #[must_use]
+    pub const fn invariant(&self) -> &'static str {
+        self.invariant
+    }
+
+    fn message(&self) -> String {
+        format!(
+            "{} value {} is invalid: {}",
+            self.field, self.value, self.invariant
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
