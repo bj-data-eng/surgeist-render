@@ -2326,6 +2326,182 @@ fn box_decoration_normalization_emits_outline_after_borders_for_each_fragment() 
 }
 
 #[test]
+fn background_and_box_decoration_normalization_reuse_border_box_area() {
+    let areas = BackgroundAreas::try_new(
+        Rect::new(20.0, 30.0, 160.0, 90.0),
+        Rect::new(26.0, 36.0, 148.0, 78.0),
+        Rect::new(34.0, 44.0, 132.0, 62.0),
+    )
+    .unwrap();
+    let background_layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+            .unwrap()
+            .with_origin(BackgroundBox::Content)
+            .with_clip(BackgroundBox::Border),
+    );
+    let background = BackgroundNormalizationInput::try_new(
+        BackgroundStack::try_new(None, vec![background_layer]).unwrap(),
+        areas,
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+    let fragment = BoxDecorationFragment::try_new(
+        areas,
+        Radii::try_new(12.0, 14.0, 16.0, 18.0).unwrap(),
+        BoxDecorationBreak::Slice,
+    )
+    .unwrap();
+    let decoration = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            solid_border(2.0, Color::BLACK),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+        )),
+        None,
+        vec![fragment.clone()],
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+
+    assert_eq!(background.commands().len(), 1);
+    assert_eq!(
+        background.commands()[0].clip().rect(),
+        Some(areas.border_box())
+    );
+    let NormalizedBackgroundCommandKind::Layer { layer } = background.commands()[0].kind() else {
+        panic!("expected mixed background layer command");
+    };
+    assert_eq!(layer.placement().paint_rect(), areas.content_box());
+
+    let border = normalized_border_command(&decoration.commands()[0]);
+    assert_eq!(border.target_rect(), areas.rect_for(BackgroundBox::Border));
+    assert_eq!(border.clip().rect(), Some(areas.border_box()));
+    assert_eq!(border.radii().border_box(), areas.border_box());
+    assert_eq!(border.radii(), fragment.radii());
+}
+
+#[test]
+fn background_box_decoration_integration_preserves_command_boundaries_across_fragments() {
+    let first_areas = BackgroundAreas::try_new(
+        Rect::new(0.0, 0.0, 100.0, 40.0),
+        Rect::new(5.0, 5.0, 90.0, 30.0),
+        Rect::new(10.0, 10.0, 80.0, 20.0),
+    )
+    .unwrap();
+    let second_areas = BackgroundAreas::try_new(
+        Rect::new(110.0, 8.0, 70.0, 54.0),
+        Rect::new(116.0, 14.0, 58.0, 42.0),
+        Rect::new(122.0, 20.0, 46.0, 30.0),
+    )
+    .unwrap();
+    let first = BoxDecorationFragment::try_new(
+        first_areas,
+        Radii::try_all(10.0).unwrap(),
+        BoxDecorationBreak::Slice,
+    )
+    .unwrap();
+    let second_clip_shape = Shape::rect(Rect::new(111.0, 9.0, 68.0, 52.0));
+    let second = BoxDecorationFragment::try_new(
+        second_areas,
+        Radii::try_new(18.0, 12.0, 10.0, 8.0).unwrap(),
+        BoxDecorationBreak::Clone,
+    )
+    .unwrap()
+    .with_border_clip_override(
+        BackgroundClipGeometry::try_shape(second_clip_shape.clone()).unwrap(),
+    );
+    let input = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            solid_border(1.0, Color::BLACK),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            solid_border(3.0, Color::TRANSPARENT),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+        )),
+        Some(Outline::try_new(OutlineStyle::Dotted, 2.0, Color::BLACK, 1.5).unwrap()),
+        vec![first.clone(), second.clone()],
+    )
+    .unwrap();
+
+    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let repeated = input.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands(), repeated.commands());
+    assert_eq!(normalized.commands().len(), 6);
+    assert_eq!(
+        normalized
+            .commands()
+            .iter()
+            .map(|command| match command.kind() {
+                NormalizedBoxDecorationCommandKind::Border(border) => {
+                    (
+                        "border",
+                        border.fragment_index(),
+                        Some(border.side()),
+                        border.break_mode(),
+                    )
+                }
+                NormalizedBoxDecorationCommandKind::Outline(outline) => {
+                    (
+                        "outline",
+                        outline.fragment_index(),
+                        None,
+                        outline.break_mode(),
+                    )
+                }
+            })
+            .collect::<Vec<_>>(),
+        vec![
+            ("border", 0, Some(BoxSide::Top), BoxDecorationBreak::Slice),
+            (
+                "border",
+                0,
+                Some(BoxSide::Bottom),
+                BoxDecorationBreak::Slice
+            ),
+            ("outline", 0, None, BoxDecorationBreak::Slice),
+            ("border", 1, Some(BoxSide::Top), BoxDecorationBreak::Clone),
+            (
+                "border",
+                1,
+                Some(BoxSide::Bottom),
+                BoxDecorationBreak::Clone
+            ),
+            ("outline", 1, None, BoxDecorationBreak::Clone),
+        ]
+    );
+
+    for command in &normalized.commands()[0..3] {
+        match command.kind() {
+            NormalizedBoxDecorationCommandKind::Border(border) => {
+                assert_eq!(border.target_rect(), first_areas.border_box());
+                assert_eq!(border.clip().rect(), Some(first_areas.border_box()));
+                assert_eq!(border.radii(), first.radii());
+            }
+            NormalizedBoxDecorationCommandKind::Outline(outline) => {
+                assert_eq!(outline.clip().rect(), Some(first_areas.border_box()));
+                assert_eq!(outline.radii(), first.radii());
+            }
+        }
+    }
+    for command in &normalized.commands()[3..] {
+        match command.kind() {
+            NormalizedBoxDecorationCommandKind::Border(border) => {
+                assert_eq!(border.target_rect(), second_areas.border_box());
+                assert_eq!(border.clip().shape(), Some(&second_clip_shape));
+                assert_eq!(border.radii(), second.radii());
+            }
+            NormalizedBoxDecorationCommandKind::Outline(outline) => {
+                assert_eq!(outline.clip().shape(), Some(&second_clip_shape));
+                assert_eq!(outline.radii(), second.radii());
+            }
+        }
+    }
+}
+
+#[test]
 fn background_stacks_reject_empty_and_colorless_inputs() {
     let error = BackgroundStack::try_new(None, Vec::new())
         .expect_err("empty transparent background stacks should use no value");
