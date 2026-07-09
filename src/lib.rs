@@ -14,6 +14,7 @@ mod geometry;
 mod image;
 mod layer;
 mod paint;
+mod reference;
 mod renderer;
 mod scene;
 mod shader;

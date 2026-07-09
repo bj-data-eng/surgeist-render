@@ -1,6 +1,7 @@
 use super::{
     backend::*,
     encode::*,
+    reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     shader::{
         RectPassBounds, RectShaderPassDescriptor, RectShaderPassGpuContext, RectShaderPassKind,
         RectShaderPipelineKey, encode_clear_fill_pass,
@@ -65,6 +66,156 @@ fn scene_stats_report_facts_without_renderer() {
     assert_eq!(stats.layers, 1);
     assert_eq!(stats.cache_misses, 1);
     assert_eq!(stats.cache_hits, 0);
+}
+
+#[test]
+fn reference_buffer_allocation_validates_positive_size_and_overflow() {
+    let buffer = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 3)).unwrap();
+
+    assert_eq!(buffer.physical_size(), PhysicalSize::new(2, 3));
+    assert_eq!(buffer.byte_len(), 24);
+    assert_eq!(buffer.pixel(1, 2).unwrap(), PremultipliedRgba8::TRANSPARENT);
+
+    let zero_width = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(0, 1))
+        .expect_err("zero-width reference buffers should be rejected");
+    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+
+    let overflow =
+        ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(u32::MAX, u32::MAX))
+            .expect_err("overflow-sized reference buffers should be rejected before allocation");
+    assert_eq!(overflow.code, ErrorCode::InvalidInput);
+
+    let wrong_data_len = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 2),
+        vec![PremultipliedRgba8::TRANSPARENT],
+    )
+    .expect_err("raw pixel data should match validated dimensions");
+    assert_eq!(wrong_data_len.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn reference_buffer_pixel_access_preserves_bounds_checks() {
+    let mut buffer = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 2)).unwrap();
+    let pixel = PremultipliedRgba8::try_new(10, 20, 30, 40).unwrap();
+
+    buffer.set_pixel(1, 1, pixel).unwrap();
+
+    assert_eq!(buffer.pixel(1, 1).unwrap(), pixel);
+    assert_eq!(
+        buffer
+            .pixel(2, 0)
+            .expect_err("x outside width should fail")
+            .code,
+        ErrorCode::InvalidInput
+    );
+    assert_eq!(
+        buffer
+            .set_pixel(0, 2, pixel)
+            .expect_err("y outside height should fail")
+            .code,
+        ErrorCode::InvalidInput
+    );
+}
+
+#[test]
+fn reference_premultiplied_pixels_apply_clamped_finite_opacity() {
+    let pixel = PremultipliedRgba8::try_new(100, 60, 20, 200).unwrap();
+
+    let invalid_pixel =
+        PremultipliedRgba8::try_new(200, 0, 0, 128).expect_err("red must be premultiplied");
+    assert_eq!(invalid_pixel.code, ErrorCode::InvalidInput);
+
+    assert_eq!(
+        pixel.apply_opacity(0.5).unwrap(),
+        PremultipliedRgba8::try_new(50, 30, 10, 100).unwrap()
+    );
+    assert_eq!(pixel.apply_opacity(3.0).unwrap(), pixel);
+    assert_eq!(
+        pixel.apply_opacity(-1.0).unwrap(),
+        PremultipliedRgba8::TRANSPARENT
+    );
+    assert_eq!(
+        pixel
+            .apply_opacity(f32::NAN)
+            .expect_err("non-finite opacity should be rejected")
+            .code,
+        ErrorCode::InvalidInput
+    );
+
+    let buffer = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![pixel, PremultipliedRgba8::TRANSPARENT],
+    )
+    .unwrap();
+    assert_eq!(
+        buffer.apply_opacity(0.5).unwrap().pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(50, 30, 10, 100).unwrap()
+    );
+}
+
+#[test]
+fn reference_source_over_composition_handles_alpha_edges() {
+    let destination = PremultipliedRgba8::try_new(20, 40, 60, 128).unwrap();
+    assert_eq!(
+        PremultipliedRgba8::TRANSPARENT.source_over(destination),
+        destination
+    );
+
+    let source = PremultipliedRgba8::try_new(20, 10, 5, 64).unwrap();
+    assert_eq!(source.source_over(PremultipliedRgba8::TRANSPARENT), source);
+
+    let opaque_source = PremultipliedRgba8::try_new(120, 80, 40, 255).unwrap();
+    assert_eq!(opaque_source.source_over(destination), opaque_source);
+
+    let partial_source = PremultipliedRgba8::try_new(128, 0, 0, 128).unwrap();
+    let partial_destination = PremultipliedRgba8::try_new(0, 64, 0, 128).unwrap();
+    assert_eq!(
+        partial_source.source_over(partial_destination),
+        PremultipliedRgba8::try_new(128, 32, 0, 192).unwrap()
+    );
+}
+
+#[test]
+fn reference_buffer_source_over_preserves_transparent_edges() {
+    let mut source = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 2)).unwrap();
+    let mut destination =
+        ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(2, 2)).unwrap();
+    let red = PremultipliedRgba8::try_new(255, 0, 0, 255).unwrap();
+    let green = PremultipliedRgba8::try_new(0, 128, 0, 128).unwrap();
+
+    source.set_pixel(0, 0, red).unwrap();
+    destination.set_pixel(1, 1, green).unwrap();
+    let composed = source.source_over(&destination).unwrap();
+
+    assert_eq!(composed.pixel(0, 0).unwrap(), red);
+    assert_eq!(composed.pixel(1, 1).unwrap(), green);
+    assert_eq!(
+        composed.pixel(0, 1).unwrap(),
+        PremultipliedRgba8::TRANSPARENT
+    );
+}
+
+#[test]
+fn reference_buffers_compare_with_deterministic_equality() {
+    let pixel = PremultipliedRgba8::try_new(8, 4, 2, 16).unwrap();
+    let first = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(1, 2),
+        vec![PremultipliedRgba8::TRANSPARENT, pixel],
+    )
+    .unwrap();
+    let same = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(1, 2),
+        vec![PremultipliedRgba8::TRANSPARENT, pixel],
+    )
+    .unwrap();
+    let different = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(1, 2),
+        vec![pixel, PremultipliedRgba8::TRANSPARENT],
+    )
+    .unwrap();
+
+    assert_eq!(first, same);
+    assert_ne!(first, different);
 }
 
 #[test]
