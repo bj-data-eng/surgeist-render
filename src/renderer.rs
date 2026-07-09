@@ -318,6 +318,14 @@ impl Renderer {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
+        let backend = self.backend.as_mut()?;
+        let dev_id = self.default_device?;
+        let device_handle = &backend.context.devices[dev_id];
+        Some((&device_handle.device, &device_handle.queue))
+    }
+
     #[must_use]
     pub const fn stats(&self) -> Stats {
         self.stats

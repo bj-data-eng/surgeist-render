@@ -1,6 +1,10 @@
 use super::{
     backend::*,
     encode::*,
+    shader::{
+        RectPassBounds, RectShaderPassDescriptor, RectShaderPassGpuContext, RectShaderPassKind,
+        RectShaderPipelineKey, encode_clear_fill_pass,
+    },
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
         OffscreenTextureCache, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
@@ -293,6 +297,325 @@ fn texture_lifecycle_accounting_is_separate_from_image_cache_stats() {
     assert_eq!(image_stats.uploaded_bytes, 4);
     assert_eq!(cache.stats().misses, 1);
     assert_eq!(cache.stats().hits, 1);
+}
+
+#[test]
+fn shader_pass_descriptor_names_textures_bounds_and_kind() {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(16, 8),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(16, 8),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(2, 1, 6, 4, source, destination).unwrap();
+
+    let pass = RectShaderPassDescriptor::try_new(
+        "layer-source",
+        "layer-destination",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::IdentityCopy,
+    )
+    .unwrap();
+
+    assert_eq!(pass.source_label(), "layer-source");
+    assert_eq!(pass.destination_label(), "layer-destination");
+    assert_eq!(pass.source(), source);
+    assert_eq!(pass.destination(), destination);
+    assert_eq!(pass.bounds(), bounds);
+    assert_eq!(pass.bounds().x(), 2);
+    assert_eq!(pass.bounds().y(), 1);
+    assert_eq!(pass.kind(), RectShaderPassKind::IdentityCopy);
+}
+
+#[test]
+fn shader_pipeline_key_is_stable_and_distinct_from_texture_cache_keys() {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 8),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 8),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(0, 0, 8, 8, source, destination).unwrap();
+    let pass = RectShaderPassDescriptor::try_new(
+        "source",
+        "destination",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::ClearFill,
+    )
+    .unwrap();
+
+    let key = RectShaderPipelineKey::from_descriptor(pass);
+    assert_eq!(key, RectShaderPipelineKey::from_descriptor(pass));
+    assert_ne!(
+        key,
+        RectShaderPipelineKey::from_descriptor(
+            RectShaderPassDescriptor::try_new(
+                "source",
+                "destination",
+                source,
+                destination,
+                bounds,
+                RectShaderPassKind::IdentityCopy,
+            )
+            .unwrap()
+        )
+    );
+    assert_ne!(
+        format!("{key:?}"),
+        format!("{:?}", TextureCacheKey::from_descriptor(destination))
+    );
+}
+
+#[test]
+fn shader_rect_bounds_reject_zero_and_out_of_range_regions() {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 4),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 4),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+
+    let zero_width = RectPassBounds::try_new(0, 0, 0, 1, source, destination)
+        .expect_err("zero-width shader bounds should be rejected");
+    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+
+    let source_overflow = RectPassBounds::try_new(3, 0, 2, 1, source, destination)
+        .expect_err("source bounds must fit source texture");
+    assert_eq!(source_overflow.code, ErrorCode::InvalidInput);
+
+    let destination_overflow = RectPassBounds::try_new(
+        0,
+        3,
+        1,
+        2,
+        source,
+        TextureDescriptor::try_new(
+            PhysicalSize::new(4, 3),
+            Format::Rgba8,
+            TextureUsageIntent::IntermediatePass,
+        )
+        .unwrap(),
+    )
+    .expect_err("destination bounds must fit destination texture");
+    assert_eq!(destination_overflow.code, ErrorCode::InvalidInput);
+}
+
+#[test]
+fn shader_pass_descriptor_revalidates_bounds_against_named_textures() {
+    let large_source = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 8),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let large_destination = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 8),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let smaller_destination = TextureDescriptor::try_new(
+        PhysicalSize::new(4, 4),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(3, 3, 2, 2, large_source, large_destination).unwrap();
+
+    let error = RectShaderPassDescriptor::try_new(
+        "source",
+        "smaller-destination",
+        large_source,
+        smaller_destination,
+        bounds,
+        RectShaderPassKind::ClearFill,
+    )
+    .expect_err("descriptor must revalidate bounds against its own destination");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("rect shader pass destination x extent")
+    );
+}
+
+#[test]
+fn shader_clear_fill_descriptor_rejects_partial_destination_bounds() {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 8),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(8, 8),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(2, 1, 4, 4, source, destination).unwrap();
+
+    let error = RectShaderPassDescriptor::try_new(
+        "source",
+        "destination",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::ClearFill,
+    )
+    .expect_err("clear/fill uses attachment clear and must be fullscreen");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("rect shader clear/fill bounds")
+    );
+}
+
+#[test]
+fn shader_pass_contract_only_context_reports_adapter_unavailable() {
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(2, 2),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(2, 2),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(0, 0, 2, 2, source, destination).unwrap();
+    let pass = RectShaderPassDescriptor::try_new(
+        "source",
+        "destination",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::ClearFill,
+    )
+    .unwrap();
+
+    let error = encode_clear_fill_pass(None, pass, Color::BLACK)
+        .expect_err("contract-only shader pass should report missing GPU context");
+
+    assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+    assert!(error.message.contains("rect/fullscreen shader pass"));
+}
+
+#[test]
+fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let Some((device, queue)) = renderer.default_wgpu_device_queue() else {
+        let source = TextureDescriptor::try_new(
+            PhysicalSize::new(1, 1),
+            Format::Rgba8,
+            TextureUsageIntent::OffscreenLayer,
+        )
+        .unwrap();
+        let destination = TextureDescriptor::try_new(
+            PhysicalSize::new(1, 1),
+            Format::Rgba8,
+            TextureUsageIntent::IntermediatePass,
+        )
+        .unwrap();
+        let bounds = RectPassBounds::try_new(0, 0, 1, 1, source, destination).unwrap();
+        let pass = RectShaderPassDescriptor::try_new(
+            "source",
+            "destination",
+            source,
+            destination,
+            bounds,
+            RectShaderPassKind::ClearFill,
+        )
+        .unwrap();
+        assert_eq!(
+            encode_clear_fill_pass(None, pass, Color::BLACK)
+                .expect_err("no GPU machines should report the explicit diagnostic")
+                .code,
+            ErrorCode::AdapterUnavailable
+        );
+        return;
+    };
+    let source = TextureDescriptor::try_new(
+        PhysicalSize::new(2, 2),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let destination = TextureDescriptor::try_new(
+        PhysicalSize::new(2, 2),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    let bounds = RectPassBounds::try_new(0, 0, 2, 2, source, destination).unwrap();
+    let pass = RectShaderPassDescriptor::try_new(
+        "source",
+        "destination",
+        source,
+        destination,
+        bounds,
+        RectShaderPassKind::ClearFill,
+    )
+    .unwrap();
+    let (_source_texture, source_view) =
+        create_texture(device, "Surgeist shader test source", source);
+    let (destination_texture, destination_view) =
+        create_texture(device, "Surgeist shader test destination", destination);
+    let context = RectShaderPassGpuContext::new(device, queue, &source_view, &destination_view);
+
+    encode_clear_fill_pass(
+        Some(context),
+        pass,
+        Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
+    )
+    .unwrap();
+    let output = read_texture_rgba(
+        device,
+        queue,
+        &destination_texture,
+        destination.physical_size(),
+    )
+    .unwrap();
+
+    let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
+    assert!(
+        (60..=68).contains(&red),
+        "red channel should be cleared: {red}"
+    );
+    assert!(
+        (124..=132).contains(&green),
+        "green channel should be cleared: {green}"
+    );
+    assert!(
+        (187..=195).contains(&blue),
+        "blue channel should be cleared: {blue}"
+    );
+    assert_eq!(alpha, 255);
 }
 
 #[test]

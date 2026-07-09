@@ -16,6 +16,7 @@ mod layer;
 mod paint;
 mod renderer;
 mod scene;
+mod shader;
 mod shape;
 mod stats;
 mod style;
