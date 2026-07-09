@@ -200,6 +200,49 @@ fn reference_buffer_source_over_preserves_transparent_edges() {
 }
 
 #[test]
+fn private_composite_reference_helpers_cover_current_internal_operator_boundary() {
+    let source = PremultipliedRgba8::try_new(128, 0, 0, 128).unwrap();
+    let destination = PremultipliedRgba8::try_new(0, 128, 0, 128).unwrap();
+    let mask = PremultipliedRgba8::try_new(0, 0, 0, 64).unwrap();
+    let source_over = source.source_over(destination);
+    let blend_normal = source.blend_over(destination, BlendMode::Normal);
+    let blend_plus = source.blend_over(destination, BlendMode::Plus);
+    let source_in = source.source_in_alpha_of(mask);
+    let destination_in = destination.destination_in_alpha_of(mask);
+
+    assert_eq!(
+        source_over,
+        PremultipliedRgba8::try_new(128, 64, 0, 192).unwrap()
+    );
+    assert_eq!(
+        blend_normal, source_over,
+        "normal blend-over remains the same private source-over operator"
+    );
+    assert_eq!(
+        blend_plus,
+        PremultipliedRgba8::try_new(128, 128, 0, 255).unwrap()
+    );
+    assert_eq!(
+        source_in,
+        PremultipliedRgba8::try_new(32, 0, 0, 32).unwrap()
+    );
+    assert_eq!(
+        destination_in,
+        PremultipliedRgba8::try_new(0, 32, 0, 32).unwrap()
+    );
+
+    for pixel in [
+        source_over,
+        blend_normal,
+        blend_plus,
+        source_in,
+        destination_in,
+    ] {
+        assert_premultiplied(pixel);
+    }
+}
+
+#[test]
 fn reference_pixels_apply_plus_lighter_and_blend_modes_deterministically() {
     let source = PremultipliedRgba8::try_new(60, 30, 10, 128).unwrap();
     let destination = PremultipliedRgba8::try_new(20, 80, 40, 160).unwrap();
@@ -9979,6 +10022,51 @@ fn unsupported_blend_and_composite_boundaries_remain_typed_diagnostics() {
             error.message.contains(unsupported.label()),
             "diagnostic should name unsupported compositing boundary: {}",
             error.message
+        );
+    }
+}
+
+#[test]
+fn unsupported_porter_duff_css_and_mask_composite_policy_stays_typed() {
+    let compositing = Capabilities::VELLO_0_9.compositing();
+    assert!(!compositing.supports_background_blend_modes());
+    assert!(!compositing.supports_additional_mix_blend_modes());
+    assert!(!compositing.supports_porter_duff_composite_modes());
+
+    for operation in [
+        PrimitiveOperation::BackgroundBlendMode,
+        PrimitiveOperation::AdditionalMixBlendMode,
+        PrimitiveOperation::PorterDuffCompositeMode,
+    ] {
+        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::Compositing, operation);
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("unsupported CSS and Porter-Duff composite policy stays typed");
+
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+        assert!(error.message.contains("compositing"));
+        assert!(error.message.contains(unsupported.label()));
+    }
+
+    let alpha_mask =
+        MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)), MaskMode::Alpha).unwrap();
+    for mode in [
+        MaskCompositeMode::Subtract,
+        MaskCompositeMode::Intersect,
+        MaskCompositeMode::Exclude,
+    ] {
+        let stack = MaskLayerStack::single(MaskLayer::try_new(alpha_mask.clone(), mode).unwrap());
+        let error = stack
+            .ensure_supported(Capabilities::VELLO_0_9)
+            .expect_err("non-default mask composites remain unsupported until fully implemented");
+
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::MaskCompositeMode,
+            ))
         );
     }
 }
