@@ -197,6 +197,191 @@ fn reference_buffer_source_over_preserves_transparent_edges() {
 }
 
 #[test]
+fn reference_blur_zero_radius_is_identity() {
+    let pixels = vec![
+        PremultipliedRgba8::TRANSPARENT,
+        PremultipliedRgba8::try_new(20, 40, 60, 80).unwrap(),
+        PremultipliedRgba8::try_new(10, 5, 0, 10).unwrap(),
+        PremultipliedRgba8::try_new(255, 128, 64, 255).unwrap(),
+    ];
+    let source =
+        ReferencePremultipliedRgba8Buffer::from_pixels(PhysicalSize::new(2, 2), pixels).unwrap();
+
+    let blurred = source
+        .apply_blur(
+            FilterBlur::try_new(0.0).unwrap(),
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+
+    assert_eq!(blurred, source);
+}
+
+#[test]
+fn reference_blur_small_radius_spreads_impulse_deterministically() {
+    let impulse = PremultipliedRgba8::try_new(255, 0, 0, 255).unwrap();
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(3, 3),
+        vec![
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+            impulse,
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::TRANSPARENT,
+        ],
+    )
+    .unwrap();
+
+    let blurred = source
+        .apply_blur(
+            FilterBlur::try_new(1.0).unwrap(),
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+
+    let expected = [15, 25, 15, 25, 41, 25, 15, 25, 15];
+    for y in 0..3 {
+        for x in 0..3 {
+            let value = expected[(y * 3 + x) as usize];
+            assert_eq!(
+                blurred.pixel(x, y).unwrap(),
+                PremultipliedRgba8::try_new(value, 0, 0, value).unwrap(),
+                "unexpected blurred impulse at {x},{y}",
+            );
+        }
+    }
+}
+
+#[test]
+fn reference_blur_samples_outside_source_as_transparent_black() {
+    let opaque = PremultipliedRgba8::try_new(255, 255, 255, 255).unwrap();
+    let source =
+        ReferencePremultipliedRgba8Buffer::from_pixels(PhysicalSize::new(1, 1), vec![opaque])
+            .unwrap();
+
+    let blurred = source
+        .apply_blur(
+            FilterBlur::try_new(1.0).unwrap(),
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        blurred.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(41, 41, 41, 41).unwrap()
+    );
+}
+
+#[test]
+fn reference_blur_preserves_partially_transparent_colored_invariants() {
+    let partial = PremultipliedRgba8::try_new(80, 40, 20, 128).unwrap();
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(3, 1),
+        vec![
+            PremultipliedRgba8::TRANSPARENT,
+            partial,
+            PremultipliedRgba8::TRANSPARENT,
+        ],
+    )
+    .unwrap();
+
+    let blurred = source
+        .apply_blur(
+            FilterBlur::try_new(1.0).unwrap(),
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+
+    assert_eq!(
+        blurred.pixel(0, 0).unwrap(),
+        PremultipliedRgba8::try_new(8, 4, 2, 12).unwrap()
+    );
+    assert_eq!(
+        blurred.pixel(1, 0).unwrap(),
+        PremultipliedRgba8::try_new(13, 6, 3, 20).unwrap()
+    );
+    assert_eq!(
+        blurred.pixel(2, 0).unwrap(),
+        PremultipliedRgba8::try_new(8, 4, 2, 12).unwrap()
+    );
+    for x in 0..3 {
+        assert_premultiplied(blurred.pixel(x, 0).unwrap());
+    }
+}
+
+#[test]
+fn reference_blur_uses_large_radius_policy() {
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(1, 1),
+        vec![PremultipliedRgba8::try_new(255, 0, 0, 255).unwrap()],
+    )
+    .unwrap();
+    let reject = BlurPolicy::try_new(
+        BlurRadiusInterpretation::CssLengthAsStandardDeviation,
+        KernelSupportRadius::try_standard_deviation_multiple(2.5).unwrap(),
+        LargeBlurRadiusPolicy::try_reject_above(1.0).unwrap(),
+        TransparentEdgeSamplingPolicy::TransparentBlack,
+    )
+    .unwrap();
+    let clamp = BlurPolicy::try_new(
+        BlurRadiusInterpretation::CssLengthAsStandardDeviation,
+        KernelSupportRadius::try_standard_deviation_multiple(2.5).unwrap(),
+        LargeBlurRadiusPolicy::try_clamp_to(1.0).unwrap(),
+        TransparentEdgeSamplingPolicy::TransparentBlack,
+    )
+    .unwrap();
+
+    let error = source
+        .apply_blur(FilterBlur::try_new(2.0).unwrap(), reject)
+        .expect_err("reject policy should reject large blur radius");
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("filter blur radius")
+    );
+    assert_eq!(
+        source
+            .apply_blur(FilterBlur::try_new(2.0).unwrap(), clamp)
+            .unwrap()
+            .pixel(0, 0)
+            .unwrap(),
+        PremultipliedRgba8::try_new(41, 0, 0, 41).unwrap()
+    );
+}
+
+#[test]
+fn reference_blur_is_deterministic_across_repeated_runs() {
+    let source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 2),
+        vec![
+            PremultipliedRgba8::try_new(10, 20, 30, 40).unwrap(),
+            PremultipliedRgba8::try_new(200, 0, 0, 200).unwrap(),
+            PremultipliedRgba8::TRANSPARENT,
+            PremultipliedRgba8::try_new(0, 80, 20, 100).unwrap(),
+        ],
+    )
+    .unwrap();
+
+    let first = source
+        .apply_blur(
+            FilterBlur::try_new(1.25).unwrap(),
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+    let second = source
+        .apply_blur(
+            FilterBlur::try_new(1.25).unwrap(),
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+
+    assert_eq!(first, second);
+}
+
+#[test]
 fn reference_buffers_compare_with_deterministic_equality() {
     let pixel = PremultipliedRgba8::try_new(8, 4, 2, 16).unwrap();
     let first = ReferencePremultipliedRgba8Buffer::from_pixels(

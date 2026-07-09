@@ -2,8 +2,8 @@
 
 use super::{
     Error, PhysicalSize, Result,
-    filter::CompiledColorFilterPipeline,
-    style::{ColorFilterOp, ColorFilterPipeline},
+    filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
+    style::{ColorFilterOp, ColorFilterPipeline, FilterBlur},
 };
 
 const LUMA_RED: f64 = 0.213;
@@ -356,6 +356,51 @@ impl ReferencePremultipliedRgba8Buffer {
         pipeline.apply_to_buffer(self)
     }
 
+    pub(crate) fn apply_blur(&self, blur: FilterBlur, policy: BlurPolicy) -> Result<Self> {
+        let Some(kernel) = BlurKernel::from_policy(blur, policy)? else {
+            return Ok(self.clone());
+        };
+
+        match policy.edge_sampling() {
+            TransparentEdgeSamplingPolicy::TransparentBlack => {
+                let width = usize::try_from(self.physical_size.width())
+                    .expect("validated reference buffer width should fit addressable memory");
+                let height = usize::try_from(self.physical_size.height())
+                    .expect("validated reference buffer height should fit addressable memory");
+                let mut horizontal = vec![FloatingPremultipliedRgba8::default(); self.pixels.len()];
+
+                for y in 0..height {
+                    for x in 0..width {
+                        let mut pixel = FloatingPremultipliedRgba8::default();
+                        for (offset, weight) in kernel.offset_weights() {
+                            let Some(sample_x) = offset_index(x, offset, width) else {
+                                continue;
+                            };
+                            pixel.add_pixel(self.pixels[y * width + sample_x], weight);
+                        }
+                        horizontal[y * width + x] = pixel;
+                    }
+                }
+
+                let mut pixels = Vec::with_capacity(self.pixels.len());
+                for y in 0..height {
+                    for x in 0..width {
+                        let mut pixel = FloatingPremultipliedRgba8::default();
+                        for (offset, weight) in kernel.offset_weights() {
+                            let Some(sample_y) = offset_index(y, offset, height) else {
+                                continue;
+                            };
+                            pixel.add_float(horizontal[sample_y * width + x], weight);
+                        }
+                        pixels.push(pixel.to_pixel());
+                    }
+                }
+
+                Self::from_pixels(self.physical_size, pixels)
+            }
+        }
+    }
+
     pub(crate) fn map_pixels(
         &self,
         mut map_pixel: impl FnMut(PremultipliedRgba8) -> Result<PremultipliedRgba8>,
@@ -424,6 +469,112 @@ impl ReferencePremultipliedRgba8Buffer {
             )
         })
     }
+}
+
+#[derive(Clone, Debug)]
+struct BlurKernel {
+    radius: i32,
+    weights: Vec<f64>,
+}
+
+impl BlurKernel {
+    fn from_policy(blur: FilterBlur, policy: BlurPolicy) -> Result<Option<Self>> {
+        if blur.radius() == 0.0 {
+            return Ok(None);
+        }
+
+        let standard_deviation = policy.standard_deviation(blur)?;
+        if standard_deviation == 0.0 {
+            return Ok(None);
+        }
+
+        let support_radius = policy.support_radius(blur)?.ceil();
+        if support_radius > f64::from(i32::MAX) {
+            return Err(Error::invalid_value(
+                "blur kernel support radius",
+                support_radius,
+                "must fit in i32 device pixels",
+            ));
+        }
+        let radius = support_radius as i32;
+        let mut weights = Vec::with_capacity(
+            usize::try_from(radius)
+                .expect("validated blur kernel support radius should fit usize")
+                .saturating_mul(2)
+                .saturating_add(1),
+        );
+        let divisor = 2.0 * standard_deviation * standard_deviation;
+        let mut weight_sum = 0.0;
+
+        for offset in -radius..=radius {
+            let distance = f64::from(offset);
+            let weight = (-(distance * distance) / divisor).exp();
+            weights.push(weight);
+            weight_sum += weight;
+        }
+        for weight in &mut weights {
+            *weight /= weight_sum;
+        }
+
+        Ok(Some(Self { radius, weights }))
+    }
+
+    fn offset_weights(&self) -> impl Iterator<Item = (i32, f64)> + '_ {
+        self.weights
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(index, weight)| {
+                (
+                    i32::try_from(index).expect("validated blur kernel index should fit i32")
+                        - self.radius,
+                    weight,
+                )
+            })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct FloatingPremultipliedRgba8 {
+    red: f64,
+    green: f64,
+    blue: f64,
+    alpha: f64,
+}
+
+impl FloatingPremultipliedRgba8 {
+    fn add_pixel(&mut self, pixel: PremultipliedRgba8, weight: f64) {
+        self.red += f64::from(pixel.red()) * weight;
+        self.green += f64::from(pixel.green()) * weight;
+        self.blue += f64::from(pixel.blue()) * weight;
+        self.alpha += f64::from(pixel.alpha()) * weight;
+    }
+
+    fn add_float(&mut self, pixel: Self, weight: f64) {
+        self.red += pixel.red * weight;
+        self.green += pixel.green * weight;
+        self.blue += pixel.blue * weight;
+        self.alpha += pixel.alpha * weight;
+    }
+
+    fn to_pixel(self) -> PremultipliedRgba8 {
+        let alpha = round_byte(self.alpha);
+        PremultipliedRgba8::try_new(
+            round_byte(self.red).min(alpha),
+            round_byte(self.green).min(alpha),
+            round_byte(self.blue).min(alpha),
+            alpha,
+        )
+        .expect("weighted premultiplied blur output should stay premultiplied")
+    }
+}
+
+fn offset_index(index: usize, offset: i32, len: usize) -> Option<usize> {
+    let sample = i64::try_from(index).ok()? + i64::from(offset);
+    if sample < 0 || sample >= i64::try_from(len).ok()? {
+        return None;
+    }
+    usize::try_from(sample).ok()
 }
 
 fn validate_size(physical_size: PhysicalSize) -> Result<u64> {

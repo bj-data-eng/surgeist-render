@@ -423,9 +423,14 @@ impl BlurPolicy {
     }
 
     pub fn support_radius(self, blur: FilterBlur) -> Result<f64> {
+        Ok(self
+            .kernel_support
+            .support_radius(self.standard_deviation(blur)?))
+    }
+
+    pub(crate) fn standard_deviation(self, blur: FilterBlur) -> Result<f64> {
         let radius = self.large_radius.resolve_radius(blur.radius())?;
-        let standard_deviation = self.radius_interpretation.standard_deviation(radius);
-        Ok(self.kernel_support.support_radius(standard_deviation))
+        Ok(self.radius_interpretation.standard_deviation(radius))
     }
 }
 
