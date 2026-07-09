@@ -611,6 +611,113 @@ fn image_placement_rejects_invalid_paint_or_intrinsic_size() {
 }
 
 #[test]
+fn image_repeat_plan_maps_css_repeat_axes() {
+    let cases = [
+        (BackgroundRepeat::no_repeat(), ImageRepeatMode::NoRepeat),
+        (BackgroundRepeat::repeat_x(), ImageRepeatMode::RepeatX),
+        (BackgroundRepeat::repeat_y(), ImageRepeatMode::RepeatY),
+        (BackgroundRepeat::repeat(), ImageRepeatMode::RepeatBoth),
+    ];
+
+    for (repeat, expected) in cases {
+        let plan = ImageRepeatPlan::try_new(repeat, Capabilities::VELLO_0_9).unwrap();
+        assert_eq!(plan.repeat(), repeat);
+        assert_eq!(plan.mode(), expected);
+    }
+}
+
+#[test]
+fn image_repeat_plan_resolves_tile_rects_inside_clip_rect() {
+    let placement = ResolvedImagePlacement::from_parts(
+        Rect::new(0.0, 0.0, 70.0, 40.0),
+        Rect::new(0.0, 5.0, 20.0, 10.0),
+    )
+    .unwrap();
+
+    let repeat_x = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::VELLO_0_9)
+        .unwrap()
+        .resolve(placement)
+        .unwrap();
+    assert_eq!(repeat_x.clip_rect(), Rect::new(0.0, 0.0, 70.0, 40.0));
+    assert_eq!(
+        repeat_x.tile_rects(),
+        &[
+            Rect::new(0.0, 5.0, 20.0, 10.0),
+            Rect::new(20.0, 5.0, 20.0, 10.0),
+            Rect::new(40.0, 5.0, 20.0, 10.0),
+            Rect::new(60.0, 5.0, 20.0, 10.0),
+        ]
+    );
+
+    let repeat_y = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_y(), Capabilities::VELLO_0_9)
+        .unwrap()
+        .resolve(placement)
+        .unwrap();
+    assert_eq!(
+        repeat_y.tile_rects(),
+        &[
+            Rect::new(0.0, -5.0, 20.0, 10.0),
+            Rect::new(0.0, 5.0, 20.0, 10.0),
+            Rect::new(0.0, 15.0, 20.0, 10.0),
+            Rect::new(0.0, 25.0, 20.0, 10.0),
+            Rect::new(0.0, 35.0, 20.0, 10.0),
+        ]
+    );
+}
+
+#[test]
+fn image_repeat_plan_includes_tiles_before_the_anchor_when_visible() {
+    let placement = ResolvedImagePlacement::from_parts(
+        Rect::new(0.0, 0.0, 50.0, 20.0),
+        Rect::new(15.0, 0.0, 20.0, 10.0),
+    )
+    .unwrap();
+
+    let repeated = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::VELLO_0_9)
+        .unwrap()
+        .resolve(placement)
+        .unwrap();
+
+    assert_eq!(
+        repeated.tile_rects(),
+        &[
+            Rect::new(-5.0, 0.0, 20.0, 10.0),
+            Rect::new(15.0, 0.0, 20.0, 10.0),
+            Rect::new(35.0, 0.0, 20.0, 10.0),
+        ]
+    );
+}
+
+#[test]
+fn image_repeat_plan_rejects_round_and_space_with_typed_diagnostics() {
+    let round = ImageRepeatPlan::try_new(
+        BackgroundRepeat::new(RepeatMode::Round, RepeatMode::Repeat),
+        Capabilities::VELLO_0_9,
+    )
+    .expect_err("round repeat is not supported yet");
+    assert_eq!(
+        round.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::BackgroundRepeatRound
+        ))
+    );
+
+    let space = ImageRepeatPlan::try_new(
+        BackgroundRepeat::new(RepeatMode::NoRepeat, RepeatMode::Space),
+        Capabilities::VELLO_0_9,
+    )
+    .expect_err("space repeat is not supported yet");
+    assert_eq!(
+        space.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::BackgroundRepeatSpace
+        ))
+    );
+}
+
+#[test]
 fn fixed_background_layers_can_carry_viewport_coordinate_space() {
     let layer =
         StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())

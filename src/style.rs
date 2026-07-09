@@ -1,7 +1,8 @@
 use super::{
-    Color, CoordinateSpaceTag, Error, Image, ImageColorProfilePolicy, ImageId,
-    ImageOrientationPolicy, Paint, Rect, Result, Shadow, Shape, Size, SymbolicColorPolicy,
-    UnresolvedResource, UnresolvedResourceKind,
+    Capabilities, Color, CoordinateSpaceTag, Error, Image, ImageColorProfilePolicy, ImageId,
+    ImageOrientationPolicy, Paint, PrimitiveFamily, PrimitiveOperation, Rect, Result, Shadow,
+    Shape, Size, SymbolicColorPolicy, UnresolvedResource, UnresolvedResourceKind,
+    UnsupportedPrimitive,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
         validate_size,
@@ -783,6 +784,161 @@ pub enum RepeatMode {
     NoRepeat,
     Round,
     Space,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageRepeatMode {
+    NoRepeat,
+    RepeatX,
+    RepeatY,
+    RepeatBoth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImageRepeatPlan {
+    repeat: BackgroundRepeat,
+    mode: ImageRepeatMode,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedImageRepeat {
+    clip_rect: Rect,
+    tile_rects: Vec<Rect>,
+}
+
+impl ImageRepeatPlan {
+    pub fn try_new(repeat: BackgroundRepeat, capabilities: Capabilities) -> Result<Self> {
+        if matches!(repeat.x(), RepeatMode::Round) || matches!(repeat.y(), RepeatMode::Round) {
+            let unsupported = UnsupportedPrimitive::new(
+                PrimitiveFamily::ImageSampling,
+                PrimitiveOperation::BackgroundRepeatRound,
+            );
+            capabilities.ensure_supported(unsupported)?;
+            return Err(Error::unsupported_render_primitive(unsupported));
+        }
+        if matches!(repeat.x(), RepeatMode::Space) || matches!(repeat.y(), RepeatMode::Space) {
+            let unsupported = UnsupportedPrimitive::new(
+                PrimitiveFamily::ImageSampling,
+                PrimitiveOperation::BackgroundRepeatSpace,
+            );
+            capabilities.ensure_supported(unsupported)?;
+            return Err(Error::unsupported_render_primitive(unsupported));
+        }
+
+        let mode = match (repeat.x(), repeat.y()) {
+            (RepeatMode::NoRepeat, RepeatMode::NoRepeat) => ImageRepeatMode::NoRepeat,
+            (RepeatMode::Repeat, RepeatMode::NoRepeat) => ImageRepeatMode::RepeatX,
+            (RepeatMode::NoRepeat, RepeatMode::Repeat) => ImageRepeatMode::RepeatY,
+            (RepeatMode::Repeat, RepeatMode::Repeat) => ImageRepeatMode::RepeatBoth,
+            _ => unreachable!("round and space are rejected before repeat mode mapping"),
+        };
+        Ok(Self { repeat, mode })
+    }
+
+    #[must_use]
+    pub const fn repeat(self) -> BackgroundRepeat {
+        self.repeat
+    }
+
+    #[must_use]
+    pub const fn mode(self) -> ImageRepeatMode {
+        self.mode
+    }
+
+    pub fn resolve(self, placement: ResolvedImagePlacement) -> Result<ResolvedImageRepeat> {
+        let repeats_x = matches!(
+            self.mode,
+            ImageRepeatMode::RepeatX | ImageRepeatMode::RepeatBoth
+        );
+        let repeats_y = matches!(
+            self.mode,
+            ImageRepeatMode::RepeatY | ImageRepeatMode::RepeatBoth
+        );
+        let x_positions = repeat_positions(
+            placement.paint_rect().x(),
+            placement.paint_rect().width(),
+            placement.tile_rect().x(),
+            placement.tile_rect().width(),
+            repeats_x,
+        )?;
+        let y_positions = repeat_positions(
+            placement.paint_rect().y(),
+            placement.paint_rect().height(),
+            placement.tile_rect().y(),
+            placement.tile_rect().height(),
+            repeats_y,
+        )?;
+
+        let mut tile_rects = Vec::new();
+        for y in y_positions {
+            for x in &x_positions {
+                tile_rects.push(Rect::new(
+                    *x,
+                    y,
+                    placement.tile_rect().width(),
+                    placement.tile_rect().height(),
+                ));
+            }
+        }
+
+        Ok(ResolvedImageRepeat {
+            clip_rect: placement.paint_rect(),
+            tile_rects,
+        })
+    }
+}
+
+impl ResolvedImageRepeat {
+    #[must_use]
+    pub const fn clip_rect(&self) -> Rect {
+        self.clip_rect
+    }
+
+    #[must_use]
+    pub fn tile_rects(&self) -> &[Rect] {
+        &self.tile_rects
+    }
+}
+
+fn repeat_positions(
+    clip_origin: f64,
+    clip_axis: f64,
+    tile_origin: f64,
+    tile_axis: f64,
+    repeats: bool,
+) -> Result<Vec<f64>> {
+    if tile_axis <= 0.0 || !tile_axis.is_finite() {
+        return Err(Error::invalid_value(
+            "image repeat tile size",
+            tile_axis,
+            "must be finite and positive",
+        ));
+    }
+
+    let clip_end = clip_origin + clip_axis;
+    if !repeats {
+        return Ok(
+            if tile_origin < clip_end && tile_origin + tile_axis > clip_origin {
+                vec![tile_origin]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+
+    let mut origin = tile_origin;
+    while origin > clip_origin {
+        origin -= tile_axis;
+    }
+
+    let mut positions = Vec::new();
+    while origin < clip_end {
+        if origin + tile_axis > clip_origin {
+            positions.push(origin);
+        }
+        origin += tile_axis;
+    }
+    Ok(positions)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
