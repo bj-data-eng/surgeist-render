@@ -1,5 +1,5 @@
 use super::{
-    Image, Point, Result,
+    Error, Image, Point, Result,
     validation::{validate_color, validate_gradient_stops, validate_point, validate_positive_f64},
 };
 
@@ -57,6 +57,108 @@ impl From<Color> for peniko::Color {
     fn from(color: Color) -> Self {
         Self::new([color.r, color.g, color.b, color.a])
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaintColorSpace {
+    Srgb,
+    Hsl,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintColor {
+    space: PaintColorSpace,
+    channels: [f32; 4],
+}
+
+impl PaintColor {
+    pub fn try_srgb(r: f32, g: f32, b: f32, a: f32) -> Result<Self> {
+        Color::try_rgba(r, g, b, a)?;
+        Ok(Self {
+            space: PaintColorSpace::Srgb,
+            channels: [r, g, b, a],
+        })
+    }
+
+    pub fn try_hsl(hue_degrees: f32, saturation: f32, lightness: f32, alpha: f32) -> Result<Self> {
+        validate_finite_channel(hue_degrees, "hsl hue")?;
+        validate_unit_channel(saturation, "hsl saturation")?;
+        validate_unit_channel(lightness, "hsl lightness")?;
+        validate_unit_channel(alpha, "hsl alpha")?;
+        Ok(Self {
+            space: PaintColorSpace::Hsl,
+            channels: [hue_degrees, saturation, lightness, alpha],
+        })
+    }
+
+    #[must_use]
+    pub const fn space(self) -> PaintColorSpace {
+        self.space
+    }
+
+    #[must_use]
+    pub const fn channels(self) -> [f32; 4] {
+        self.channels
+    }
+
+    pub fn to_color(self) -> Result<Color> {
+        match self.space {
+            PaintColorSpace::Srgb => {
+                let [r, g, b, a] = self.channels;
+                Color::try_rgba(r, g, b, a)
+            }
+            PaintColorSpace::Hsl => {
+                let [hue_degrees, saturation, lightness, alpha] = self.channels;
+                let [r, g, b] = hsl_to_srgb(hue_degrees, saturation, lightness);
+                Color::try_rgba(r, g, b, alpha)
+            }
+        }
+    }
+}
+
+fn validate_finite_channel(value: f32, name: &str) -> Result<()> {
+    if !value.is_finite() {
+        return Err(Error::invalid_value(name, value, "must be finite"));
+    }
+    Ok(())
+}
+
+fn validate_unit_channel(value: f32, name: &str) -> Result<()> {
+    if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+        return Err(Error::invalid_value(
+            name,
+            value,
+            "must be finite and between 0 and 1",
+        ));
+    }
+    Ok(())
+}
+
+fn hsl_to_srgb(hue_degrees: f32, saturation: f32, lightness: f32) -> [f32; 3] {
+    if saturation == 0.0 {
+        return [lightness, lightness, lightness];
+    }
+
+    let hue = hue_degrees.rem_euclid(360.0);
+    let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+    let hue_sector = hue / 60.0;
+    let x = chroma * (1.0 - (hue_sector.rem_euclid(2.0) - 1.0).abs());
+    let m = lightness - chroma / 2.0;
+
+    let [r, g, b] = match hue_sector {
+        sector if sector < 1.0 => [chroma, x, 0.0],
+        sector if sector < 2.0 => [x, chroma, 0.0],
+        sector if sector < 3.0 => [0.0, chroma, x],
+        sector if sector < 4.0 => [0.0, x, chroma],
+        sector if sector < 5.0 => [x, 0.0, chroma],
+        _ => [chroma, 0.0, x],
+    };
+
+    [
+        (r + m).clamp(0.0, 1.0),
+        (g + m).clamp(0.0, 1.0),
+        (b + m).clamp(0.0, 1.0),
+    ]
 }
 
 #[derive(Clone, Debug, PartialEq)]

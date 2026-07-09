@@ -38,7 +38,7 @@ pub use geometry::{
 };
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
 pub use layer::{BlendMode, Filter, Layer, Shadow};
-pub use paint::{Color, Gradient, GradientStop, Paint};
+pub use paint::{Color, Gradient, GradientStop, Paint, PaintColor, PaintColorSpace};
 pub use renderer::{Antialiasing, Options, Renderer};
 pub use scene::Scene;
 pub use shape::{

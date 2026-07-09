@@ -306,6 +306,40 @@ fn symbolic_color_policy_keeps_style_colors_root_resolved() {
 }
 
 #[test]
+fn paint_colors_convert_srgb_to_concrete_rgba() {
+    let color = PaintColor::try_srgb(0.25, 0.5, 0.75, 0.8)
+        .unwrap()
+        .to_color()
+        .unwrap();
+
+    assert_eq!(color, Color::try_rgba(0.25, 0.5, 0.75, 0.8).unwrap());
+}
+
+#[test]
+fn paint_colors_convert_hsl_known_vectors() {
+    let red = PaintColor::try_hsl(0.0, 1.0, 0.5, 1.0)
+        .unwrap()
+        .to_color()
+        .unwrap();
+    let cyan = PaintColor::try_hsl(180.0, 1.0, 0.5, 1.0)
+        .unwrap()
+        .to_color()
+        .unwrap();
+
+    assert_eq!(red, Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap());
+    assert_eq!(cyan, Color::try_rgba(0.0, 1.0, 1.0, 1.0).unwrap());
+}
+
+#[test]
+fn paint_colors_reject_invalid_conversion_inputs() {
+    assert!(PaintColor::try_srgb(f32::NAN, 0.0, 0.0, 1.0).is_err());
+    assert!(PaintColor::try_hsl(f32::NAN, 1.0, 0.5, 1.0).is_err());
+    assert!(PaintColor::try_hsl(0.0, 1.5, 0.5, 1.0).is_err());
+    assert!(PaintColor::try_hsl(0.0, 1.0, -0.1, 1.0).is_err());
+    assert!(PaintColor::try_hsl(0.0, 1.0, 0.5, f32::INFINITY).is_err());
+}
+
+#[test]
 fn style_reference_identifiers_must_not_be_empty() {
     let error = StyleResourceRef::try_new("  ").expect_err("empty identifiers are invalid");
 
