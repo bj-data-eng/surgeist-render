@@ -380,6 +380,161 @@ fn reference_color_filter_buffer_preserves_transparency_and_partial_alpha_invari
     assert_premultiplied(partial);
 }
 
+#[test]
+fn compiled_color_filter_pipeline_matches_per_op_reference_chain() {
+    let pixel = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
+    let pipeline = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.25).unwrap()),
+        ColorFilterOp::Contrast(FilterAmount::try_new(0.8).unwrap()),
+        ColorFilterOp::Grayscale(UnitFilterAmount::try_new(0.25).unwrap()),
+        ColorFilterOp::HueRotate(FilterAngle::try_radians(0.5).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(0.4).unwrap()),
+        ColorFilterOp::Saturate(FilterAmount::try_new(1.5).unwrap()),
+        ColorFilterOp::Sepia(UnitFilterAmount::try_new(0.6).unwrap()),
+    ]);
+    let compiled = CompiledColorFilterPipeline::try_from_pipeline(&pipeline).unwrap();
+
+    assert_eq!(compiled.source_ops(), pipeline.ops());
+    assert_eq!(
+        pixel
+            .apply_compiled_color_filter_pipeline(&compiled)
+            .unwrap(),
+        pixel.apply_color_filter_pipeline(&pipeline).unwrap()
+    );
+}
+
+#[test]
+fn compiled_color_filter_pipeline_applies_to_reference_buffers() {
+    let first = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
+    let second = PremultipliedRgba8::try_new(50, 75, 100, 128).unwrap();
+    let buffer = ReferencePremultipliedRgba8Buffer::from_pixels(
+        PhysicalSize::new(2, 1),
+        vec![first, second],
+    )
+    .unwrap();
+    let pipeline = color_filter_pipeline([
+        ColorFilterOp::Saturate(FilterAmount::try_new(0.5).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(0.25).unwrap()),
+    ]);
+    let compiled = CompiledColorFilterPipeline::try_from_pipeline(&pipeline).unwrap();
+
+    assert_eq!(
+        buffer
+            .apply_compiled_color_filter_pipeline(&compiled)
+            .unwrap(),
+        buffer.apply_color_filter_pipeline(&pipeline).unwrap()
+    );
+}
+
+#[test]
+fn compiled_color_filter_pipeline_fuses_adjacent_color_steps() {
+    let fused_color_run = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.25).unwrap()),
+        ColorFilterOp::Contrast(FilterAmount::try_new(0.8).unwrap()),
+        ColorFilterOp::Saturate(FilterAmount::try_new(1.5).unwrap()),
+    ]);
+    let opacity_boundary = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.25).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+        ColorFilterOp::Saturate(FilterAmount::try_new(1.5).unwrap()),
+    ]);
+
+    assert_eq!(
+        CompiledColorFilterPipeline::try_from_pipeline(&fused_color_run)
+            .unwrap()
+            .executable_step_count(),
+        1
+    );
+    assert_eq!(
+        CompiledColorFilterPipeline::try_from_pipeline(&opacity_boundary)
+            .unwrap()
+            .executable_step_count(),
+        3
+    );
+}
+
+#[test]
+fn compiled_color_filter_pipeline_preserves_order_sensitivity() {
+    let pixel = PremultipliedRgba8::try_new(90, 130, 210, 255).unwrap();
+    let contrast_then_brightness = color_filter_pipeline([
+        ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
+        ColorFilterOp::Brightness(FilterAmount::try_new(0.7).unwrap()),
+    ]);
+    let brightness_then_contrast = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(0.7).unwrap()),
+        ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
+    ]);
+    let contrast_then_brightness =
+        CompiledColorFilterPipeline::try_from_pipeline(&contrast_then_brightness).unwrap();
+    let brightness_then_contrast =
+        CompiledColorFilterPipeline::try_from_pipeline(&brightness_then_contrast).unwrap();
+
+    assert_ne!(
+        pixel
+            .apply_compiled_color_filter_pipeline(&contrast_then_brightness)
+            .unwrap(),
+        pixel
+            .apply_compiled_color_filter_pipeline(&brightness_then_contrast)
+            .unwrap()
+    );
+}
+
+#[test]
+fn compiled_color_filter_pipeline_sequences_opacity_with_color_steps() {
+    let pixel = PremultipliedRgba8::try_new(50, 75, 100, 128).unwrap();
+    let opacity_then_invert = color_filter_pipeline([
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap()),
+    ]);
+    let invert_then_opacity = color_filter_pipeline([
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+    ]);
+    let opacity_then_invert_compiled =
+        CompiledColorFilterPipeline::try_from_pipeline(&opacity_then_invert).unwrap();
+    let invert_then_opacity_compiled =
+        CompiledColorFilterPipeline::try_from_pipeline(&invert_then_opacity).unwrap();
+
+    assert_eq!(
+        pixel
+            .apply_compiled_color_filter_pipeline(&opacity_then_invert_compiled)
+            .unwrap(),
+        pixel
+            .apply_color_filter_pipeline(&opacity_then_invert)
+            .unwrap()
+    );
+    assert_eq!(
+        pixel
+            .apply_compiled_color_filter_pipeline(&invert_then_opacity_compiled)
+            .unwrap(),
+        pixel
+            .apply_color_filter_pipeline(&invert_then_opacity)
+            .unwrap()
+    );
+    assert_ne!(
+        pixel
+            .apply_compiled_color_filter_pipeline(&opacity_then_invert_compiled)
+            .unwrap(),
+        pixel
+            .apply_compiled_color_filter_pipeline(&invert_then_opacity_compiled)
+            .unwrap()
+    );
+}
+
+#[test]
+fn compiled_color_filter_pipeline_rejects_empty_construction() {
+    let error = CompiledColorFilterPipeline::try_from_ops(Vec::new())
+        .expect_err("empty compiled pipelines should be unconstructable");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("compiled color filter pipeline")
+    );
+}
+
 fn color_filter_pipeline<const N: usize>(ops: [ColorFilterOp; N]) -> ColorFilterPipeline {
     let ops = ops
         .into_iter()

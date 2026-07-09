@@ -1,6 +1,10 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
-use super::{Error, PhysicalSize, Result, style::ColorFilterOp, style::ColorFilterPipeline};
+use super::{
+    Error, PhysicalSize, Result,
+    filter::CompiledColorFilterPipeline,
+    style::{ColorFilterOp, ColorFilterPipeline},
+};
 
 const LUMA_RED: f64 = 0.213;
 const LUMA_GREEN: f64 = 0.715;
@@ -95,6 +99,13 @@ impl PremultipliedRgba8 {
         Ok(pixel)
     }
 
+    pub(crate) fn apply_compiled_color_filter_pipeline(
+        self,
+        pipeline: &CompiledColorFilterPipeline,
+    ) -> Result<Self> {
+        pipeline.apply_to_pixel(self)
+    }
+
     pub(crate) const fn source_over(self, destination: Self) -> Self {
         if self.alpha == 0 {
             return destination;
@@ -168,7 +179,7 @@ impl PremultipliedRgba8 {
         Self::from_straight_rgb(filter(straight).clamp_unit(), self.alpha)
     }
 
-    fn apply_opacity_amount(self, opacity: f64) -> Self {
+    pub(crate) fn apply_opacity_amount(self, opacity: f64) -> Self {
         let opacity = opacity.clamp(0.0, 1.0);
         Self {
             red: scale_channel_by_opacity(self.red, opacity),
@@ -176,6 +187,10 @@ impl PremultipliedRgba8 {
             blue: scale_channel_by_opacity(self.blue, opacity),
             alpha: scale_channel_by_opacity(self.alpha, opacity),
         }
+    }
+
+    pub(crate) fn from_straight_color_channels(red: f64, green: f64, blue: f64, alpha: u8) -> Self {
+        Self::from_straight_rgb(StraightRgb::new(red, green, blue).clamp_unit(), alpha)
     }
 
     fn from_straight_rgb(rgb: StraightRgb, alpha: u8) -> Self {
@@ -330,6 +345,26 @@ impl ReferencePremultipliedRgba8Buffer {
             .iter()
             .copied()
             .map(|pixel| pixel.apply_color_filter_pipeline(pipeline))
+            .collect::<Result<Vec<_>>>()?;
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
+    pub(crate) fn apply_compiled_color_filter_pipeline(
+        &self,
+        pipeline: &CompiledColorFilterPipeline,
+    ) -> Result<Self> {
+        pipeline.apply_to_buffer(self)
+    }
+
+    pub(crate) fn map_pixels(
+        &self,
+        mut map_pixel: impl FnMut(PremultipliedRgba8) -> Result<PremultipliedRgba8>,
+    ) -> Result<Self> {
+        let pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .map(&mut map_pixel)
             .collect::<Result<Vec<_>>>()?;
         Self::from_pixels(self.physical_size, pixels)
     }

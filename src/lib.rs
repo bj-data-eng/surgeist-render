@@ -10,6 +10,7 @@ mod capability;
 mod command;
 mod encode;
 mod error;
+mod filter;
 mod geometry;
 mod image;
 mod layer;
@@ -38,6 +39,7 @@ pub use error::{
     DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,
     PrimitiveOperation, Result, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
+pub use filter::CompiledColorFilterPipeline;
 pub use geometry::{
     CoordinateSpaceId, CoordinateSpaceKind, CoordinateSpaceTag, PhysicalSize, Point, Radii, Rect,
     Size, Transform,
