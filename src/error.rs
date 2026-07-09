@@ -257,6 +257,7 @@ pub enum PrimitiveOperation {
     BackgroundRepeatRound,
     BackgroundRepeatSpace,
     FilteredImagePaint,
+    ColorFilteredImagePaint,
     ImageOrientationConversion,
     ImageColorProfileConversion,
     EllipsePathShadowShape,
@@ -282,6 +283,10 @@ pub enum PrimitiveOperation {
     NestedOpacityPlanning,
     MaskExecution,
     FilterExecution,
+    ColorFilterClassification,
+    ColorFilterPipelineExecution,
+    ColorFilterBlur,
+    ColorFilterDropShadow,
     BackdropExecution,
 }
 
@@ -299,6 +304,7 @@ impl PrimitiveOperation {
             Self::BackgroundRepeatRound => "background repeat round",
             Self::BackgroundRepeatSpace => "background repeat space",
             Self::FilteredImagePaint => "filtered image paint",
+            Self::ColorFilteredImagePaint => "color-filtered image paint",
             Self::ImageOrientationConversion => "image orientation conversion",
             Self::ImageColorProfileConversion => "image color profile conversion",
             Self::EllipsePathShadowShape => "ellipse/path shadow shape",
@@ -324,6 +330,10 @@ impl PrimitiveOperation {
             Self::NestedOpacityPlanning => "nested opacity planning",
             Self::MaskExecution => "mask execution",
             Self::FilterExecution => "filter execution",
+            Self::ColorFilterClassification => "color filter classification",
+            Self::ColorFilterPipelineExecution => "color filter pipeline execution",
+            Self::ColorFilterBlur => "color filter blur",
+            Self::ColorFilterDropShadow => "color filter drop-shadow",
             Self::BackdropExecution => "backdrop execution",
         }
     }

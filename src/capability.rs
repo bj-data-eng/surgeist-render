@@ -48,6 +48,7 @@ impl Capabilities {
             repeat_round: false,
             repeat_space: false,
             filtered_image_paint: false,
+            color_filtered_image_paint: false,
             image_orientation_conversion: false,
             image_color_profile_conversion: false,
             attachment_coordinate_policy:
@@ -61,6 +62,8 @@ impl Capabilities {
         },
         filters: FilterCapabilities {
             layer_filters: false,
+            color_filter_classification: true,
+            color_filter_pipeline_execution: false,
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,
@@ -212,6 +215,9 @@ impl Capabilities {
             (PrimitiveFamily::ImageSampling, PrimitiveOperation::FilteredImagePaint) => {
                 self.image_sampling.supports_filtered_image_paint()
             }
+            (PrimitiveFamily::ImageSampling, PrimitiveOperation::ColorFilteredImagePaint) => {
+                self.image_sampling.supports_color_filtered_image_paint()
+            }
             (PrimitiveFamily::ImageSampling, PrimitiveOperation::ImageOrientationConversion) => {
                 self.image_sampling.supports_image_orientation_conversion()
             }
@@ -225,6 +231,16 @@ impl Capabilities {
             (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter) => {
                 self.filters.supports_layer_filters()
             }
+            (PrimitiveFamily::Filters, PrimitiveOperation::ColorFilterClassification) => {
+                self.filters.supports_color_filter_classification()
+            }
+            (PrimitiveFamily::Filters, PrimitiveOperation::ColorFilterPipelineExecution) => {
+                self.filters.supports_color_filter_pipeline_execution()
+            }
+            (
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::ColorFilterBlur | PrimitiveOperation::ColorFilterDropShadow,
+            ) => false,
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LayerMask) => {
                 self.masks_clips.supports_layer_masks()
             }
@@ -450,6 +466,7 @@ pub struct ImageSamplingCapabilities {
     repeat_round: bool,
     repeat_space: bool,
     filtered_image_paint: bool,
+    color_filtered_image_paint: bool,
     image_orientation_conversion: bool,
     image_color_profile_conversion: bool,
     attachment_coordinate_policy: BackgroundAttachmentCoordinatePolicy,
@@ -491,6 +508,11 @@ impl ImageSamplingCapabilities {
     #[must_use]
     pub const fn supports_filtered_image_paint(self) -> bool {
         self.filtered_image_paint
+    }
+
+    #[must_use]
+    pub const fn supports_color_filtered_image_paint(self) -> bool {
+        self.color_filtered_image_paint
     }
 
     #[must_use]
@@ -540,12 +562,24 @@ impl ShadowCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterCapabilities {
     layer_filters: bool,
+    color_filter_classification: bool,
+    color_filter_pipeline_execution: bool,
 }
 
 impl FilterCapabilities {
     #[must_use]
     pub const fn supports_layer_filters(self) -> bool {
         self.layer_filters
+    }
+
+    #[must_use]
+    pub const fn supports_color_filter_classification(self) -> bool {
+        self.color_filter_classification
+    }
+
+    #[must_use]
+    pub const fn supports_color_filter_pipeline_execution(self) -> bool {
+        self.color_filter_pipeline_execution
     }
 }
 

@@ -2148,6 +2148,92 @@ fn filter_lists_distinguish_none_from_ordered_ops() {
 }
 
 #[test]
+fn filter_lists_classify_ordered_color_filter_pipelines() {
+    let list = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.2).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(0.8).unwrap()),
+        FilterOp::grayscale(UnitFilterAmount::try_new(0.25).unwrap()),
+        FilterOp::hue_rotate(FilterAngle::try_radians(0.5).unwrap()),
+        FilterOp::invert(UnitFilterAmount::try_new(0.4).unwrap()),
+        FilterOp::opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+        FilterOp::saturate(FilterAmount::try_new(1.5).unwrap()),
+        FilterOp::sepia(UnitFilterAmount::try_new(0.6).unwrap()),
+    ])
+    .unwrap();
+
+    let pipeline = list
+        .color_filter_pipeline()
+        .expect("color-only filter lists should classify")
+        .expect("color-only filter lists should produce a pipeline");
+
+    assert_eq!(
+        pipeline.ops(),
+        &[
+            ColorFilterOp::Brightness(FilterAmount::try_new(1.2).unwrap()),
+            ColorFilterOp::Contrast(FilterAmount::try_new(0.8).unwrap()),
+            ColorFilterOp::Grayscale(UnitFilterAmount::try_new(0.25).unwrap()),
+            ColorFilterOp::HueRotate(FilterAngle::try_radians(0.5).unwrap()),
+            ColorFilterOp::Invert(UnitFilterAmount::try_new(0.4).unwrap()),
+            ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+            ColorFilterOp::Saturate(FilterAmount::try_new(1.5).unwrap()),
+            ColorFilterOp::Sepia(UnitFilterAmount::try_new(0.6).unwrap()),
+        ]
+    );
+}
+
+#[test]
+fn filter_none_has_no_executable_color_pipeline() {
+    assert_eq!(FilterList::none().color_filter_pipeline(), Ok(None));
+}
+
+#[test]
+fn filter_color_pipeline_rejects_blur_with_typed_diagnostic() {
+    let list = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.0).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(4.0).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(1.0).unwrap()),
+    ])
+    .unwrap();
+
+    let unsupported = list
+        .color_filter_pipeline()
+        .expect_err("blur is not a color-only filter operation");
+
+    assert_eq!(
+        unsupported,
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::ColorFilterBlur
+        )
+    );
+    assert_eq!(unsupported.label(), "color filter blur");
+}
+
+#[test]
+fn filter_color_pipeline_rejects_drop_shadow_with_typed_diagnostic() {
+    let shadow = Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap();
+    let list = FilterList::try_ops(vec![
+        FilterOp::saturate(FilterAmount::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(shadow),
+        FilterOp::sepia(UnitFilterAmount::try_new(0.25).unwrap()),
+    ])
+    .unwrap();
+
+    let unsupported = list
+        .color_filter_pipeline()
+        .expect_err("drop-shadow is not a color-only filter operation");
+
+    assert_eq!(
+        unsupported,
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::ColorFilterDropShadow
+        )
+    );
+    assert_eq!(unsupported.label(), "color filter drop-shadow");
+}
+
+#[test]
 fn filter_lists_reject_empty_ordered_ops() {
     let error = FilterList::try_ops(Vec::new()).expect_err("empty op lists must use none");
 
@@ -4150,6 +4236,38 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
     assert!(!capabilities.supports_mask_execution());
     assert!(!capabilities.supports_filter_execution());
     assert!(!capabilities.supports_backdrop_execution());
+}
+
+#[test]
+fn color_filter_capability_names_classification_without_overclaiming_execution() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    assert!(
+        capabilities
+            .filters()
+            .supports_color_filter_classification()
+    );
+    assert!(
+        !capabilities
+            .filters()
+            .supports_color_filter_pipeline_execution()
+    );
+    assert!(!capabilities.filters().supports_layer_filters());
+    assert!(
+        !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+    );
+    assert!(
+        !capabilities
+            .image_sampling()
+            .supports_color_filtered_image_paint()
+    );
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_filter_execution()
+    );
 }
 
 #[test]

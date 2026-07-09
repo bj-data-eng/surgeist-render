@@ -1185,6 +1185,68 @@ impl FilterList {
     pub fn ops(&self) -> &[FilterOp] {
         self.ops.as_deref().unwrap_or(&[])
     }
+
+    pub fn color_filter_pipeline(
+        &self,
+    ) -> std::result::Result<Option<ColorFilterPipeline>, UnsupportedPrimitive> {
+        let Some(ops) = self.ops.as_deref() else {
+            return Ok(None);
+        };
+
+        let mut color_ops = Vec::with_capacity(ops.len());
+        for op in ops {
+            color_ops.push(ColorFilterOp::try_from_filter_op(op)?);
+        }
+
+        Ok(Some(ColorFilterPipeline { ops: color_ops }))
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ColorFilterPipeline {
+    ops: Vec<ColorFilterOp>,
+}
+
+impl ColorFilterPipeline {
+    #[must_use]
+    pub fn ops(&self) -> &[ColorFilterOp] {
+        &self.ops
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ColorFilterOp {
+    Brightness(FilterAmount),
+    Contrast(FilterAmount),
+    Grayscale(UnitFilterAmount),
+    HueRotate(FilterAngle),
+    Invert(UnitFilterAmount),
+    Opacity(UnitFilterAmount),
+    Saturate(FilterAmount),
+    Sepia(UnitFilterAmount),
+}
+
+impl ColorFilterOp {
+    fn try_from_filter_op(op: &FilterOp) -> std::result::Result<Self, UnsupportedPrimitive> {
+        match op.kind() {
+            FilterOpKind::Brightness(amount) => Ok(Self::Brightness(*amount)),
+            FilterOpKind::Contrast(amount) => Ok(Self::Contrast(*amount)),
+            FilterOpKind::Grayscale(amount) => Ok(Self::Grayscale(*amount)),
+            FilterOpKind::HueRotate(angle) => Ok(Self::HueRotate(*angle)),
+            FilterOpKind::Invert(amount) => Ok(Self::Invert(*amount)),
+            FilterOpKind::Opacity(amount) => Ok(Self::Opacity(*amount)),
+            FilterOpKind::Saturate(amount) => Ok(Self::Saturate(*amount)),
+            FilterOpKind::Sepia(amount) => Ok(Self::Sepia(*amount)),
+            FilterOpKind::Blur(_) => Err(UnsupportedPrimitive::new(
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::ColorFilterBlur,
+            )),
+            FilterOpKind::DropShadow(_) => Err(UnsupportedPrimitive::new(
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::ColorFilterDropShadow,
+            )),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
