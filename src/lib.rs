@@ -51,7 +51,7 @@ pub use geometry::{
     Size, Transform,
 };
 pub use image::{Extend, Image, ImageBuffer, ImageFit, ImageId, ImageQuality};
-pub use layer::{BlendMode, Filter, Layer, Shadow};
+pub use layer::{BlendMode, Filter, Layer, Shadow, ShadowKind, ShadowList};
 pub use paint::{
     Color, Gradient, GradientStop, NormalizedPaintLayer, Paint, PaintColor, PaintColorSpace,
 };

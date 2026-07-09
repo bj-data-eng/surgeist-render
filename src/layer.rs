@@ -139,6 +139,7 @@ impl Filter {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Shadow {
+    kind: ShadowKind,
     offset: Point,
     blur: f64,
     spread: f64,
@@ -146,8 +147,15 @@ pub struct Shadow {
 }
 
 impl Shadow {
-    fn new(offset: Point, blur: f64, spread: f64, paint: impl Into<Paint>) -> Self {
+    fn new(
+        kind: ShadowKind,
+        offset: Point,
+        blur: f64,
+        spread: f64,
+        paint: impl Into<Paint>,
+    ) -> Self {
         Self {
+            kind,
             offset,
             blur,
             spread,
@@ -156,12 +164,36 @@ impl Shadow {
     }
 
     pub fn try_new(offset: Point, blur: f64, spread: f64, paint: impl Into<Paint>) -> Result<Self> {
+        Self::try_with_kind(ShadowKind::Outer, offset, blur, spread, paint)
+    }
+
+    pub fn try_inset(
+        offset: Point,
+        blur: f64,
+        spread: f64,
+        paint: impl Into<Paint>,
+    ) -> Result<Self> {
+        Self::try_with_kind(ShadowKind::Inset, offset, blur, spread, paint)
+    }
+
+    pub fn try_with_kind(
+        kind: ShadowKind,
+        offset: Point,
+        blur: f64,
+        spread: f64,
+        paint: impl Into<Paint>,
+    ) -> Result<Self> {
         validate_point(offset, "shadow offset")?;
         validate_non_negative_f64(blur, "shadow blur")?;
         validate_finite_f64(spread, "shadow spread")?;
         let paint = paint.into();
         validate_paint(&paint)?;
-        Ok(Self::new(offset, blur, spread, paint))
+        Ok(Self::new(kind, offset, blur, spread, paint))
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> ShadowKind {
+        self.kind
     }
 
     #[must_use]
@@ -182,5 +214,55 @@ impl Shadow {
     #[must_use]
     pub const fn paint(&self) -> &Paint {
         &self.paint
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum ShadowKind {
+    #[default]
+    Outer,
+    Inset,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShadowList {
+    shadows: Vec<Shadow>,
+}
+
+impl ShadowList {
+    pub fn try_new(shadows: Vec<Shadow>) -> Result<Self> {
+        if shadows.is_empty() {
+            return Err(Error::invalid_value(
+                "shadow list",
+                "[]",
+                "must contain at least one shadow",
+            ));
+        }
+        for shadow in &shadows {
+            validate_point(shadow.offset(), "shadow offset")?;
+            validate_non_negative_f64(shadow.blur(), "shadow blur")?;
+            validate_finite_f64(shadow.spread(), "shadow spread")?;
+            validate_paint(shadow.paint())?;
+        }
+        Ok(Self { shadows })
+    }
+
+    #[must_use]
+    pub fn shadows(&self) -> &[Shadow] {
+        &self.shadows
+    }
+
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.shadows.len()
+    }
+
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.shadows.is_empty()
+    }
+
+    pub(crate) fn into_vec(self) -> Vec<Shadow> {
+        self.shadows
     }
 }

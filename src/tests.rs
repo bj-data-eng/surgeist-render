@@ -7433,6 +7433,107 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
 }
 
 #[test]
+fn outer_box_shadow_list_normalizes_offset_blur_spread_and_order() {
+    let first = Shadow::try_new(Point::new(3.0, -2.0), 6.0, 1.5, Color::BLACK).unwrap();
+    let second = Shadow::try_new(Point::new(-4.0, 5.0), 0.0, -1.0, Color::BLACK).unwrap();
+    let shadows = ShadowList::try_new(vec![first.clone(), second.clone()]).unwrap();
+    let mut scene = Scene::new();
+
+    scene.shadows(Rect::new(8.0, 8.0, 10.0, 10.0), shadows);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    assert_eq!(normalized.commands.len(), 2);
+    assert_eq!(normalized.stats().shadows, 2);
+
+    let command::RenderCommand::Shadow { shadow, .. } = &normalized.commands[0] else {
+        panic!("first shadow-list entry should lower to a render shadow");
+    };
+    assert_eq!(shadow.offset, first.offset());
+    assert_eq!(shadow.blur, first.blur());
+    assert_eq!(shadow.spread, first.spread());
+
+    let command::RenderCommand::Shadow { shadow, .. } = &normalized.commands[1] else {
+        panic!("second shadow-list entry should lower to a render shadow");
+    };
+    assert_eq!(shadow.offset, second.offset());
+    assert_eq!(shadow.blur, second.blur());
+    assert_eq!(shadow.spread, second.spread());
+}
+
+#[test]
+fn non_uniform_rounded_outer_shadow_preserves_authored_radii() {
+    let radii = Radii::new(0.0, 4.0, 8.0, 12.0);
+    let mut scene = Scene::new();
+    scene.shadow(
+        Shape::try_rounded_rect(Rect::new(4.0, 4.0, 16.0, 12.0), radii).unwrap(),
+        Shadow::try_new(Point::new(2.0, 2.0), 4.0, 1.0, Color::BLACK).unwrap(),
+    );
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let command::RenderCommand::Shadow { shape, .. } = &normalized.commands[0] else {
+        panic!("rounded rect shadow should lower to a render shadow");
+    };
+    let command::ShadowShape::RoundedRect {
+        radii: lowered_radii,
+        ..
+    } = shape
+    else {
+        panic!("rounded rect shadow should preserve rounded geometry");
+    };
+    assert_eq!(*lowered_radii, radii);
+}
+
+#[test]
+fn multiple_outer_shadows_render_in_authored_order() {
+    let red = Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap();
+    let blue = Color::try_rgba(0.0, 0.0, 1.0, 1.0).unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, red).unwrap(),
+        Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, blue).unwrap(),
+    ])
+    .unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.shadows(Rect::new(1.0, 1.0, 6.0, 6.0), shadows);
+
+    let stats = renderer
+        .render(&mut surface, &scene, Parameters::default())
+        .unwrap();
+    let output = renderer.read_headless(&surface).unwrap();
+    let overlap = pixel_rgba(&output, 4, 4);
+
+    assert_eq!(stats.shadows, 2);
+    assert!(
+        overlap[2] > overlap[0],
+        "last overlapping shadow should be composited above earlier shadows: {overlap:?}"
+    );
+}
+
+#[test]
+fn inset_box_shadow_reports_typed_unsupported_diagnostic() {
+    let mut scene = Scene::new();
+    scene.shadow(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Shadow::try_inset(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+    );
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("inset shadow execution is not implemented in this phase");
+
+    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::InsetBoxShadow,
+        ))
+    );
+    assert!(error.message.contains("inset box shadow"));
+}
+
+#[test]
 fn direct_geometry_targets_render_without_unsupported_diagnostics() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer

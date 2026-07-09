@@ -49,6 +49,17 @@ impl Scene {
         self
     }
 
+    pub fn shadows(&mut self, shape: impl Into<Shape>, shadows: ShadowList) -> &mut Self {
+        let shape = shape.into();
+        for shadow in shadows.into_vec() {
+            self.commands.push(Command::Shadow {
+                shape: shape.clone(),
+                shadow,
+            });
+        }
+        self
+    }
+
     pub fn image(&mut self, image: Image, rect: Rect, fit: ImageFit) -> &mut Self {
         self.commands.push(Command::Image { image, rect, fit });
         self

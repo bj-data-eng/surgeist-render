@@ -496,6 +496,13 @@ impl ShadowShape {
 impl RenderShadow {
     fn from_authored(shadow: Shadow, capabilities: Capabilities) -> Result<Self> {
         validate_shadow(&shadow)?;
+        if shadow.kind() == ShadowKind::Inset {
+            capabilities.ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::Shadows,
+                PrimitiveOperation::InsetBoxShadow,
+            ))?;
+            unreachable!("inset shadow support requires clipped inner shadow lowering");
+        }
         Ok(Self {
             offset: shadow.offset(),
             blur: shadow.blur(),
