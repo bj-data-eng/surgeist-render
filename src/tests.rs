@@ -277,6 +277,15 @@ fn invalid_value_errors_name_rejected_value() {
 }
 
 #[test]
+fn error_type_stays_below_clippy_large_err_threshold() {
+    assert!(
+        std::mem::size_of::<Error>() <= 128,
+        "Error should stay compact enough for crate-wide Result<T, Error>: {} bytes",
+        std::mem::size_of::<Error>()
+    );
+}
+
+#[test]
 fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");

@@ -8,10 +8,10 @@ pub struct Error {
     pub code: ErrorCode,
     pub message: String,
     pub source: Option<Box<dyn error::Error + Send + Sync>>,
-    invalid_value: Option<InvalidValue>,
+    invalid_value: Option<Box<InvalidValue>>,
     unsupported_primitive: Option<UnsupportedPrimitive>,
-    unresolved_resource: Option<UnresolvedResource>,
-    degraded_quality: Option<DegradedQuality>,
+    unresolved_resource: Option<Box<UnresolvedResource>>,
+    degraded_quality: Option<Box<DegradedQuality>>,
 }
 
 impl Error {
@@ -46,7 +46,7 @@ impl Error {
     #[must_use]
     pub fn from_invalid_value(invalid_value: InvalidValue) -> Self {
         let mut error = Self::new(ErrorCode::InvalidInput, invalid_value.message());
-        error.invalid_value = Some(invalid_value);
+        error.invalid_value = Some(Box::new(invalid_value));
         error
     }
 
@@ -67,14 +67,14 @@ impl Error {
     #[must_use]
     pub fn unresolved_resource(resource: UnresolvedResource) -> Self {
         let mut error = Self::new(ErrorCode::UnresolvedResource, resource.message());
-        error.unresolved_resource = Some(resource);
+        error.unresolved_resource = Some(Box::new(resource));
         error
     }
 
     #[must_use]
     pub fn degraded_quality(diagnostic: DegradedQuality) -> Self {
         let mut error = Self::new(ErrorCode::DegradedQuality, diagnostic.message());
-        error.degraded_quality = Some(diagnostic);
+        error.degraded_quality = Some(Box::new(diagnostic));
         error
     }
 
@@ -85,17 +85,26 @@ impl Error {
 
     #[must_use]
     pub const fn invalid_value_diagnostic(&self) -> Option<&InvalidValue> {
-        self.invalid_value.as_ref()
+        match &self.invalid_value {
+            Some(diagnostic) => Some(diagnostic),
+            None => None,
+        }
     }
 
     #[must_use]
     pub const fn unresolved_resource_diagnostic(&self) -> Option<&UnresolvedResource> {
-        self.unresolved_resource.as_ref()
+        match &self.unresolved_resource {
+            Some(diagnostic) => Some(diagnostic),
+            None => None,
+        }
     }
 
     #[must_use]
     pub const fn degraded_quality_diagnostic(&self) -> Option<&DegradedQuality> {
-        self.degraded_quality.as_ref()
+        match &self.degraded_quality {
+            Some(diagnostic) => Some(diagnostic),
+            None => None,
+        }
     }
 }
 
