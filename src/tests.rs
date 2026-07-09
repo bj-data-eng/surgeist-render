@@ -305,6 +305,75 @@ fn style_reference_identifiers_must_not_be_empty() {
 }
 
 #[test]
+fn resolved_image_resources_preserve_handle_and_intrinsic_size() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(7), Size::new(24.0, 12.0)).unwrap();
+
+    assert_eq!(resource.id(), ImageId::new(7));
+    assert_eq!(resource.intrinsic_size(), Size::new(24.0, 12.0));
+}
+
+#[test]
+fn css_image_layers_preserve_sampling_inputs_without_lowering() {
+    let resource = ResolvedImageResource::try_new(ImageId::new(11), Size::new(8.0, 8.0)).unwrap();
+    let layer = StyleImageLayer::try_new(StyleImageSource::resolved(resource.clone()))
+        .unwrap()
+        .with_position(BackgroundPosition::percent(0.25, 0.75).unwrap())
+        .with_size(BackgroundSize::cover())
+        .with_repeat(BackgroundRepeat::repeat_x())
+        .with_origin(BackgroundBox::Padding)
+        .with_clip(BackgroundBox::Content)
+        .with_attachment(BackgroundAttachment::Fixed);
+
+    assert_eq!(
+        layer.source().kind(),
+        &StyleImageSourceKind::Resolved(resource)
+    );
+    assert_eq!(layer.position().x().kind(), PositionComponentKind::Percent);
+    assert_eq!(layer.position().y().value(), 0.75);
+    assert_eq!(layer.size(), BackgroundSize::cover());
+    assert_eq!(layer.repeat(), BackgroundRepeat::repeat_x());
+    assert_eq!(layer.origin(), BackgroundBox::Padding);
+    assert_eq!(layer.clip(), BackgroundBox::Content);
+    assert_eq!(layer.attachment(), BackgroundAttachment::Fixed);
+}
+
+#[test]
+fn resolved_image_resources_reject_invalid_intrinsic_size() {
+    let error = ResolvedImageResource::try_new(ImageId::new(7), Size::new(f64::NAN, 12.0))
+        .expect_err("invalid intrinsic size should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("resolved image intrinsic size width")
+    );
+}
+
+#[test]
+fn background_position_rejects_non_finite_percent() {
+    let error = BackgroundPosition::percent(f64::NAN, 0.0)
+        .expect_err("non-finite percentages should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background position x percent")
+    );
+}
+
+#[test]
+fn background_size_rejects_negative_length() {
+    let error = SizeComponent::try_length(-1.0)
+        .expect_err("negative explicit background sizes should be rejected");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background size length")
+    );
+}
+
+#[test]
 fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");

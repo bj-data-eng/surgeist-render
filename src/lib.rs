@@ -39,7 +39,12 @@ pub use renderer::{Antialiasing, Options, Renderer};
 pub use scene::Scene;
 pub use shape::{Dash, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign};
 pub use stats::Stats;
-pub use style::{StyleColor, StyleResourceRef};
+pub use style::{
+    BackgroundAttachment, BackgroundBox, BackgroundPosition, BackgroundRepeat, BackgroundSize,
+    BackgroundSizeKind, PositionComponent, PositionComponentKind, RepeatMode,
+    ResolvedImageResource, SizeComponent, SizeComponentKind, StyleColor, StyleImageLayer,
+    StyleImageSource, StyleImageSourceKind, StyleResourceRef,
+};
 pub use surface::{
     Attachment, Format, Parameters, PresentMode, Surface, SurfaceOptions, SurfaceResourceState,
     SurfaceState, WebCanvas,
