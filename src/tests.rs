@@ -1635,6 +1635,113 @@ fn outlines_reject_non_finite_offset() {
     );
 }
 
+fn box_decoration_test_areas() -> BackgroundAreas {
+    BackgroundAreas::try_new(
+        Rect::new(0.0, 0.0, 100.0, 40.0),
+        Rect::new(4.0, 4.0, 92.0, 32.0),
+        Rect::new(8.0, 8.0, 84.0, 24.0),
+    )
+    .unwrap()
+}
+
+#[test]
+fn box_decoration_fragments_normalize_border_box_radii_on_construction() {
+    let areas = box_decoration_test_areas();
+    let radii = Radii::try_new(10.0, 12.0, 14.0, 16.0).unwrap();
+
+    let fragment = BoxDecorationFragment::try_new(areas, radii, BoxDecorationBreak::Slice).unwrap();
+
+    assert_eq!(fragment.areas(), areas);
+    assert_eq!(fragment.radii().border_box(), areas.border_box());
+    assert_eq!(fragment.radii().radii(), radii);
+    assert_eq!(fragment.break_mode(), BoxDecorationBreak::Slice);
+    assert_eq!(fragment.border_clip_override(), None);
+}
+
+#[test]
+fn box_decoration_inputs_reject_empty_fragments() {
+    let error = BoxDecorationInput::try_new(None, None, Vec::new())
+        .expect_err("box decoration inputs require at least one fragment");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("box decoration fragments")
+    );
+}
+
+#[test]
+fn box_decoration_inputs_preserve_border_outline_and_break_mode() {
+    let side = BorderSide::try_new(BorderStyle::Solid, 2.0, Color::BLACK).unwrap();
+    let edges = BorderEdges::new(side.clone(), side.clone(), side.clone(), side);
+    let outline = Outline::try_new(OutlineStyle::Dashed, 3.0, Color::TRANSPARENT, 1.5).unwrap();
+    let fragment = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(4.0).unwrap(),
+        BoxDecorationBreak::Clone,
+    )
+    .unwrap();
+
+    let input = BoxDecorationInput::try_new(
+        Some(edges.clone()),
+        Some(outline.clone()),
+        vec![fragment.clone()],
+    )
+    .unwrap();
+
+    assert_eq!(input.border_edges(), Some(&edges));
+    assert_eq!(input.outline(), Some(&outline));
+    assert_eq!(input.fragments(), &[fragment]);
+    assert_eq!(input.fragments()[0].break_mode(), BoxDecorationBreak::Clone);
+}
+
+#[test]
+fn box_decoration_radii_scale_against_horizontal_and_vertical_limits() {
+    let areas = box_decoration_test_areas();
+    let radii = Radii::try_new(80.0, 80.0, 20.0, 20.0).unwrap();
+
+    let fragment = BoxDecorationFragment::try_new(areas, radii, BoxDecorationBreak::Slice).unwrap();
+
+    assert_eq!(
+        fragment.radii().radii(),
+        Radii::try_new(32.0, 32.0, 8.0, 8.0).unwrap()
+    );
+}
+
+#[test]
+fn box_decoration_fragments_validate_clip_override_geometry() {
+    let error = BackgroundClipGeometry::try_rect(Rect::new(0.0, 0.0, 0.0, 10.0))
+        .expect_err("clip overrides reuse background clip validation");
+
+    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("background clip rect")
+    );
+}
+
+#[test]
+fn box_decoration_fragments_preserve_border_clip_override() {
+    let shape = Shape::rect(Rect::new(1.0, 2.0, 30.0, 20.0));
+    let clip = BackgroundClipGeometry::try_shape(shape.clone()).unwrap();
+
+    let fragment = BoxDecorationFragment::try_new(
+        box_decoration_test_areas(),
+        Radii::try_all(5.0).unwrap(),
+        BoxDecorationBreak::Slice,
+    )
+    .unwrap()
+    .with_border_clip_override(clip.clone());
+
+    assert_eq!(fragment.border_clip_override(), Some(&clip));
+    assert_eq!(
+        fragment
+            .border_clip_override()
+            .and_then(|clip| clip.shape()),
+        Some(&shape)
+    );
+}
+
 #[test]
 fn background_stacks_reject_empty_and_colorless_inputs() {
     let error = BackgroundStack::try_new(None, Vec::new())

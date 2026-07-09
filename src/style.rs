@@ -1,8 +1,8 @@
 use super::{
     Capabilities, Color, CoordinateSpaceKind, CoordinateSpaceTag, Error, Image,
     ImageColorProfilePolicy, ImageId, ImageOrientationPolicy, Paint, PrimitiveFamily,
-    PrimitiveOperation, Rect, Result, Shadow, Shape, Size, SymbolicColorPolicy, UnresolvedResource,
-    UnresolvedResourceKind, UnsupportedPrimitive,
+    PrimitiveOperation, Radii, Rect, Result, Shadow, Shape, Size, SymbolicColorPolicy,
+    UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
     validation::{
         validate_finite_f64, validate_non_negative_f64, validate_paint, validate_shape,
         validate_size,
@@ -1722,6 +1722,185 @@ impl Outline {
     #[must_use]
     pub const fn offset(&self) -> f64 {
         self.offset
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BoxDecorationBreak {
+    Slice,
+    Clone,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NormalizedBoxRadii {
+    border_box: Rect,
+    radii: Radii,
+}
+
+impl NormalizedBoxRadii {
+    pub fn try_new(border_box: Rect, radii: Radii) -> Result<Self> {
+        validate_background_rect(border_box, "box decoration border box")?;
+        validate_box_decoration_radii(radii)?;
+        Ok(Self {
+            border_box,
+            radii: scale_box_radii(border_box, radii),
+        })
+    }
+
+    #[must_use]
+    pub const fn border_box(self) -> Rect {
+        self.border_box
+    }
+
+    #[must_use]
+    pub const fn radii(self) -> Radii {
+        self.radii
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxDecorationFragment {
+    areas: BackgroundAreas,
+    radii: NormalizedBoxRadii,
+    break_mode: BoxDecorationBreak,
+    border_clip_override: Option<BackgroundClipGeometry>,
+}
+
+impl BoxDecorationFragment {
+    pub fn try_new(
+        areas: BackgroundAreas,
+        radii: Radii,
+        break_mode: BoxDecorationBreak,
+    ) -> Result<Self> {
+        Ok(Self {
+            areas,
+            radii: NormalizedBoxRadii::try_new(areas.border_box(), radii)?,
+            break_mode,
+            border_clip_override: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_border_clip_override(
+        mut self,
+        border_clip_override: BackgroundClipGeometry,
+    ) -> Self {
+        self.border_clip_override = Some(border_clip_override);
+        self
+    }
+
+    #[must_use]
+    pub const fn areas(&self) -> BackgroundAreas {
+        self.areas
+    }
+
+    #[must_use]
+    pub const fn radii(&self) -> NormalizedBoxRadii {
+        self.radii
+    }
+
+    #[must_use]
+    pub const fn break_mode(&self) -> BoxDecorationBreak {
+        self.break_mode
+    }
+
+    #[must_use]
+    pub const fn border_clip_override(&self) -> Option<&BackgroundClipGeometry> {
+        self.border_clip_override.as_ref()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BoxDecorationInput {
+    border_edges: Option<BorderEdges>,
+    outline: Option<Outline>,
+    fragments: Vec<BoxDecorationFragment>,
+}
+
+impl BoxDecorationInput {
+    pub fn try_new(
+        border_edges: Option<BorderEdges>,
+        outline: Option<Outline>,
+        fragments: Vec<BoxDecorationFragment>,
+    ) -> Result<Self> {
+        if fragments.is_empty() {
+            return Err(Error::invalid_value(
+                "box decoration fragments",
+                "[]",
+                "must contain at least one fragment",
+            ));
+        }
+        Ok(Self {
+            border_edges,
+            outline,
+            fragments,
+        })
+    }
+
+    #[must_use]
+    pub const fn border_edges(&self) -> Option<&BorderEdges> {
+        self.border_edges.as_ref()
+    }
+
+    #[must_use]
+    pub const fn outline(&self) -> Option<&Outline> {
+        self.outline.as_ref()
+    }
+
+    #[must_use]
+    pub fn fragments(&self) -> &[BoxDecorationFragment] {
+        &self.fragments
+    }
+}
+
+fn validate_box_decoration_radii(radii: Radii) -> Result<()> {
+    for (field, value) in [
+        ("box decoration top-left radius", radii.top_left()),
+        ("box decoration top-right radius", radii.top_right()),
+        ("box decoration bottom-right radius", radii.bottom_right()),
+        ("box decoration bottom-left radius", radii.bottom_left()),
+    ] {
+        validate_non_negative_f64(value, field)?;
+    }
+    Ok(())
+}
+
+fn scale_box_radii(border_box: Rect, radii: Radii) -> Radii {
+    let mut scale: f64 = 1.0;
+    scale = scale.min(corner_scale(
+        border_box.width(),
+        radii.top_left() + radii.top_right(),
+    ));
+    scale = scale.min(corner_scale(
+        border_box.width(),
+        radii.bottom_left() + radii.bottom_right(),
+    ));
+    scale = scale.min(corner_scale(
+        border_box.height(),
+        radii.top_left() + radii.bottom_left(),
+    ));
+    scale = scale.min(corner_scale(
+        border_box.height(),
+        radii.top_right() + radii.bottom_right(),
+    ));
+
+    if scale >= 1.0 {
+        return radii;
+    }
+
+    Radii::new(
+        radii.top_left() * scale,
+        radii.top_right() * scale,
+        radii.bottom_right() * scale,
+        radii.bottom_left() * scale,
+    )
+}
+
+fn corner_scale(available: f64, requested: f64) -> f64 {
+    if requested <= available || requested == 0.0 {
+        1.0
+    } else {
+        available / requested
     }
 }
 
