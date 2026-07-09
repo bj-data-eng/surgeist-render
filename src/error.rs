@@ -221,6 +221,7 @@ pub enum PrimitiveFamily {
     Filters,
     MasksAndClips,
     Surfaces,
+    TransformsAndCoordinateSpaces,
 }
 
 impl PrimitiveFamily {
@@ -233,6 +234,7 @@ impl PrimitiveFamily {
             Self::Filters => "filters",
             Self::MasksAndClips => "masks and clips",
             Self::Surfaces => "surfaces",
+            Self::TransformsAndCoordinateSpaces => "transforms and coordinate spaces",
         }
     }
 }
@@ -247,6 +249,11 @@ pub enum PrimitiveOperation {
     GeometryBooleanOperation,
     GeometryOffsetOperation,
     WebCanvasSurface,
+    Matrix3dTransform,
+    PerspectiveTransform,
+    Rotate3dTransform,
+    TranslateZTransform,
+    ScaleZTransform,
 }
 
 impl PrimitiveOperation {
@@ -261,6 +268,11 @@ impl PrimitiveOperation {
             Self::GeometryBooleanOperation => "geometry boolean operation",
             Self::GeometryOffsetOperation => "geometry offset operation",
             Self::WebCanvasSurface => "web canvas surface",
+            Self::Matrix3dTransform => "matrix3d transform",
+            Self::PerspectiveTransform => "perspective transform",
+            Self::Rotate3dTransform => "rotate3d transform",
+            Self::TranslateZTransform => "translateZ transform",
+            Self::ScaleZTransform => "scaleZ transform",
         }
     }
 }

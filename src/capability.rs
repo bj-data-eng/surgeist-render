@@ -9,6 +9,7 @@ pub struct Capabilities {
     masks_clips: MaskClipCapabilities,
     compositing: CompositingCapabilities,
     surfaces: SurfaceCapabilities,
+    transform_coordinate_spaces: TransformCoordinateSpaceCapabilities,
 }
 
 impl Capabilities {
@@ -49,6 +50,13 @@ impl Capabilities {
             headless_surfaces: true,
             web_canvas_surfaces: cfg!(all(feature = "render-web", target_arch = "wasm32")),
         },
+        transform_coordinate_spaces: TransformCoordinateSpaceCapabilities {
+            affine_2d: true,
+            transform_origin: true,
+            skew: true,
+            transform_3d: false,
+            coordinate_space_tags: true,
+        },
     };
 
     #[must_use]
@@ -84,6 +92,11 @@ impl Capabilities {
     #[must_use]
     pub const fn surfaces(self) -> SurfaceCapabilities {
         self.surfaces
+    }
+
+    #[must_use]
+    pub const fn transform_coordinate_spaces(self) -> TransformCoordinateSpaceCapabilities {
+        self.transform_coordinate_spaces
     }
 
     pub fn ensure_supported(self, primitive: UnsupportedPrimitive) -> Result<()> {
@@ -123,6 +136,14 @@ impl Capabilities {
             (PrimitiveFamily::Surfaces, PrimitiveOperation::WebCanvasSurface) => {
                 self.surfaces.supports_web_canvas_surfaces()
             }
+            (
+                PrimitiveFamily::TransformsAndCoordinateSpaces,
+                PrimitiveOperation::Matrix3dTransform
+                | PrimitiveOperation::PerspectiveTransform
+                | PrimitiveOperation::Rotate3dTransform
+                | PrimitiveOperation::TranslateZTransform
+                | PrimitiveOperation::ScaleZTransform,
+            ) => self.transform_coordinate_spaces.supports_transform_3d(),
             _ => false,
         }
     }
@@ -304,5 +325,41 @@ impl SurfaceCapabilities {
     #[must_use]
     pub const fn supports_web_canvas_surfaces(self) -> bool {
         self.web_canvas_surfaces
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TransformCoordinateSpaceCapabilities {
+    affine_2d: bool,
+    transform_origin: bool,
+    skew: bool,
+    transform_3d: bool,
+    coordinate_space_tags: bool,
+}
+
+impl TransformCoordinateSpaceCapabilities {
+    #[must_use]
+    pub const fn supports_affine_2d(self) -> bool {
+        self.affine_2d
+    }
+
+    #[must_use]
+    pub const fn supports_transform_origin(self) -> bool {
+        self.transform_origin
+    }
+
+    #[must_use]
+    pub const fn supports_skew(self) -> bool {
+        self.skew
+    }
+
+    #[must_use]
+    pub const fn supports_transform_3d(self) -> bool {
+        self.transform_3d
+    }
+
+    #[must_use]
+    pub const fn supports_coordinate_space_tags(self) -> bool {
+        self.coordinate_space_tags
     }
 }

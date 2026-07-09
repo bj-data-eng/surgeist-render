@@ -924,6 +924,17 @@ fn renderer_reports_backend_capabilities_by_family() {
 }
 
 #[test]
+fn transform_capabilities_name_2d_origin_skew_and_coordinate_tags() {
+    let capabilities = Capabilities::VELLO_0_9.transform_coordinate_spaces();
+
+    assert!(capabilities.supports_affine_2d());
+    assert!(capabilities.supports_transform_origin());
+    assert!(capabilities.supports_skew());
+    assert!(capabilities.supports_coordinate_space_tags());
+    assert!(!capabilities.supports_transform_3d());
+}
+
+#[test]
 fn geometry_capabilities_name_boolean_offset_and_hit_test_boundaries() {
     let capabilities = Capabilities::VELLO_0_9;
 
@@ -975,6 +986,27 @@ fn unsupported_geometry_operations_report_typed_diagnostics() {
         let error = Capabilities::VELLO_0_9
             .ensure_supported(unsupported)
             .expect_err("geometry operation should be explicitly unsupported");
+        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.unsupported_primitive(), Some(unsupported));
+    }
+}
+
+#[test]
+fn unsupported_3d_transforms_report_typed_diagnostics() {
+    for operation in [
+        PrimitiveOperation::Matrix3dTransform,
+        PrimitiveOperation::PerspectiveTransform,
+        PrimitiveOperation::Rotate3dTransform,
+        PrimitiveOperation::TranslateZTransform,
+        PrimitiveOperation::ScaleZTransform,
+    ] {
+        let unsupported =
+            UnsupportedPrimitive::new(PrimitiveFamily::TransformsAndCoordinateSpaces, operation);
+
+        let error = Capabilities::VELLO_0_9
+            .ensure_supported(unsupported)
+            .expect_err("3D transforms are unsupported in this render phase");
+
         assert_eq!(error.code, ErrorCode::UnsupportedBackend);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
