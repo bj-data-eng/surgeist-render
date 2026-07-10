@@ -9606,6 +9606,158 @@ fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
 }
 
 #[test]
+fn materialized_selection_background_and_text_foreground_stay_ordered_commands() {
+    let selected_glyphs = [
+        TextGlyph::try_new(21, 4.0, 14.0, 7.0).unwrap(),
+        TextGlyph::try_new(22, 11.0, 14.0, 6.0).unwrap(),
+    ];
+    let selected_text_paint =
+        TextPaint::try_fill(Color::try_rgba(0.9, 0.96, 1.0, 1.0).unwrap().into()).unwrap();
+    let selected_run = TextRun::try_new(
+        FontRef::new(21).named("Root materialized selection text"),
+        16.0,
+        Transform::identity(),
+        selected_text_paint.clone(),
+        &selected_glyphs,
+    )
+    .unwrap();
+    let selection_background = Rect::new(2.0, 2.0, 18.0, 18.0);
+    let selection_background_paint = Color::try_rgba(0.0, 0.26, 0.72, 1.0).unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(selection_background, selection_background_paint)
+        .text_run(selected_run);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.commands.len(), 2);
+    assert_eq!(normalized.stats().fills, 1);
+    assert_eq!(normalized.stats().glyphs, 2);
+    let [
+        command::RenderCommand::Fill { shape, paint },
+        command::RenderCommand::TextRun {
+            font,
+            paint: text_paint,
+            glyphs,
+            ..
+        },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("selection bucket should remain a fill followed by selected glyphs");
+    };
+    assert_eq!(
+        shape,
+        &command::RenderShape::Rect(selection_background),
+        "selection highlight geometry is ordinary fill geometry"
+    );
+    assert_eq!(
+        paint,
+        &command::RenderPaint::Color(selection_background_paint),
+        "selection highlight paint is ordinary fill paint"
+    );
+    assert_eq!(font.id(), FontId::new(21));
+    assert_eq!(text_paint, &selected_text_paint);
+    assert_eq!(glyphs, &selected_glyphs);
+}
+
+#[test]
+fn materialized_generated_text_content_preserves_render_command_order() {
+    let before_glyphs = [TextGlyph::try_new(31, 0.0, 12.0, 5.0).unwrap()];
+    let principal_glyphs = [TextGlyph::try_new(32, 6.0, 12.0, 8.0).unwrap()];
+    let after_glyphs = [TextGlyph::try_new(33, 15.0, 12.0, 5.0).unwrap()];
+    let before = TextRun::try_new(
+        FontRef::new(31).named("Generated before"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &before_glyphs,
+    )
+    .unwrap();
+    let principal = TextRun::try_new(
+        FontRef::new(32).named("Principal text"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::try_rgba(0.1, 0.1, 0.1, 1.0).unwrap().into()).unwrap(),
+        &principal_glyphs,
+    )
+    .unwrap();
+    let after = TextRun::try_new(
+        FontRef::new(33).named("Generated after"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &after_glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_run(before).text_run(principal).text_run(after);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.stats().glyphs, 3);
+    let [
+        command::RenderCommand::TextRun {
+            font: before_font, ..
+        },
+        command::RenderCommand::TextRun {
+            font: principal_font,
+            ..
+        },
+        command::RenderCommand::TextRun {
+            font: after_font, ..
+        },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("generated and principal text should all normalize as text runs");
+    };
+    assert_eq!(before_font.id(), FontId::new(31));
+    assert_eq!(principal_font.id(), FontId::new(32));
+    assert_eq!(after_font.id(), FontId::new(33));
+}
+
+#[test]
+fn materialized_generated_image_marker_and_text_content_are_ordinary_image_text_commands() {
+    let marker_image = Image::from_rgba(
+        Size::new(2.0, 2.0),
+        Arc::<[u8]>::from([0, 0, 0, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255]),
+    )
+    .unwrap();
+    let marker_id = marker_image.id();
+    let marker_rect = Rect::new(0.0, 3.0, 4.0, 4.0);
+    let item_glyphs = [TextGlyph::try_new(41, 8.0, 14.0, 9.0).unwrap()];
+    let item_text = TextRun::try_new(
+        FontRef::new(41).named("Generated list item text"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &item_glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .image(marker_image, marker_rect, ImageFit::Contain)
+        .text_run(item_text);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.stats().images, 1);
+    assert_eq!(normalized.stats().glyphs, 1);
+    assert_eq!(normalized.stats().cache_misses, 1);
+    let [
+        command::RenderCommand::Image { image, rect, fit },
+        command::RenderCommand::TextRun { font, glyphs, .. },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("generated marker image and text should remain ordinary image/text commands");
+    };
+    assert_eq!(image.id(), marker_id);
+    assert_eq!(*rect, marker_rect);
+    assert_eq!(*fit, ImageFit::Contain);
+    assert_eq!(font.id(), FontId::new(41));
+    assert_eq!(glyphs, &item_glyphs);
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
