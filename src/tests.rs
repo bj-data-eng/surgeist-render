@@ -20,6 +20,18 @@ use std::{sync::Arc, time::Duration};
 
 use super::*;
 
+const AHEM_FONT_BYTES: &[u8] = include_bytes!("../tests/fixtures/fonts/ahem/Ahem.ttf");
+const AHEM_FONT_ID: u64 = 9001;
+const AHEM_GLYPH_X: u32 = 58;
+const AHEM_GLYPH_DESCENT_P: u32 = 82;
+const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
+
+fn ahem_font(name: &'static str) -> FontRef<'static> {
+    FontRef::new(AHEM_FONT_ID)
+        .named(name)
+        .with_data(FontData::from_bytes(AHEM_FONT_BYTES.to_vec(), 0))
+}
+
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -9441,6 +9453,89 @@ fn text_fill_paint_matches_concrete_render_paint_surface() {
 }
 
 #[test]
+fn ahem_text_run_preserves_font_data_and_stable_glyph_stream() {
+    assert_eq!(AHEM_GLYPH_X, 58);
+    assert_eq!(AHEM_GLYPH_DESCENT_P, 82);
+    assert_eq!(AHEM_GLYPH_ASCENT_E_ACUTE, 100);
+
+    let expected_glyphs = [
+        TextGlyph::try_new(AHEM_GLYPH_X, 2.0, 10.0, 10.0).unwrap(),
+        TextGlyph::try_new(AHEM_GLYPH_DESCENT_P, 14.0, 10.0, 10.0).unwrap(),
+        TextGlyph::try_new(AHEM_GLYPH_ASCENT_E_ACUTE, 26.0, 10.0, 10.0).unwrap(),
+    ];
+    let run = TextRun::try_new(
+        ahem_font("Ahem stable glyph stream"),
+        10.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &expected_glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_run(run);
+
+    let normalized = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect("Ahem text run with prepared glyphs should normalize");
+
+    let [
+        command::RenderCommand::TextRun {
+            font,
+            glyphs: encoded_glyphs,
+            ..
+        },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("Ahem text should normalize as one text run");
+    };
+    assert_eq!(font.id(), FontId::new(AHEM_FONT_ID));
+    assert!(font.data.is_some());
+    assert_eq!(encoded_glyphs, &expected_glyphs);
+}
+
+#[test]
+fn ahem_font_data_renders_ascent_and_descent_glyph_bands() {
+    let glyphs = [
+        TextGlyph::try_new(AHEM_GLYPH_ASCENT_E_ACUTE, 1.0, 9.0, 10.0).unwrap(),
+        TextGlyph::try_new(AHEM_GLYPH_DESCENT_P, 13.0, 9.0, 10.0).unwrap(),
+    ];
+    let mut scene = Scene::new();
+    scene.text_run(
+        TextRun::try_new(
+            ahem_font("Ahem ascent and descent bands"),
+            10.0,
+            Transform::identity(),
+            TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+            &glyphs,
+        )
+        .unwrap(),
+    );
+    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(25.0, 12.0))
+    else {
+        return;
+    };
+
+    assert!(
+        pixel_alpha(&output, 6, 5) > 200,
+        "E-acute gid 100 should paint the ascent band"
+    );
+    assert_eq!(
+        pixel_alpha(&output, 6, 10),
+        0,
+        "E-acute gid 100 should not paint the descent band"
+    );
+    assert!(
+        pixel_alpha(&output, 18, 10) > 200,
+        "p gid 82 should paint the descent band"
+    );
+    assert_eq!(
+        pixel_alpha(&output, 18, 5),
+        0,
+        "p gid 82 should not paint the ascent band"
+    );
+}
+
+#[test]
 fn text_decoration_line_preserves_paint_thickness_transform_and_text_order() {
     let gradient = Gradient::try_linear(
         Point::new(0.0, 12.0),
@@ -11609,7 +11704,23 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
         }
         Err(error) => panic!("render failed unexpectedly: {error:?}"),
     }
-    Some(renderer.read_headless(&surface).unwrap())
+    match renderer.read_headless(&surface) {
+        Ok(output) => Some(output),
+        Err(error)
+            if matches!(
+                error.code,
+                ErrorCode::AdapterUnavailable | ErrorCode::UnsupportedBackend
+            ) =>
+        {
+            assert!(
+                error.message.contains("headless") || error.message.contains("readback"),
+                "readback diagnostic should name the headless readback boundary: {}",
+                error.message
+            );
+            None
+        }
+        Err(error) => panic!("headless readback failed unexpectedly: {error:?}"),
+    }
 }
 
 fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {
