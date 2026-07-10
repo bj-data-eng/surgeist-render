@@ -9255,6 +9255,170 @@ fn text_shadow_run_model_preserves_text_run_and_shadow_order() {
 }
 
 #[test]
+fn zero_blur_multi_text_shadow_preserves_authored_order_but_rejects_execution() {
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 10.0, 10.0).unwrap()];
+    let run = TextRun::try_new(
+        ahem_font("Ahem ordered zero blur text shadows"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let first = Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap();
+    let second = Shadow::try_new(
+        Point::new(-2.0, 3.0),
+        0.0,
+        0.0,
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![first.clone(), second.clone()]).unwrap();
+    let text_shadow = TextShadowRun::try_new(run, shadows).unwrap();
+
+    assert_eq!(
+        text_shadow.shadows().shadows(),
+        &[first.clone(), second.clone()]
+    );
+
+    let mut scene = Scene::new();
+    scene.text_shadow_run(text_shadow);
+
+    match &scene.commands[0] {
+        scene::Command::TextShadowRun { shadows, .. } => {
+            assert_eq!(shadows.shadows(), &[first, second]);
+        }
+        command => panic!("expected stored TextShadowRun, got {command:?}"),
+    }
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("zero-blur text-shadow candidates must not emit render commands yet");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
+    assert!(error.message.contains("zero-blur solid text shadows"));
+    assert!(error.message.contains("not claimed or enabled"));
+}
+
+#[test]
+fn transformed_text_shadow_inputs_are_stored_but_not_claimed_as_shifted_glyph_execution() {
+    let text_transform = Transform::translation(4.0, 5.0)
+        .unwrap()
+        .then(Transform::skew_x(0.25).unwrap())
+        .unwrap();
+    let layer_transform = Transform::translation(10.0, -3.0).unwrap();
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 2.0, 10.0, 10.0).unwrap()];
+    let run = TextRun::try_new(
+        ahem_font("Ahem transformed text shadow"),
+        16.0,
+        text_transform,
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(2.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut scene = Scene::new();
+
+    scene.transform(layer_transform, |scene| {
+        scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
+    });
+
+    match &scene.commands[0] {
+        scene::Command::Layer { layer, children } => {
+            assert_eq!(layer.transform(), layer_transform);
+            match &children[0] {
+                scene::Command::TextShadowRun {
+                    transform, glyphs, ..
+                } => {
+                    assert_eq!(*transform, text_transform);
+                    assert_eq!(glyphs[0].id(), AHEM_GLYPH_X);
+                }
+                command => panic!("expected stored transformed TextShadowRun, got {command:?}"),
+            }
+        }
+        command => panic!("expected transformed layer, got {command:?}"),
+    }
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("transform-aware shifted glyph text-shadow execution is not implemented");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
+    assert!(error.message.contains("repeated shifted glyph draws"));
+    assert!(error.message.contains("not claimed or enabled"));
+}
+
+#[test]
+fn non_solid_or_spread_text_shadow_stays_on_glyph_alpha_offscreen_diagnostic_path() {
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(8.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap()).unwrap(),
+        ],
+    )
+    .unwrap();
+    let cases = [
+        (
+            "gradient text shadow paint",
+            Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Paint::gradient(gradient)).unwrap(),
+        ),
+        (
+            "spread text shadow",
+            Shadow::try_new(Point::new(1.0, 1.0), 0.0, 2.0, Color::BLACK).unwrap(),
+        ),
+        (
+            "blurred text shadow",
+            Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+        ),
+    ];
+
+    for (label, shadow) in cases {
+        let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 10.0, 10.0).unwrap()];
+        let run = TextRun::try_new(
+            ahem_font(label),
+            16.0,
+            Transform::identity(),
+            TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+            &glyphs,
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.text_shadow_run(
+            TextShadowRun::try_new(run, ShadowList::try_new(vec![shadow]).unwrap()).unwrap(),
+        );
+
+        let error = match scene.normalize(Capabilities::VELLO_0_9) {
+            Ok(_) => panic!("{label} should stay unsupported"),
+            Err(error) => error,
+        };
+        assert!(
+            error.message.contains("glyph-alpha/offscreen text capture"),
+            "{label} used the wrong text-shadow diagnostic: {}",
+            error.message
+        );
+        assert!(
+            !error.message.contains("zero-blur solid text shadows"),
+            "{label} should not be classified as the shifted-glyph candidate path"
+        );
+    }
+}
+
+#[test]
 fn text_shadow_run_reports_typed_unsupported_diagnostic() {
     let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 0.0, 5.0).unwrap()];
     let run = TextRun::try_new(
