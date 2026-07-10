@@ -10298,6 +10298,362 @@ fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
 }
 
 #[test]
+fn matrix_full_background_box_image_text_stack_preserves_render_order() {
+    let areas = BackgroundAreas::try_new(
+        Rect::new(0.0, 0.0, 64.0, 32.0),
+        Rect::new(4.0, 4.0, 56.0, 24.0),
+        Rect::new(8.0, 8.0, 48.0, 16.0),
+    )
+    .unwrap();
+    let background_image =
+        Image::from_rgba(Size::new(2.0, 2.0), Arc::<[u8]>::from([255; 16])).unwrap();
+    let background_layer = BackgroundLayer::new(
+        StyleImageLayer::try_new(StyleImageSource::image(background_image.clone()).unwrap())
+            .unwrap()
+            .with_origin(BackgroundBox::Content)
+            .with_clip(BackgroundBox::Padding)
+            .with_size(BackgroundSize::explicit(
+                SizeComponent::try_length(12.0).unwrap(),
+                SizeComponent::try_length(8.0).unwrap(),
+            ))
+            .with_repeat(BackgroundRepeat::no_repeat()),
+    );
+    let background = BackgroundNormalizationInput::try_new(
+        BackgroundStack::try_new(
+            Some(Color::try_rgba(0.1, 0.2, 0.3, 1.0).unwrap()),
+            vec![background_layer],
+        )
+        .unwrap(),
+        areas,
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+    let decoration = BoxDecorationInput::try_new(
+        Some(box_decoration_edges(
+            solid_border(2.0, Color::BLACK),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+            BorderSide::try_new(BorderStyle::None, 0.0, Color::BLACK).unwrap(),
+        )),
+        Some(Outline::try_new(OutlineStyle::Solid, 1.0, Color::TRANSPARENT, 1.0).unwrap()),
+        vec![
+            BoxDecorationFragment::try_new(
+                areas,
+                Radii::try_all(3.0).unwrap(),
+                BoxDecorationBreak::Slice,
+            )
+            .unwrap(),
+        ],
+    )
+    .unwrap()
+    .normalize(Capabilities::VELLO_0_9)
+    .unwrap();
+    let decoration_line = TextDecorationLine::try_solid(
+        Point::new(10.0, 24.0),
+        Point::new(42.0, 24.0),
+        1.5,
+        Transform::identity(),
+        Paint::color(Color::BLACK),
+    )
+    .unwrap();
+    let glyphs = [TextGlyph::try_new(71, 12.0, 22.0, 9.0).unwrap()];
+    let text = TextRun::try_new(
+        FontRef::new(71).named("Matrix paint stack"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            areas.border_box(),
+            Color::try_rgba(0.1, 0.2, 0.3, 1.0).unwrap(),
+        )
+        .image(
+            background_image,
+            Rect::new(8.0, 8.0, 12.0, 8.0),
+            ImageFit::Stretch,
+        )
+        .stroke(
+            areas.border_box(),
+            Stroke::try_new(2.0).unwrap(),
+            Color::BLACK,
+        )
+        .text_decoration_line(decoration_line)
+        .text_run(text);
+
+    assert_eq!(background.commands().len(), 2);
+    assert!(matches!(
+        background.commands()[0].kind(),
+        NormalizedBackgroundCommandKind::ColorFill { .. }
+    ));
+    let NormalizedBackgroundCommandKind::Layer { layer } = background.commands()[1].kind() else {
+        panic!("expected normalized image layer after background color");
+    };
+    assert_eq!(
+        background.commands()[1].clip().rect(),
+        Some(areas.padding_box())
+    );
+    assert!(matches!(
+        layer.source(),
+        NormalizedBackgroundLayerSource::Image(_)
+    ));
+    assert_eq!(layer.placement().paint_rect(), areas.content_box());
+    assert_eq!(
+        decoration
+            .commands()
+            .iter()
+            .map(|command| match command.kind() {
+                NormalizedBoxDecorationCommandKind::Border(_) => "border",
+                NormalizedBoxDecorationCommandKind::Outline(_) => "outline",
+            })
+            .collect::<Vec<_>>(),
+        ["border", "outline"]
+    );
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.stats().fills, 1);
+    assert_eq!(normalized.stats().images, 1);
+    assert_eq!(normalized.stats().strokes, 2);
+    assert_eq!(normalized.stats().glyphs, 1);
+    let [
+        command::RenderCommand::Fill { .. },
+        command::RenderCommand::Image { .. },
+        command::RenderCommand::Stroke {
+            shape: border_shape,
+            stroke: border_stroke,
+            paint: border_paint,
+        },
+        command::RenderCommand::Stroke {
+            shape: decoration_shape,
+            stroke: decoration_stroke,
+            paint: decoration_paint,
+        },
+        command::RenderCommand::TextRun { .. },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("expected fill, image, border stroke, decoration stroke, and text run in order");
+    };
+    assert_eq!(
+        border_shape,
+        &command::RenderStrokeShape::Rect(kurbo::Rect::from(areas.border_box()))
+    );
+    assert_eq!(border_stroke.width, 2.0);
+    assert_eq!(border_paint, &command::RenderPaint::Color(Color::BLACK));
+    let command::RenderStrokeShape::Path(decoration_path) = decoration_shape else {
+        panic!("expected text decoration to lower to a path stroke");
+    };
+    assert_eq!(decoration_path.elements().len(), 2);
+    assert_eq!(
+        decoration_path.elements()[0],
+        kurbo::PathEl::MoveTo(kurbo::Point::new(10.0, 24.0))
+    );
+    assert_eq!(
+        decoration_path.elements()[1],
+        kurbo::PathEl::LineTo(kurbo::Point::new(42.0, 24.0))
+    );
+    assert_eq!(decoration_stroke.width, 1.5);
+    assert_eq!(decoration_paint, &command::RenderPaint::Color(Color::BLACK));
+}
+
+#[test]
+fn matrix_full_transform_clip_opacity_image_gradient_stack_plans_layers() {
+    let image = Image::from_rgba(Size::new(2.0, 2.0), Arc::<[u8]>::from([255; 16])).unwrap();
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(10.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let outer_transform = Transform::translation(3.0, 4.0).unwrap();
+    let clip_shape = Shape::rect(Rect::new(2.0, 2.0, 18.0, 14.0));
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_transform(outer_transform).unwrap(),
+        |scene| {
+            scene.layer(Layer::new().try_clip(clip_shape).unwrap(), |scene| {
+                scene.layer(Layer::new().try_opacity(0.625).unwrap(), |scene| {
+                    scene.image(image, Rect::new(4.0, 5.0, 8.0, 6.0), ImageFit::Contain);
+                    scene.fill(
+                        Rect::new(6.0, 7.0, 10.0, 3.0),
+                        Paint::gradient(gradient.clone()),
+                    );
+                });
+            });
+        },
+    );
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+
+    assert_eq!(normalized.stats().layers, 3);
+    assert_eq!(normalized.stats().images, 1);
+    assert_eq!(normalized.stats().fills, 1);
+    let [
+        command::RenderCommand::Layer {
+            layer: transform_layer,
+            children: transform_children,
+        },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("expected transform layer at the root");
+    };
+    assert_eq!(transform_layer.transform, outer_transform);
+    assert_eq!(transform_layer.isolation, command::LayerIsolation::None);
+    let [
+        command::RenderCommand::Layer {
+            layer: clip_layer,
+            children: clip_children,
+        },
+    ] = transform_children.as_slice()
+    else {
+        panic!("expected clip layer inside transform layer");
+    };
+    assert_eq!(clip_layer.isolation, command::LayerIsolation::ClipOnly);
+    assert_eq!(
+        clip_layer.pass_plan.kind(),
+        command::LayerPassKind::ClipOnly
+    );
+    assert_eq!(
+        clip_layer
+            .pass_plan
+            .bounds()
+            .map(command::OffscreenBounds::rect),
+        Some(Rect::new(2.0, 2.0, 18.0, 14.0))
+    );
+    let [
+        command::RenderCommand::Layer {
+            layer: opacity_layer,
+            children: opacity_children,
+        },
+    ] = clip_children.as_slice()
+    else {
+        panic!("expected opacity layer inside clip layer");
+    };
+    assert_eq!(opacity_layer.opacity, 0.625);
+    assert_eq!(
+        opacity_layer.isolation,
+        command::LayerIsolation::BackendLayer
+    );
+    assert_eq!(
+        opacity_layer.pass_plan.requirement(),
+        command::LayerPassRequirement::DirectVelloOpacity
+    );
+    assert!(matches!(
+        opacity_children.as_slice(),
+        [
+            command::RenderCommand::Image { .. },
+            command::RenderCommand::Fill {
+                paint: command::RenderPaint::Gradient(_),
+                ..
+            },
+        ]
+    ));
+}
+
+#[test]
+fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
+    let filter_layer = Layer::new()
+        .try_filter(Filter::try_blur(4.0).unwrap())
+        .unwrap();
+    let mut filter_scene = Scene::new();
+    filter_scene.layer(filter_layer, |scene| {
+        scene.shadow(
+            Rect::new(0.0, 0.0, 8.0, 8.0),
+            Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+        );
+    });
+    let filter_error = filter_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("layer filters remain a typed full-stack diagnostic boundary");
+    assert_eq!(
+        filter_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::LayerFilter,
+        ))
+    );
+
+    let mut inset_shadow_scene = Scene::new();
+    inset_shadow_scene.shadow(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Shadow::try_inset(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
+    );
+    let inset_shadow_error = inset_shadow_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("inset box shadows remain a typed shadow diagnostic boundary");
+    assert_eq!(
+        inset_shadow_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::InsetBoxShadow,
+        ))
+    );
+
+    let mask_layer = Layer::new()
+        .try_mask(Shape::rect(Rect::new(0.0, 0.0, 6.0, 6.0)))
+        .unwrap();
+    let mut mask_scene = Scene::new();
+    mask_scene.layer(mask_layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    });
+    let mask_error = mask_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("authored layer masks remain a typed full-stack diagnostic boundary");
+    assert_eq!(
+        mask_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ))
+    );
+
+    let backdrop_filters = FilterList::try_ops(vec![FilterOp::opacity(
+        UnitFilterAmount::try_new(0.75).unwrap(),
+    )])
+    .unwrap();
+    let backdrop = BackdropFilterInput::try_new(
+        backdrop_filters,
+        BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 8.0)).unwrap(),
+        Some(ClipInput::try_shape(Shape::rect(Rect::new(1.0, 1.0, 6.0, 6.0))).unwrap()),
+    )
+    .unwrap();
+    let mut backdrop_scene = Scene::new();
+    backdrop_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
+    backdrop_scene.layer(
+        Layer::new()
+            .try_transform(Transform::translation(1.0, 0.0).unwrap())
+            .unwrap()
+            .try_backdrop_filter(backdrop)
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::new(1.0, 1.0, 4.0, 4.0), Color::TRANSPARENT);
+        },
+    );
+    let backdrop_error = backdrop_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("transformed backdrop stacks remain explicitly unsupported");
+    assert_eq!(
+        backdrop_error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropExecution,
+        ))
+    );
+    assert!(
+        backdrop_error
+            .message
+            .contains("transformed backdrop capture")
+    );
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
