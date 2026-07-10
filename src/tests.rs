@@ -10071,6 +10071,233 @@ fn materialized_generated_image_marker_and_text_content_are_ordinary_image_text_
 }
 
 #[test]
+fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(12.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let glyph_fill_glyphs = [TextGlyph::try_new(51, 2.0, 12.0, 7.0).unwrap()];
+    let glyph_fill = TextRun::try_new(
+        FontRef::new(51).named("Sequence 14 glyph fill"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Paint::gradient(gradient.clone())).unwrap(),
+        &glyph_fill_glyphs,
+    )
+    .unwrap();
+    let decoration = TextDecorationLine::try_solid(
+        Point::new(2.0, 16.0),
+        Point::new(22.0, 16.0),
+        1.5,
+        Transform::identity(),
+        Paint::color(Color::BLACK),
+    )
+    .unwrap();
+    let generated_image =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255])).unwrap();
+    let generated_glyphs = [TextGlyph::try_new(52, 28.0, 12.0, 6.0).unwrap()];
+    let generated = TextRun::try_new(
+        FontRef::new(52).named("Sequence 14 generated content"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &generated_glyphs,
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.0, 2.0, 26.0, 18.0),
+            Color::try_rgba(0.7, 0.82, 1.0, 1.0).unwrap(),
+        )
+        .text_run(glyph_fill)
+        .text_decoration_line(decoration)
+        .image(
+            generated_image,
+            Rect::new(24.0, 4.0, 28.0, 8.0),
+            ImageFit::Contain,
+        )
+        .text_run(generated);
+
+    let normalized = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect("implemented Sequence 14 rows should normalize as ordinary render commands");
+
+    assert_eq!(normalized.stats().fills, 1);
+    assert_eq!(normalized.stats().strokes, 1);
+    assert_eq!(normalized.stats().images, 1);
+    assert_eq!(normalized.stats().glyphs, 2);
+    let [
+        command::RenderCommand::Fill { .. },
+        command::RenderCommand::TextRun {
+            paint: glyph_paint,
+            glyphs: normalized_glyphs,
+            ..
+        },
+        command::RenderCommand::Stroke { stroke, paint, .. },
+        command::RenderCommand::Image { fit, .. },
+        command::RenderCommand::TextRun {
+            font: generated_font,
+            ..
+        },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("Sequence 14 implemented rows should keep fill/text/stroke/image/text order");
+    };
+    assert_eq!(glyph_paint.fill(), &Paint::gradient(gradient));
+    assert_eq!(normalized_glyphs, &glyph_fill_glyphs);
+    assert_eq!(stroke.width, 1.5);
+    assert_eq!(paint, &command::RenderPaint::Color(Color::BLACK));
+    assert_eq!(*fit, ImageFit::Contain);
+    assert_eq!(generated_font.id(), FontId::new(52));
+
+    let shadow_glyphs = [TextGlyph::try_new(53, 0.0, 12.0, 7.0).unwrap()];
+    let shadow_run = TextRun::try_new(
+        FontRef::new(53).named("Sequence 14 text shadow"),
+        14.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &shadow_glyphs,
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut shadow_scene = Scene::new();
+    shadow_scene.text_shadow_run(TextShadowRun::try_new(shadow_run, shadows).unwrap());
+
+    let error = shadow_scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("Sequence 14 text-shadow execution should stay explicitly diagnostic");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
+    assert!(error.message.contains("zero-blur solid text shadows"));
+}
+
+#[test]
+fn sequence14_capabilities_advertise_only_render_owned_text_behavior() {
+    let capabilities = Capabilities::VELLO_0_9;
+
+    assert!(capabilities.paint_sources().supports_solid_rgba());
+    assert!(capabilities.paint_sources().supports_gradients());
+    assert!(capabilities.paint_sources().supports_image_paint());
+    assert!(capabilities.geometry_targets().supports_rect_fill_stroke());
+    assert!(
+        capabilities
+            .geometry_targets()
+            .supports_arbitrary_path_centered_stroke()
+    );
+    assert!(capabilities.image_sampling().supports_image_fit());
+
+    assert_eq!(
+        capabilities.geometry_targets().hit_testing(),
+        HitTestOwnership::RootOwned,
+        "selection ownership must stay outside render; render only accepts materialized fills/text"
+    );
+    assert_eq!(
+        capabilities.paint_sources().symbolic_color_policy(),
+        SymbolicColorPolicy::RootResolvedOnly,
+        "generated/currentColor style resolution must stay outside render"
+    );
+    assert!(
+        !capabilities
+            .paint_sources()
+            .supports_unresolved_symbolic_colors()
+    );
+    assert!(!capabilities.paint_sources().supports_color_mix());
+    assert!(!capabilities.shadows().supports_text_shadows());
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_filter_execution()
+    );
+    assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
+
+    let text_shadow =
+        UnsupportedPrimitive::new(PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow);
+    let error = capabilities
+        .ensure_supported(text_shadow)
+        .expect_err("capabilities should not claim text-shadow execution");
+    assert_eq!(error.unsupported_primitive(), Some(text_shadow));
+}
+
+#[test]
+fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
+    assert!(!Capabilities::VELLO_0_9.shadows().supports_text_shadows());
+
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(8.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let cases = [
+        (
+            "zero blur",
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+            "zero-blur solid text shadows",
+        ),
+        (
+            "blurred glyph alpha",
+            Shadow::try_new(Point::new(1.0, 0.0), 3.0, 0.0, Color::BLACK).unwrap(),
+            "glyph-alpha/offscreen text capture",
+        ),
+        (
+            "non-solid glyph alpha",
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Paint::gradient(gradient)).unwrap(),
+            "glyph-alpha/offscreen text capture",
+        ),
+    ];
+
+    for (label, shadow, expected_message) in cases {
+        let glyphs = [TextGlyph::try_new(61, 0.0, 12.0, 7.0).unwrap()];
+        let run = TextRun::try_new(
+            FontRef::new(61).named(label),
+            14.0,
+            Transform::identity(),
+            TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+            &glyphs,
+        )
+        .unwrap();
+        let mut scene = Scene::new();
+        scene.text_shadow_run(
+            TextShadowRun::try_new(run, ShadowList::try_new(vec![shadow]).unwrap()).unwrap(),
+        );
+
+        let error = match scene.normalize(Capabilities::VELLO_0_9) {
+            Ok(_) => panic!("{label} text-shadow should stay unsupported"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::Shadows,
+                PrimitiveOperation::TextShadow,
+            ))
+        );
+        assert!(
+            error.message.contains(expected_message),
+            "{label} text-shadow used the wrong diagnostic: {}",
+            error.message
+        );
+    }
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = renderer
