@@ -9256,9 +9256,9 @@ fn text_shadow_run_model_preserves_text_run_and_shadow_order() {
 
 #[test]
 fn text_shadow_run_reports_typed_unsupported_diagnostic() {
-    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 0.0, 5.0).unwrap()];
     let run = TextRun::try_new(
-        FontRef::new(1).named("Test"),
+        ahem_font("Ahem zero blur text shadow"),
         16.0,
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
@@ -9285,7 +9285,8 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
         ))
     );
     assert!(error.message.contains("text shadow"));
-    assert!(error.message.contains("glyph-alpha/offscreen text capture"));
+    assert!(error.message.contains("zero-blur solid"));
+    assert!(error.message.contains("repeated shifted glyph draws"));
 }
 
 #[test]
@@ -9325,18 +9326,19 @@ fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
         normalize_error.unsupported_primitive(),
         capability_error.unsupported_primitive()
     );
+    assert!(normalize_error.message.contains("zero-blur solid"));
     assert!(
         normalize_error
             .message
-            .contains("glyph-alpha/offscreen text capture")
+            .contains("repeated shifted glyph draws")
     );
 }
 
 #[test]
 fn blurred_text_shadow_reports_same_typed_boundary() {
-    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 0.0, 5.0).unwrap()];
     let run = TextRun::try_new(
-        FontRef::new(1).named("Test"),
+        ahem_font("Ahem blurred text shadow"),
         16.0,
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
@@ -9363,6 +9365,58 @@ fn blurred_text_shadow_reports_same_typed_boundary() {
     );
     assert!(error.message.contains("text shadow"));
     assert!(error.message.contains("glyph-alpha/offscreen text capture"));
+}
+
+#[test]
+fn text_shadow_run_command_storage_preserves_shadow_order_font_data_and_glyphs() {
+    let glyphs = [
+        TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 10.0, 10.0).unwrap(),
+        TextGlyph::try_new(AHEM_GLYPH_DESCENT_P, 12.0, 10.0, 10.0).unwrap(),
+    ];
+    let run = TextRun::try_new(
+        ahem_font("Ahem stored text shadow"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+    )
+    .unwrap();
+    let first = Shadow::try_new(Point::new(3.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap();
+    let second = Shadow::try_new(Point::new(0.0, 4.0), 2.0, 0.0, Color::BLACK).unwrap();
+    let shadows = ShadowList::try_new(vec![first.clone(), second.clone()]).unwrap();
+    let mut scene = Scene::new();
+
+    scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
+
+    assert_eq!(scene.commands.len(), 1);
+    match &scene.commands[0] {
+        scene::Command::TextShadowRun {
+            font,
+            glyphs,
+            shadows,
+            ..
+        } => {
+            assert_eq!(font.id(), FontId::new(AHEM_FONT_ID));
+            assert_eq!(font.name.as_deref(), Some("Ahem stored text shadow"));
+            assert!(font.data.is_some());
+            assert_eq!(glyphs.len(), 2);
+            assert_eq!(glyphs[0].id(), AHEM_GLYPH_X);
+            assert_eq!(glyphs[1].id(), AHEM_GLYPH_DESCENT_P);
+            assert_eq!(shadows.shadows(), &[first, second]);
+        }
+        command => panic!("expected stored TextShadowRun, got {command:?}"),
+    }
+
+    let error = scene
+        .normalize(Capabilities::VELLO_0_9)
+        .expect_err("stored text-shadow ordering should be rejected only at normalization");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::Shadows,
+            PrimitiveOperation::TextShadow,
+        ))
+    );
 }
 
 #[test]

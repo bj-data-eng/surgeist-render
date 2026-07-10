@@ -501,7 +501,10 @@ fn normalize_commands_in_context(
                 for shadow in shadows.shadows() {
                     validate_shadow(shadow)?;
                 }
-                return Err(unsupported_text_shadow_error());
+                return Err(unsupported_text_shadow_error(plan_text_shadow_run(
+                    shadows,
+                    capabilities,
+                )));
             }
             Command::Layer { layer, children } => {
                 validate_layer(layer)?;
@@ -585,14 +588,51 @@ fn repeated_top_level_backdrop_capture_error() -> Error {
     error
 }
 
-fn unsupported_text_shadow_error() -> Error {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum TextShadowPlan {
+    SupportedZeroBlurSolid,
+    UnsupportedZeroBlurSolid,
+    UnsupportedGlyphAlphaCapture,
+}
+
+fn plan_text_shadow_run(shadows: &ShadowList, capabilities: Capabilities) -> TextShadowPlan {
+    if is_zero_blur_solid_text_shadow_subset(shadows) {
+        if capabilities.shadows().supports_text_shadows() {
+            TextShadowPlan::SupportedZeroBlurSolid
+        } else {
+            TextShadowPlan::UnsupportedZeroBlurSolid
+        }
+    } else {
+        TextShadowPlan::UnsupportedGlyphAlphaCapture
+    }
+}
+
+fn is_zero_blur_solid_text_shadow_subset(shadows: &ShadowList) -> bool {
+    shadows.shadows().iter().all(|shadow| {
+        shadow.kind() == ShadowKind::Outer
+            && shadow.blur() == 0.0
+            && shadow.spread() == 0.0
+            && matches!(shadow.paint().kind(), PaintKind::Color(_))
+    })
+}
+
+fn unsupported_text_shadow_error(plan: TextShadowPlan) -> Error {
     let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
         PrimitiveFamily::Shadows,
         PrimitiveOperation::TextShadow,
     ));
-    error
-        .message
-        .push_str(": text-shadow execution depends on glyph-alpha/offscreen text capture before blurred shadows can be composited behind text");
+    match plan {
+        TextShadowPlan::SupportedZeroBlurSolid | TextShadowPlan::UnsupportedZeroBlurSolid => {
+            error.message.push_str(
+                ": zero-blur solid text shadows could be represented as repeated shifted glyph draws behind text, but this renderer has not claimed or enabled that executable subset yet",
+            );
+        }
+        TextShadowPlan::UnsupportedGlyphAlphaCapture => {
+            error.message.push_str(
+                ": text-shadow execution depends on glyph-alpha/offscreen text capture before blurred shadows can be composited behind text",
+            );
+        }
+    }
     error
 }
 
