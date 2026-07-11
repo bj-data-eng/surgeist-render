@@ -33,7 +33,8 @@ Use these sources together:
    status and authoritative code/test evidence for all 101 rows.
 3. `plans/2026-07-10-render-root-handoff.md` defines the crate boundary and
    root responsibilities.
-4. `guidance/surgeist-rust-modeling-guide.md` defines the modeling standard.
+4. `$surgeist-agent` bundled `references/rust-modeling-guide.md` defines the
+   modeling standard.
 5. Current code and tests define the implementation being migrated, but they do
    not override a known correctness defect in this overlay.
 6. The CSS graphical-effect order follows the
@@ -510,9 +511,10 @@ This migration overlay is complete when:
 
 1. the mechanical completeness contract passes against the current ledger;
 2. the correction register agrees with current code evidence;
-3. the architecture contracts agree with the modeling guide and crate boundary;
+3. the architecture contracts agree with the canonical modeling guide and crate
+   boundary;
 4. the worktree contains only the intended planning change;
 5. a separate clean-context reviewer inspects this overlay against
-   `AGENTS.md`, the modeling guide, all source matrices/handoffs, current code
-   evidence, and the 101-row completeness requirement and returns clean with no
-   findings.
+   `AGENTS.md`, the canonical modeling guide, all source matrices/handoffs,
+   current code evidence, and the 101-row completeness requirement and returns
+   clean with no findings.
