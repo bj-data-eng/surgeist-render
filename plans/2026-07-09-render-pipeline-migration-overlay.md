@@ -95,7 +95,7 @@ This overlay does not:
 | `ImagePass` | Run a WGPU compute/render image operation such as conversion, color filtering, blur, or paint-through-mask. |
 | `CompositePass` | Apply masks, opacity, blend/composite operations, and pass results into a parent target. |
 | `ResourceManager` | Own device resources, pipeline caches, texture pools, budgets, lifetimes, and reuse. |
-| `CpuReference` | Provide deterministic semantic oracles and explicit fallback evidence; it is not the default production effect path. |
+| `CpuReference` | Provide deterministic test oracles and golden evidence; it is never a production render route. |
 | `Diagnostic` | Return the existing typed unsupported/unresolved/degraded result. |
 | `Root` | Remain outside this crate and arrive only as resolved render input. |
 
@@ -124,6 +124,9 @@ reference/readback work. Mixed frames must preserve authored paint order and
 initialize the modeled parent base exactly once; the direct-only fast path must
 remain direct. Exact pass decomposition belongs in later implementation plans.
 
+Every production pixel path executes through WGPU, either through Vello or a
+render-owned pass. The production planner never selects `CpuReference`.
+
 ### Pixel Contract
 
 Surface presentation format and intermediate working format are different
@@ -142,7 +145,8 @@ Every pass resource must explicitly name:
 The pinned Vello capture boundary introduces one straight-alpha RGBA8 boundary.
 Custom work must canonicalize that capture into a premultiplied working domain,
 avoid repeated quantization, and convert to presentation format only at final
-output. Runtime format limitations require a typed fallback or diagnostic.
+output. Runtime format limitations require an alternate GPU route or a typed
+diagnostic.
 
 CSS filter functions operate in sRGB and preserve authored order and
 per-function clamp semantics even when fused. Ordinary filter blur and backdrop
@@ -191,6 +195,7 @@ diagnostics.
 
 The production path must:
 
+- execute all pixel generation and composition through WGPU;
 - keep intermediate effect data GPU-resident;
 - maintain typed per-device pipeline/resources across frames with bounded
   lifetime and deterministic lifecycle behavior;
@@ -210,9 +215,10 @@ Separate semantic backend capabilities from runtime device capabilities:
 
 - semantic capabilities describe supported render operations and diagnostics;
 - runtime capabilities describe the actual adapter formats, storage/filtering
-  support, limits, sample support, and fallback routes;
+  support, limits, sample support, and alternate GPU routes;
 - a public semantic capability may become true only when every required runtime
-  route has a supported implementation or a typed declared fallback;
+  route has a supported GPU implementation or a typed unsupported/degraded
+  result;
 - internal pass plumbing does not by itself make a broad CSS primitive
   supported;
 - contract-only planning must remain distinguishable from executable device
@@ -220,8 +226,10 @@ Separate semantic backend capabilities from runtime device capabilities:
 
 ## Correction Register
 
-Ranges are closed over the stable IDs in this document. Later plans must update
-a correction mapping when a route gains or loses a consumer.
+Ranges are closed over the stable IDs in this document. This register is the
+sole authoritative correction-to-row mapping; row target-route cells do not
+duplicate correction IDs. Later plans must update this register when a route
+gains or loses a consumer.
 
 | ID | Affected rows | Required migration correction |
 | --- | --- | --- |
@@ -230,7 +238,7 @@ a correction mapping when a route gains or loses a consumer.
 | `COR-03` | `SHD-04`, `FLT-02..FLT-10`, `FLT-12..FLT-14`, `BDP-01`, `BDP-02`, `MSK-05`, `XFM-01`, `XFM-03`, `XFM-05`, `BEP-03..BEP-08` | Preserve effect-space semantics and raster quality under transforms; correct drop-shadow order, subpixel offsets, and expanded bounds. |
 | `COR-04` | `TXT-01`, `MSK-05`, `BEP-03` | Use real glyph ink bounds for bounds-dependent effects rather than requiring incidental clips or relying on advances. |
 | `COR-05` | `SHD-04`, `FLT-02..FLT-10`, `FLT-12`, `BDP-01`, `BDP-02`, `MSK-05`, `BEP-02..BEP-07` | Remove synchronous production readback, per-effect cache recreation, CPU materialization, and image reupload from migrated routes. |
-| `COR-06` | `DIA-02`, `DIA-05`, `BEP-02..BEP-07` | Separate semantic support claims from runtime adapter capabilities and typed fallback/degradation. |
+| `COR-06` | `DIA-02`, `DIA-05`, `BEP-02..BEP-07` | Separate semantic support claims from runtime adapter capabilities, alternate GPU routes, and typed degradation. |
 | `COR-07` | `SHD-04`, `FLT-02..FLT-10`, `FLT-12..FLT-14`, `BDP-01`, `BDP-02`, `MSK-05`, `BEP-03..BEP-08` | Add missing cross-route quality coverage for AA, capture grids, transforms, base colors, and effect parity. |
 | `COR-08` | `SHD-04`, `FLT-01`, `FLT-02..FLT-10`, `FLT-12..FLT-14`, `BDP-02`, `BEP-04`, `BEP-05`, `BEP-07`, `BEP-08` | Model CSS filter sRGB/clamp semantics and distinct ordinary versus backdrop edge behavior; keep byte-reference evidence separate from the semantic oracle. |
 
@@ -319,7 +327,7 @@ one-to-one from the reconciliation ledger.
 | `SHD-01` | Outer box shadow | Supported | Preserve | `Normalize -> VelloDirect` for current supported shapes | `G1`, `G2`, `G4`, `G6` |
 | `SHD-02` | Inset box shadow | Diagnostic | HoldDiagnostic | `Diagnostic`; later `VelloCapture -> ImagePass -> CompositePass` | `G1`, `G8` |
 | `SHD-03` | Multiple shadows | Supported | Preserve | Ordered `VelloDirect` commands | `G1`, `G2`, `G6` |
-| `SHD-04` | Drop shadow filter | Supported | Correct | `VelloCapture/Image source -> ImagePass -> CompositePass`; apply `COR-03` and `COR-08` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `SHD-04` | Drop shadow filter | Supported | Correct | `VelloCapture/Image source -> ImagePass -> CompositePass` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `SHD-05` | Text shadow | Diagnostic | HoldDiagnostic | `Diagnostic`; later glyph-alpha `VelloCapture -> ImagePass` | `G1`, `G8` |
 | `SHD-06` | Non-solid shadow paint | Diagnostic | HoldDiagnostic | `Diagnostic`; later blurred alpha plus render paint evaluation | `G1`, `G8` |
 
@@ -328,26 +336,26 @@ one-to-one from the reconciliation ledger.
 | ID | Reconciled row | Current | Disposition | Target route | Gates |
 | --- | --- | --- | --- | --- | --- |
 | `FLT-01` | Filter list model | Supported | Preserve | `Normalize` to ordered pass intents with typed sRGB function and edge policies | `G1`, `G6` |
-| `FLT-02` | Blur | Supported | Migrate | `VelloCapture/Image source -> ImagePass`; apply `COR-02`, `COR-03`, and `COR-08` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `FLT-02` | Blur | Supported | Migrate | `VelloCapture/Image source -> ImagePass` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-03` | Brightness | Supported | Migrate | sRGB color `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-04` | Contrast | Supported | Migrate | sRGB color `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
-| `FLT-05` | Grayscale | Supported | Correct | sRGB color `ImagePass`; apply `COR-08` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `FLT-05` | Grayscale | Supported | Correct | sRGB color `ImagePass` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-06` | Hue rotate | Supported | Migrate | sRGB color `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-07` | Invert | Supported | Migrate | sRGB color `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-08` | Opacity filter | Supported | Migrate | ordered sRGB/alpha `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-09` | Saturate | Supported | Migrate | sRGB color `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-10` | Sepia | Supported | Migrate | sRGB color `ImagePass`; semantic oracle | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `FLT-11` | URL/SVG/reference filter | Diagnostic | HoldDiagnostic | `Diagnostic`; resolved filter graph requires separate model and plan | `G1`, `G8` |
-| `FLT-12` | Filter fusion | Supported | Correct | ordered fused `ImagePass`; apply `COR-08` | `G1`, `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
-| `FLT-13` | Filter region/outsets | Supported | Correct | `Normalize` explicit source, execution, clip, and device bounds; apply `COR-02` and `COR-03` | `G1`, `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
-| `FLT-14` | Software/reference fallback | Supported | Correct | `CpuReference` semantic oracle and explicit fallback; apply `COR-08` | `G1`, `G3`, `G4`, `G7`, `G8` |
+| `FLT-12` | Filter fusion | Supported | Correct | ordered fused `ImagePass` | `G1`, `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `FLT-13` | Filter region/outsets | Supported | Correct | `Normalize` explicit source, execution, clip, and device bounds | `G1`, `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `FLT-14` | Software/reference fallback | Supported | Correct | `CpuReference` oracle only; remove production software fallback selection | `G1`, `G3`, `G4`, `G7`, `G8` |
 
 ### Backdrop Filters
 
 | ID | Reconciled row | Current | Disposition | Target route | Gates |
 | --- | --- | --- | --- | --- | --- |
 | `BDP-01` | Backdrop capture | Supported | Correct | `VelloCapture` from completed prior content with explicit backdrop root, signed device mapping, and bounded temporary | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
-| `BDP-02` | Backdrop filter chain | Supported | Correct | `VelloCapture -> ImagePass -> CompositePass`; apply `COR-01`, `COR-03`, and `COR-08` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `BDP-02` | Backdrop filter chain | Supported | Correct | `VelloCapture -> ImagePass -> CompositePass` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `BDP-03` | Backdrop isolation | Diagnostic | HoldDiagnostic | `Diagnostic` until backdrop-root and nested completion semantics are modeled | `G1`, `G8` |
 | `BDP-04` | Root backdrop policy | Diagnostic | HoldDiagnostic | `Diagnostic`; root/host policy remains explicit | `G1`, `G8` |
 
@@ -388,7 +396,7 @@ one-to-one from the reconciliation ledger.
 
 | ID | Reconciled row | Current | Disposition | Target route | Gates |
 | --- | --- | --- | --- | --- | --- |
-| `TXT-01` | Glyph fill paint | Supported | Preserve | `VelloDirect`; provide/derive effect bounds under `COR-04` | `G1`, `G2`, `G4` |
+| `TXT-01` | Glyph fill paint | Supported | Preserve | `VelloDirect`; provide or derive effect bounds | `G1`, `G2`, `G4` |
 | `TXT-02` | Text decoration paint | Supported | Preserve | `Normalize -> VelloDirect` bounded stroke geometry | `G1`, `G2`, `G4` |
 | `TXT-03` | Text shadow | Diagnostic | HoldDiagnostic | `Diagnostic`; later glyph-alpha capture path | `G1`, `G8` |
 | `TXT-04` | Selection paint bucket | DeferredToRoot | HoldRoot | `Root` materializes ordinary commands | `G1`, `G8` |
@@ -408,10 +416,10 @@ one-to-one from the reconciliation ledger.
 | ID | Reconciled row | Current | Disposition | Target route | Gates |
 | --- | --- | --- | --- | --- | --- |
 | `DIA-01` | Unsupported primitive diagnostics | Supported | Preserve | `Diagnostic` at normalization/planning boundary | `G1`, `G8` |
-| `DIA-02` | Backend capability matrix | Supported | Migrate | Preserve semantic capabilities and add lifecycle-aware runtime device capabilities under `COR-06` | `G1`, `G5`, `G7`, `G8` |
+| `DIA-02` | Backend capability matrix | Supported | Migrate | `ResourceManager`; preserve semantic capabilities and add lifecycle-aware runtime capability reporting | `G1`, `G5`, `G7`, `G8` |
 | `DIA-03` | Unresolved resource diagnostics | Supported | Preserve | `Diagnostic` before execution | `G1`, `G8` |
 | `DIA-04` | Invalid value diagnostics | Supported | Preserve | Typed construction/normalization failure | `G1`, `G8` |
-| `DIA-05` | Degraded-quality diagnostics | Supported | Preserve | Typed quality/fallback evidence from planner/executor | `G1`, `G3`, `G5`, `G7`, `G8` |
+| `DIA-05` | Degraded-quality diagnostics | Supported | Preserve | Typed quality and alternate-GPU-route evidence from planner/executor | `G1`, `G3`, `G5`, `G7`, `G8` |
 
 ### Backend Pipeline Requirements
 
@@ -421,10 +429,10 @@ one-to-one from the reconciliation ledger.
 | `BEP-02` | Texture cache/upload | Supported | Migrate | Preserve direct-path image-cache behavior and add a persistent per-device `ResourceManager` for pass resources | `G1`, `G2`, `G5`, `G7`, `G8` |
 | `BEP-03` | Offscreen layer renderer | Diagnostic | Enable | Bounded `VelloCapture`; capability changes only after complete supported contract | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `BEP-04` | Fullscreen/rect shader pass | Diagnostic | Enable | Real bounded `ImagePass` pipelines, source bindings, samplers, mappings, and pipeline cache | `G3`, `G4`, `G5`, `G7`, `G8` |
-| `BEP-05` | Separable blur pass | FutureRender | Enable | high-precision `ImagePass`; apply `COR-03` and `COR-08` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `BEP-05` | Separable blur pass | FutureRender | Enable | high-precision `ImagePass` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
 | `BEP-06` | Mask compositor | Diagnostic | HoldDiagnostic | Internal alpha-mask `CompositePass` may land first; broad capability stays false until all claimed mask inputs execute | `G1`, `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
-| `BEP-07` | Backdrop compositor | Supported | Correct | GPU-resident capture/filter/clip/foreground-combine/outer-effect/composite chain | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
-| `BEP-08` | CPU reference path | Supported | Correct | `CpuReference` semantic oracle and explicit fallback; apply `COR-03` and `COR-08` | `G1`, `G3`, `G4`, `G7`, `G8` |
+| `BEP-07` | Backdrop compositor | Supported | Correct | `VelloCapture -> ImagePass -> CompositePass` | `G3`, `G4`, `G5`, `G6`, `G7`, `G8` |
+| `BEP-08` | CPU reference path | Supported | Correct | `CpuReference` test oracle only; never production execution | `G1`, `G3`, `G4`, `G7`, `G8` |
 
 ## Property Cross-Reference Preservation Rule
 
@@ -493,6 +501,7 @@ Before this overlay or a later revision is accepted, also verify:
 - no public support claim is inferred from internal pass plumbing;
 - supported target routes receive executable verification rather than skipped
   coverage;
+- no production route selects `CpuReference` or performs CPU pixel rendering;
 - no backwards compatibility shim is required.
 
 ## Overlay Completion
