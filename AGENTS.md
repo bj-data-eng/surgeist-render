@@ -1,119 +1,80 @@
-# Crate Agent Guide
+# surgeist-render Repository Guide
 
-Use this guide for automated work inside a single Surgeist crate repo.
+Use `$surgeist-agent` for every task in this repository.
 
-## Crate Role
+## Authority Split
 
-This repo owns one Surgeist crate. Keep work inside this crate unless the user
-or root coordinator explicitly directs otherwise.
+This file is the leaf repository's committed discovery entry point. It owns the
+mapping from mutable leaf facts to authoritative sources, the intended crate and
+architecture boundary, and the configured local command inventory. The sources
+named below own their current values.
 
-Before starting, identify the crate name from `Cargo.toml` and read the local
-`README.md`, active plan, and any referenced guidance files. Treat root-authored
-plans as the source of task scope for cross-crate work.
+`$surgeist-agent` is the sole Surgeist workflow authority. It owns scope control,
+planning, debugging and TDD, worker/reviewer gates, external-software permission,
+the absolute unsafe prohibition, Git landing and publication, and
+cross-repository handoffs. This file does not redefine those workflows or grant
+authority to mutate, install, commit, or publish.
 
-## Boundaries
+Resolve an apparent conflict by domain: use this file and the sources below for
+mutable repository facts; use `$surgeist-agent` for workflow.
+Higher-priority user and system instructions still apply. Do not import another
+general development workflow.
 
-- Do not edit sibling crate repos from this crate project.
-- Do not update root `surgeist` submodule pointers from this crate project.
-- If another crate blocks this work, report the blocker with reproduction steps,
-  expected behavior, observed behavior, affected APIs/files, and commands run.
-- Keep public APIs intentional and crate-owned. Do not reach through sibling
-  private module paths.
-- Generated files are owned by their generator. Regenerate them with the
-  documented command instead of hand-editing output.
+## Repository Identity And Ownership
 
-## Plans
+`surgeist-render` is an independent leaf repository. It owns its manifest,
+rendering domain implementation, public front door, focused tests and docs,
+commits, and published `main` candidate.
 
-Plans for this crate go in `plans/` at this repo root. This repo-local plan
-location intentionally overrides Superpowers default paths such as
-`docs/superpowers/plans`. Root-authored plans may be drafted in the root repo
-and then copied here for crate-local execution.
+Root `surgeist` owns the facade and public composition, cross-crate adapters,
+root integration tests and tools, the gitlink, and the API generator and
+artifacts. A parent workspace, Codex project, task, branch, or worktree does not
+change repository ownership.
 
-## Coordinator Workflow
+## Discover The Current Structure
 
-Crate coordinators coordinate first. They assign, verify, reconcile, and
-integrate; they do not default to editing implementation code themselves.
+Read these sources for current facts; do not substitute a cached root roster or
+descriptive crate list for them.
 
-For code changes, follow this sequence unless the user explicitly waives it:
+| Fact | Authoritative source |
+| --- | --- |
+| Package identity, edition, dependencies, features, and targets | `Cargo.toml` |
+| Public front door | `src/lib.rs` and its reexports |
+| Implemented behavior and crate boundary | `README.md` and `src/` |
+| Focused verification | Tracked `#[cfg(test)]` modules and, when present, `tests/` and fixtures |
+| Additional local commands | Cargo targets and features in `Cargo.toml` and `README.md`; task runner and CI when present |
+| Root integration MSRV, repository URL, and compatible pin | Root `Cargo.toml`, root `.gitmodules`, and root's committed gitlink for `crates/surgeist-render`, when root integration is in scope |
 
-1. Check crate status before work begins.
-2. Confirm the work belongs in this crate.
-3. If executing an implementation plan, split it into sequential tasks and
-   assign workers one task or tightly coupled task group at a time.
-4. Assign one implementation worker to the current scoped task.
-5. Wait for the worker's result, including reported tests and git status.
-6. Assign a separate reviewer to inspect the worker's scoped changes before
-   moving to the next task.
-7. Reconcile worker and reviewer findings before assigning follow-up work.
-8. After a scoped task's worker/reviewer cycle is clean, run the relevant
-   focused check and commit that task as a traceable logical point.
-9. After all scoped tasks are complete, assign a final holistic reviewer to
-   inspect the complete result against the plan, crate boundary, tests, and git
-   diff.
-10. Run this crate's final focused checks.
-11. Push when another repo/thread must fetch the commit, when root needs a
-    submodule pointer update, or when the user requested publication.
-12. Report completion or blockers back to the root coordinator when root
-    integration or pointer updates are needed.
+When these sources disagree, report the exact paths and revisions. Do not guess,
+silently update another document, or widen the task to reconcile them.
 
-During plan execution, assign one clear scoped task to each worker. Tell workers
-they are not alone in the codebase and must not revert others' work.
+## Crate Boundary
 
-Do not fork any conversation context into workers or reviewers. Provide only the
-scoped task prompt, relevant files, commands, and constraints.
+`surgeist-render` owns rendering contracts and backend-facing draw data. It
+excludes style, layout, and text interpretation and application and window
+lifecycle.
 
-Do not declare a multi-task implementation plan complete until task-scoped
-worker/reviewer cycles and the final holistic review are clean.
+Surgeist-to-Surgeist lowering and adapters belong to root. Sibling internals are
+not this repository's surface.
 
-## Direct Coordinator Edits
+## API Artifacts
 
-The coordinator may directly edit crate-local planning, documentation,
-requirements, or workflow files when the user explicitly asks for that change.
+Source in this repository is authoritative. Root `surgeist` owns the only API
+generator and all generated API audit artifacts. This leaf carries no copies.
 
-Crate code changes still count as code changes and must go through the worker
-and reviewer gate unless the user explicitly waives review.
+## Command Inventory
 
-## Testing
-
-Use the crate's active plan, README, task runner, or local scripts for
-crate-specific checks. Baseline commands:
+These commands describe local verification capability; `$surgeist-agent`
+determines their exact gate, order, feature matrix, and whether already-present
+tooling can run without unauthorized acquisition.
 
 ```sh
+cargo check -p surgeist-render
 cargo test -p surgeist-render
-cargo clippy -p surgeist-render --all-targets -- -D warnings
+cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
 cargo fmt --check
 ```
 
-Do not assume `--all-features` is valid when features are mutually exclusive,
-host-specific, backend-specific, or generator-only.
-
-If a broad check is skipped, name the reason in the task output.
-
-## Git Hygiene
-
-- Use `apply_patch` for manual edits.
-- Prefer `rg` and `rg --files`.
-- Check status before and after edits: `git status --short --branch`.
-- Review `git diff --stat` and the relevant detailed diff before committing.
-- Do not rewrite unrelated files or revert user changes unless explicitly asked.
-- Do not create or switch branches for ordinary Surgeist work. Use the current
-  `main` branch and sequential task-scoped commits unless the user explicitly
-  asks for a branch or worktree.
-- Keep `.venv/`, `target/`, `build/`, `dist/`, secrets, editor residue, and
-  runtime residue out of git.
-- Commit logical points with short, concrete messages.
-- Push only when requested, when handing work to another repo/thread, or when
-  root needs a fetchable commit for pointer updates.
-
-## Engineering Guidance
-
-When a plan asks for modeling, API, dependency, generated-artifact, unsafe, or
-cross-crate boundary review, use the guidance file referenced by that plan. If
-no file is referenced and the work changes Rust models, use:
-
-```text
-guidance/surgeist-rust-modeling-guide.md
-```
-
-Plans should carry the detailed engineering context needed for their task. This
-file is only the standing crate-local workflow contract.
+Discovery is complete when the owning repository, public front door, dependency
+and feature facts, verification sources, API-artifact owner, and applicable
+command inventory are identified from the sources above.
