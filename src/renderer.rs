@@ -1,8 +1,4 @@
-#[cfg(any(
-    test,
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
+#[cfg(test)]
 use super::gpu_transaction::GpuOperationTransaction;
 #[cfg(any(
     feature = "render-window",
@@ -24,41 +20,6 @@ use std::{
     collections::HashSet,
     time::{Duration, Instant},
 };
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-const PRESENTED_SETUP_STEPS: [PresentedSetupStep; 3] = [
-    PresentedSetupStep::Allocation,
-    PresentedSetupStep::Configure,
-    PresentedSetupStep::Renderer,
-];
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-#[derive(Clone, Copy)]
-enum PresentedSetupStep {
-    Allocation,
-    Configure,
-    Renderer,
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-impl PresentedSetupStep {
-    const fn stage(self) -> GpuOperationStage {
-        match self {
-            Self::Allocation => GpuOperationStage::SurfaceCreate,
-            Self::Configure => GpuOperationStage::SurfaceConfigure,
-            Self::Renderer => GpuOperationStage::RendererCreate,
-        }
-    }
-}
 
 pub struct Renderer {
     identity: RendererIdentity,
@@ -119,10 +80,15 @@ impl Renderer {
                     ));
                 };
                 let physical_size = physical_size(options.size, options.scale)?;
-                let raw_surface = backend
+                let surface = backend
                     .context
-                    .instance
-                    .create_surface(handle.clone())
+                    .create_surface(
+                        handle.clone(),
+                        physical_size.width(),
+                        physical_size.height(),
+                        options.present_mode.into(),
+                    )
+                    .await
                     .map_err(|source| {
                         Error::new(
                             BackendErrorCode::SurfaceCreateFailed,
@@ -130,26 +96,18 @@ impl Renderer {
                         )
                         .with_source(source)
                     })?;
-                let device_slot = backend
-                    .context
-                    .device(Some(&raw_surface))
-                    .await
-                    .ok_or_else(|| {
-                        Error::new(
-                            BackendErrorCode::AdapterUnavailable,
-                            "no compatible wgpu adapter is available for the native surface",
-                        )
-                    })?;
-                let device_identity = backend.device_slot_identity(device_slot)?;
-                let surface = create_presented_surface(
+                let device_identity = backend.device_slot_identity(surface.dev_id)?;
+                if let Some(error) =
+                    backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
+                {
+                    return Err(error);
+                }
+                ensure_vello_renderer(
                     backend,
-                    raw_surface,
-                    physical_size,
-                    options.present_mode,
                     self.options,
                     device_identity,
-                )
-                .await?;
+                    RuntimeOperation::AdapterSelection,
+                )?;
                 Ok(Surface::with_backend(
                     Attachment::Window(handle),
                     options,
@@ -185,10 +143,15 @@ impl Renderer {
             ));
         };
         let physical_size = physical_size(options.size, options.scale)?;
-        let raw_surface = backend
+        let surface = backend
             .context
-            .instance
-            .create_surface(html_canvas)
+            .create_surface(
+                html_canvas,
+                physical_size.width(),
+                physical_size.height(),
+                options.present_mode.into(),
+            )
+            .await
             .map_err(|source| {
                 Error::new(
                     BackendErrorCode::SurfaceCreateFailed,
@@ -196,26 +159,18 @@ impl Renderer {
                 )
                 .with_source(source)
             })?;
-        let device_slot = backend
-            .context
-            .device(Some(&raw_surface))
-            .await
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::AdapterUnavailable,
-                    "no compatible WebGPU adapter is available for the canvas surface",
-                )
-            })?;
-        let device_identity = backend.device_slot_identity(device_slot)?;
-        let surface = create_presented_surface(
+        let device_identity = backend.device_slot_identity(surface.dev_id)?;
+        if let Some(error) =
+            backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
+        {
+            return Err(error);
+        }
+        ensure_vello_renderer(
             backend,
-            raw_surface,
-            physical_size,
-            options.present_mode,
             self.options,
             device_identity,
-        )
-        .await?;
+            RuntimeOperation::AdapterSelection,
+        )?;
         Ok(Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
@@ -1352,188 +1307,6 @@ fn backdrop_execution_error() -> Error {
         ": backdrop capture was planned during normalization but render-time backdrop execution is not implemented",
     );
     error
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-async fn create_presented_surface<'surface>(
-    backend: &mut Backend,
-    surface: wgpu::Surface<'surface>,
-    physical_size: PhysicalSize,
-    present_mode: PresentMode,
-    options: Options,
-    device_identity: DeviceSlotIdentity,
-) -> Result<vello::util::RenderSurface<'surface>> {
-    let slot = device_identity.slot();
-    let device_handle = backend.context.devices.get(slot).ok_or_else(|| {
-        Error::new(
-            BackendErrorCode::SurfaceCreateFailed,
-            "compatible Vello device slot disappeared before presented surface setup",
-        )
-    })?;
-    let format = surface
-        .get_capabilities(device_handle.adapter())
-        .formats
-        .into_iter()
-        .find(|format| {
-            matches!(
-                format,
-                wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
-            )
-        })
-        .ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::SurfaceCreateFailed,
-                "surface does not support Rgba8Unorm or Bgra8Unorm presentation",
-            )
-        })?;
-    let config = wgpu::SurfaceConfiguration {
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-        format,
-        width: physical_size.width(),
-        height: physical_size.height(),
-        present_mode: present_mode.into(),
-        desired_maximum_frame_latency: 2,
-        alpha_mode: wgpu::CompositeAlphaMode::Auto,
-        view_formats: vec![],
-    };
-
-    let mut allocation = None;
-    orchestrate_presented_setup(backend, device_identity, |backend, _, step| match step {
-        PresentedSetupStep::Allocation => {
-            let device = &backend
-                .context
-                .devices
-                .get(slot)
-                .ok_or_else(|| {
-                    Error::new(
-                        BackendErrorCode::SurfaceCreateFailed,
-                        "compatible Vello device slot disappeared during target allocation",
-                    )
-                })?
-                .device;
-            let target_texture = device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Surgeist presented Vello target"),
-                size: wgpu::Extent3d {
-                    width: physical_size.width(),
-                    height: physical_size.height(),
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                view_formats: &[],
-            });
-            let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let blitter = wgpu::util::TextureBlitter::new(device, format);
-            allocation = Some((target_texture, target_view, blitter));
-            Ok(())
-        }
-        PresentedSetupStep::Configure => {
-            surface.configure(
-                &backend
-                    .context
-                    .devices
-                    .get(slot)
-                    .ok_or_else(|| {
-                        Error::new(
-                            BackendErrorCode::SurfaceConfigureFailed,
-                            "compatible Vello device slot disappeared before surface configuration",
-                        )
-                    })?
-                    .device,
-                &config,
-            );
-            Ok(())
-        }
-        PresentedSetupStep::Renderer => ensure_vello_renderer(
-            backend,
-            options,
-            device_identity,
-            RuntimeOperation::AdapterSelection,
-        ),
-    })
-    .await?;
-    let (target_texture, target_view, blitter) = allocation.ok_or_else(|| {
-        Error::new(
-            BackendErrorCode::SurfaceCreateFailed,
-            "presented setup completed without allocating a render target",
-        )
-    })?;
-
-    Ok(vello::util::RenderSurface {
-        surface,
-        config,
-        dev_id: slot,
-        format,
-        target_texture,
-        target_view,
-        blitter,
-    })
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-async fn orchestrate_presented_setup(
-    backend: &mut Backend,
-    device_identity: DeviceSlotIdentity,
-    mut work: impl FnMut(&mut Backend, &GpuOperationTransaction, PresentedSetupStep) -> Result<()>,
-) -> Result<()> {
-    for step in PRESENTED_SETUP_STEPS {
-        let transaction = backend.begin_gpu_operation(
-            device_identity,
-            step.stage(),
-            RuntimeOperation::AdapterSelection,
-        )?;
-        let work_result = work(backend, &transaction, step);
-        let scope_result = transaction.finish(RuntimeOperation::AdapterSelection).await;
-        backend.observe_device_terminal(device_identity);
-        scope_result?;
-        work_result?;
-    }
-    Ok(())
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl Renderer {
-    pub(crate) async fn presented_setup_transaction_stages_for_test(
-        &mut self,
-    ) -> Result<[GpuOperationStage; 3]> {
-        let device_identity = self.default_device.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
-                "presented setup orchestration coverage requires a host adapter",
-            )
-        })?;
-        let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
-                "presented setup orchestration coverage requires a host adapter",
-            )
-        })?;
-        let mut observed = [GpuOperationStage::Render; 3];
-        let mut index = 0;
-        orchestrate_presented_setup(backend, device_identity, |backend, transaction, step| {
-            assert_eq!(transaction.stage_for_test(), step.stage());
-            assert!(
-                backend
-                    .active_operation_generation_for_test(device_identity)
-                    .is_some(),
-                "each presented setup step must run under an active GPU transaction"
-            );
-            observed[index] = step.stage();
-            index += 1;
-            Ok(())
-        })
-        .await?;
-        Ok(observed)
-    }
 }
 
 /// Renderer configuration that is fixed when a [`Renderer`] is created.

@@ -11257,10 +11257,6 @@ fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stag
             GpuOperationStage::RendererCreate,
             BackendErrorCode::RendererCreateFailed,
         ),
-        (
-            GpuOperationStage::SurfaceConfigure,
-            BackendErrorCode::SurfaceConfigureFailed,
-        ),
         (GpuOperationStage::Render, BackendErrorCode::RenderFailed),
         (GpuOperationStage::Present, BackendErrorCode::PresentFailed),
     ];
@@ -11282,24 +11278,6 @@ fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stag
                 }
             );
         }
-    }
-}
-
-#[test]
-fn presented_setup_assigns_each_device_owned_step_to_a_transaction_stage() {
-    #[cfg(feature = "render-window")]
-    {
-        let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-        let stages = pollster::block_on(renderer.presented_setup_transaction_stages_for_test())
-            .expect("presented setup orchestration requires a host adapter");
-        assert_eq!(
-            stages,
-            [
-                GpuOperationStage::SurfaceCreate,
-                GpuOperationStage::SurfaceConfigure,
-                GpuOperationStage::RendererCreate,
-            ]
-        );
     }
 }
 
