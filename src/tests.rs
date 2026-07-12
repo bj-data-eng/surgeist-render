@@ -13459,6 +13459,7 @@ struct PinnedVelloCharacterizationCase {
     ahem_descent_ink: [u8; 4],
     solid_edge: AlphaSupport,
     stroke_edge: AlphaSupport,
+    transformed_placement: AlphaSupport,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -13479,6 +13480,7 @@ struct PinnedVelloVariation {
     gradient_right: [u8; 2],
     solid_edge: AlphaSupport,
     stroke_edge: AlphaSupport,
+    transformed_placement: AlphaSupport,
 }
 
 // Each row is `{AA, scale, physical dimensions, stroke alpha, gradient left/right,
@@ -13494,6 +13496,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [32, 223],
             edge(2, 2, 10, 10, 575, 575),
             edge(12, 0, 24, 12, 1824, 624),
+            edge(54, 17, 61, 23, 5750, 2000),
         ),
     ),
     pinned_vello_case(
@@ -13506,6 +13509,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [32, 223],
             edge(2, 2, 12, 12, 731, 731),
             edge(15, 0, 30, 15, 2293, 793),
+            edge(67, 21, 77, 29, 7199, 2511),
         ),
     ),
     pinned_vello_case(
@@ -13518,6 +13522,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [24, 231],
             edge(4, 4, 20, 20, 1200, 1200),
             edge(25, 1, 49, 25, 3699, 1300),
+            edge(108, 34, 123, 47, 11550, 4050),
         ),
     ),
     pinned_vello_case(
@@ -13530,6 +13535,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [32, 223],
             edge(2, 2, 10, 10, 575, 575),
             edge(12, 0, 24, 12, 1824, 624),
+            edge(54, 17, 61, 23, 5750, 2000),
         ),
     ),
     pinned_vello_case(
@@ -13542,6 +13548,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [32, 223],
             edge(2, 2, 12, 12, 737, 730),
             edge(16, 1, 30, 15, 2299, 796),
+            edge(67, 21, 77, 29, 7200, 2511),
         ),
     ),
     pinned_vello_case(
@@ -13554,6 +13561,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [24, 231],
             edge(4, 4, 20, 20, 1200, 1200),
             edge(25, 1, 49, 25, 3700, 1300),
+            edge(108, 34, 123, 47, 11550, 4050),
         ),
     ),
     pinned_vello_case(
@@ -13566,6 +13574,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [32, 223],
             edge(2, 2, 10, 10, 575, 575),
             edge(12, 0, 24, 12, 1824, 624),
+            edge(54, 17, 61, 23, 5750, 2000),
         ),
     ),
     pinned_vello_case(
@@ -13578,6 +13587,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [32, 223],
             edge(2, 2, 12, 12, 731, 731),
             edge(15, 0, 30, 15, 2293, 794),
+            edge(67, 21, 77, 29, 7200, 2511),
         ),
     ),
     pinned_vello_case(
@@ -13590,6 +13600,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             [24, 231],
             edge(4, 4, 20, 20, 1200, 1200),
             edge(25, 1, 49, 25, 3700, 1300),
+            edge(108, 34, 123, 47, 11550, 4050),
         ),
     ),
 ];
@@ -13629,6 +13640,7 @@ const fn pinned_vello_case(
         ahem_descent_ink: [0, 0, 0, 255],
         solid_edge: variation.solid_edge,
         stroke_edge: variation.stroke_edge,
+        transformed_placement: variation.transformed_placement,
     }
 }
 
@@ -13639,6 +13651,7 @@ const fn variation(
     gradient_right: [u8; 2],
     solid_edge: AlphaSupport,
     stroke_edge: AlphaSupport,
+    transformed_placement: AlphaSupport,
 ) -> PinnedVelloVariation {
     PinnedVelloVariation {
         physical_dimensions,
@@ -13647,6 +13660,7 @@ const fn variation(
         gradient_right,
         solid_edge,
         stroke_edge,
+        transformed_placement,
     }
 }
 
@@ -13699,7 +13713,7 @@ fn pinned_vello_characterization_cases_are_source_readable() {
             .expect("pinned Vello characterization must read the rendered headless surface");
         observed.push(observe_pinned_vello_characterization(
             antialiasing,
-            scale,
+            &surface,
             &output,
         ));
     }
@@ -13714,7 +13728,6 @@ fn pinned_vello_characterization_cases_are_source_readable() {
         configurations.len(),
         "the pinned table must cover every AA/scale Cartesian pair"
     );
-
     for (actual, expected) in observed.iter().zip(PINNED_VELLO_CHARACTERIZATION_CASES) {
         assert_pinned_vello_characterization_case(*actual, *expected);
     }
@@ -13781,15 +13794,34 @@ fn pinned_vello_characterization_scene() -> Scene {
 
 fn observe_pinned_vello_characterization(
     antialiasing: Antialiasing,
-    scale: f64,
+    surface: &Surface,
     image: &ImageBuffer,
 ) -> PinnedVelloCharacterizationCase {
+    let logical_size = surface.size();
+    let scale = surface.scale();
+    let surface_physical_size = surface.physical_size();
+    let frame_bounds = Rect::new(0.0, 0.0, logical_size.width(), logical_size.height());
+    let physical_origin = [
+        (frame_bounds.x() * scale).floor() as u32,
+        (frame_bounds.y() * scale).floor() as u32,
+    ];
+    let physical_dimensions = [image.size.width(), image.size.height()];
+
+    assert_eq!(
+        physical_dimensions,
+        [
+            surface_physical_size.width(),
+            surface_physical_size.height()
+        ],
+        "headless image dimensions must match the created surface"
+    );
+
     PinnedVelloCharacterizationCase {
         antialiasing,
         scale,
-        logical_dimensions: [72, 48],
-        physical_origin: [0, 0],
-        physical_dimensions: [image.size.width(), image.size.height()],
+        logical_dimensions: [logical_size.width() as u32, logical_size.height() as u32],
+        physical_origin,
+        physical_dimensions,
         solid_fill: characterization_pixel(image, scale, 5.0, 5.0),
         stroke: characterization_pixel(image, scale, 15.0, 5.0),
         gradient_left: characterization_pixel(image, scale, 4.0, 20.0),
@@ -13804,6 +13836,7 @@ fn observe_pinned_vello_characterization(
         ahem_descent_ink: characterization_pixel(image, scale, 19.0, 39.0),
         solid_edge: characterization_alpha_support(image, scale, 1.0, 1.0, 11.0, 11.0),
         stroke_edge: characterization_alpha_support(image, scale, 12.0, 0.0, 25.0, 13.0),
+        transformed_placement: characterization_alpha_support(image, scale, 54.0, 17.0, 8.0, 7.0),
     }
 }
 
@@ -13873,8 +13906,13 @@ fn assert_pinned_vello_characterization_case(
     assert_eq!(actual.physical_origin, expected.physical_origin);
     assert_eq!(actual.physical_dimensions, expected.physical_dimensions);
 
+    assert_partial_alpha_straight_rgba8(
+        actual.solid_fill,
+        expected.solid_fill,
+        "partial-alpha solid fill",
+    );
+
     for (name, actual, expected) in [
-        ("solid fill", actual.solid_fill, expected.solid_fill),
         ("stroke", actual.stroke, expected.stroke),
         (
             "gradient left",
@@ -13913,7 +13951,6 @@ fn assert_pinned_vello_characterization_case(
             expected.ahem_descent_ink,
         ),
     ] {
-        assert_straight_rgba8_premultiplies(actual, name);
         assert_rgba_within(actual, expected, 2, name);
     }
 
@@ -13929,24 +13966,36 @@ fn assert_pinned_vello_characterization_case(
     );
     assert_alpha_support_within(actual.solid_edge, expected.solid_edge, "solid fill edge");
     assert_alpha_support_within(actual.stroke_edge, expected.stroke_edge, "stroke edge");
+    assert_transformed_placement_within(
+        actual.transformed_placement,
+        expected.transformed_placement,
+    );
     assert!(actual.gradient_left[0] > actual.gradient_left[2]);
     assert!(actual.gradient_right[2] > actual.gradient_right[0]);
     assert!(actual.image_top_left[0] > actual.image_top_left[1]);
     assert!(actual.image_top_right[1] > actual.image_top_right[0]);
 }
 
-fn assert_straight_rgba8_premultiplies(pixel: [u8; 4], name: &str) {
+fn assert_partial_alpha_straight_rgba8(actual: [u8; 4], expected: [u8; 4], name: &str) {
+    assert_rgba_within(actual, expected, 2, name);
+    assert!(
+        actual[3] > 0 && actual[3] < u8::MAX,
+        "{name} must remain partially transparent: {actual:?}"
+    );
+    assert!(
+        actual[0] > actual[3],
+        "{name} must retain its straight red channel above alpha: {actual:?}"
+    );
+
     let premultiplied = [
-        ((u16::from(pixel[0]) * u16::from(pixel[3]) + 127) / 255) as u8,
-        ((u16::from(pixel[1]) * u16::from(pixel[3]) + 127) / 255) as u8,
-        ((u16::from(pixel[2]) * u16::from(pixel[3]) + 127) / 255) as u8,
-        pixel[3],
+        ((u16::from(actual[0]) * u16::from(actual[3]) + 127) / 255) as u8,
+        ((u16::from(actual[1]) * u16::from(actual[3]) + 127) / 255) as u8,
+        ((u16::from(actual[2]) * u16::from(actual[3]) + 127) / 255) as u8,
+        actual[3],
     ];
     assert!(
-        premultiplied[..3]
-            .iter()
-            .all(|channel| *channel <= premultiplied[3]),
-        "{name} must retain alpha when converted to premultiplied RGBA8: {pixel:?}"
+        premultiplied[0] <= premultiplied[3] && actual[0].abs_diff(premultiplied[0]) >= 32,
+        "{name} must differ materially from its premultiplied representation: {actual:?} -> {premultiplied:?}"
     );
 }
 
@@ -13978,6 +14027,28 @@ fn assert_alpha_support_within(actual: AlphaSupport, expected: AlphaSupport, nam
     assert!(
         (actual.centroid_y_hundredths - expected.centroid_y_hundredths).abs() <= 35,
         "{name} centroid y exceeds the S34 0.35-device-pixel tolerance"
+    );
+}
+
+fn assert_transformed_placement_within(actual: AlphaSupport, expected: AlphaSupport) {
+    for (component, actual, expected) in [
+        ("min_x", actual.min_x, expected.min_x),
+        ("min_y", actual.min_y, expected.min_y),
+        ("max_x", actual.max_x, expected.max_x),
+        ("max_y", actual.max_y, expected.max_y),
+    ] {
+        assert!(
+            actual.abs_diff(expected) <= 1,
+            "transformed rectangle nonzero support {component} expected {expected} +/- 1, got {actual}"
+        );
+    }
+    assert!(
+        (actual.centroid_x_hundredths - expected.centroid_x_hundredths).abs() <= 35,
+        "transformed rectangle centroid x exceeds the S34 0.35-device-pixel tolerance"
+    );
+    assert!(
+        (actual.centroid_y_hundredths - expected.centroid_y_hundredths).abs() <= 35,
+        "transformed rectangle centroid y exceeds the S34 0.35-device-pixel tolerance"
     );
 }
 
