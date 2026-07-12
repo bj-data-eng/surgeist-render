@@ -3618,17 +3618,29 @@ fn headless_backend_resource_state_tracks_readiness() {
 ))]
 #[test]
 fn presented_surface_lifecycle_state_names_pending_resize() {
-    let state = PresentedLifecycle::ResizePending {
+    let idle = PresentedLifecycle::ResizePending {
         physical_size: PhysicalSize::new(20, 10),
         resizing: ResizeState::Idle,
     };
+    let resizing = idle.with_resizing(ResizeState::Resizing);
 
     assert_eq!(
-        state,
+        resizing,
         PresentedLifecycle::ResizePending {
             physical_size: PhysicalSize::new(20, 10),
-            resizing: ResizeState::Idle,
+            resizing: ResizeState::Resizing,
         }
+    );
+    assert_eq!(
+        resizing.with_resizing(ResizeState::Resizing),
+        resizing,
+        "repeating the resizing hint is idempotent"
+    );
+    assert_eq!(resizing.with_resizing(ResizeState::Idle), idle);
+    assert_eq!(
+        idle.with_resizing(ResizeState::Idle),
+        idle,
+        "repeating the idle hint is idempotent"
     );
 }
 

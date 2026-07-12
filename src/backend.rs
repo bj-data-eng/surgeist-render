@@ -531,34 +531,6 @@ pub(crate) struct RenderTimings {
     pub(crate) present_time: Duration,
 }
 
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-pub(crate) fn apply_presented_resize_state(
-    backend: Option<&mut Backend>,
-    native: &mut vello::util::RenderSurface<'static>,
-    resizing: bool,
-) {
-    #[cfg(target_os = "macos")]
-    if let Some(backend) = backend {
-        // SAFETY: wgpu checks the backend cast. If the presented surface is not Metal,
-        // as_hal returns None and the resize hint is simply unavailable.
-        unsafe {
-            if let Some(hal_surface) = native.surface.as_hal::<wgpu::hal::api::Metal>() {
-                hal_surface
-                    .render_layer()
-                    .lock()
-                    .setPresentsWithTransaction(resizing);
-                backend.context.configure_surface(native);
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "macos"))]
-    let _ = (backend, native, resizing);
-}
-
 pub(crate) fn ensure_vello_renderer(
     backend: &mut Backend,
     options: Options,

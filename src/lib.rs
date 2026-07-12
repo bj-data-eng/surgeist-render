@@ -1,3 +1,5 @@
+#![forbid(unsafe_code)]
+
 //! Vello-backed rendering boundary for Surgeist.
 //!
 //! This module owns renderer-facing visual facts: surfaces, scenes, drawing

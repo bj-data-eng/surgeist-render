@@ -206,12 +206,7 @@ impl Renderer {
             feature = "render-window",
             all(feature = "render-web", target_arch = "wasm32")
         ))]
-        if let SurfaceBackend::Presented {
-            surface: native,
-            lifecycle,
-            ..
-        } = &mut surface.backend
-        {
+        if let SurfaceBackend::Presented { lifecycle, .. } = &mut surface.backend {
             let next = if resizing {
                 ResizeState::Resizing
             } else {
@@ -221,7 +216,6 @@ impl Renderer {
                 return Ok(());
             }
             *lifecycle = lifecycle.with_resizing(next);
-            apply_presented_resize_state(self.backend.as_mut(), native, resizing);
         }
 
         Ok(())
