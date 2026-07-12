@@ -11653,7 +11653,19 @@ fn destroyed_device_callback_reports_terminal_loss_without_stale_resource_use() 
         RuntimeOperation::SurfaceRendering,
         DeviceLossReason::Destroyed,
     );
+
+    let error = match pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)) {
+        Ok(_) => panic!("a destroyed device must not create another headless surface"),
+        Err(error) => error,
+    };
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::AdapterSelection,
+        DeviceLossReason::Destroyed,
+    );
+
     assert!(renderer.default_device_renderer_released_for_test());
+    assert!(DeviceState::ready_slot_remains_ready_after_other_slot_loss_for_test());
 }
 
 fn assert_runtime_device_lost(error: Error, operation: RuntimeOperation, reason: DeviceLossReason) {
