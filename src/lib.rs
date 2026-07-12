@@ -91,7 +91,7 @@ pub use surface::{
 };
 pub use text::{
     FontData, FontId, FontRef, TextDecorationLine, TextDecorationLineStyle, TextGlyph, TextPaint,
-    TextRun, TextShadowRun,
+    TextRun, TextRunBounds, TextRunBoundsKind, TextShadowRun,
 };
 
 #[cfg(test)]

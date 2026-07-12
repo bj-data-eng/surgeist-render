@@ -431,6 +431,7 @@ pub enum UnresolvedResourceKind {
     Mask,
     Filter,
     Clip,
+    TextRunInkBounds,
 }
 
 impl UnresolvedResourceKind {
@@ -441,6 +442,7 @@ impl UnresolvedResourceKind {
             Self::Mask => "mask",
             Self::Filter => "filter",
             Self::Clip => "clip",
+            Self::TextRunInkBounds => "text run ink bounds",
         }
     }
 }

@@ -1,5 +1,5 @@
 use super::{
-    Paint, Point, PrimitiveFamily, PrimitiveOperation, Result, ShadowList, Transform,
+    Paint, Point, PrimitiveFamily, PrimitiveOperation, Rect, Result, ShadowList, Transform,
     UnsupportedPrimitive, validation::*,
 };
 use std::borrow::Cow;
@@ -25,6 +25,78 @@ impl From<u64> for FontId {
     }
 }
 
+/// Authored ink bounds for a text run in run-local logical coordinates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TextRunBounds {
+    value: TextRunBoundsValue,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum TextRunBoundsValue {
+    Unspecified,
+    Empty,
+    Ink(Rect),
+}
+
+/// The payload-free authored state of [`TextRunBounds`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextRunBoundsKind {
+    /// No ink extent was supplied because direct rendering does not require one.
+    Unspecified,
+    /// The run is known to contribute no ink.
+    Empty,
+    /// The run has a validated positive-area ink rectangle.
+    Ink,
+}
+
+impl TextRunBounds {
+    /// Returns bounds whose ink extent is intentionally not authored.
+    #[must_use]
+    pub const fn unspecified() -> Self {
+        Self {
+            value: TextRunBoundsValue::Unspecified,
+        }
+    }
+
+    /// Returns bounds for a run known to contribute no ink.
+    #[must_use]
+    pub const fn empty() -> Self {
+        Self {
+            value: TextRunBoundsValue::Empty,
+        }
+    }
+
+    /// Validates a finite, positive-area run-local ink rectangle.
+    pub fn try_ink(rect: Rect) -> Result<Self> {
+        validate_rect(rect, "text run ink bounds")?;
+        validate_positive_f64(rect.width(), "text run ink bounds width")?;
+        validate_positive_f64(rect.height(), "text run ink bounds height")?;
+        Ok(Self {
+            value: TextRunBoundsValue::Ink(rect),
+        })
+    }
+
+    /// Returns the authored bounds state without exposing its ink payload.
+    #[must_use]
+    pub const fn kind(self) -> TextRunBoundsKind {
+        match self.value {
+            TextRunBoundsValue::Unspecified => TextRunBoundsKind::Unspecified,
+            TextRunBoundsValue::Empty => TextRunBoundsKind::Empty,
+            TextRunBoundsValue::Ink(_) => TextRunBoundsKind::Ink,
+        }
+    }
+
+    /// Returns the validated run-local ink rectangle when one was authored.
+    #[must_use]
+    pub const fn ink_rect(self) -> Option<Rect> {
+        match self.value {
+            TextRunBoundsValue::Ink(rect) => Some(rect),
+            TextRunBoundsValue::Unspecified | TextRunBoundsValue::Empty => None,
+        }
+    }
+}
+
+/// An authored text run with a font, glyphs, paint, transform, and ink bounds.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextRun<'a> {
     font: FontRef<'a>,
@@ -32,15 +104,18 @@ pub struct TextRun<'a> {
     transform: Transform,
     paint: TextPaint,
     glyphs: &'a [TextGlyph],
+    bounds: TextRunBounds,
 }
 
 impl<'a> TextRun<'a> {
+    /// Creates a valid authored run with bounds in local coordinates before `transform`.
     pub fn try_new(
         font: FontRef<'a>,
         size: f32,
         transform: Transform,
         paint: TextPaint,
         glyphs: &'a [TextGlyph],
+        bounds: TextRunBounds,
     ) -> Result<Self> {
         validate_text_run(size, transform, glyphs)?;
         validate_paint(paint.fill())?;
@@ -50,6 +125,7 @@ impl<'a> TextRun<'a> {
             transform,
             paint,
             glyphs,
+            bounds,
         })
     }
 
@@ -76,6 +152,12 @@ impl<'a> TextRun<'a> {
     #[must_use]
     pub const fn glyphs(&self) -> &'a [TextGlyph] {
         self.glyphs
+    }
+
+    /// Returns the authored run-local ink bounds without estimating glyph geometry.
+    #[must_use]
+    pub const fn bounds(&self) -> TextRunBounds {
+        self.bounds
     }
 }
 

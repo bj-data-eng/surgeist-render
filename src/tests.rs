@@ -85,6 +85,62 @@ fn vello_renderer_options_force_gpu_execution() {
     );
 }
 
+#[test]
+fn text_run_bounds_distinguish_unspecified_empty_and_ink() {
+    let unspecified = TextRunBounds::unspecified();
+    let empty = TextRunBounds::empty();
+    let ink_rect = Rect::new(-2.0, -3.0, 4.0, 5.0);
+    let ink = TextRunBounds::try_ink(ink_rect).unwrap();
+
+    assert_eq!(unspecified.kind(), TextRunBoundsKind::Unspecified);
+    assert_eq!(empty.kind(), TextRunBoundsKind::Empty);
+    assert_eq!(ink.kind(), TextRunBoundsKind::Ink);
+    assert_eq!(unspecified.ink_rect(), None);
+    assert_eq!(empty.ink_rect(), None);
+    assert_eq!(ink.ink_rect(), Some(ink_rect));
+    let zero_width = TextRunBounds::try_ink(Rect::new(0.0, 0.0, 0.0, 1.0)).unwrap_err();
+    let zero_height = TextRunBounds::try_ink(Rect::new(0.0, 0.0, 1.0, 0.0)).unwrap_err();
+    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+    assert_eq!(zero_height.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        zero_width
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("text run ink bounds width")
+    );
+    assert_eq!(
+        zero_height
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("text run ink bounds height")
+    );
+    assert_eq!(
+        UnresolvedResourceKind::TextRunInkBounds.label(),
+        "text run ink bounds"
+    );
+
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Bounded text"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        ink,
+    )
+    .unwrap();
+    let shadowed = TextShadowRun::try_new(
+        run,
+        ShadowList::try_new(vec![
+            Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        ])
+        .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(shadowed.run().bounds(), ink);
+}
+
 fn ahem_font(name: &'static str) -> FontRef<'static> {
     FontRef::new(AHEM_FONT_ID)
         .named(name)
@@ -2225,6 +2281,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let text_shadows = ShadowList::try_new(vec![
@@ -9252,6 +9309,7 @@ fn draw_value_try_constructors_reject_invalid_values() {
             Transform::identity(),
             TextPaint::try_fill(Paint::color(Color::BLACK)).unwrap(),
             &[],
+            TextRunBounds::unspecified(),
         )
         .is_err()
     );
@@ -9271,6 +9329,7 @@ fn draw_value_constructors_preserve_valid_values() {
         Transform::identity(),
         text_paint.clone(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
 
@@ -9311,6 +9370,7 @@ fn text_shadow_run_model_preserves_text_run_and_shadow_order() {
         Transform::identity(),
         TextPaint::try_fill(Paint::color(Color::BLACK)).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let first = Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap();
@@ -9334,6 +9394,7 @@ fn zero_blur_multi_text_shadow_preserves_authored_order_but_rejects_execution() 
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let first = Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap();
@@ -9390,6 +9451,7 @@ fn transformed_text_shadow_inputs_are_stored_but_not_claimed_as_shifted_glyph_ex
         text_transform,
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let shadows = ShadowList::try_new(vec![
@@ -9466,6 +9528,7 @@ fn non_solid_or_spread_text_shadow_stays_on_glyph_alpha_offscreen_diagnostic_pat
             Transform::identity(),
             TextPaint::try_fill(Color::BLACK.into()).unwrap(),
             &glyphs,
+            TextRunBounds::unspecified(),
         )
         .unwrap();
         let mut scene = Scene::new();
@@ -9498,6 +9561,7 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let shadows = ShadowList::try_new(vec![
@@ -9543,6 +9607,7 @@ fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let shadows = ShadowList::try_new(vec![
@@ -9578,6 +9643,7 @@ fn blurred_text_shadow_reports_same_typed_boundary() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let shadows = ShadowList::try_new(vec![
@@ -9614,6 +9680,7 @@ fn text_shadow_run_command_storage_preserves_shadow_order_font_data_and_glyphs()
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let first = Shadow::try_new(Point::new(3.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap();
@@ -9663,6 +9730,7 @@ fn ordinary_text_run_normalization_remains_unaffected_by_text_shadow_boundary() 
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -9707,6 +9775,7 @@ fn text_fill_paint_matches_concrete_render_paint_surface() {
             Transform::identity(),
             TextPaint::try_fill(paint.clone()).unwrap(),
             &glyphs,
+            TextRunBounds::unspecified(),
         )
         .unwrap();
         let mut scene = Scene::new();
@@ -9758,6 +9827,7 @@ fn ahem_text_run_preserves_font_data_and_stable_glyph_stream() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &expected_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -9796,6 +9866,7 @@ fn ahem_font_data_renders_ascent_and_descent_glyph_bands() {
             Transform::identity(),
             TextPaint::try_fill(Color::BLACK.into()).unwrap(),
             &glyphs,
+            TextRunBounds::unspecified(),
         )
         .unwrap(),
     );
@@ -9850,6 +9921,7 @@ fn text_decoration_line_preserves_paint_thickness_transform_and_text_order() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -9954,6 +10026,7 @@ fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
         Transform::identity(),
         TextPaint::try_fill(Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap().into()).unwrap(),
         &selected_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let generated_run = TextRun::try_new(
@@ -9962,6 +10035,7 @@ fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &generated_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
 
@@ -10003,6 +10077,7 @@ fn materialized_selection_background_and_text_foreground_stay_ordered_commands()
         Transform::identity(),
         selected_text_paint.clone(),
         &selected_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let selection_background = Rect::new(2.0, 2.0, 18.0, 18.0);
@@ -10055,6 +10130,7 @@ fn materialized_generated_text_content_preserves_render_command_order() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &before_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let principal = TextRun::try_new(
@@ -10063,6 +10139,7 @@ fn materialized_generated_text_content_preserves_render_command_order() {
         Transform::identity(),
         TextPaint::try_fill(Color::try_rgba(0.1, 0.1, 0.1, 1.0).unwrap().into()).unwrap(),
         &principal_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let after = TextRun::try_new(
@@ -10071,6 +10148,7 @@ fn materialized_generated_text_content_preserves_render_command_order() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &after_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -10115,6 +10193,7 @@ fn materialized_generated_image_marker_and_text_content_are_ordinary_image_text_
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &item_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -10159,6 +10238,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
         Transform::identity(),
         TextPaint::try_fill(Paint::gradient(gradient.clone())).unwrap(),
         &glyph_fill_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let decoration = TextDecorationLine::try_solid(
@@ -10178,6 +10258,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &generated_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -10234,6 +10315,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &shadow_glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let shadows = ShadowList::try_new(vec![
@@ -10342,6 +10424,7 @@ fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
             Transform::identity(),
             TextPaint::try_fill(Color::BLACK.into()).unwrap(),
             &glyphs,
+            TextRunBounds::unspecified(),
         )
         .unwrap();
         let mut scene = Scene::new();
@@ -10435,6 +10518,7 @@ fn matrix_full_background_box_image_text_stack_preserves_render_order() {
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
         &glyphs,
+        TextRunBounds::unspecified(),
     )
     .unwrap();
     let mut scene = Scene::new();
@@ -11968,6 +12052,7 @@ fn text_run_requires_font_data() {
             Transform::identity(),
             TextPaint::try_fill(Color::BLACK.into()).unwrap(),
             &glyphs,
+            TextRunBounds::unspecified(),
         )
         .unwrap(),
     );
@@ -12004,6 +12089,7 @@ fn text_run_with_gradient_fill_still_requires_font_data_before_brush_encoding() 
             Transform::identity(),
             TextPaint::try_fill(Paint::gradient(gradient)).unwrap(),
             &glyphs,
+            TextRunBounds::unspecified(),
         )
         .unwrap(),
     );
