@@ -40,8 +40,10 @@ pub use capability::{
     TransformCoordinateSpaceCapabilities,
 };
 pub use error::{
-    DegradedQuality, DegradedQualityKind, Error, ErrorCode, InvalidValue, PrimitiveFamily,
-    PrimitiveOperation, Result, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
+    DegradedQuality, DegradedQualityKind, DeviceLossReason, Error, ErrorCode, GpuFaultKind,
+    InvalidValue, PrimitiveFamily, PrimitiveOperation, RenderSurfaceAvailability, Result,
+    RuntimeCapabilityUnavailable, RuntimeCapabilityUnavailableReason, RuntimeOperation,
+    SurfaceIdentityMismatchKind, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
 pub use filter::{
     BlurPolicy, BlurRadiusInterpretation, CompiledColorFilterPipeline, DevicePixelConversionPolicy,

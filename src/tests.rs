@@ -39,6 +39,244 @@ impl std::fmt::Display for ErrorSourceFixture {
 impl std::error::Error for ErrorSourceFixture {}
 
 #[test]
+fn runtime_errors_distinguish_semantic_unsupported_from_device_unavailable() {
+    let unsupported = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::LayerFilter,
+    ));
+    let unavailable = Error::runtime_capability_unavailable(
+        RuntimeCapabilityUnavailable::try_new(
+            RuntimeOperation::SurfaceRendering,
+            RuntimeCapabilityUnavailableReason::DeviceLost {
+                reason: DeviceLossReason::Destroyed,
+            },
+        )
+        .unwrap(),
+    );
+
+    assert_eq!(unsupported.code(), ErrorCode::UnsupportedPrimitive);
+    assert!(unsupported.unsupported_primitive().is_some());
+    assert_eq!(
+        unsupported.runtime_capability_unavailable_diagnostic(),
+        None
+    );
+    assert_eq!(unavailable.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(unavailable.unsupported_primitive(), None);
+    assert_eq!(
+        unavailable
+            .runtime_capability_unavailable_diagnostic()
+            .map(|diagnostic| diagnostic.operation()),
+        Some(RuntimeOperation::SurfaceRendering)
+    );
+}
+
+#[test]
+fn runtime_diagnostic_constructor_rejects_every_unlisted_operation_reason_pair() {
+    let operations = [
+        RuntimeOperation::AdapterSelection,
+        RuntimeOperation::SurfaceRendering,
+        RuntimeOperation::SurfaceReadback,
+        RuntimeOperation::SurfaceResume,
+        RuntimeOperation::EffectRendering,
+        RuntimeOperation::EffectTextureAllocation,
+        RuntimeOperation::EffectPresentation,
+    ];
+    let reasons = [
+        RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::Suspended,
+        },
+        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::NonRenderable,
+        },
+        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::Uninitialized,
+        },
+        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::Occluded,
+        },
+        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::Lost,
+        },
+        RuntimeCapabilityUnavailableReason::DeviceLost {
+            reason: DeviceLossReason::Unknown,
+        },
+        RuntimeCapabilityUnavailableReason::DeviceFaulted {
+            kind: GpuFaultKind::Validation,
+        },
+        RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+            kind: SurfaceIdentityMismatchKind::ForeignRenderer,
+        },
+        RuntimeCapabilityUnavailableReason::EffectFormatUnavailable {
+            policy: EffectQualityPolicy::RequireHighPrecision,
+        },
+        RuntimeCapabilityUnavailableReason::TextureDimensionExceeded {
+            requested: PhysicalSize::new(17, 19),
+            maximum: 16,
+        },
+        RuntimeCapabilityUnavailableReason::SurfaceFormatUnavailable {
+            format: Format::Bgra8,
+        },
+    ];
+
+    for operation in operations {
+        for reason in reasons {
+            let result = RuntimeCapabilityUnavailable::try_new(operation, reason);
+            if runtime_pair_is_listed(operation, reason) {
+                let diagnostic = result.unwrap();
+                assert_eq!(diagnostic.operation(), operation);
+                assert_eq!(diagnostic.reason(), reason);
+            } else {
+                let error = result.unwrap_err();
+                assert_eq!(error.code(), ErrorCode::InvalidInput);
+                assert!(error.invalid_value_diagnostic().is_some());
+            }
+        }
+    }
+}
+
+fn runtime_pair_is_listed(
+    operation: RuntimeOperation,
+    reason: RuntimeCapabilityUnavailableReason,
+) -> bool {
+    match operation {
+        RuntimeOperation::AdapterSelection => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::AdapterUnavailable
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+        RuntimeOperation::SurfaceRendering => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::AdapterUnavailable
+                | RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                    state: RenderSurfaceAvailability::Suspended
+                        | RenderSurfaceAvailability::NonRenderable
+                        | RenderSurfaceAvailability::Occluded
+                        | RenderSurfaceAvailability::Lost,
+                }
+                | RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+        RuntimeOperation::SurfaceReadback => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::AdapterUnavailable
+                | RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                    state: RenderSurfaceAvailability::Suspended
+                        | RenderSurfaceAvailability::NonRenderable
+                        | RenderSurfaceAvailability::Uninitialized
+                        | RenderSurfaceAvailability::Lost,
+                }
+                | RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+        RuntimeOperation::SurfaceResume => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+        RuntimeOperation::EffectRendering => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::EffectFormatUnavailable { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+        RuntimeOperation::EffectTextureAllocation => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+        RuntimeOperation::EffectPresentation => matches!(
+            reason,
+            RuntimeCapabilityUnavailableReason::SurfaceFormatUnavailable { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceLost { .. }
+                | RuntimeCapabilityUnavailableReason::DeviceFaulted { .. }
+        ),
+    }
+}
+
+#[test]
+fn typed_error_codes_cannot_exist_without_their_matching_payload() {
+    let runtime = RuntimeCapabilityUnavailable::try_new(
+        RuntimeOperation::SurfaceRendering,
+        RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+    )
+    .unwrap();
+    let errors = [
+        Error::invalid_value("field", "value", "must be valid"),
+        Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::LayerFilter,
+        )),
+        Error::unresolved_resource(UnresolvedResource::new(
+            UnresolvedResourceKind::Image,
+            "image",
+        )),
+        Error::degraded_quality(DegradedQuality::new(
+            DegradedQualityKind::ReducedIntermediatePrecision,
+            "reduced",
+        )),
+        Error::runtime_capability_unavailable(runtime),
+    ];
+
+    for error in &errors {
+        let typed_payloads = [
+            error.invalid_value_diagnostic().is_some(),
+            error.unsupported_primitive().is_some(),
+            error.unresolved_resource_diagnostic().is_some(),
+            error.degraded_quality_diagnostic().is_some(),
+            error.runtime_capability_unavailable_diagnostic().is_some(),
+        ];
+        assert_eq!(typed_payloads.iter().filter(|present| **present).count(), 1);
+        match error.code() {
+            ErrorCode::InvalidInput => assert!(typed_payloads[0]),
+            ErrorCode::UnsupportedPrimitive => assert!(typed_payloads[1]),
+            ErrorCode::UnresolvedResource => assert!(typed_payloads[2]),
+            ErrorCode::DegradedQuality => assert!(typed_payloads[3]),
+            ErrorCode::RuntimeCapabilityUnavailable => assert!(typed_payloads[4]),
+            _ => panic!("semantic constructor returned a non-semantic code"),
+        }
+    }
+
+    let backend_codes = [
+        BackendErrorCode::AdapterUnavailable,
+        BackendErrorCode::DeviceCreateFailed,
+        BackendErrorCode::RendererCreateFailed,
+        BackendErrorCode::SurfaceCreateFailed,
+        BackendErrorCode::SurfaceConfigureFailed,
+        BackendErrorCode::SurfaceLost,
+        BackendErrorCode::SurfaceOutOfMemory,
+        BackendErrorCode::SurfaceTimeout,
+        BackendErrorCode::SurfaceOutdated,
+        BackendErrorCode::SurfaceUnavailable,
+        BackendErrorCode::ImageUploadFailed,
+        BackendErrorCode::RenderFailed,
+        BackendErrorCode::PresentFailed,
+        BackendErrorCode::UnsupportedBackend,
+    ];
+    for code in backend_codes {
+        let error = Error::new(code, "backend failure");
+        assert!(!matches!(
+            error.code(),
+            ErrorCode::InvalidInput
+                | ErrorCode::UnsupportedPrimitive
+                | ErrorCode::UnresolvedResource
+                | ErrorCode::DegradedQuality
+                | ErrorCode::RuntimeCapabilityUnavailable
+        ));
+        assert!(error.invalid_value_diagnostic().is_none());
+        assert!(error.unsupported_primitive().is_none());
+        assert!(error.unresolved_resource_diagnostic().is_none());
+        assert!(error.degraded_quality_diagnostic().is_none());
+        assert!(error.runtime_capability_unavailable_diagnostic().is_none());
+    }
+}
+
+#[test]
 fn semantic_error_accessors_preserve_payloads() {
     let invalid = Error::invalid_value("radius", -1, "must be non-negative");
     let unsupported = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
