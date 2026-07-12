@@ -37,8 +37,7 @@ impl GpuOperationStage {
         }
     }
 
-    fn classify_fault(self, kind: GpuFaultKind, message: impl Into<String>) -> Error {
-        let message = message.into();
+    fn classify_fault(self, kind: GpuFaultKind, message: &str) -> Error {
         let code = if kind == GpuFaultKind::OutOfMemory {
             BackendErrorCode::SurfaceOutOfMemory
         } else {
@@ -96,7 +95,7 @@ impl GpuOperationLease {
         self.generation
     }
 
-    fn finish(&self) -> Option<DeviceTerminalSignal> {
+    fn finish(&self) -> Option<Arc<DeviceTerminalSignal>> {
         self.signal.finish_active_generation(self.generation)
     }
 
@@ -167,14 +166,14 @@ impl GpuOperationTransaction {
             .await;
 
         if let Some(terminal) = self.lease.finish() {
-            return match terminal {
+            return match terminal.as_ref() {
                 DeviceTerminalSignal::Lost { .. } => Err(terminal.error(operation)),
                 DeviceTerminalSignal::Faulted {
                     kind,
                     message,
                     operation_generation: Some(generation),
-                } if generation == self.lease.generation() => {
-                    Err(self.stage.classify_fault(kind, message))
+                } if *generation == self.lease.generation() => {
+                    Err(self.stage.classify_fault(*kind, message))
                 }
                 DeviceTerminalSignal::Faulted { .. } => Err(terminal.error(operation)),
             };
@@ -211,6 +210,6 @@ fn classify_captured_error(stage: GpuOperationStage, error: wgpu::Error) -> Erro
         wgpu::Error::Internal { .. } => GpuFaultKind::Internal,
     };
     stage
-        .classify_fault(kind, error.to_string())
+        .classify_fault(kind, &error.to_string())
         .with_source(error)
 }

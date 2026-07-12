@@ -37,7 +37,7 @@ pub(crate) struct DeviceState {
     renderer: Option<vello::Renderer>,
     capabilities: DeviceCapabilities,
     signal: Arc<DeviceSignal>,
-    terminal: Option<DeviceTerminalSignal>,
+    terminal: Option<Arc<DeviceTerminalSignal>>,
     next_operation_generation: u64,
 }
 
@@ -56,46 +56,18 @@ impl DeviceState {
     }
 
     fn observe_terminal(&mut self) {
-        let Some(signal) = self.signal.first_terminal() else {
+        let Some(terminal) = self.signal.first_terminal() else {
             return;
         };
         if self.terminal.is_none() {
-            self.terminal = Some(signal);
+            self.terminal = Some(terminal);
             self.renderer.take();
         }
     }
 
     fn terminal(&mut self) -> Option<&DeviceTerminalSignal> {
         self.observe_terminal();
-        self.terminal.as_ref()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ready_slot_remains_ready_after_other_slot_loss_for_test() -> bool {
-        let first_signal = Arc::new(DeviceSignal::new());
-        let mut first = Self {
-            generation: 0,
-            renderer: None,
-            capabilities: DeviceCapabilities::empty(),
-            signal: Arc::clone(&first_signal),
-            terminal: None,
-            next_operation_generation: 0,
-        };
-        let mut second = Self {
-            generation: 0,
-            renderer: None,
-            capabilities: DeviceCapabilities::empty(),
-            signal: Arc::new(DeviceSignal::new()),
-            terminal: None,
-            next_operation_generation: 0,
-        };
-        first_signal.record(DeviceTerminalSignal::lost(
-            DeviceLossReason::Destroyed,
-            "test device loss".into(),
-        ));
-        first.observe_terminal();
-        second.observe_terminal();
-        first.terminal.is_some() && second.terminal.is_none()
+        self.terminal.as_deref()
     }
 }
 
@@ -123,15 +95,6 @@ impl DeviceCapabilities {
         }
     }
 
-    #[cfg(test)]
-    const fn empty() -> Self {
-        Self {
-            high_precision: false,
-            reduced_precision: false,
-            max_texture_dimension_2d: 0,
-        }
-    }
-
     pub(crate) const fn runtime_report(
         self,
         surface_format: Format,
@@ -156,7 +119,7 @@ fn supports_effect_texture_format(features: wgpu::TextureFormatFeatures) -> bool
             .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub(crate) enum DeviceTerminalSignal {
     Lost {
         reason: DeviceLossReason,
@@ -235,7 +198,7 @@ pub(crate) struct DeviceSignal {
 }
 
 struct DeviceSignalState {
-    first_terminal: Option<DeviceTerminalSignal>,
+    first_terminal: Option<Arc<DeviceTerminalSignal>>,
     // The lease clears this only when it still owns the recorded generation.
     active_operation_generation: Option<u64>,
 }
@@ -258,13 +221,13 @@ impl DeviceSignal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.first_terminal.is_none() {
-            state.first_terminal = Some(signal);
+            state.first_terminal = Some(Arc::new(signal));
             #[cfg(test)]
             self.changed.notify_all();
         }
     }
 
-    pub(crate) fn first_terminal(&self) -> Option<DeviceTerminalSignal> {
+    pub(crate) fn first_terminal(&self) -> Option<Arc<DeviceTerminalSignal>> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -273,7 +236,10 @@ impl DeviceSignal {
     }
 
     /// Atomically snapshots terminal state and releases this operation's lease.
-    pub(crate) fn finish_active_generation(&self, generation: u64) -> Option<DeviceTerminalSignal> {
+    pub(crate) fn finish_active_generation(
+        &self,
+        generation: u64,
+    ) -> Option<Arc<DeviceTerminalSignal>> {
         let mut state = self
             .state
             .lock()
@@ -291,11 +257,11 @@ impl DeviceSignal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.first_terminal.is_none() {
-            state.first_terminal = Some(DeviceTerminalSignal::faulted(
+            state.first_terminal = Some(Arc::new(DeviceTerminalSignal::faulted(
                 kind,
                 message,
                 state.active_operation_generation,
-            ));
+            )));
             #[cfg(test)]
             self.changed.notify_all();
         }
@@ -360,7 +326,7 @@ impl DeviceSignal {
     pub(crate) fn finish_active_generation_for_test(
         &self,
         generation: u64,
-    ) -> Option<DeviceTerminalSignal> {
+    ) -> Option<Arc<DeviceTerminalSignal>> {
         self.finish_active_generation(generation)
     }
 

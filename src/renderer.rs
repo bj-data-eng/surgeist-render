@@ -910,6 +910,104 @@ impl Renderer {
             .is_some_and(|backend| backend.wait_for_terminal_for_test(device_identity, timeout))
     }
 
+    #[cfg(test)]
+    pub(crate) async fn add_donor_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
+        let mut donor_context = vello::util::RenderContext::new();
+        let donor_slot = donor_context.device(None).await.ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "the donor render context could not acquire a compatible wgpu device",
+            )
+        })?;
+        let donor_device = donor_context.devices.swap_remove(donor_slot);
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "the renderer has no backend to receive a donor wgpu device",
+            )
+        })?;
+        let slot = backend.context.devices.len();
+        backend.context.devices.push(donor_device);
+        backend.device_slot_identity(slot)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn submit_scoped_wgpu_probe_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+    ) -> Result<()> {
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "real second-slot WGPU coverage requires a renderer backend",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let work = (|| -> Result<()> {
+            let device_handle = backend
+                .context
+                .devices
+                .get(device_identity.slot())
+                .ok_or_else(|| {
+                    Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "the ready test device slot disappeared before WGPU submission",
+                    )
+                })?;
+            let texture = device_handle
+                .device
+                .create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Surgeist second-slot terminal test target"),
+                    size: wgpu::Extent3d {
+                        width: 1,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder =
+                device_handle
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Surgeist second-slot terminal test encoder"),
+                    });
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Surgeist second-slot terminal test pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+            }
+            device_handle.queue.submit([encoder.finish()]);
+            Ok(())
+        })();
+        let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+        backend.observe_device_terminal(device_identity);
+        scope_result?;
+        work
+    }
+
     fn materialize_resolved_backdrops(
         &mut self,
         commands: Vec<RenderCommand>,

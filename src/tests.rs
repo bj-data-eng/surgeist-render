@@ -11335,6 +11335,37 @@ fn uncaptured_faults_observe_active_and_released_generations() {
 }
 
 #[test]
+fn terminal_record_snapshots_share_identity_and_keep_the_first_record() {
+    let signal = DeviceSignal::new_for_test();
+    let lease = GpuOperationLease::begin_for_test(&signal).unwrap();
+    let generation = lease.generation_for_test();
+
+    signal.record_uncaptured_fault_for_test(GpuFaultKind::Validation, "first terminal record");
+    signal.record_uncaptured_fault_for_test(GpuFaultKind::Internal, "later terminal record");
+
+    let first_snapshot = signal
+        .first_terminal()
+        .expect("the first terminal signal must be recorded");
+    let repeated_snapshot = signal
+        .first_terminal()
+        .expect("repeated terminal snapshots must remain available");
+    let finished_snapshot = signal
+        .finish_active_generation_for_test(generation)
+        .expect("finishing the active generation must observe the terminal record");
+
+    assert!(Arc::ptr_eq(&first_snapshot, &repeated_snapshot));
+    assert!(Arc::ptr_eq(&first_snapshot, &finished_snapshot));
+    assert!(matches!(
+        first_snapshot.as_ref(),
+        DeviceTerminalSignal::Faulted {
+            kind: GpuFaultKind::Validation,
+            message,
+            operation_generation: Some(observed_generation),
+        } if message == "first terminal record" && *observed_generation == generation
+    ));
+}
+
+#[test]
 fn dropped_gpu_operation_future_aborts_draft_state_and_leases() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     if let Some(transaction) = renderer.start_default_gpu_operation_for_test() {
@@ -11594,8 +11625,6 @@ fn terminal_default_device_rejects_headless_without_disabling_ready_slots() {
         RuntimeOperation::AdapterSelection,
         DeviceLossReason::Destroyed,
     );
-
-    assert!(DeviceState::ready_slot_remains_ready_after_other_slot_loss_for_test());
 }
 
 #[test]
@@ -11638,6 +11667,8 @@ fn destroyed_device_callback_reports_terminal_loss_without_stale_resource_use() 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let ready_slot = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("the destroyed-device test requires a second real WGPU device slot");
 
     assert!(renderer.destroy_default_device_for_test());
     assert!(
@@ -11665,7 +11696,8 @@ fn destroyed_device_callback_reports_terminal_loss_without_stale_resource_use() 
     );
 
     assert!(renderer.default_device_renderer_released_for_test());
-    assert!(DeviceState::ready_slot_remains_ready_after_other_slot_loss_for_test());
+    pollster::block_on(renderer.submit_scoped_wgpu_probe_for_test(ready_slot))
+        .expect("a ready second slot must submit and finish a real scoped WGPU operation");
 }
 
 fn assert_runtime_device_lost(error: Error, operation: RuntimeOperation, reason: DeviceLossReason) {
