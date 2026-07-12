@@ -1,7 +1,7 @@
 # GPU Render Pipeline C03 Internal Vello Raster Engine Cutover
 
 ## Header
-- Cycle: `C03`; owner: `surgeist-render`; status: `reviewed`.
+- Cycle: `C03`; owner: `surgeist-render`; status: `in_progress`.
 - Cycle base and published prerequisite: `957582a6f9ceedfcff9a728bca23d26fc108af8f` (C02).
 - Specification: `plans/specs/gpu-render-pipeline.md` at `1e6517e4e33669d97b1f45c0df9c1de78ec4d07e`, normalized SHA-256 `db78f70e03a31430e949ac06de6628ca24a03cd53cf5dec453b43bcf4fbe53be`: S04-S06A, S07 raster phase, S10A, raster/internalization portions of S13A and S16-S17, S25-S26 device/resource boundary, S28 vello engine/backend/renderer/text/error rows, S29 FontData/Capabilities/internal-engine rows, and C03-applicable S31-S37 rows.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at `b46c9c2afb6f705fdaf928d640b3821a8e29c0c9`, normalized SHA-256 `3dab5afdeb5084026f4863a3f0f4dfa18de47441a2560e1f5cbd1562732d8bdf`, entry `C03 Internal Vello Raster Engine Cutover`.
