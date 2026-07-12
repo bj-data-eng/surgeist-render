@@ -4,7 +4,7 @@
 
 - Cycle: `C01`.
 - Owner: `surgeist-render`.
-- Status: `reviewed`.
+- Status: `in_progress`.
 - Review disposition: the user explicitly waived the remaining cycle-plan review after the final returned finding was limited to the corrected S32/S36/S37 header inventory.
 - Cycle base: `d59ad253300b68311f4e81a70e2b6ce73c922a4d`.
 - Specification: `plans/specs/gpu-render-pipeline.md` at commit `3826a9098e859874a515bbebaf470a47d754d76c`, content SHA-256 `f01972e19f8a5ddc90936edfc6ea7955feff3d1b1fdf5d181e77e8d10cc1f60a`, sections S07-S08, S10, S12, non-readback S13, safe-resize S26, applicable S29 rows, S35, C01-named model tests from S32, C01 dependency/feature/docs/MSRV limits from S36, and the available native command subset from S37. Its user-authorized review disposition is recorded by the sequence.
