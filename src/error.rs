@@ -162,6 +162,8 @@ impl Error {
         Self::from_invalid_value(InvalidValue::new(name, value, rule))
     }
 
+    /// Creates an invalid-input diagnostic whose structured payload is available through
+    /// [`Self::invalid_value_diagnostic`].
     #[must_use]
     pub fn from_invalid_value(invalid_value: InvalidValue) -> Self {
         let mut error = Self::semantic(ErrorCode::InvalidInput, invalid_value.message());
@@ -169,6 +171,8 @@ impl Error {
         error
     }
 
+    /// Creates an unsupported-primitive diagnostic whose payload is returned by
+    /// [`Self::unsupported_primitive`].
     #[must_use]
     pub fn unsupported_render_primitive(primitive: UnsupportedPrimitive) -> Self {
         let mut error = Self::semantic(
@@ -183,6 +187,8 @@ impl Error {
         error
     }
 
+    /// Creates an unresolved-resource diagnostic whose structured payload is available through
+    /// [`Self::unresolved_resource_diagnostic`].
     #[must_use]
     pub fn unresolved_resource(resource: UnresolvedResource) -> Self {
         let mut error = Self::semantic(ErrorCode::UnresolvedResource, resource.message());
@@ -190,6 +196,8 @@ impl Error {
         error
     }
 
+    /// Creates a degraded-quality diagnostic whose structured payload is available through
+    /// [`Self::degraded_quality_diagnostic`].
     #[must_use]
     pub fn degraded_quality(diagnostic: DegradedQuality) -> Self {
         let mut error = Self::semantic(ErrorCode::DegradedQuality, diagnostic.message());
@@ -197,11 +205,13 @@ impl Error {
         error
     }
 
+    /// Returns the unsupported-primitive payload, when this diagnostic carries one.
     #[must_use]
     pub const fn unsupported_primitive(&self) -> Option<UnsupportedPrimitive> {
         self.unsupported_primitive
     }
 
+    /// Returns the invalid-input payload, when this diagnostic carries one.
     #[must_use]
     pub const fn invalid_value_diagnostic(&self) -> Option<&InvalidValue> {
         match &self.invalid_value {
@@ -210,6 +220,7 @@ impl Error {
         }
     }
 
+    /// Returns the unresolved-resource payload, when this diagnostic carries one.
     #[must_use]
     pub const fn unresolved_resource_diagnostic(&self) -> Option<&UnresolvedResource> {
         match &self.unresolved_resource {
@@ -218,6 +229,7 @@ impl Error {
         }
     }
 
+    /// Returns the degraded-quality payload, when this diagnostic carries one.
     #[must_use]
     pub const fn degraded_quality_diagnostic(&self) -> Option<&DegradedQuality> {
         match &self.degraded_quality {
