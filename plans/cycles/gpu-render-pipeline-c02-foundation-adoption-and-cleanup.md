@@ -4,7 +4,7 @@
 
 - Cycle: `C02`.
 - Owner: `surgeist-render`.
-- Status: `reviewed`.
+- Status: `in_progress`.
 - Cycle base: `5361e3460278dffb877b9d485a2d12977977c3ef`.
 - Specification: `plans/specs/gpu-render-pipeline.md` at commit
   `1e6517e4e33669d97b1f45c0df9c1de78ec4d07e`, normalized SHA-256
