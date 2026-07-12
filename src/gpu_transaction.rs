@@ -9,16 +9,14 @@ use std::sync::Arc;
 pub(crate) enum GpuOperationStage {
     SurfaceCreate,
     RendererCreate,
-    #[allow(
-        dead_code,
-        reason = "the default feature build omits presented surface setup"
-    )]
+    #[cfg(any(
+        test,
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
     SurfaceConfigure,
     Render,
-    #[allow(
-        dead_code,
-        reason = "Task 6 owns the presented frame submission transaction"
-    )]
+    #[cfg(test)]
     Present,
 }
 
@@ -27,8 +25,14 @@ impl GpuOperationStage {
         match self {
             Self::SurfaceCreate => BackendErrorCode::SurfaceCreateFailed,
             Self::RendererCreate => BackendErrorCode::RendererCreateFailed,
+            #[cfg(any(
+                test,
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
             Self::SurfaceConfigure => BackendErrorCode::SurfaceConfigureFailed,
             Self::Render => BackendErrorCode::RenderFailed,
+            #[cfg(test)]
             Self::Present => BackendErrorCode::PresentFailed,
         }
     }
@@ -184,6 +188,11 @@ impl GpuOperationTransaction {
             return Err(classify_captured_error(self.stage, error));
         }
         Ok(())
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) const fn stage_for_test(&self) -> GpuOperationStage {
+        self.stage
     }
 }
 

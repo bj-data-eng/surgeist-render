@@ -268,9 +268,36 @@ impl<'a> RectShaderPassGpuContext<'a> {
     }
 }
 
+pub(crate) enum RectShaderPassExecution<'a> {
+    ContractOnly,
+    Gpu(RectShaderPassGpuExecution<'a>),
+}
+
+impl<'a> RectShaderPassExecution<'a> {
+    #[must_use]
+    pub(crate) const fn contract_only() -> Self {
+        Self::ContractOnly
+    }
+
+    #[must_use]
+    pub(crate) const fn gpu(
+        context: RectShaderPassGpuContext<'a>,
+        transaction: GpuOperationTransaction,
+    ) -> Self {
+        Self::Gpu(RectShaderPassGpuExecution {
+            context,
+            transaction,
+        })
+    }
+}
+
+pub(crate) struct RectShaderPassGpuExecution<'a> {
+    context: RectShaderPassGpuContext<'a>,
+    transaction: GpuOperationTransaction,
+}
+
 pub(crate) async fn encode_clear_fill_pass(
-    context: Option<RectShaderPassGpuContext<'_>>,
-    transaction: Option<GpuOperationTransaction>,
+    execution: RectShaderPassExecution<'_>,
     descriptor: RectShaderPassDescriptor,
     color: Color,
 ) -> Result<()> {
@@ -281,16 +308,14 @@ pub(crate) async fn encode_clear_fill_pass(
             "must be ClearFill for clear/fill encoding",
         ));
     }
-    let Some(context) = context else {
+    let RectShaderPassExecution::Gpu(RectShaderPassGpuExecution {
+        context,
+        transaction,
+    }) = execution
+    else {
         return Err(Error::new(
             BackendErrorCode::AdapterUnavailable,
             "rect/fullscreen shader pass requires an available wgpu device context",
-        ));
-    };
-    let Some(transaction) = transaction else {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "clear/fill GPU work requires an active render transaction",
         ));
     };
     let _source_view = context.source_view;

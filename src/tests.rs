@@ -8,8 +8,8 @@ use super::{
         ReferencePremultipliedRgba8Buffer,
     },
     shader::{
-        RectPassBounds, RectShaderPassDescriptor, RectShaderPassKind, RectShaderPipelineKey,
-        encode_clear_fill_pass,
+        RectPassBounds, RectShaderPassDescriptor, RectShaderPassExecution, RectShaderPassKind,
+        RectShaderPipelineKey, encode_clear_fill_pass,
     },
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
@@ -3485,8 +3485,12 @@ fn shader_pass_contract_only_context_reports_adapter_unavailable() {
     )
     .unwrap();
 
-    let error = pollster::block_on(encode_clear_fill_pass(None, None, pass, Color::BLACK))
-        .expect_err("contract-only shader pass should report missing GPU context");
+    let error = pollster::block_on(encode_clear_fill_pass(
+        RectShaderPassExecution::contract_only(),
+        pass,
+        Color::BLACK,
+    ))
+    .expect_err("contract-only shader pass should report missing GPU context");
 
     assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
     assert!(error.message().contains("rect/fullscreen shader pass"));
@@ -3495,15 +3499,12 @@ fn shader_pass_contract_only_context_reports_adapter_unavailable() {
 #[test]
 fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let result = pollster::block_on(renderer.scoped_clear_fill_probe_for_test());
-    if result
-        .as_ref()
-        .is_err_and(|error| error.code() == ErrorCode::AdapterUnavailable)
-    {
-        return;
-    }
-    let output =
-        result.expect("available GPU clear/fill work must resolve through its transaction");
+    assert!(
+        renderer.default_wgpu_device_queue().is_some(),
+        "real GPU clear/fill coverage requires a host adapter"
+    );
+    let output = pollster::block_on(renderer.scoped_clear_fill_probe_for_test())
+        .expect("available GPU clear/fill work must resolve through its transaction");
     let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
     assert!(
         (60..=68).contains(&red),
@@ -11287,14 +11288,19 @@ fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stag
 #[test]
 fn presented_setup_assigns_each_device_owned_step_to_a_transaction_stage() {
     #[cfg(feature = "render-window")]
-    assert_eq!(
-        super::renderer::presented_setup_transaction_stages_for_test(),
-        [
-            GpuOperationStage::SurfaceCreate,
-            GpuOperationStage::SurfaceConfigure,
-            GpuOperationStage::RendererCreate,
-        ]
-    );
+    {
+        let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+        let stages = pollster::block_on(renderer.presented_setup_transaction_stages_for_test())
+            .expect("presented setup orchestration requires a host adapter");
+        assert_eq!(
+            stages,
+            [
+                GpuOperationStage::SurfaceCreate,
+                GpuOperationStage::SurfaceConfigure,
+                GpuOperationStage::RendererCreate,
+            ]
+        );
+    }
 }
 
 #[test]
@@ -11395,8 +11401,14 @@ fn real_gpu_error_scope_captures_deliberate_validation_error() {
 #[test]
 fn real_gpu_smoke_emits_no_uncaptured_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    pollster::block_on(renderer.scoped_clear_fill_probe_for_test())
-        .expect("real GPU clear/fill probe requires a host adapter and scoped submission");
+    assert!(
+        renderer.default_wgpu_device_queue().is_some(),
+        "real GPU smoke coverage requires a host adapter"
+    );
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("real GPU smoke coverage requires a host adapter");
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the production Renderer::create_headless + Renderer::render path must be clean");
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
