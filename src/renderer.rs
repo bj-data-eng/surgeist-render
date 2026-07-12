@@ -51,7 +51,13 @@ impl Renderer {
         })
     }
 
-    pub fn create_surface(
+    /// Creates a surface and awaits any native or WebGPU surface setup.
+    ///
+    /// The returned surface is ready for its next lifecycle operation when this
+    /// future succeeds. Invalid options and unsupported attachments preserve
+    /// their existing diagnostics when the future is awaited. This future does
+    /// not promise to be `Send`.
+    pub async fn create_surface(
         &mut self,
         attachment: Attachment,
         options: SurfaceOptions,
@@ -59,7 +65,7 @@ impl Renderer {
         validate_surface_options(options)?;
         match attachment {
             Attachment::Headless => self.create_headless_surface(options),
-            Attachment::WebCanvas(canvas) => self.create_web_canvas_surface(canvas, options),
+            Attachment::WebCanvas(canvas) => self.create_web_canvas_surface(canvas, options).await,
             #[cfg(feature = "render-window")]
             Attachment::Window(handle) => {
                 let Some(backend) = self.backend.as_mut() else {
@@ -69,19 +75,22 @@ impl Renderer {
                     ));
                 };
                 let physical_size = physical_size(options.size, options.scale)?;
-                let surface = pollster::block_on(backend.context.create_surface(
-                    handle.clone(),
-                    physical_size.width(),
-                    physical_size.height(),
-                    options.present_mode.into(),
-                ))
-                .map_err(|source| {
-                    Error::new(
-                        BackendErrorCode::SurfaceCreateFailed,
-                        "failed to create native surface",
+                let surface = backend
+                    .context
+                    .create_surface(
+                        handle.clone(),
+                        physical_size.width(),
+                        physical_size.height(),
+                        options.present_mode.into(),
                     )
-                    .with_source(source)
-                })?;
+                    .await
+                    .map_err(|source| {
+                        Error::new(
+                            BackendErrorCode::SurfaceCreateFailed,
+                            "failed to create native surface",
+                        )
+                        .with_source(source)
+                    })?;
                 let device_identity = backend.device_slot_identity(surface.dev_id)?;
                 ensure_vello_renderer(backend, self.options, device_identity)?;
                 Ok(Surface::with_backend(
@@ -101,7 +110,7 @@ impl Renderer {
     }
 
     #[cfg(all(feature = "render-web", target_arch = "wasm32"))]
-    fn create_web_canvas_surface(
+    async fn create_web_canvas_surface(
         &mut self,
         canvas: WebCanvas,
         options: SurfaceOptions,
@@ -119,19 +128,22 @@ impl Renderer {
             ));
         };
         let physical_size = physical_size(options.size, options.scale)?;
-        let surface = pollster::block_on(backend.context.create_surface(
-            html_canvas,
-            physical_size.width(),
-            physical_size.height(),
-            options.present_mode.into(),
-        ))
-        .map_err(|source| {
-            Error::new(
-                BackendErrorCode::SurfaceCreateFailed,
-                "failed to create web canvas surface",
+        let surface = backend
+            .context
+            .create_surface(
+                html_canvas,
+                physical_size.width(),
+                physical_size.height(),
+                options.present_mode.into(),
             )
-            .with_source(source)
-        })?;
+            .await
+            .map_err(|source| {
+                Error::new(
+                    BackendErrorCode::SurfaceCreateFailed,
+                    "failed to create web canvas surface",
+                )
+                .with_source(source)
+            })?;
         let device_identity = backend.device_slot_identity(surface.dev_id)?;
         ensure_vello_renderer(backend, self.options, device_identity)?;
         Ok(Surface::with_backend(
@@ -149,7 +161,7 @@ impl Renderer {
     }
 
     #[cfg(not(all(feature = "render-web", target_arch = "wasm32")))]
-    fn create_web_canvas_surface(
+    async fn create_web_canvas_surface(
         &mut self,
         canvas: WebCanvas,
         _options: SurfaceOptions,
@@ -162,7 +174,11 @@ impl Renderer {
         unreachable!("web canvas support requires the render-web feature on wasm32");
     }
 
-    pub fn create_headless(&mut self, size: Size, scale: f64) -> Result<Surface> {
+    /// Creates a headless surface for a later asynchronous render operation.
+    ///
+    /// Await this operation before using the surface. Input and format failures
+    /// are reported when the future is awaited; readback remains synchronous.
+    pub async fn create_headless(&mut self, size: Size, scale: f64) -> Result<Surface> {
         let options = SurfaceOptions {
             size,
             scale,
@@ -239,7 +255,11 @@ impl Renderer {
         Ok(())
     }
 
-    pub fn render(
+    /// Submits one render operation for an available surface.
+    ///
+    /// Awaiting this future returns render statistics after scene validation and
+    /// submission, or the existing lifecycle, validation, or backend diagnostic.
+    pub async fn render(
         &mut self,
         surface: &mut Surface,
         scene: &Scene,
@@ -292,7 +312,15 @@ impl Renderer {
         Ok(stats)
     }
 
-    pub fn resume_surface(&mut self, surface: &mut Surface, attachment: Attachment) -> Result<()> {
+    /// Resumes a compatible surface, awaiting recreation when it is presented.
+    ///
+    /// Await this operation before rendering again. Incompatible attachments and
+    /// identity failures preserve their existing error ordering.
+    pub async fn resume_surface(
+        &mut self,
+        surface: &mut Surface,
+        attachment: Attachment,
+    ) -> Result<()> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceResume)?;
         if surface.attachment.kind() != attachment.kind() {
             return Err(Error::new(
@@ -308,7 +336,7 @@ impl Renderer {
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
             SurfaceBackend::Presented { .. } => {
-                let mut next = self.create_surface(attachment, surface.options)?;
+                let mut next = self.create_surface(attachment, surface.options).await?;
                 next.last_parameters = surface.last_parameters;
                 *surface = next;
                 Ok(())

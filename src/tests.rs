@@ -1207,7 +1207,8 @@ fn resolved_alpha_mask_execution_rejects_mismatched_buffers() {
 #[test]
 fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
     let mask = ImageBuffer {
         size: PhysicalSize::new(3, 1),
         rgba: vec![
@@ -1225,9 +1226,7 @@ fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
         );
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert!(pixel_rgba(&output, 0, 0)[0] > 200);
@@ -1239,7 +1238,8 @@ fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
 #[test]
 fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0)).unwrap();
     let inner_mask = ImageBuffer {
         size: PhysicalSize::new(2, 1),
         rgba: vec![255, 255, 255, 255, 255, 255, 255, 128],
@@ -1261,9 +1261,7 @@ fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
         },
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert!((96..=160).contains(&pixel_alpha(&output, 0, 0)));
@@ -1273,7 +1271,8 @@ fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
 #[test]
 fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
     let mask = ImageBuffer {
         size: PhysicalSize::new(2, 1),
         rgba: vec![255, 255, 255, 255, 255, 255, 255, 255],
@@ -1288,9 +1287,7 @@ fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
         scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
@@ -1301,7 +1298,8 @@ fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
 #[test]
 fn layer_resolved_alpha_mask_composites_after_layer_transform() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
     let mask = ImageBuffer {
         size: PhysicalSize::new(1, 1),
         rgba: vec![255, 255, 255, 255],
@@ -1316,9 +1314,7 @@ fn layer_resolved_alpha_mask_composites_after_layer_transform() {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
@@ -1329,7 +1325,8 @@ fn layer_resolved_alpha_mask_composites_after_layer_transform() {
 #[test]
 fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(1.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
     let mask = ImageBuffer {
         size: PhysicalSize::new(1, 1),
         rgba: vec![255, 255, 255, 128],
@@ -1346,9 +1343,7 @@ fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
         });
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
     let alpha = pixel_alpha(&output, 0, 0);
 
@@ -3782,10 +3777,10 @@ fn offscreen_nested_layer_opacity_stays_on_direct_vello_surface_path() {
     assert!(!inner.pass_plan.requires_offscreen_texture());
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+    let stats =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
     let alpha = pixel_alpha(&output, 0, 0);
 
@@ -3892,16 +3887,18 @@ fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_b
     );
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut first_surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
-    let mut second_surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut first_surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
+    let mut second_surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
 
-    let first_stats = renderer
-        .render(&mut first_surface, &scene, Parameters::default())
-        .unwrap();
+    let first_stats =
+        pollster::block_on(renderer.render(&mut first_surface, &scene, Parameters::default()))
+            .unwrap();
     let first_output = renderer.read_headless(&first_surface).unwrap();
-    let second_stats = renderer
-        .render(&mut second_surface, &scene, Parameters::default())
-        .unwrap();
+    let second_stats =
+        pollster::block_on(renderer.render(&mut second_surface, &scene, Parameters::default()))
+            .unwrap();
     let second_output = renderer.read_headless(&second_surface).unwrap();
 
     assert_eq!(first_stats.layers, 0);
@@ -4133,9 +4130,8 @@ fn scene_normalization_preserves_stats() {
 #[test]
 fn surface_tracks_size_and_scale() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
 
     surface.resize(Size::new(20.0, 30.0), 2.0).unwrap();
 
@@ -4146,9 +4142,9 @@ fn surface_tracks_size_and_scale() {
 #[test]
 fn surface_state_reports_availability_without_bool_peeking() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::try_new(1.0, 1.0).unwrap(), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::try_new(1.0, 1.0).unwrap(), 1.0))
+            .unwrap();
 
     assert_eq!(surface.state(), SurfaceState::Available);
     surface.suspend().unwrap();
@@ -4158,9 +4154,9 @@ fn surface_state_reports_availability_without_bool_peeking() {
 #[test]
 fn headless_backend_resource_state_tracks_readiness() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::try_new(2.0, 2.0).unwrap(), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::try_new(2.0, 2.0).unwrap(), 1.0))
+            .unwrap();
 
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     surface
@@ -4226,9 +4222,8 @@ fn presented_surface_lifecycle_recovers_from_zero_size_at_current_native_size() 
 #[test]
 fn headless_resize_keeps_target_when_physical_size_is_unchanged() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
 
     surface.resize(Size::new(10.4, 10.4), 1.0).unwrap();
 
@@ -4247,17 +4242,16 @@ fn headless_resize_keeps_target_when_physical_size_is_unchanged() {
 fn create_surface_headless_preserves_surface_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
 
-    let surface = renderer
-        .create_surface(
-            Attachment::Headless,
-            SurfaceOptions {
-                size: Size::new(10.0, 20.0),
-                scale: 2.0,
-                present_mode: PresentMode::Immediate,
-                format: Format::Rgba8,
-            },
-        )
-        .unwrap();
+    let surface = pollster::block_on(renderer.create_surface(
+        Attachment::Headless,
+        SurfaceOptions {
+            size: Size::new(10.0, 20.0),
+            scale: 2.0,
+            present_mode: PresentMode::Immediate,
+            format: Format::Rgba8,
+        },
+    ))
+    .unwrap();
 
     assert_eq!(surface.size(), Size::new(10.0, 20.0));
     assert_eq!(surface.scale(), 2.0);
@@ -4269,14 +4263,15 @@ fn create_surface_headless_preserves_surface_options() {
 #[test]
 fn rejects_invalid_surface_geometry() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let error = match renderer.create_headless(Size::new(f64::NAN, 10.0), 1.0) {
+    let error = match pollster::block_on(renderer.create_headless(Size::new(f64::NAN, 10.0), 1.0)) {
         Ok(_) => panic!("non-finite surface size should fail before physical conversion"),
         Err(error) => error,
     };
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
 
-    let mut surface = renderer.create_headless(Size::new(1.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
     let error = surface
         .resize(Size::new(1.0, 1.0), 0.0)
         .expect_err("invalid scale should fail before resize");
@@ -6832,14 +6827,14 @@ fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() 
             .unwrap();
         assert_eq!(normalized.geometry().kind(), &expected_geometry);
 
-        let mut surface = renderer.create_headless(Size::new(3.0, 2.0), 1.0).unwrap();
+        let mut surface =
+            pollster::block_on(renderer.create_headless(Size::new(3.0, 2.0), 1.0)).unwrap();
         let mut scene = Scene::new();
         scene.layer(Layer::new().try_clip(shape).unwrap(), |scene| {
             scene.fill(Rect::new(0.0, 0.0, 3.0, 2.0), Color::BLACK);
         });
 
-        renderer
-            .render(&mut surface, &scene, Parameters::default())
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("Sequence 12 shape/basic-shape clips should execute through layer clipping");
         let output = renderer.read_headless(&surface).unwrap();
 
@@ -6878,7 +6873,8 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
             &ClipGeometryKind::Path(filled_path.clone())
         );
 
-        let mut surface = renderer.create_headless(Size::new(5.0, 5.0), 1.0).unwrap();
+        let mut surface =
+            pollster::block_on(renderer.create_headless(Size::new(5.0, 5.0), 1.0)).unwrap();
         let mut scene = Scene::new();
         scene.layer(
             Layer::new()
@@ -6889,8 +6885,7 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
             },
         );
 
-        renderer
-            .render(&mut surface, &scene, Parameters::default())
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("Sequence 12 path clips should execute with their authored fill rule");
         outputs.push(renderer.read_headless(&surface).unwrap());
     }
@@ -6989,7 +6984,8 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
     assert_eq!(masked.rgba, vec![255, 0, 0, 255, 0, 255, 0, 128]);
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(
         Layer::new().try_resolved_alpha_mask(mask).unwrap(),
@@ -6998,8 +6994,7 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
         },
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("Sequence 12 resolved layer alpha masks should execute");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -9569,9 +9564,9 @@ fn vello_baseline_reports_web_canvas_surface_as_supported_on_wasm_web() {
 #[test]
 fn unsupported_layer_masks_report_typed_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::try_new(4.0, 2.0).unwrap(), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::try_new(4.0, 2.0).unwrap(), 1.0))
+            .unwrap();
     let mut scene = Scene::new();
 
     scene.layer(
@@ -9583,8 +9578,7 @@ fn unsupported_layer_masks_report_typed_error() {
         },
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("unsupported mask should fail render");
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
@@ -9715,11 +9709,12 @@ fn physical_size_try_from_logical_size_rejects_u32_overflow() {
 fn create_headless_rejects_physical_size_overflow() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
 
-    let error =
-        match renderer.create_headless(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0) {
-            Ok(_) => panic!("physical device pixels should fit in u32"),
-            Err(error) => error,
-        };
+    let error = match pollster::block_on(
+        renderer.create_headless(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0),
+    ) {
+        Ok(_) => panic!("physical device pixels should fit in u32"),
+        Err(error) => error,
+    };
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
@@ -11255,11 +11250,35 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
 }
 
 #[test]
+fn non_readback_renderer_front_door_is_async() {
+    pollster::block_on(async {
+        let mut renderer = Renderer::new(Options::default()).await.unwrap();
+        let mut surface = renderer
+            .create_surface(Attachment::Headless, SurfaceOptions::default())
+            .await
+            .unwrap();
+        renderer
+            .render(&mut surface, &Scene::new(), Parameters::default())
+            .await
+            .unwrap();
+        renderer
+            .resume_surface(&mut surface, Attachment::Headless)
+            .await
+            .unwrap();
+
+        let headless = renderer
+            .create_headless(Size::new(1.0, 1.0), 1.0)
+            .await
+            .unwrap();
+        let _: Result<ImageBuffer> = renderer.read_headless(&headless);
+    });
+}
+
+#[test]
 fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 20.0), 1.5)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 20.0), 1.5)).unwrap();
 
     let error = surface
         .resize(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0)
@@ -11288,13 +11307,13 @@ fn vello_out_of_memory_maps_to_stable_surface_error() {
 fn create_headless_reports_unsupported_format() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
 
-    let error = match renderer.create_surface(
+    let error = match pollster::block_on(renderer.create_surface(
         Attachment::Headless,
         SurfaceOptions {
             format: Format::Bgra8,
             ..SurfaceOptions::default()
         },
-    ) {
+    )) {
         Ok(_) => panic!("unsupported headless format should fail before wgpu validation"),
         Err(error) => error,
     };
@@ -11306,23 +11325,18 @@ fn create_headless_reports_unsupported_format() {
 #[test]
 fn surface_suspend_and_resume_preserve_attachment_kind() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
     let scene = Scene::new();
 
     surface.suspend().unwrap();
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("suspended surfaces should be unavailable");
 
     assert_eq!(error.code(), ErrorCode::SurfaceUnavailable);
 
-    renderer
-        .resume_surface(&mut surface, Attachment::Headless)
-        .unwrap();
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.resume_surface(&mut surface, Attachment::Headless)).unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("resumed headless surface should render");
 
     let error = surface
@@ -11336,7 +11350,8 @@ fn surface_suspend_and_resume_preserve_attachment_kind() {
 fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
     let mut owner = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut foreign_renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut foreign_surface = owner.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let mut foreign_surface =
+        pollster::block_on(owner.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
 
     if let SurfaceBackend::Headless {
         device_identity, ..
@@ -11345,9 +11360,12 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         device_identity.mark_stale_for_test();
     }
 
-    let error = foreign_renderer
-        .render(&mut foreign_surface, &Scene::new(), Parameters::default())
-        .expect_err("foreign surfaces must fail before indexing their device slot");
+    let error = pollster::block_on(foreign_renderer.render(
+        &mut foreign_surface,
+        &Scene::new(),
+        Parameters::default(),
+    ))
+    .expect_err("foreign surfaces must fail before indexing their device slot");
 
     assert_surface_identity_mismatch(
         error,
@@ -11362,16 +11380,18 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         RuntimeOperation::SurfaceReadback,
         SurfaceIdentityMismatchKind::ForeignRenderer,
     );
-    let error = foreign_renderer
-        .resume_surface(&mut foreign_surface, Attachment::Headless)
-        .expect_err("foreign resume must fail before indexing the device slot");
+    let error = pollster::block_on(
+        foreign_renderer.resume_surface(&mut foreign_surface, Attachment::Headless),
+    )
+    .expect_err("foreign resume must fail before indexing the device slot");
     assert_surface_identity_mismatch(
         error,
         RuntimeOperation::SurfaceResume,
         SurfaceIdentityMismatchKind::ForeignRenderer,
     );
 
-    let mut stale_surface = owner.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let mut stale_surface =
+        pollster::block_on(owner.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
     let SurfaceBackend::Headless {
         device_identity, ..
     } = &mut stale_surface.backend
@@ -11380,9 +11400,9 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
     };
     device_identity.mark_stale_for_test();
 
-    let error = owner
-        .render(&mut stale_surface, &Scene::new(), Parameters::default())
-        .expect_err("stale rendering must fail before indexing the device slot");
+    let error =
+        pollster::block_on(owner.render(&mut stale_surface, &Scene::new(), Parameters::default()))
+            .expect_err("stale rendering must fail before indexing the device slot");
     assert_surface_identity_mismatch(
         error,
         RuntimeOperation::SurfaceRendering,
@@ -11396,15 +11416,13 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         RuntimeOperation::SurfaceReadback,
         SurfaceIdentityMismatchKind::StaleDeviceGeneration,
     );
-    let error = owner
-        .resume_surface(
-            &mut stale_surface,
-            Attachment::from_web_canvas("incompatible-canvas"),
-        )
-        .expect_err("incompatible resume must fail before stale device validation");
+    let error = pollster::block_on(owner.resume_surface(
+        &mut stale_surface,
+        Attachment::from_web_canvas("incompatible-canvas"),
+    ))
+    .expect_err("incompatible resume must fail before stale device validation");
     assert_eq!(error.code(), ErrorCode::SurfaceCreateFailed);
-    let error = owner
-        .resume_surface(&mut stale_surface, Attachment::Headless)
+    let error = pollster::block_on(owner.resume_surface(&mut stale_surface, Attachment::Headless))
         .expect_err("stale resume must fail before indexing the device slot");
     assert_surface_identity_mismatch(
         error,
@@ -11439,13 +11457,13 @@ fn unsupported_web_canvas_attachment_reports_target_requirement() {
 
     assert_eq!(canvas.id(), "preview");
 
-    let error = match renderer.create_surface(
+    let error = match pollster::block_on(renderer.create_surface(
         Attachment::WebCanvas(canvas),
         SurfaceOptions {
             size: Size::new(10.0, 10.0),
             ..SurfaceOptions::default()
         },
-    ) {
+    )) {
         Ok(_) => panic!("native test targets should not create web canvas surfaces"),
         Err(error) => error,
     };
@@ -11464,9 +11482,8 @@ fn unsupported_web_canvas_attachment_reports_target_requirement() {
 #[test]
 fn render_reports_command_stats() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene
         .fill(Rect::new(0.0, 0.0, 5.0, 5.0), Color::BLACK)
@@ -11478,8 +11495,7 @@ fn render_reports_command_stats() {
             );
         });
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("headless render should report stats");
 
     assert_eq!(stats.commands, 3);
@@ -11494,15 +11510,12 @@ fn render_reports_command_stats() {
 #[test]
 fn render_scales_logical_scene_to_physical_surface() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(20.0, 20.0), 2.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(20.0, 20.0), 2.0)).unwrap();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 10.0, 10.0), Color::BLACK);
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(output.size, PhysicalSize::new(40, 40));
@@ -11513,9 +11526,8 @@ fn render_scales_logical_scene_to_physical_surface() {
 #[test]
 fn warm_image_reuse_reports_cache_hit() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
     let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255])).unwrap();
     assert_eq!(image_data(&image), image_data(&image.clone()));
     let mut scene = Scene::new();
@@ -11525,12 +11537,10 @@ fn warm_image_reuse_reports_cache_hit() {
         ImageFit::Stretch,
     );
 
-    let cold = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
-    let warm = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    let cold =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
+    let warm =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
 
     assert_eq!(cold.cache_misses, 1);
     assert_eq!(warm.cache_hits, 1);
@@ -11539,7 +11549,8 @@ fn warm_image_reuse_reports_cache_hit() {
 #[test]
 fn failed_render_does_not_warm_image_reuse_stats() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
     let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255])).unwrap();
     let mut failing = Scene::new();
     failing.image(
@@ -11556,16 +11567,14 @@ fn failed_render_does_not_warm_image_reuse_stats() {
         },
     );
 
-    let error = renderer
-        .render(&mut surface, &failing, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &failing, Parameters::default()))
         .expect_err("unsupported mask should fail render");
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
 
     let mut valid = Scene::new();
     valid.image(image, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch);
 
-    let stats = renderer
-        .render(&mut surface, &valid, Parameters::default())
+    let stats = pollster::block_on(renderer.render(&mut surface, &valid, Parameters::default()))
         .expect("valid render should still see cold image");
 
     assert_eq!(stats.cache_misses, 1);
@@ -11599,15 +11608,15 @@ fn rejects_malformed_scene_values() {
 #[test]
 fn concrete_color_paint_renders_without_color_realization() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.fill(
         Rect::new(0.0, 0.0, 2.0, 2.0),
         Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("concrete color paint should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11626,19 +11635,20 @@ fn gradient_paint_renders_with_transparent_stop() {
     )
     .unwrap();
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), gradient);
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("gradient paint should render");
 }
 
 #[test]
 fn image_paint_lowers_to_brush() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let image = Image::from_rgba(
         Size::new(2.0, 2.0),
         Arc::<[u8]>::from([
@@ -11649,9 +11659,8 @@ fn image_paint_lowers_to_brush() {
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Paint::image(image));
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    let stats =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(stats.fills, 1);
@@ -11677,7 +11686,8 @@ fn image_brush_preserves_sampling_and_extend() {
 #[test]
 fn cover_image_fit_clips_to_target_rect() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
     let mut pixels = Vec::new();
     for _ in 0..8 {
         pixels.extend_from_slice(&[255, 0, 0, 255]);
@@ -11686,9 +11696,7 @@ fn cover_image_fit_clips_to_target_rect() {
     let mut scene = Scene::new();
     scene.image(image, Rect::new(1.0, 0.0, 2.0, 2.0), ImageFit::Cover);
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
@@ -11725,7 +11733,8 @@ fn image_fit_transforms_use_uniform_scale() {
 #[test]
 fn layer_transform_moves_child_content() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.transform(
         Transform::try_new([1.0, 0.0, 0.0, 1.0, 2.0, 0.0]).unwrap(),
@@ -11734,9 +11743,7 @@ fn layer_transform_moves_child_content() {
         },
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
@@ -11748,7 +11755,8 @@ fn layer_transform_moves_child_content() {
 #[test]
 fn composed_layer_transforms_render_in_order() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(6.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(6.0, 2.0), 1.0)).unwrap();
     let transform = Transform::translation(1.0, 0.0)
         .unwrap()
         .then(Transform::scale(2.0, 1.0).unwrap())
@@ -11758,8 +11766,7 @@ fn composed_layer_transforms_render_in_order() {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 2.0), Color::BLACK);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("composed transform should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11772,7 +11779,8 @@ fn composed_layer_transforms_render_in_order() {
 #[test]
 fn origin_wrapped_layer_transform_renders_about_origin() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
     let transform = Transform::scale(2.0, 2.0)
         .unwrap()
         .around(Point::try_new(1.0, 1.0).unwrap())
@@ -11782,8 +11790,7 @@ fn origin_wrapped_layer_transform_renders_about_origin() {
         scene.fill(Rect::new(1.0, 1.0, 1.0, 1.0), Color::BLACK);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("origin-wrapped transform should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11795,7 +11802,8 @@ fn origin_wrapped_layer_transform_renders_about_origin() {
 #[test]
 fn transformed_shape_clips_render_in_layer_space() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(
         Layer::new()
@@ -11808,8 +11816,7 @@ fn transformed_shape_clips_render_in_layer_space() {
         },
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("transformed clip should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11837,7 +11844,8 @@ fn path_clip_fill_rules_execute_even_odd_and_nonzero() {
     }
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut even_odd_surface = renderer.create_headless(Size::new(6.0, 5.0), 1.0).unwrap();
+    let mut even_odd_surface =
+        pollster::block_on(renderer.create_headless(Size::new(6.0, 5.0), 1.0)).unwrap();
     let even_odd_clip = ClipInput::try_filled_path(
         FilledPath::try_new(nested_rect_path(), FillRule::EvenOdd).unwrap(),
     )
@@ -11849,12 +11857,12 @@ fn path_clip_fill_rules_execute_even_odd_and_nonzero() {
             scene.fill(Rect::new(0.0, 0.0, 6.0, 5.0), Color::BLACK);
         },
     );
-    renderer
-        .render(&mut even_odd_surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut even_odd_surface, &scene, Parameters::default()))
         .expect("even-odd path clip should render");
     let even_odd = renderer.read_headless(&even_odd_surface).unwrap();
 
-    let mut nonzero_surface = renderer.create_headless(Size::new(6.0, 5.0), 1.0).unwrap();
+    let mut nonzero_surface =
+        pollster::block_on(renderer.create_headless(Size::new(6.0, 5.0), 1.0)).unwrap();
     let nonzero_clip = ClipInput::try_filled_path(
         FilledPath::try_new(nested_rect_path(), FillRule::NonZero).unwrap(),
     )
@@ -11866,8 +11874,7 @@ fn path_clip_fill_rules_execute_even_odd_and_nonzero() {
             scene.fill(Rect::new(0.0, 0.0, 6.0, 5.0), Color::BLACK);
         },
     );
-    renderer
-        .render(&mut nonzero_surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut nonzero_surface, &scene, Parameters::default()))
         .expect("nonzero path clip should render");
     let nonzero = renderer.read_headless(&nonzero_surface).unwrap();
 
@@ -11890,14 +11897,14 @@ fn builtin_shape_clips_execute_for_layer_clipping() {
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     for clip in clips {
-        let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+        let mut surface =
+            pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
         let mut scene = Scene::new();
         scene.layer(Layer::new().try_clip(clip).unwrap(), |scene| {
             scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
         });
 
-        renderer
-            .render(&mut surface, &scene, Parameters::default())
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("builtin shape clip should render as a layer clip");
         let output = renderer.read_headless(&surface).unwrap();
 
@@ -11911,7 +11918,8 @@ fn builtin_shape_clips_execute_for_layer_clipping() {
 #[test]
 fn nested_clips_render_only_the_intersection() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(5.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(5.0, 2.0), 1.0)).unwrap();
     let mut inner_path = Path::new();
     inner_path
         .move_to(Point::new(2.0, 0.0))
@@ -11934,8 +11942,7 @@ fn nested_clips_render_only_the_intersection() {
         },
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("nested clips should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11949,7 +11956,8 @@ fn nested_clips_render_only_the_intersection() {
 #[test]
 fn coordinate_space_tag_transform_affects_layer_clip() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
     let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
         .unwrap()
         .with_coordinate_space(
@@ -11960,8 +11968,7 @@ fn coordinate_space_tag_transform_affects_layer_clip() {
         scene.fill(Rect::new(0.0, 0.0, 4.0, 2.0), Color::BLACK);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("coordinate-space clip transform should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11974,14 +11981,14 @@ fn coordinate_space_tag_transform_affects_layer_clip() {
 #[test]
 fn scene_clip_convenience_still_uses_shape_layer_clips() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(3.0, 1.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.clip(Rect::new(1.0, 0.0, 1.0, 1.0), |scene| {
         scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("existing Scene::clip convenience should keep working");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -11994,14 +12001,14 @@ fn scene_clip_convenience_still_uses_shape_layer_clips() {
 fn transformed_images_render_in_layer_space() {
     let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255])).unwrap();
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.transform(Transform::translation(2.0, 0.0).unwrap(), |scene| {
         scene.image(image, Rect::new(0.0, 0.0, 2.0, 2.0), ImageFit::Stretch);
     });
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("transformed image should render");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -12270,14 +12277,14 @@ fn exact_epsilon_opacity_with_clip_keeps_backend_layer_isolation() {
 #[test]
 fn layer_default_is_visible() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(Layer::default(), |scene| {
         scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
     });
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("default layer should render visible content");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -12288,14 +12295,14 @@ fn layer_default_is_visible() {
 #[test]
 fn layer_opacity_isolates_child_output() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
         scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
     });
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("opacity layer should render");
     let output = renderer.read_headless(&surface).unwrap();
     let [_, _, _, alpha] = pixel_rgba(&output, 0, 0);
@@ -12308,7 +12315,8 @@ fn layer_opacity_isolates_child_output() {
 #[test]
 fn layer_blend_isolates_child_output() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(2.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.fill(
         Rect::new(0.0, 0.0, 2.0, 2.0),
@@ -12321,8 +12329,7 @@ fn layer_blend_isolates_child_output() {
         );
     });
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("blend layer should render");
     let output = renderer.read_headless(&surface).unwrap();
     let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
@@ -12605,12 +12612,10 @@ fn text_run_requires_font_data() {
         .unwrap(),
     );
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("prepared glyphs cannot render without font data");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
@@ -12642,12 +12647,10 @@ fn text_run_with_gradient_fill_still_requires_font_data_before_brush_encoding() 
         .unwrap(),
     );
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(10.0, 10.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(10.0, 10.0), 1.0)).unwrap();
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("prepared glyphs cannot render without font data");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
@@ -12658,9 +12661,8 @@ fn text_run_with_gradient_fill_still_requires_font_data_before_brush_encoding() 
 #[test]
 fn inside_and_outside_strokes_lower_for_builtin_shapes() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(24.0, 24.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(24.0, 24.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene
         .stroke(
@@ -12674,9 +12676,8 @@ fn inside_and_outside_strokes_lower_for_builtin_shapes() {
             Color::BLACK,
         );
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    let stats =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
 
     assert_eq!(stats.strokes, 2);
 }
@@ -12684,9 +12685,8 @@ fn inside_and_outside_strokes_lower_for_builtin_shapes() {
 #[test]
 fn aligned_rect_strokes_do_not_cross_source_edge() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(12.0, 12.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(12.0, 12.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.stroke(
         Rect::new(3.0, 3.0, 6.0, 6.0),
@@ -12694,17 +12694,14 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
         Color::BLACK,
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let inside = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(pixel_alpha(&inside, 2, 6), 0);
     assert!(pixel_alpha(&inside, 3, 6) > 0);
 
-    let mut surface = renderer
-        .create_headless(Size::new(12.0, 12.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(12.0, 12.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.stroke(
         Rect::new(3.0, 3.0, 6.0, 6.0),
@@ -12712,9 +12709,7 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
         Color::BLACK,
     );
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let outside = renderer.read_headless(&surface).unwrap();
 
     assert!(pixel_alpha(&outside, 2, 6) > 0);
@@ -12724,18 +12719,16 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
 #[test]
 fn circle_shadows_lower_to_blurred_round_rect() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(24.0, 24.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(24.0, 24.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.shadow(
         Shape::try_circle(Point::new(12.0, 12.0), 4.0).unwrap(),
         Shadow::try_new(Point::new(1.0, 1.0), 4.0, 1.0, Color::BLACK).unwrap(),
     );
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    let stats =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(stats.shadows, 1);
@@ -12745,9 +12738,8 @@ fn circle_shadows_lower_to_blurred_round_rect() {
 #[test]
 fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(40.0, 36.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(40.0, 36.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.shadow(
         Shape::try_rounded_rect(
@@ -12758,8 +12750,7 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
         Shadow::try_new(Point::new(4.0, 5.0), 8.0, 0.0, Color::BLACK).unwrap(),
     );
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("non-uniform rounded shadow should render through corner partitioning");
     let output = renderer.read_headless(&surface).unwrap();
 
@@ -12828,13 +12819,13 @@ fn multiple_outer_shadows_render_in_authored_order() {
     ])
     .unwrap();
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.shadows(Rect::new(1.0, 1.0, 6.0, 6.0), shadows);
 
-    let stats = renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    let stats =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
     let overlap = pixel_rgba(&output, 4, 4);
 
@@ -12871,9 +12862,8 @@ fn inset_box_shadow_reports_typed_unsupported_diagnostic() {
 #[test]
 fn direct_geometry_targets_render_without_unsupported_diagnostics() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(32.0, 32.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(32.0, 32.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     let mut path = Path::new();
     path.move_to(Point::try_new(2.0, 24.0).unwrap())
@@ -12935,17 +12925,15 @@ fn direct_geometry_targets_render_without_unsupported_diagnostics() {
     );
     scene.fill(Shape::path(path), Color::BLACK);
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("direct geometry targets should render");
 }
 
 #[test]
 fn centered_path_strokes_support_join_cap_and_dash_inputs() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(24.0, 24.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(24.0, 24.0), 1.0)).unwrap();
     let mut path = Path::new();
     path.move_to(Point::try_new(2.0, 2.0).unwrap())
         .line_to(Point::try_new(20.0, 2.0).unwrap())
@@ -12959,15 +12947,15 @@ fn centered_path_strokes_support_join_cap_and_dash_inputs() {
     let mut scene = Scene::new();
     scene.stroke(Shape::path(path), stroke, Color::BLACK);
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("centered path strokes should render");
 }
 
 #[test]
 fn inside_outside_path_strokes_keep_typed_geometry_diagnostic() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
     let mut path = Path::new();
     path.move_to(Point::try_new(1.0, 1.0).unwrap())
         .line_to(Point::try_new(6.0, 1.0).unwrap())
@@ -12980,8 +12968,7 @@ fn inside_outside_path_strokes_keep_typed_geometry_diagnostic() {
         Color::BLACK,
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("inside path stroke alignment requires offset lowering");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -12997,9 +12984,8 @@ fn inside_outside_path_strokes_keep_typed_geometry_diagnostic() {
 #[test]
 fn unsupported_aligned_path_strokes_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(24.0, 24.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(24.0, 24.0), 1.0)).unwrap();
     let mut path = Path::new();
     path.move_to(Point::new(1.0, 1.0))
         .line_to(Point::new(10.0, 10.0));
@@ -13010,8 +12996,7 @@ fn unsupported_aligned_path_strokes_report_explicit_error() {
         Color::BLACK,
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("path offsetting is deliberately explicit");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -13032,7 +13017,8 @@ fn unsupported_aligned_path_strokes_report_explicit_error() {
 #[test]
 fn unsupported_layer_masks_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 2.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 2.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(
         Layer::new()
@@ -13043,8 +13029,7 @@ fn unsupported_layer_masks_report_explicit_error() {
         },
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("mask lowering should be explicit until implemented");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -13061,9 +13046,8 @@ fn unsupported_layer_masks_report_explicit_error() {
 #[test]
 fn unsupported_layer_filters_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer
-        .create_headless(Size::new(24.0, 24.0), 1.0)
-        .unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(24.0, 24.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(
         Layer::new()
@@ -13074,8 +13058,7 @@ fn unsupported_layer_filters_report_explicit_error() {
         },
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("filter lowering should be explicit until implemented");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -13092,7 +13075,8 @@ fn unsupported_layer_filters_report_explicit_error() {
 #[test]
 fn unsupported_non_solid_shadow_paint_reports_typed_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
     let gradient = Gradient::try_linear(
         Point::new(0.0, 0.0),
         Point::new(1.0, 1.0),
@@ -13108,8 +13092,7 @@ fn unsupported_non_solid_shadow_paint_reports_typed_error() {
         Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Paint::gradient(gradient)).unwrap(),
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("shadow lowering requires solid paint in this milestone");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -13126,15 +13109,15 @@ fn unsupported_non_solid_shadow_paint_reports_typed_error() {
 #[test]
 fn unsupported_shadow_shapes_report_typed_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.shadow(
         Shape::try_ellipse(Point::new(4.0, 4.0), Size::new(2.0, 1.0)).unwrap(),
         Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("ellipse shadows should remain unsupported in this milestone");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -13151,7 +13134,8 @@ fn unsupported_shadow_shapes_report_typed_error() {
 #[test]
 fn unsupported_path_shadows_report_typed_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(8.0, 8.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
     let mut path = Path::new();
     path.move_to(Point::new(1.0, 1.0))
         .line_to(Point::new(6.0, 1.0))
@@ -13163,8 +13147,7 @@ fn unsupported_path_shadows_report_typed_error() {
         Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
     );
 
-    let error = renderer
-        .render(&mut surface, &scene, Parameters::default())
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("path shadows should remain unsupported in this milestone");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -13181,13 +13164,12 @@ fn unsupported_path_shadows_report_typed_error() {
 #[test]
 fn headless_render_can_be_read_back() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
 
-    renderer
-        .render(&mut surface, &scene, Parameters::default())
-        .unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let image = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(image.size, PhysicalSize::new(4, 4));
@@ -13197,8 +13179,8 @@ fn headless_render_can_be_read_back() {
 
 fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Option<ImageBuffer> {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = renderer.create_headless(size, 1.0).unwrap();
-    match renderer.render(&mut surface, scene, Parameters::default()) {
+    let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
+    match pollster::block_on(renderer.render(&mut surface, scene, Parameters::default())) {
         Ok(_) => {}
         Err(error) if error.code() == ErrorCode::AdapterUnavailable => {
             assert!(
@@ -13230,9 +13212,9 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
 }
 
 fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {
-    let mut surface = renderer.create_headless(Size::new(1.0, 1.0), 1.0).unwrap();
-    renderer
-        .render(&mut surface, scene, Parameters::default())
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
+    pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
         .expect("single-pixel blend scene should render through the direct Vello path");
     let output = renderer.read_headless(&surface).unwrap();
     pixel_rgba(&output, 0, 0)
