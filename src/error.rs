@@ -252,6 +252,7 @@ impl error::Error for Error {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Stable classifications for render diagnostics, suitable for programmatic failure handling.
 pub enum ErrorCode {
     AdapterUnavailable,
     DeviceCreateFailed,
@@ -264,6 +265,7 @@ pub enum ErrorCode {
     SurfaceOutdated,
     SurfaceUnavailable,
     InvalidInput,
+    /// Reports a render primitive that this renderer cannot represent.
     UnsupportedPrimitive,
     UnresolvedResource,
     DegradedQuality,
@@ -614,12 +616,16 @@ impl DegradedQuality {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// Describes a quality limitation reported by a [`ErrorCode::DegradedQuality`] diagnostic.
 pub enum DegradedQualityKind {
+    /// Reports output produced with reduced intermediate precision.
     ReducedIntermediatePrecision,
+    /// Reports inability to perform the requested paint-space conversion.
     UnsupportedPaintSpaceConversion,
 }
 
 impl DegradedQualityKind {
+    /// Returns a stable human-readable label for this quality limitation.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
