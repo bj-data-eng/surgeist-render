@@ -11,16 +11,16 @@ specification owns the selected desired state.
 ## S01 Outcome
 
 `surgeist-render` renders every currently supported scene through WGPU, either
-through one direct Vello render or through a render-owned GPU pass graph around
-bounded Vello captures. Production filter, mask, backdrop, and compositing
-execution never reads pixels to the CPU, runs a CPU pixel algorithm, or uploads
-the result again.
+through one direct pass in its crate-owned Vello-derived raster engine or
+through a render-owned GPU pass graph around bounded raster captures.
+Production filter, mask, backdrop, and compositing execution never reads pixels
+to the CPU, runs a CPU pixel algorithm, or uploads the result again.
 
 The completed renderer has two observable routes:
 
-- `DirectVello` renders a scene with no custom effect requirement in one Vello
-  render, preserving the current high-quality vector fast path.
-- `GpuGraph` executes a closed render-owned graph of Vello captures, image
+- `DirectVello` renders a scene with no custom effect requirement in one
+  internal Vello raster pass, preserving the high-quality vector fast path.
+- `GpuGraph` executes a closed render-owned graph of Vello raster captures, image
   passes, and composite passes, then presents the GPU-resident result.
 
 The CPU implementation remains only a private `cfg(test)` semantic oracle.
@@ -39,7 +39,9 @@ contains a useful internal primitive.
 - authored renderer-facing inputs already exposed by this crate;
 - normalized render commands and effect planning;
 - resolved frame and device-pixel mappings;
-- Vello encoding and WGPU backend lowering;
+- the private Vello-derived scene, recording, raster scheduling, shader binding,
+  resource-lease, and WGPU lowering modules copied from the pinned Vello 0.9
+  main crate and adapted under S06A;
 - render-owned GPU textures, uploads, samplers, buffers, shaders, pipelines,
   pass scheduling, submission, and readback of explicit headless outputs;
 - semantic and runtime rendering capability reports;
@@ -74,9 +76,12 @@ This initiative does not:
   modes, 3D transforms, or another overlay `HoldDiagnostic` row;
 - resolve style, layout, font shaping, symbolic resources, color profiles, or
   host/window policy;
-- add a dependency, feature, generator, script, CI workflow, or downloaded
-  toolchain without exact user permission for the acquisition; the known web
-  execution blocker in S37 does not itself grant that permission;
+- vendor or modify `vello_encoding`, `vello_shaders`, or their WGSL raster
+  algorithms; they remain pinned external dependencies and safe backend inputs;
+- add a dependency outside the already-present, explicitly authorized S36
+  internalization set, or add a feature, generator, script, CI workflow, or
+  downloaded toolchain without exact user permission; the known web execution
+  blocker in S37 does not itself grant that permission;
 - add or retain Surgeist-owned `unsafe`.
 
 The absence of a compatibility requirement permits intentional public API
@@ -103,6 +108,9 @@ At initiative base `d59ad253300b68311f4e81a70e2b6ce73c922a4d`:
 - `reference.rs`, public filter execution-plan types, and
   `ResolvedAlphaMaskExecution` compile into production.
 - `ImageBuffer` exposes public fields, so invalid byte lengths are constructible.
+- `FontData::from_bytes` accepts arbitrary bytes and collection indices, while
+  pinned Vello scene lowering unwraps `skrifa::FontRef::from_index`; malformed
+  public font input can therefore panic instead of returning a typed error.
 - `ResolvedLayerAlphaMask` stores a generic readback buffer with no logical
   placement or reusable image identity.
 - `Capabilities::VELLO_0_9` mixes semantic support claims with implementation
@@ -121,6 +129,25 @@ Baseline evidence is clean for default tests, host `render-web` checking, and
 `render-window` checking. The installed Rust toolchain does not contain the
 `wasm32-unknown-unknown` target; host `render-web` checking is not a substitute
 for the final wasm compile gate.
+
+At architecture-revision head
+`9aa1d97c30a75d0bd552d6b07b62d8d87a7bd39b`, unpublished C02 work has already
+established renderer/device identity, async non-readback entry points,
+per-device terminal signals, immutable runtime capability snapshots, and the
+first scoped GPU transaction model. The external `vello = 0.9.0` crate still
+owns renderer construction, recording execution, an internal `queue.submit`,
+resource pooling, and surface convenience types. The current Task 4 review is
+not clean because production presented setup remains hidden behind that
+external integration boundary.
+
+The pinned `vello 0.9.0` package identified by Cargo checksum
+`261359dbef879f8110ef7e1c442246c838d33d3d91cb05e0ea9288d432760c9f`
+contains 5,497 physical Rust lines. Its main crate contains one unsafe trusted
+shader-module creation site, one internal queue-submission site, a blocking
+device-poll helper, optional CPU shader dispatch, and close-to-WGPU buffer,
+binding, pipeline, atlas, and command-recording ownership. The companion
+`vello_encoding 0.9.0` and `vello_shaders 0.9.0` packages contain the packed
+scene model and raster shaders and remain external under the revised contract.
 
 ## S05 Normative Sources
 
@@ -145,20 +172,24 @@ Clip/mask/filter/opacity order follows
 Filter Effects order: render the source, apply filters, apply clip and mask,
 apply opacity, then blend/composite into the parent.
 
-The pinned Vello and WGPU source in the local Cargo registry is the backend API
-evidence. This specification does not promise a backend behavior that those
-pinned versions cannot expose safely.
+The pinned Vello 0.9 main source is import/provenance evidence. The pinned
+`vello_encoding`, `vello_shaders`, and WGPU source in the local Cargo registry
+is backend API evidence. This specification does not promise a backend behavior
+that those pinned external versions cannot expose safely.
 
 ## S06 Resolved Design Decisions
 
 | Decision | Selected contract | Rejected material alternative |
 | --- | --- | --- |
-| Production execution | WGPU only, directly or through Vello | CPU fallback violates the stated product boundary and hides missing GPU capability. |
+| Production execution | WGPU only, directly or through the internal Vello-derived raster engine | CPU fallback violates the stated product boundary and hides missing GPU capability. |
+| Raster-engine ownership | Copy the pinned Vello 0.9 main-crate implementation into private `surgeist-render` modules, then adapt it while retaining external `vello_encoding` and `vello_shaders` | Keeping external `vello` preserves opaque submission/resource ownership; vendoring all three crates unnecessarily takes ownership of the packed format and raster shader algorithms. |
+| GPU submission ownership | The render transaction owns command encoders, queue submission, scope resolution, and resource-lease commit/abort | Allowing the internal raster engine to submit independently prevents frame-atomic cleanup and coherent graph scheduling. |
+| Imported execution modes | Preserve only checked WGPU raster execution | Retaining Vello CPU dispatch, blocking helpers, debug downloads, hot reload, or trusted unsafe shader creation contradicts the production and safety boundaries. |
 | Mixed-scene ownership | Once a scene needs an effect graph, render owns the working image until presentation | Re-entering Vello through its RGBA8 atlas quantizes and copies every custom result. |
 | Working pixels | Premultiplied numeric-sRGB `Rgba16Float`; explicit reduced `Rgba8Unorm` route | Linear-light working pixels would contradict CSS filter-function color space; unpremultiplied working pixels make filtering and composition unstable. |
 | Quality fallback | High precision is required by default; reduced precision is opt-in | Silent reduction makes quality device-dependent and unobservable. |
 | Mask input | Immutable `Image` plus explicit logical bounds | A physical `ImageBuffer` couples public semantics to one surface scale and has no cache identity. |
-| Text bounds | Caller-supplied run-local ink bounds with an explicit unspecified state | Adding a font parser dependency is unauthorized; guessing from advances is not ink geometry. |
+| Text bounds | Caller-supplied run-local ink bounds with an explicit unspecified state | Parsing validated font data does not authorize render to invent ink bounds; guessing from advances is not ink geometry. |
 | Blur implementation | Separable Gaussian fragment passes with CPU-planned weights only | CPU pixels are forbidden; an initial compute-only design adds complexity without a demonstrated need. |
 | Backdrop source | Copy the completed parent GPU image at the paint position | Cloning and replaying prior commands duplicates work and mishandles parent/base/effect state. |
 | Resource retention | Per-device manager with a public retained-byte budget | Unbounded retention is not operationally safe; a hidden fixed policy prevents applications from selecting memory policy. |
@@ -171,9 +202,124 @@ rejects resources required by the active frame. Device limits and allocation
 failure remain explicit runtime failures. Zero bytes is valid and disables
 retention after each frame.
 
+### S06A Internal Vello Engine Contract
+
+The pinned Vello 0.9 main-crate source is internalized into the existing
+`surgeist-render` package under private `src/vello_engine/` modules. It is not a
+new public crate, workspace member, feature, backend choice, or compatibility
+fork. Source files retain their copyright/SPDX headers. A tracked
+`NOTICE-VELLO.md` records package name, version, Cargo checksum, source URL,
+copied files, each copied file's pre-adaptation SHA-256, omitted files, material
+adaptations, and the preserved Apache-2.0/MIT license texts. The package
+checksum is the immutable S04 import checksum, not a future lockfile lookup.
+The first committed import may perform required module-path and lint adaptation
+and must replace the upstream unsafe site; no commit may contain an executable
+unsafe construct even transiently.
+
+The final internal engine keeps only behavior needed by the production raster
+path:
+
+- scene lowering compatible with `vello_encoding 0.9.0`;
+- fallible font-data parsing with no copied upstream unwrap/expect path;
+- the fixed coarse/fine Vello recording schedule and shader permutations;
+- checked WGPU shader-module, bind-group, pipeline, buffer, image-atlas, and
+  command encoding;
+- per-device persistent raster caches and transaction-owned transient leases.
+
+It removes the external `vello` dependency, Vello utility device/surface
+ownership, CPU shader dispatch and materialized CPU buffers, `use_cpu`, debug
+layers/downloads, hot reload, profiler integration, deprecated async rendering,
+blocking executors, production mapping/polling, direct queue submission, and
+trusted unchecked shader creation. `vello_shaders` is built with default
+features disabled and only `wgsl` enabled, so its external CPU shader module is
+not part of the production dependency graph.
+
+The private phase boundary is:
+
+```text
+TextRun
+  -> preflight_selected_glyphs
+ValidatedGlyphRun
+  -> encode_into
+VelloScene
+  -> prepare_raster(RasterParameters)
+PreparedVelloPass { recording, target_intent, resource_intents }
+  -> encode_into(FrameCommandEncoder, VelloEngineState)
+EncodedVelloPass { transient_lease, atlas_commit }
+  -> submit_with(GpuOperationTransaction)
+SubmittedVelloPass
+  -> commit resources after clean scope/signal resolution
+```
+
+`ValidatedGlyphRun`, `VelloScene`, and `PreparedVelloPass` contain no WGPU
+resource. Every glyph run crosses S10A preflight before the internal scene can
+append an external `vello_encoding::GlyphRun`; external resolver omission is
+therefore not an error channel. The per-device
+`VelloEngineState` owns checked shader pipelines, resolver state, and persistent
+image-atlas metadata while the one S25 `ResourceManager` owns its live and idle
+allocations. `EncodedVelloPass` cannot submit;
+the engine encodes into an encoder already owned by the frame transaction and
+returns the private `VelloResourceLease` with an encoded-pass token. The
+transaction is the only owner that calls `queue.submit`, and it retains every
+raster/effect lease until that submission is accepted and all S13A
+scopes/signals resolve.
+
+Successful submission commits reusable raster resources in queue order. Error
+or cancellation before the clean linearization point drops or quarantines
+uncertain transient buffers/images instead of returning them idle. A canceled
+atlas update is marked dirty or replaced before reuse; it can never make an
+incomplete frame public. No Vello-derived resource identity crosses the private
+engine boundary or appears in public capabilities/statistics.
+
+The internal engine remains a vector-raster pass, not the CSS effect graph.
+Changing Vello draw tags, packed encoding, fine-raster output semantics, or WGSL
+algorithms requires a later reviewed specification revision that explicitly
+expands ownership to the relevant external crate. Filters, masks, blends,
+backdrops, canonicalization, and presentation remain the crate-owned WGPU passes
+defined by S15-S24.
+
+### S06B Planning Supersession And Retained Work
+
+This specification revision atomically changes the status of
+`plans/cycles/gpu-render-pipeline-c02-async-gpu-transactions-and-device-terminality.md`
+to `superseded`. It is inert now; no worker may receive another task from it.
+Its task text remains only historical evidence. A replacement plan must use a
+distinct path and the reviewed current specification and sequence revisions.
+
+Published C01 commit `5361e3460278dffb877b9d485a2d12977977c3ef` remains
+complete and is the adoption base for the entire unpublished range. Planning
+commits and implementation commits after that SHA are not separate legal cycle
+acceptance points. Every provisional hunk and forward correction after that
+base remains subject to one successor cycle's exact-range task and holistic
+review before it can become accepted implementation.
+
+The complete adoption map is:
+
+| Existing artifact/range | Desired-state disposition |
+| --- | --- |
+| Published C01 through `5361e34` | Retain as complete; do not reopen or rewrite; use as the sole published adoption base |
+| Old-plan commits `c13609e`, `2b6d4ad`, and `6621c62` | Historical planning only; contribute no acceptance evidence |
+| `64bc5cb` and `7e2a31e` identity changes | Provisional foundation candidate: audit renderer/device/surface identity and validation order |
+| `7b638c6` async API changes | Provisional foundation candidate: audit the async non-readback front door |
+| `d80c6ec` and `ed3355f` terminal-device/capability changes | Provisional foundation candidate: audit terminal signals, immutable reports, and creation-race closure |
+| Generic scope/generation/error/lease work in `03f0db7`, `43187ed`, and `9aa1d97` | Provisionally retain only backend-neutral transaction foundations after complete diff audit |
+| External-Vello presented-setup orchestration and its no-op test seam introduced in the same transaction commits | Not accepted; remove by forward correction without rewriting history, then reimplement setup only under S06A |
+| Old C02 tasks 5-7 | No clean accepted implementation exists; desired headless publication, presentation, and lifecycle behavior remains unimplemented |
+| Old sequence C03 readback and every later item | Preserve the semantic work; dependency-order and renumber it in the revised sequence |
+
+The old requirement to retain external `vello::Renderer::render_to_texture`,
+its renderer/device slots, or its surface/setup ownership is invalidated. The
+current external renderer may remain only as unchanged temporary production
+behavior while the provisional foundation is audited. Internalization and
+production raster cutover under S06A must precede new headless-publication,
+surface-setup, submission, or presentation implementation. Readback and graph
+work follow those lifecycle prerequisites. The revised sequence owns exact
+cycle allocation; each just-in-time plan owns executable adoption tasks and
+ranges. Canonical workflow transitions are not redefined here.
+
 ## S07 Phase Model
 
-The rendering flow has six distinct phases:
+The rendering flow has seven distinct phases:
 
 1. **Authored:** `Scene`, `Layer`, `FilterList`, `BackdropFilterInput`, `Image`,
    `ResolvedLayerAlphaMask`, and text runs preserve caller meaning and typed
@@ -187,10 +333,13 @@ The rendering flow has six distinct phases:
 4. **Runtime capability:** `DeviceCapabilities` records facts from the selected
    safe WGPU adapter/device and output surface. It is private; a stable public
    projection is `RuntimeCapabilities`.
-5. **Backend algorithm:** `ExecutableFramePlan` chooses the working format,
+5. **Raster algorithm:** `ValidatedGlyphRun` proves selected-glyph preflight;
+   `PreparedVelloPass` is a private recording/resource intent produced from a
+   Vello-encodable span. Neither contains a live WGPU object or can submit.
+6. **Backend algorithm:** `ExecutableFramePlan` chooses the working format,
    concrete texture descriptors, pipelines, and topological pass sequence. It
    cannot contain an unsupported operation or an unresolved resource.
-6. **Runtime resource:** per-device resources have allocation identity,
+7. **Runtime resource:** per-device resources have allocation identity,
    generation, lease state, last-used frame, and deterministic retention state.
 
 No type is reused across these phases merely because fields happen to match.
@@ -251,8 +400,8 @@ and `DEFAULT` is `64 * 1024 * 1024` bytes.
 Debug + Eq + PartialEq`; the policy implements `Default` as
 `RequireHighPrecision` and the budget implements `Default` as `DEFAULT`.
 
-`Options::use_cpu` is removed. Vello renderer construction always sets its
-`use_cpu` option to `false`. No replacement CPU selector exists.
+`Options::use_cpu` is removed. The internal raster engine contains no CPU
+execution mode or corresponding field. No replacement CPU selector exists.
 
 `EffectQualityPolicy::AllowReducedPrecision` means prefer high precision and
 select reduced precision only when high precision is unavailable. It does not
@@ -396,8 +545,83 @@ glyph advances. `Empty` contributes no pixels and is valid for an empty or
 non-inking shaped run.
 
 The Ahem fixture remains test-only. It proves stable glyph ink extents and
-direct-versus-captured raster alignment; production does not parse that fixture
-or add a font-metrics dependency.
+direct-versus-captured raster alignment; production does not inspect it to
+derive font metrics or invent text bounds.
+
+### S10A Validated Font Data
+
+Font bytes and a collection index are authored renderer input, but their
+readability is an invariant of `FontData`, not a precondition left to the
+raster backend. The infallible constructor is replaced without a compatibility
+shim:
+
+```rust
+impl FontData {
+    pub fn try_from_bytes(bytes: Vec<u8>, index: u32) -> Result<Self>;
+}
+```
+
+`try_from_bytes` calls `skrifa::FontRef::from_index(bytes.as_slice(), index)`
+before constructing the private `peniko::FontData`. Success stores immutable
+owned bytes/index exactly once. Failure returns `ErrorCode::InvalidInput` with
+this exact `InvalidValue` model:
+
+| Field | Value |
+| --- | --- |
+| `field` | `"font_data"` |
+| `value` | `"len={byte_len}, index={index}"` |
+| `invariant` | `"must contain a readable OpenType font at the requested collection index"` |
+
+The diagnostic never formats raw font bytes. Empty/malformed bytes and a valid
+font with an out-of-range collection index take the same typed boundary and do
+not enter normalization, internal Vello scene encoding, or WGPU work.
+
+OpenType table parsing is lazy, so a readable container may still contain a
+malformed selected outline, color, palette, bitmap, or embedded-PNG table.
+Every text run therefore passes through private
+`preflight_selected_glyphs(&TextRun) -> Result<ValidatedGlyphRun>` before copied
+Vello scene code appends a glyph run or calls external `vello_encoding`. The
+token borrows the exact immutable font bytes, index, glyph slice, normalized
+coordinates, size, hinting, embolden, transform, fill/stroke style, and selected
+representation consumed by encoding; it cannot be constructed by callers or
+reused for different inputs.
+
+For each selected glyph, preflight uses `skrifa` to execute the same relevant
+read as lowering:
+
+1. choose outline, COLR/CPAL, or bitmap representation using the same order as
+   the internal scene;
+2. for an outline, obtain the glyph and draw it into a validation sink with the
+   exact unhinted/hinted size, coordinates, embolden, and style facts that the
+   external resolver will receive;
+3. for COLR, traverse the selected paint graph and validate every referenced
+   palette entry and outline;
+4. for a bitmap, validate the selected strike/glyph dimensions and checked byte
+   length, and fully decode/validate selected PNG or packed-mask data;
+5. reject a missing selected glyph rather than substituting an empty external
+   encoding.
+
+Preflight has three exact failure classes:
+
+| Failure | Result |
+| --- | --- |
+| Malformed font container or selected outline/COLR/CPAL/bitmap/PNG data | The same S10A `font_data` `InvalidValue` using stored byte length/index |
+| Missing selected glyph ID | `InvalidValue { field: "text_glyph.id", value: glyph_id, invariant: "must identify a drawable glyph in the selected FontData" }` |
+| Valid selected glyph image encoding that the internal engine cannot represent | Owning S13 internal-raster preparation `RenderFailed` with private safe context |
+
+Copied Vello glyph lowering removes both upstream
+`FontRef::from_index(...).unwrap()` calls and every other panic-prone
+font-derived conversion or parse unwrap. It consumes only
+`ValidatedGlyphRun`; no fallback font or silent glyph omission is permitted.
+The retained external `vello_encoding` crate is not modified, but its
+`GlyphCache::session -> None` and `get_or_insert -> None` omission branches are
+unreachable because the same immutable selected glyph and draw settings were
+successfully preflighted before the external encoding was built.
+
+Public construction excludes the gross byte/index failure, while the fallible
+private edge closes errors from lazy tables and protects future internal model
+changes. This validation does not shape text, calculate ink bounds, select a
+font, or alter root ownership.
 
 ## S11 Semantic Capabilities
 
@@ -546,8 +770,9 @@ High-precision effects require `Rgba16Float` as a render attachment and sampled
 texture with the filtering used by the pass set. Reduced-precision effects
 require the same operations on `Rgba8Unorm`. Storage binding is not a
 requirement for custom effect textures because the initial implementation uses
-fragment render passes. Vello capture capability remains separately implied by
-the selected Vello device and its required `Rgba8Unorm` storage target.
+fragment render passes. Internal raster capture capability remains separately
+implied by the selected WGPU device and its required `Rgba8Unorm` storage
+target.
 
 `max_effect_texture_dimension_2d` is the selected device's 2D texture limit.
 Dynamic allocation exhaustion cannot be predicted by a capability report and
@@ -746,12 +971,12 @@ not create a second mapping:
 | --- | --- |
 | Adapter request yields none | validated runtime diagnostic above |
 | Device request/create | `DeviceCreateFailed` |
-| Vello renderer creation | `RendererCreateFailed` |
+| Internal raster-engine creation | `RendererCreateFailed` |
 | Surface object creation | `SurfaceCreateFailed` |
 | Surface configuration or presented resize | `SurfaceConfigureFailed` |
 | Surface acquire timeout/outdated/lost/out-of-memory | `SurfaceTimeout` / `SurfaceOutdated` / typed `SurfaceUnavailable { Lost }` / `SurfaceOutOfMemory` |
 | Other surface acquire failure | `PresentFailed` |
-| Vello draw/capture, effect allocation, pipeline creation, draw encoding, or draw submission validation/internal error | `RenderFailed` |
+| Internal raster draw/capture, effect allocation, pipeline creation, draw encoding, or draw submission validation/internal error | `RenderFailed` |
 | Output conversion, surface write, or present validation/internal error | `PresentFailed` |
 | Headless copy allocation/encoding/submission validation/internal error, `map_async` callback error, checked row-decoding failure, or `PollError::WrongSubmissionIndex` | `ReadbackFailed` |
 | Captured or active-generation uncaptured out-of-memory at any stage | `SurfaceOutOfMemory` |
@@ -759,9 +984,9 @@ not create a second mapping:
 | No-active-generation uncaptured validation/out-of-memory/internal error | next device operation returns typed `DeviceFaulted` with the recorded class |
 | Device-lost signal observed at any stage | owning operation returns typed `DeviceLost`; this terminal classification takes precedence over a generic stage error |
 
-Safe WGPU, Vello, map, and poll sources are retained under the target-specific
-source representation. Tests inject private error classifications to prove the
-table; they do not parse source display text.
+Safe WGPU, internal raster, map, and poll sources are retained under the
+target-specific source representation. Tests inject private error
+classifications to prove the table; they do not parse source display text.
 
 An unavailable adapter, format, limit, surface, or device never becomes
 `UnsupportedPrimitive`: semantic support and runtime availability are distinct.
@@ -842,32 +1067,44 @@ Each device registers both safe callbacks at creation:
   operation generation into the same synchronized device signal state.
 
 Every render-owned GPU operation uses a private `GpuOperationTransaction` with
-a monotonic generation, draft public state, and RAII leases. Before any WGPU
-resource/pipeline creation or submission, it pushes nested WGPU 29 error scopes
-in outer-to-inner order `Internal`, `OutOfMemory`, `Validation`. After all draw
-submissions, it pops them in reverse order and awaits every returned future.
-This is an asynchronous error-attribution boundary; it is not a buffer map,
-pixel readback, busy poll, or blocking CPU wait.
+a monotonic generation, draft public state, one or more owned command encoders,
+and RAII leases. Before any WGPU resource/pipeline creation or submission, it
+pushes nested WGPU 29 error scopes in outer-to-inner order `Internal`,
+`OutOfMemory`, `Validation`. The internal Vello engine may prepare recordings,
+write queue upload data, and encode compute passes only through the active
+transaction; it cannot call `queue.submit`. After the transaction submits all
+draw command buffers, it pops scopes in reverse order and awaits every returned
+future. This is an asynchronous error-attribution boundary; it is not a buffer
+map, pixel readback, busy poll, or blocking CPU wait.
+
+An encoded Vello pass carries a private `VelloResourceLease`. Before submission,
+drop/cancellation destroys or quarantines its uncertain transient resources.
+After submission is accepted, queue ordering permits a successful transaction
+to return compatible resources to the per-device idle pool. Scope failure or a
+terminal device signal aborts publication and never makes the lease reusable
+through an implicit `Drop` path. Persistent atlas writes are either committed
+as valid cache content or marked dirty/recreated before the next raster use.
 
 For a presented frame, the transaction owns the acquired surface texture.
-Drawing is rendered into the Vello/custom intermediate without calling Vello's
-surface-present convenience. After drawing scopes resolve cleanly, the
-transaction encodes/submits the output blit/present pass under a second set of
-the same three scopes and calls `SurfaceTexture::present` while those scopes and
-the active operation generation remain installed. It then pops/awaits all three
-scopes, rechecks device-loss/uncaptured signals, and commits last-successful
-stats/parameters only when clean. A present may therefore have been attempted
-for a frame ultimately reported as failed; no rollback of an external surface
-side effect is promised. A loss signaled after the final clean linearization
-point is observed by the next operation and does not retroactively rewrite the
-completed result.
+Drawing is rendered into the internal Vello/custom intermediate without a
+raster-engine surface convenience or submission call. After drawing scopes
+resolve cleanly, the transaction encodes/submits the output blit/present pass
+under a second set of the same three scopes and calls
+`SurfaceTexture::present` while those scopes and the active operation generation
+remain installed. It then pops/awaits all three scopes, rechecks
+device-loss/uncaptured signals, and commits last-successful stats/parameters
+only when clean. A present may therefore have been attempted for a frame
+ultimately reported as failed; no rollback of an external surface side effect
+is promised. A loss signaled after the final clean linearization point is
+observed by the next operation and does not retroactively rewrite the completed
+result.
 
 Captured errors map deterministically: out of memory to
 `SurfaceOutOfMemory`; validation to the owning create/render/present code;
-internal to the owning create/render/present code. Safe WGPU/Vello sources and
-descriptions are retained for display but never parsed for control flow.
-Synchronous Vello errors and `CurrentSurfaceTexture` variants enter the same
-transaction before commit.
+internal to the owning create/render/present code. Safe WGPU/internal-raster
+sources and descriptions are retained for display but never parsed for control
+flow. Synchronous raster-planning/encoding errors and `CurrentSurfaceTexture`
+variants enter the same transaction before commit.
 
 An uncaptured error for the active generation aborts that operation and moves
 the device to terminal `Faulted`; an uncaptured record arriving with no active
@@ -1073,8 +1310,9 @@ Present
 to `Parameters::base_color` once. Nested isolated groups clear to transparent
 black.
 
-`VelloCapture` encodes one maximal consecutive Vello-only span or one bounded
-subtree into an `Rgba8Unorm` storage texture. It uses the selected
+`VelloCapture` prepares and transaction-encodes one maximal consecutive
+Vello-only span or one bounded subtree through the internal raster engine into
+an `Rgba8Unorm` storage texture. It uses the selected
 `Antialiasing`, transparent base color, and a local-to-capture transform that
 preserves signed device origin. It does not apply the owning effect layer's
 outer filter, clip, mask, opacity, or parent blend early.
@@ -1109,7 +1347,10 @@ Headless output remains the same straight RGBA8 representation returned by
 WGSL files under `src/shaders/` are implementation source, loaded with
 `include_str!`, and compiled by WGPU. Uniform/storage bytes are serialized by
 explicit safe little-endian encoders with documented WGSL alignment and padding.
-No bytemuck-like dependency, pointer cast, or `unsafe` is introduced.
+Custom pass serialization uses no pointer cast or derived POD implementation.
+The already-present `bytemuck` crate is a direct dependency only for safe
+Vello-compatible casts whose source types implement POD in pinned external
+crates; the internal engine adds no owned `Pod`/`Zeroable` derive or unsafe impl.
 
 ## S17 Mixed-Scene Partitioning
 
@@ -1130,13 +1371,14 @@ boundaries:
 - graph results never re-enter Vello through `register_texture`,
   `override_image`, or a newly constructed RGBA8 `Image`.
 
-Vello may submit capture work through its pinned API. WGPU queue ordering is the
-synchronization contract between Vello submissions and custom command buffers.
-The renderer may batch adjacent custom passes in one encoder and flush before a
-dependent Vello submission. It never maps a buffer, polls for CPU-visible
-completion, or waits between production passes. The one async error-scope
-resolution after the complete drawing submission stage is the S13A transaction
-commit boundary, not an inter-pass synchronization edge.
+The internal raster engine encodes Vello capture work into command encoders
+owned by the same frame transaction as custom passes. The executor may use one
+encoder or an ordered finite encoder sequence according to WGPU usage rules,
+but only the transaction submits them. WGPU queue ordering is the synchronization
+contract; the renderer never maps a buffer, polls for CPU-visible completion,
+or waits between production passes. The one async error-scope resolution after
+the complete drawing submission stage is the S13A transaction commit boundary,
+not an inter-pass synchronization edge.
 
 ## S18 Working Pixel Contract
 
@@ -1480,9 +1722,10 @@ Those inputs fail before backend execution with their existing typed
 
 ## S25 Resource Manager
 
-`Backend` owns a `DeviceState` for every Vello device slot. Each state contains:
+`Backend` owns a `DeviceState` for every selected WGPU device slot. Each state
+contains:
 
-- the Vello renderer for direct and capture work;
+- the private `VelloEngineState` for direct and capture raster work;
 - immutable probed `DeviceCapabilities`;
 - one persistent `ResourceManager`;
 - shader modules, bind-group layouts, samplers, and render-pipeline caches;
@@ -1519,8 +1762,8 @@ success. Backend prose is retained for display/source context but is never
 parsed to detect loss.
 
 `Ready -> Lost` and `Ready -> Faulted` are terminal for that device generation.
-Either transition takes and
-drops the Vello renderer, resource manager contents, shader/pipeline caches, and
+Either transition takes and drops the internal raster engine, resource manager
+contents, shader/pipeline caches, and
 all idle leases before another operation can obtain them. Any active frame is
 failed, its scope-owned leases are dropped, and last-successful surface
 parameters/stats are not updated. A duplicate/late signal preserves the first
@@ -1531,13 +1774,15 @@ observed by the next operation.
 This renderer does not silently create a replacement device. Every later render,
 readback, runtime-capability query, or surface resume that names the lost device
 returns the same typed `DeviceLost` or `DeviceFaulted` reason without making a
-WGPU/Vello call.
+WGPU/internal-raster call.
 Recovery is explicit: the caller creates a new `Renderer` and recreates its
 surfaces/scene resources. No handle or cache generation crosses renderer/device
 instances.
 
 The resource manager owns:
 
+- Vello recording buffers, transient images, and atlas allocations keyed by
+  exact internal usage role;
 - transient working/capture/coverage textures keyed by exact descriptor and
   usage role;
 - retained resolved-mask uploads keyed by `ImageId`, dimensions, and image
@@ -1564,13 +1809,15 @@ Active-frame bytes are reported internally but are not rejected by the
 retention budget. Device limits are checked before allocation; WGPU allocation
 or submission failures remain typed backend failures.
 
-Direct Vello image-atlas ownership remains in Vello. Render-owned mask uploads
-do not claim to expose or control Vello's internal atlas.
+The internal raster atlas remains private to `VelloEngineState`, but every live
+allocation and retained byte is registered with the same resource manager.
+Render-owned mask uploads and raster-atlas entries use distinct role keys and
+cannot alias accidentally.
 
 ## S26 Surface And Device Lifecycle
 
 Headless targets add the safe usages needed by the custom present pass while
-retaining Vello direct storage rendering and explicit readback. Headless
+retaining internal Vello direct storage rendering and explicit readback. Headless
 surfaces remain `Format::Rgba8` only; `Format::Bgra8` is rejected before WGPU
 work with `SurfaceCreateFailed`, preserving the current contract. Presented
 Rgba8/Bgra8 formats are selected only when advertised by the surface and the
@@ -1674,7 +1921,7 @@ PartialEq`. The private headless resource state adds `Empty` alongside
 `Pending` and `Ready`. A zero-area `ImageBuffer` remains valid exactly for this
 readback/fixture result.
 
-Device loss is isolated by Vello device slot, not renderer-wide:
+Device loss is isolated by WGPU device slot, not renderer-wide:
 
 | Operation after one slot is lost/faulted | Result |
 | --- | --- |
@@ -1682,7 +1929,7 @@ Device loss is isolated by Vello device slot, not renderer-wide:
 | `create_headless` when the renderer's default headless slot is terminal | Same terminal diagnostic; no automatic default-device replacement |
 | `resume_surface` naming the terminal slot | Same terminal diagnostic |
 | Existing surface on another ready slot | Continues using its own resources and capabilities |
-| New presented surface whose safe Vello selection yields another/new ready slot | Register an independent `DeviceState` and succeed |
+| New presented surface whose safe WGPU selection yields another/new ready slot | Register an independent `DeviceState` and succeed |
 | New presented surface whose selected slot is terminal | Return that slot's terminal diagnostic |
 
 No operation silently replaces a terminal generation. Explicit full recovery
@@ -1738,9 +1985,16 @@ ownership boundaries:
 | `renderer.rs` | Public orchestration, successful-frame state update, direct/graph dispatch, runtime capability projection |
 | `command.rs` | Normalized semantic render commands, bounds contribution, no cloned backdrop source commands |
 | `frame.rs` | Private `FrameContext`, `FramePlan`, graph builder, partitioning, logical/spatial planning, graph validation |
-| `backend.rs` | Vello/WGPU device and surface integration, async scoped GPU-operation transactions, safe acquisition/submission/presentation, per-device loss/fault state lookup |
+| `backend.rs` | WGPU device and surface integration, async scoped GPU-operation transactions, safe acquisition/submission/presentation, per-device loss/fault state lookup |
+| `vello_engine/scene.rs` | Private Vello-compatible scene lowering retained from the pinned main crate, with no public reexport |
+| `vello_engine/glyph.rs` | Fallible S10A selected-glyph/table/image preflight before any external encoding; no shaping or inferred bounds |
+| `vello_engine/recording.rs` | Private resource-intent and compute-dispatch IR; no WGPU submission |
+| `vello_engine/raster.rs` | Fixed coarse/fine Vello recording schedule over external `vello_encoding` types |
+| `vello_engine/shaders.rs` | Checked WGPU pipeline construction from external `vello_shaders::SHADERS`; no CPU/hot-reload path |
+| `vello_engine/encoder.rs` | Encode prepared raster work into transaction-owned command encoders and produce `VelloResourceLease` values |
+| `vello_engine/mod.rs` | Per-device `VelloEngineState`, private phase transitions, and adapted error boundary |
 | `readback.rs` | Private staging/map state machine, native bounded poll helper, wasm callback completion, cancellation cleanup |
-| `resource.rs` | Private generation-aware leases, texture/upload/kernel retention, deterministic budget trimming and stats |
+| `resource.rs` | Private generation-aware Vello/effect leases, texture/upload/kernel retention, deterministic budget trimming and stats |
 | `pass.rs` | Private executable pass/resource nodes, runtime lowering, scheduler, bind groups, command encoding |
 | `shader.rs` | Pipeline keys/cache creation, safe uniform encoders, shared shader constants |
 | `src/shaders/*.wgsl` | Canonicalization, color filter, blur, shadow colorize, composite/blend, and present shader source |
@@ -1750,14 +2004,15 @@ ownership boundaries:
 | `error.rs` | Typed semantic and runtime diagnostics |
 | `image.rs` | Validated images/readback buffers; no CPU effect executor |
 | `layer.rs` | Resolved mask semantic input and preserved layer contracts |
-| `text.rs` | Explicit run-local text bounds |
+| `text.rs` | Validated immutable font bytes/index plus explicit run-local text bounds; no shaping or inferred ink geometry |
 | `stats.rs` | Route/pass/resource telemetry |
 | `surface.rs` | Existing safe dynamic lifecycle and output target state |
 
-`frame.rs`, `resource.rs`, `pass.rs`, `readback.rs`, and all shader
-implementation modules are private. The public front door remains reexports
-from `lib.rs`; no `wgpu`,
-Vello, graph, resource handle, shader key, or working-format type is exposed.
+`frame.rs`, `resource.rs`, `pass.rs`, `readback.rs`, `vello_engine/`, and all
+shader implementation modules are private. The public front door remains
+reexports from `lib.rs`; no `wgpu`, `vello_encoding`, `vello_shaders`, internal
+Vello engine, graph, resource handle, shader key, or working-format type is
+exposed.
 
 The existing `texture.rs` and `shader.rs` probes may be absorbed into the new
 private owners rather than duplicated. There is one authoritative texture
@@ -1782,6 +2037,7 @@ The initiative intentionally contains breaking public changes:
 | Resolved alpha-mask API | Breaking | `ResolvedLayerAlphaMask::try_new(Image, Rect)`, `image`, `bounds`, and `Layer::with_resolved_alpha_mask`; remove buffer `size`/`mode`/`alpha_mask` accessors and `Layer::try_resolved_alpha_mask` |
 | `ResolvedLayerAlphaMask: Eq` | Breaking trait removal | `Clone + Debug + PartialEq` only |
 | Text-run construction | Breaking | Append `bounds: TextRunBounds` after `glyphs` in the exact S10 `TextRun::try_new` signature |
+| `FontData::from_bytes` | Breaking replacement | `FontData::try_from_bytes` validates bytes and collection index and returns the exact S10A typed `InvalidValue`; no infallible alias |
 | Filter drop-shadow payload | Breaking | `FilterDropShadow` instead of broad `Shadow` |
 | `FilterBlur::try_new` accepted range | Breaking behavior | Values above 256 logical pixels now return typed `InvalidValue`; no clamp or fallback |
 | `Error` public fields/raw constructor | Breaking | Private fields plus `code`, `message`, typed accessors, semantic constructors |
@@ -2121,7 +2377,9 @@ add, or reclassify an inventory row.
 
 | Input/runtime condition | Route/result |
 | --- | --- |
-| Empty or Vello-only scene | One `DirectVello` render with base color |
+| Empty or Vello-only scene | One transaction-owned internal Vello raster pass with base color and one frame submission stage |
+| Internal Vello preparation/encoding failure | Owning render-stage error; raster/effect leases abort and no frame state publishes |
+| Canceled encoded Vello pass before submission | Uncertain transient resources drop/quarantine; no idle reuse or publication |
 | Any nonzero render on contract-only surface | `RuntimeCapabilityUnavailable(SurfaceRendering, AdapterUnavailable)`; last-successful stats unchanged |
 | Any read on nonzero contract-only surface | `RuntimeCapabilityUnavailable(SurfaceReadback, AdapterUnavailable)` |
 | Foreign/stale surface passed to renderer | Exact operation plus `SurfaceIdentityMismatch`; no device-slot access |
@@ -2139,6 +2397,11 @@ add, or reclassify an inventory row.
 | High unavailable, reduced disallowed | Typed runtime capability error |
 | Neither effect format available | Typed runtime capability error |
 | Effect extent exceeds device dimension | Typed dimension error before allocation |
+| Malformed font bytes | S10A `InvalidInput` at `FontData::try_from_bytes`; no normalization/raster/WGPU work |
+| Valid font with out-of-range collection index | Same exact S10A `InvalidInput`; no normalization/raster/WGPU work |
+| Readable font container with malformed selected outline/color/palette/bitmap/PNG table | Same exact S10A `InvalidInput` during fallible scene encoding; no raster recording or WGPU work |
+| Missing selected glyph ID | S10A `text_glyph.id` `InvalidInput` before external encoding; no empty-glyph substitution |
+| Valid but unsupported glyph image encoding | Owning internal-raster preparation `RenderFailed`; no silent glyph omission or fallback font |
 | Missing text ink bounds in direct scene | Direct Vello success |
 | Missing text ink bounds in bounded graph subtree | Typed unresolved text-bounds error |
 | Degenerate transformed effect subtree | Explicit empty/no-op result |
@@ -2164,6 +2427,18 @@ Focused non-GPU tests cover these named contracts:
 - `options_default_requires_high_precision_and_bounds_retention`;
 - `resource_cache_budget_zero_disables_idle_retention`;
 - `image_buffer_rejects_short_long_and_overflowing_byte_lengths`;
+- `font_data_rejects_malformed_bytes_before_raster_lowering`;
+- `font_data_rejects_out_of_range_collection_index_before_raster_lowering`;
+- `font_data_constructor_never_panics_for_arbitrary_bytes_and_indices`;
+- `font_lowering_rejects_malformed_lazy_tables_without_panic_or_gpu_work`;
+- `selected_glyph_preflight_rejects_missing_outline_before_external_encoding`;
+- `selected_glyph_preflight_validates_exact_outline_draw_settings`;
+- `selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs`;
+- `selected_glyph_preflight_distinguishes_unsupported_image_from_malformed_data`;
+- `external_glyph_resolver_omission_branches_are_blocked_by_preflight`;
+- `unsupported_glyph_image_encoding_returns_render_failed_without_omission`;
+- `ahem_font_data_validates_at_collection_index_zero`;
+- `internal_vello_font_parsing_is_fallible_and_never_unwraps`;
 - `resolved_alpha_mask_requires_finite_positive_local_bounds`;
 - `text_run_bounds_distinguish_unspecified_empty_and_ink`;
 - `capabilities_current_report_semantics_without_backend_or_cpu_names`;
@@ -2176,6 +2451,10 @@ Focused non-GPU tests cover these named contracts:
 - `native_and_wasm_error_source_storage_preserves_source_contract`;
 - `gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage`;
 - `dropped_gpu_operation_future_aborts_draft_state_and_leases`;
+- `internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations`;
+- `prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority`;
+- `encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit`;
+- `canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty`;
 - `direct_vello_is_the_least_powerful_plan_for_effect_free_scenes`;
 - `gpu_graph_is_selected_only_for_supported_custom_requirements`;
 - `graph_builder_rejects_forward_stale_and_read_write_aliases`;
@@ -2222,6 +2501,9 @@ The GPU suite includes:
 - `real_gpu_error_scope_captures_deliberate_validation_error`;
 - `real_gpu_smoke_emits_no_uncaptured_error`;
 - `uncaptured_gpu_error_faults_only_its_device_generation`;
+- `internal_vello_checked_shader_creation_reports_validation_without_unsafe`;
+- `internal_vello_encoding_shares_the_frame_transaction_submission`;
+- `internal_vello_direct_pixels_match_pinned_vello_characterization_cases`;
 - `direct_vello_scene_uses_one_pass_and_no_effect_allocation`;
 - `capture_canonicalize_present_round_trips_transparent_partial_and_opaque_pixels`;
 - `reduced_precision_low_alpha_pixels_use_alpha_and_premul8_tolerances`;
@@ -2254,6 +2536,16 @@ The GPU suite includes:
 - `canceled_native_readback_discards_late_callback_without_publication_change`;
 - `render_window_smoke_executes_direct_and_graph_presented_frames`;
 - `render_path_submits_without_map_or_cpu_wait`.
+
+Before removing the external `vello` dependency, the internalization cycle
+records expected pixels for the named characterization cases by rendering the
+same authored scenes through pinned Vello 0.9 and the current production
+surface route. The cases cover solid fill and stroke edges, gradients, image
+sampling, clipping, transforms, and Ahem glyphs at the S33 scale and
+antialiasing pairs. Expected values are retained as explicit test constants or
+small source-readable tables, not a generated binary fixture. The replacement
+engine must satisfy those same cases and S34 tolerances before the external
+dependency is removed.
 
 Real-backend validation is intentionally separate from deterministic error
 classification. The real suite safely induces only a validation error inside
@@ -2315,12 +2607,26 @@ straight RGB at low nonzero alpha.
 
 Source/diff tests and final inspection prove:
 
-- `Options` and Vello setup contain no CPU selector and Vello `use_cpu` is
-  always false;
+- `Options` and `src/vello_engine/` contain no CPU selector, `use_cpu`, CPU
+  shader/materialized-buffer path, debug download, blocking helper, profiler,
+  hot reload, or deprecated async renderer;
+- `Cargo.toml` has no external `vello` dependency, and production source has no
+  `vello::` path; only pinned `vello_encoding` and WGSL-only `vello_shaders`
+  remain external;
+- `src/vello_engine/` contains no `queue.submit`, buffer map, `Device::poll`,
+  surface/device convenience owner, or unchecked/trusted shader creation;
+- public/internal font parsing contains no `unwrap`, `expect`, fallback font, or
+  silent malformed-font omission, and every constructed `FontData` passed to
+  raster lowering satisfies S10A;
+- every external `vello_encoding` glyph run is built from a
+  `ValidatedGlyphRun`; no direct unpreflighted glyph-run append path exists;
+- `NOTICE-VELLO.md` names the exact Vello 0.9 package checksum, imported and
+  omitted files, pre-adaptation per-file hashes, adaptations, and preserved
+  license texts;
 - production modules do not import `reference`;
 - `Renderer::render` has no call path to the readback state machine, buffer
   mapping, `Device::poll`, CPU pixel execution, rendered `Image::from_rgba`, or
-  Vello texture registration for graph re-entry;
+  internal-raster atlas registration for effect-graph re-entry;
 - production `Device::poll` appears only in the native explicit-readback helper,
   and private injected GPU error classification is compiled only under
   `#[cfg(test)]`;
@@ -2335,14 +2641,32 @@ that pixels or lifecycle semantics are correct.
 
 ## S36 Feature, Dependency, And Artifact Contract
 
-The normal dependency set remains exactly `glifo = 0.1.1`, `kurbo = 0.13.1`,
-`peniko = 0.6.1`, `pollster = 0.4.0`, optional path/version
-`surgeist-window = 0.1.0`, `vello = 0.9.0`, and `wgpu = 29.0.3`. The existing
-dev dependency remains `proptest = 1.11.0` with default features disabled and
-`std` enabled. Its role remains property/model testing; it is never a production
-pixel engine. No direct font parser, shader utility, serialization/casting,
-image-filter, compute, wasm harness, or other dependency is added under the
-current permission envelope.
+The reviewed normal dependency set is exactly:
+
+- existing `kurbo = 0.13.1`, `peniko = 0.6.1`, optional path/version
+  `surgeist-window = 0.1.0`, and `wgpu = 29.0.3`;
+- already-present `bytemuck = 1.25.0` with no feature requested by this crate,
+  used only for safe casts of pinned external POD types; Cargo feature
+  unification still enables `bytemuck/derive` through pinned
+  `vello_encoding`, but Surgeist-owned source does not use its derive macros;
+- already-present `log = 0.4.33`, `png = 0.18.1`, and `skrifa = 0.42.1` with
+  default features disabled and `autohint_shaping,std` enabled, preserving the
+  copied scene/glyph behavior;
+- `vello_encoding = 0.9.0` and `vello_shaders = 0.9.0`, with
+  `vello_shaders` default features disabled and only `wgsl` enabled.
+
+The external `vello` dependency is removed. Its `futures-intrusive`,
+`static_assertions`, and `thiserror` direct uses are removed with deprecated
+async/debug helpers, upstream-only assertions, and the external error wrapper;
+they do not become direct dependencies. The currently unused direct
+`glifo = 0.1.1` dependency is also removed. `pollster = 0.4.0` moves from normal
+to dev dependencies because only tests and the tracked native smoke example
+drive the async public API synchronously. The other dev dependency remains
+`proptest = 1.11.0` with default features disabled and `std` enabled. Its role
+remains property/model testing; it is never a production pixel engine. Every
+retained direct dependency must have a production, test, or example source use
+and appear once at its intended Cargo role. No image-filter, compute, wasm
+harness, or other dependency is added under the current permission envelope.
 
 The feature/target support matrix is closed:
 
@@ -2374,16 +2698,22 @@ dependencies, and harness artifact require user permission and a reviewed
 specification revision before acquisition or edits.
 
 The crate has no declared local MSRV, API generator, snapshot generator, or CI
-workflow. The authoritative root facade manifest declares `rust-version =
-"1.89"`; therefore Rust 1.89 is the root-integration compatibility floor for
-every leaf API and implementation choice even though this leaf manifest does
-not duplicate that field. Rust 2024 compatibility and the current toolchain are
-also preserved. At specification review time the installed toolchains are
-stable 1.96.0, nightly-2025-08-02, and 1.92.0; 1.89.0 is absent. No API
-stabilized after 1.89 may enter production without an equivalent
-1.89-compatible form.
+workflow. At root HEAD `19590f6d9fa01c0df197c5ef07fb626c5cf18ced`, the
+authoritative facade manifest declares `rust-version = "1.97"`; therefore Rust
+1.97 is the root-integration compatibility floor for every leaf API and
+implementation choice even though this leaf manifest does not duplicate that
+field. Rust 2024 compatibility is also preserved. At specification review time
+the installed active/stable toolchain is exactly Rust 1.97.0, alongside
+nightly-2025-08-02 and 1.92.0. No API stabilized after 1.97 may enter production
+without an equivalent 1.97-compatible form.
 
-WGSL files are tracked implementation artifacts, not generated output.
+Custom WGSL files are tracked implementation artifacts, not generated output.
+`vello_shaders` remains an external crate whose existing build script produces
+its embedded `SHADERS`; no generated shader Rust is copied or hand-edited.
+`NOTICE-VELLO.md` plus
+`LICENSES/Vello-0.9.0-APACHE-2.0.txt` and
+`LICENSES/Vello-0.9.0-MIT.txt` are tracked provenance/license artifacts for the
+internalized main-crate source. Source headers remain intact.
 The existing Ahem font and its license/provenance files remain the only fixture
 needed by this initiative. No binary fixture is downloaded or modified.
 
@@ -2418,8 +2748,13 @@ CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features 
 CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window
 CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
-CARGO_NET_OFFLINE=true cargo +1.89.0 check -p surgeist-render --all-targets
-CARGO_NET_OFFLINE=true cargo +1.89.0 check -p surgeist-render --all-targets --features render-window,render-web
+rustc +stable --version # must report Rust 1.97.x
+CARGO_NET_OFFLINE=true cargo +stable check -p surgeist-render --all-targets
+CARGO_NET_OFFLINE=true cargo +stable check -p surgeist-render --all-targets --features render-window,render-web
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e normal --depth 1
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e dev --depth 1
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i bytemuck
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i vello_shaders
 ```
 
 Default and feature test commands execute the required real headless GPU suite;
@@ -2435,18 +2770,33 @@ returns the canonical missing-tooling blocker requesting exact permission for
 treat the check as passed. A missing graphical session similarly blocks the
 native presented command without downloading a display/server substitute.
 
-The current environment also lacks toolchain 1.89.0. If it remains absent when
-the MSRV gate is reached, the exact acquisition blocker requests permission for
-`rustup toolchain install 1.89.0 --profile minimal`; it does not install the
-toolchain or treat a newer compiler as MSRV evidence. If the toolchain is
-already present, both listed MSRV commands are mandatory. Any target component
-needed on that toolchain would require its own exact permission request rather
-than being folded into this blocker.
+Before the two `+stable` compatibility commands, `rustc +stable --version` must
+report exactly Rust 1.97.x. If stable has advanced beyond the 1.97 line when the
+gate is reached and no exact 1.97 toolchain is installed, the acquisition
+blocker requests permission for `rustup toolchain install 1.97.0 --profile
+minimal`; it does not install the toolchain or treat a newer compiler as MSRV
+evidence. If an exact toolchain is already present, the equivalent two checks
+under that toolchain are mandatory. Any target component needed on it requires
+its own exact permission request rather than being folded into this blocker.
 
 The final unsafe-absence gate builds the owned Rust manifest from tracked and
 non-ignored untracked `*.rs` files, excludes only dependency/build-cache roots,
 and applies the canonical `$surgeist-agent` unsafe scan. The compiler lint and
 repository-wide scan must both be clean.
+
+Final dependency/provenance inspection additionally proves that `Cargo.toml`
+has no `vello` package dependency, `cargo tree` contains direct
+`vello_encoding` and WGSL-only `vello_shaders`, every S36 direct dependency has
+an intended source use, `glifo` is absent, `pollster` is dev-only, and no removed
+Vello helper became direct. The feature tree may contain `bytemuck/derive` only
+through pinned external crates; the owned-source guard proves no
+`Pod`/`Zeroable` derive or unsafe implementation. Static source inspection
+confirms `src/vello_engine/` has no CPU dispatch, blocking/poll/map, direct
+submission, trusted shader API, or Vello utility surface/device owner. The three
+S36 provenance/license artifacts exist, their recorded package version/checksum
+match the immutable S04 import record, and the notice retains every imported
+file's pre-adaptation SHA-256. The removed `vello` lockfile entry is not final
+provenance authority.
 
 ## S38 Finite Acceptance Criteria
 
@@ -2456,7 +2806,8 @@ This initiative is accepted only when all of the following are true:
    specified production route and executable evidence.
 2. Every overlay `Preserve` row remains supported, and every `HoldDiagnostic`
    and `HoldRoot` row remains correctly typed and owned.
-3. Effect-free scenes take one `DirectVello` pass with no effect allocation.
+3. Effect-free scenes take one transaction-owned internal `DirectVello` raster
+   pass with no effect allocation or engine-owned submission.
 4. Supported alpha-mask and bounded-backdrop scenes execute through the closed
    GPU graph with no production readback, CPU pixel algorithm, or Vello-atlas
    graph re-entry.
@@ -2472,12 +2823,14 @@ This initiative is accepted only when all of the following are true:
 8. Public models and phase boundaries match S07-S14 and S29; invalid values and
    unresolved/runtime failures are not represented as strings or backend-name
    guesses.
-9. CPU reference code is test-only, Vello CPU mode is unreachable, and all
+9. CPU reference code is test-only; the internal Vello engine has no CPU mode,
+   blocking helper, direct submission, or unchecked shader path; and all
    Surgeist-owned source contains no `unsafe` or unsafe allowance.
 10. The dependency, feature, fixture, artifact, and crate/root boundaries in S02,
-    S03, and S36 remain intact.
+    S03, S06A, and S36 remain intact, including exact Vello provenance and the
+    absence of the external `vello` dependency.
 11. Every named applicable model, GPU, lifecycle, readback, guard, feature,
-    Rust-1.89 MSRV, and target check is green; unavailable required tooling is
+    Rust-1.97 compatibility, and target check is green; unavailable required tooling is
     reported through the canonical permission blocker rather than treated as a
     pass.
 

@@ -4,8 +4,12 @@
 
 - Cycle: `C02`.
 - Owner: `surgeist-render`.
-- Status: `in_progress`.
+- Status: `superseded`.
 - Cycle base: `5361e3460278dffb877b9d485a2d12977977c3ef`.
+- Supersession: this packet is historical and assigns no further work. The
+  reviewed S06B revision in `plans/specs/gpu-render-pipeline.md` requires a
+  distinct replacement C02 plan after the revised sequence is clean and
+  committed.
 - Specification: `plans/specs/gpu-render-pipeline.md` at commit `3826a9098e859874a515bbebaf470a47d754d76c`, content SHA-256 `f01972e19f8a5ddc90936edfc6ea7955feff3d1b1fdf5d181e77e8d10cc1f60a`, sections S12-S13, non-readback S13A, identity/device/publication portions of S25-S26, applicable S29 rows, S31, C02-applicable named evidence in S32-S33, S35, and the native feature/tooling limits in S36-S37. The sequence records the user's explicit authorization to skip the remaining final specification re-review after its findings were incorporated.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at commit `ff0d4a3c478f6f89cceab3962883bd53396cba6b`, content SHA-256 `1ff25dbd5bb0382e2e66573affd058a3e3f939bede561a896ce6e1dea7d73840`, entry `C02 Async GPU Transactions And Device Terminality`.
 - Outcome: make non-readback GPU entry points asynchronous; validate renderer and device identity before slot access; make each selected device terminal on its first loss or uncaptured fault; scope and classify owned GPU work; and commit headless or presented frame state only at the specified clean transaction boundary.
