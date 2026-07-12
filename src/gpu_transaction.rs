@@ -9,21 +9,15 @@ use std::sync::Arc;
 pub(crate) enum GpuOperationStage {
     SurfaceCreate,
     RendererCreate,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 6 installs the presented resize transaction using this existing classification"
-        )
+    #[allow(
+        dead_code,
+        reason = "the default feature build omits presented surface setup"
     )]
     SurfaceConfigure,
     Render,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "Task 6 installs the second presented submission transaction using this classification"
-        )
+    #[allow(
+        dead_code,
+        reason = "Task 6 owns the presented frame submission transaction"
     )]
     Present,
 }
@@ -97,6 +91,15 @@ impl GpuOperationLease {
     const fn generation(&self) -> u64 {
         self.generation
     }
+
+    fn finish(&self) -> Option<DeviceTerminalSignal> {
+        self.signal.finish_active_generation(self.generation)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn generation_for_test(&self) -> u64 {
+        self.generation
+    }
 }
 
 impl Drop for GpuOperationLease {
@@ -159,7 +162,7 @@ impl GpuOperationTransaction {
             .pop()
             .await;
 
-        if let Some(terminal) = self.lease.signal.first_terminal() {
+        if let Some(terminal) = self.lease.finish() {
             return match terminal {
                 DeviceTerminalSignal::Lost { .. } => Err(terminal.error(operation)),
                 DeviceTerminalSignal::Faulted {

@@ -1,7 +1,8 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
+use super::gpu_transaction::GpuOperationTransaction;
 use super::{
-    BackendErrorCode, Color, Error, Format, Result,
+    BackendErrorCode, Color, Error, Format, Result, RuntimeOperation,
     texture::{TextureDescriptor, TextureUsageIntent},
 };
 
@@ -267,8 +268,9 @@ impl<'a> RectShaderPassGpuContext<'a> {
     }
 }
 
-pub(crate) fn encode_clear_fill_pass(
+pub(crate) async fn encode_clear_fill_pass(
     context: Option<RectShaderPassGpuContext<'_>>,
+    transaction: Option<GpuOperationTransaction>,
     descriptor: RectShaderPassDescriptor,
     color: Color,
 ) -> Result<()> {
@@ -283,6 +285,12 @@ pub(crate) fn encode_clear_fill_pass(
         return Err(Error::new(
             BackendErrorCode::AdapterUnavailable,
             "rect/fullscreen shader pass requires an available wgpu device context",
+        ));
+    };
+    let Some(transaction) = transaction else {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "clear/fill GPU work requires an active render transaction",
         ));
     };
     let _source_view = context.source_view;
@@ -315,7 +323,7 @@ pub(crate) fn encode_clear_fill_pass(
         });
     }
     context.queue.submit([encoder.finish()]);
-    Ok(())
+    transaction.finish(RuntimeOperation::SurfaceRendering).await
 }
 
 fn validate_label(name: &'static str, value: &'static str) -> Result<()> {

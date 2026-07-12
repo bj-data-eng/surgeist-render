@@ -215,6 +215,17 @@ impl DeviceTerminalSignal {
         error.append_message(format_args!(": {}", self.message()));
         error
     }
+
+    #[cfg(test)]
+    pub(crate) const fn operation_generation_for_test(&self) -> Option<u64> {
+        match self {
+            Self::Lost { .. } => None,
+            Self::Faulted {
+                operation_generation,
+                ..
+            } => *operation_generation,
+        }
+    }
 }
 
 pub(crate) struct DeviceSignal {
@@ -259,6 +270,19 @@ impl DeviceSignal {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .first_terminal
             .clone()
+    }
+
+    /// Atomically snapshots terminal state and releases this operation's lease.
+    pub(crate) fn finish_active_generation(&self, generation: u64) -> Option<DeviceTerminalSignal> {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let terminal = state.first_terminal.clone();
+        if state.active_operation_generation == Some(generation) {
+            state.active_operation_generation = None;
+        }
+        terminal
     }
 
     fn record_fault(&self, kind: GpuFaultKind, message: String) {
@@ -325,6 +349,19 @@ impl DeviceSignal {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .active_operation_generation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_uncaptured_fault_for_test(&self, kind: GpuFaultKind, message: &str) {
+        self.record_fault(kind, message.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_active_generation_for_test(
+        &self,
+        generation: u64,
+    ) -> Option<DeviceTerminalSignal> {
+        self.finish_active_generation(generation)
     }
 
     #[cfg(test)]

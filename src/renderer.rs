@@ -21,6 +21,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+const PRESENTED_SETUP_STAGES: [GpuOperationStage; 3] = [
+    GpuOperationStage::SurfaceCreate,
+    GpuOperationStage::SurfaceConfigure,
+    GpuOperationStage::RendererCreate,
+];
+
 pub struct Renderer {
     identity: RendererIdentity,
     options: Options,
@@ -80,15 +90,10 @@ impl Renderer {
                     ));
                 };
                 let physical_size = physical_size(options.size, options.scale)?;
-                let surface = backend
+                let raw_surface = backend
                     .context
-                    .create_surface(
-                        handle.clone(),
-                        physical_size.width(),
-                        physical_size.height(),
-                        options.present_mode.into(),
-                    )
-                    .await
+                    .instance
+                    .create_surface(handle.clone())
                     .map_err(|source| {
                         Error::new(
                             BackendErrorCode::SurfaceCreateFailed,
@@ -96,18 +101,26 @@ impl Renderer {
                         )
                         .with_source(source)
                     })?;
-                let device_identity = backend.device_slot_identity(surface.dev_id)?;
-                if let Some(error) =
-                    backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
-                {
-                    return Err(error);
-                }
-                ensure_vello_renderer(
+                let device_slot = backend
+                    .context
+                    .device(Some(&raw_surface))
+                    .await
+                    .ok_or_else(|| {
+                        Error::new(
+                            BackendErrorCode::AdapterUnavailable,
+                            "no compatible wgpu adapter is available for the native surface",
+                        )
+                    })?;
+                let device_identity = backend.device_slot_identity(device_slot)?;
+                let surface = create_presented_surface(
                     backend,
+                    raw_surface,
+                    physical_size,
+                    options.present_mode,
                     self.options,
                     device_identity,
-                    RuntimeOperation::AdapterSelection,
-                )?;
+                )
+                .await?;
                 Ok(Surface::with_backend(
                     Attachment::Window(handle),
                     options,
@@ -143,15 +156,10 @@ impl Renderer {
             ));
         };
         let physical_size = physical_size(options.size, options.scale)?;
-        let surface = backend
+        let raw_surface = backend
             .context
-            .create_surface(
-                html_canvas,
-                physical_size.width(),
-                physical_size.height(),
-                options.present_mode.into(),
-            )
-            .await
+            .instance
+            .create_surface(html_canvas)
             .map_err(|source| {
                 Error::new(
                     BackendErrorCode::SurfaceCreateFailed,
@@ -159,18 +167,26 @@ impl Renderer {
                 )
                 .with_source(source)
             })?;
-        let device_identity = backend.device_slot_identity(surface.dev_id)?;
-        if let Some(error) =
-            backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
-        {
-            return Err(error);
-        }
-        ensure_vello_renderer(
+        let device_slot = backend
+            .context
+            .device(Some(&raw_surface))
+            .await
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::AdapterUnavailable,
+                    "no compatible WebGPU adapter is available for the canvas surface",
+                )
+            })?;
+        let device_identity = backend.device_slot_identity(device_slot)?;
+        let surface = create_presented_surface(
             backend,
+            raw_surface,
+            physical_size,
+            options.present_mode,
             self.options,
             device_identity,
-            RuntimeOperation::AdapterSelection,
-        )?;
+        )
+        .await?;
         Ok(Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
@@ -647,17 +663,35 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    pub(crate) async fn deliberate_validation_error_for_test(&mut self) -> Option<Result<()>> {
-        let device_identity = self.default_device?;
-        let backend = self.backend.as_mut()?;
-        let transaction = backend
-            .begin_gpu_operation(
-                device_identity,
-                GpuOperationStage::Render,
-                RuntimeOperation::SurfaceRendering,
+    pub(crate) async fn deliberate_validation_error_for_test(&mut self) -> Result<Result<()>> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "real GPU error-scope coverage requires a host adapter",
             )
-            .ok()?;
-        let device = &backend.context.devices.get(device_identity.slot())?.device;
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "real GPU error-scope coverage requires a host adapter",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let device = &backend
+            .context
+            .devices
+            .get(device_identity.slot())
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "default GPU device disappeared before validation probe",
+                )
+            })?
+            .device;
         let _ = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Surgeist deliberate scoped validation failure"),
             size: wgpu::Extent3d {
@@ -674,7 +708,109 @@ impl Renderer {
         });
         let result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
         backend.observe_device_terminal(device_identity);
-        Some(result)
+        Ok(result)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn scoped_clear_fill_probe_for_test(&mut self) -> Result<ImageBuffer> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "real GPU clear/fill probe requires a host adapter",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "real GPU clear/fill probe requires a host adapter",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let (result, destination_texture) = {
+            use super::shader::{
+                RectPassBounds, RectShaderPassDescriptor, RectShaderPassGpuContext,
+                RectShaderPassKind, encode_clear_fill_pass,
+            };
+            use super::texture::{TextureDescriptor, TextureUsageIntent};
+
+            let source = TextureDescriptor::try_new(
+                PhysicalSize::new(2, 2),
+                Format::Rgba8,
+                TextureUsageIntent::OffscreenLayer,
+            )?;
+            let destination = TextureDescriptor::try_new(
+                PhysicalSize::new(2, 2),
+                Format::Rgba8,
+                TextureUsageIntent::IntermediatePass,
+            )?;
+            let bounds = RectPassBounds::try_new(0, 0, 2, 2, source, destination)?;
+            let pass = RectShaderPassDescriptor::try_new(
+                "scoped source",
+                "scoped destination",
+                source,
+                destination,
+                bounds,
+                RectShaderPassKind::ClearFill,
+            )?;
+            let device_handle = backend
+                .context
+                .devices
+                .get(device_identity.slot())
+                .ok_or_else(|| {
+                    Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "default GPU device disappeared before clear/fill probe",
+                    )
+                })?;
+            let (_source_texture, source_view) = create_texture(
+                &device_handle.device,
+                "Surgeist scoped shader source",
+                source,
+            );
+            let (destination_texture, destination_view) = create_texture(
+                &device_handle.device,
+                "Surgeist scoped shader destination",
+                destination,
+            );
+            let context = RectShaderPassGpuContext::new(
+                &device_handle.device,
+                &device_handle.queue,
+                &source_view,
+                &destination_view,
+            );
+            (
+                encode_clear_fill_pass(
+                    Some(context),
+                    Some(transaction),
+                    pass,
+                    Color::try_rgba(0.25, 0.5, 0.75, 1.0)?,
+                )
+                .await,
+                destination_texture,
+            )
+        };
+        backend.observe_device_terminal(device_identity);
+        result?;
+        let device_handle = backend
+            .context
+            .devices
+            .get(device_identity.slot())
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "default GPU device disappeared before clear/fill probe readback",
+                )
+            })?;
+        read_texture_rgba(
+            &device_handle.device,
+            &device_handle.queue,
+            &destination_texture,
+            PhysicalSize::new(2, 2),
+        )
     }
 
     #[cfg(test)]
@@ -1090,6 +1226,159 @@ fn backdrop_execution_error() -> Error {
         ": backdrop capture was planned during normalization but render-time backdrop execution is not implemented",
     );
     error
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+async fn create_presented_surface<'surface>(
+    backend: &mut Backend,
+    surface: wgpu::Surface<'surface>,
+    physical_size: PhysicalSize,
+    present_mode: PresentMode,
+    options: Options,
+    device_identity: DeviceSlotIdentity,
+) -> Result<vello::util::RenderSurface<'surface>> {
+    let slot = device_identity.slot();
+    let device_handle = backend.context.devices.get(slot).ok_or_else(|| {
+        Error::new(
+            BackendErrorCode::SurfaceCreateFailed,
+            "compatible Vello device slot disappeared before presented surface setup",
+        )
+    })?;
+    let format = surface
+        .get_capabilities(device_handle.adapter())
+        .formats
+        .into_iter()
+        .find(|format| {
+            matches!(
+                format,
+                wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+            )
+        })
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::SurfaceCreateFailed,
+                "surface does not support Rgba8Unorm or Bgra8Unorm presentation",
+            )
+        })?;
+    let config = wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: physical_size.width(),
+        height: physical_size.height(),
+        present_mode: present_mode.into(),
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![],
+    };
+
+    let allocation_transaction = backend.begin_gpu_operation(
+        device_identity,
+        PRESENTED_SETUP_STAGES[0],
+        RuntimeOperation::AdapterSelection,
+    )?;
+    let allocation_work = (|| -> Result<_> {
+        let device = &backend
+            .context
+            .devices
+            .get(slot)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::SurfaceCreateFailed,
+                    "compatible Vello device slot disappeared during target allocation",
+                )
+            })?
+            .device;
+        let target_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surgeist presented Vello target"),
+            size: wgpu::Extent3d {
+                width: physical_size.width(),
+                height: physical_size.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            view_formats: &[],
+        });
+        let target_view = target_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let blitter = wgpu::util::TextureBlitter::new(device, format);
+        Ok((target_texture, target_view, blitter))
+    })();
+    let allocation_scope = allocation_transaction
+        .finish(RuntimeOperation::AdapterSelection)
+        .await;
+    backend.observe_device_terminal(device_identity);
+    allocation_scope?;
+    let (target_texture, target_view, blitter) = allocation_work?;
+
+    let configure_transaction = backend.begin_gpu_operation(
+        device_identity,
+        PRESENTED_SETUP_STAGES[1],
+        RuntimeOperation::AdapterSelection,
+    )?;
+    surface.configure(
+        &backend
+            .context
+            .devices
+            .get(slot)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::SurfaceConfigureFailed,
+                    "compatible Vello device slot disappeared before surface configuration",
+                )
+            })?
+            .device,
+        &config,
+    );
+    let configure_scope = configure_transaction
+        .finish(RuntimeOperation::AdapterSelection)
+        .await;
+    backend.observe_device_terminal(device_identity);
+    configure_scope?;
+
+    let renderer_transaction = backend.begin_gpu_operation(
+        device_identity,
+        PRESENTED_SETUP_STAGES[2],
+        RuntimeOperation::AdapterSelection,
+    )?;
+    let renderer_work = ensure_vello_renderer(
+        backend,
+        options,
+        device_identity,
+        RuntimeOperation::AdapterSelection,
+    );
+    let renderer_scope = renderer_transaction
+        .finish(RuntimeOperation::AdapterSelection)
+        .await;
+    backend.observe_device_terminal(device_identity);
+    renderer_scope?;
+    renderer_work?;
+
+    Ok(vello::util::RenderSurface {
+        surface,
+        config,
+        dev_id: slot,
+        format,
+        target_texture,
+        target_view,
+        blitter,
+    })
+}
+
+#[cfg(all(
+    test,
+    any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )
+))]
+pub(crate) const fn presented_setup_transaction_stages_for_test() -> [GpuOperationStage; 3] {
+    PRESENTED_SETUP_STAGES
 }
 
 /// Renderer configuration that is fixed when a [`Renderer`] is created.

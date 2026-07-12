@@ -8,8 +8,8 @@ use super::{
         ReferencePremultipliedRgba8Buffer,
     },
     shader::{
-        RectPassBounds, RectShaderPassDescriptor, RectShaderPassGpuContext, RectShaderPassKind,
-        RectShaderPipelineKey, encode_clear_fill_pass,
+        RectPassBounds, RectShaderPassDescriptor, RectShaderPassKind, RectShaderPipelineKey,
+        encode_clear_fill_pass,
     },
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
@@ -3485,7 +3485,7 @@ fn shader_pass_contract_only_context_reports_adapter_unavailable() {
     )
     .unwrap();
 
-    let error = encode_clear_fill_pass(None, pass, Color::BLACK)
+    let error = pollster::block_on(encode_clear_fill_pass(None, None, pass, Color::BLACK))
         .expect_err("contract-only shader pass should report missing GPU context");
 
     assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
@@ -3495,79 +3495,15 @@ fn shader_pass_contract_only_context_reports_adapter_unavailable() {
 #[test]
 fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let Some((device, queue)) = renderer.default_wgpu_device_queue() else {
-        let source = TextureDescriptor::try_new(
-            PhysicalSize::new(1, 1),
-            Format::Rgba8,
-            TextureUsageIntent::OffscreenLayer,
-        )
-        .unwrap();
-        let destination = TextureDescriptor::try_new(
-            PhysicalSize::new(1, 1),
-            Format::Rgba8,
-            TextureUsageIntent::IntermediatePass,
-        )
-        .unwrap();
-        let bounds = RectPassBounds::try_new(0, 0, 1, 1, source, destination).unwrap();
-        let pass = RectShaderPassDescriptor::try_new(
-            "source",
-            "destination",
-            source,
-            destination,
-            bounds,
-            RectShaderPassKind::ClearFill,
-        )
-        .unwrap();
-        assert_eq!(
-            encode_clear_fill_pass(None, pass, Color::BLACK)
-                .expect_err("no GPU machines should report the explicit diagnostic")
-                .code(),
-            ErrorCode::AdapterUnavailable
-        );
+    let result = pollster::block_on(renderer.scoped_clear_fill_probe_for_test());
+    if result
+        .as_ref()
+        .is_err_and(|error| error.code() == ErrorCode::AdapterUnavailable)
+    {
         return;
-    };
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(2, 2),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(2, 2),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(0, 0, 2, 2, source, destination).unwrap();
-    let pass = RectShaderPassDescriptor::try_new(
-        "source",
-        "destination",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::ClearFill,
-    )
-    .unwrap();
-    let (_source_texture, source_view) =
-        create_texture(device, "Surgeist shader test source", source);
-    let (destination_texture, destination_view) =
-        create_texture(device, "Surgeist shader test destination", destination);
-    let context = RectShaderPassGpuContext::new(device, queue, &source_view, &destination_view);
-
-    encode_clear_fill_pass(
-        Some(context),
-        pass,
-        Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
-    )
-    .unwrap();
-    let output = read_texture_rgba(
-        device,
-        queue,
-        &destination_texture,
-        destination.physical_size(),
-    )
-    .unwrap();
-
+    }
+    let output =
+        result.expect("available GPU clear/fill work must resolve through its transaction");
     let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
     assert!(
         (60..=68).contains(&red),
@@ -11349,6 +11285,50 @@ fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stag
 }
 
 #[test]
+fn presented_setup_assigns_each_device_owned_step_to_a_transaction_stage() {
+    #[cfg(feature = "render-window")]
+    assert_eq!(
+        super::renderer::presented_setup_transaction_stages_for_test(),
+        [
+            GpuOperationStage::SurfaceCreate,
+            GpuOperationStage::SurfaceConfigure,
+            GpuOperationStage::RendererCreate,
+        ]
+    );
+}
+
+#[test]
+fn uncaptured_faults_observe_active_and_released_generations() {
+    let signal = DeviceSignal::new_for_test();
+    let lease = GpuOperationLease::begin_for_test(&signal).unwrap();
+    let generation = lease.generation_for_test();
+
+    signal.record_uncaptured_fault_for_test(GpuFaultKind::Validation, "active fault");
+    let terminal = signal
+        .finish_active_generation_for_test(generation)
+        .unwrap();
+    assert_eq!(terminal.operation_generation_for_test(), Some(generation));
+    assert_eq!(signal.active_generation_for_test(), None);
+
+    let late_signal = DeviceSignal::new_for_test();
+    let late_lease = GpuOperationLease::begin_for_test(&late_signal).unwrap();
+    let late_generation = late_lease.generation_for_test();
+    assert!(
+        late_signal
+            .finish_active_generation_for_test(late_generation)
+            .is_none()
+    );
+    late_signal.record_uncaptured_fault_for_test(GpuFaultKind::Internal, "late fault");
+    assert_eq!(
+        late_signal
+            .first_terminal()
+            .expect("late fault must terminally affect the next operation")
+            .operation_generation_for_test(),
+        None
+    );
+}
+
+#[test]
 fn dropped_gpu_operation_future_aborts_draft_state_and_leases() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     if let Some(transaction) = renderer.start_default_gpu_operation_for_test() {
@@ -11405,9 +11385,8 @@ fn dropped_gpu_operation_future_aborts_draft_state_and_leases() {
 #[test]
 fn real_gpu_error_scope_captures_deliberate_validation_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let Some(result) = pollster::block_on(renderer.deliberate_validation_error_for_test()) else {
-        return;
-    };
+    let result = pollster::block_on(renderer.deliberate_validation_error_for_test())
+        .expect("real GPU error-scope coverage requires a host adapter");
     let error = result.expect_err("the deliberate invalid texture must be captured by the scope");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
@@ -11416,10 +11395,8 @@ fn real_gpu_error_scope_captures_deliberate_validation_error() {
 #[test]
 fn real_gpu_smoke_emits_no_uncaptured_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-        .expect("headless creation should succeed on the configured runtime");
-    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
-        .expect("an empty scoped render should succeed");
+    pollster::block_on(renderer.scoped_clear_fill_probe_for_test())
+        .expect("real GPU clear/fill probe requires a host adapter and scoped submission");
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
