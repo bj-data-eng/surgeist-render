@@ -6,7 +6,7 @@
 - Owner: `surgeist-render`.
 - Status: `in_progress`.
 - Cycle base: `5361e3460278dffb877b9d485a2d12977977c3ef`.
-- Specification: `plans/specs/gpu-render-pipeline.md` at commit `3826a9098e859874a515bbebaf470a47d754d76c`, content SHA-256 `f01972e19f8a5ddc90936edfc6ea7955feff3d1b1fdf5d181e77e8d10cc1f60a`, sections S12-S13, non-readback S13A, identity/device/publication portions of S25-S26, applicable S29 rows, S31, C02-applicable named evidence in S32-S33, S35, and the native feature/tooling limits in S36-S37.
+- Specification: `plans/specs/gpu-render-pipeline.md` at commit `3826a9098e859874a515bbebaf470a47d754d76c`, content SHA-256 `f01972e19f8a5ddc90936edfc6ea7955feff3d1b1fdf5d181e77e8d10cc1f60a`, sections S12-S13, non-readback S13A, identity/device/publication portions of S25-S26, applicable S29 rows, S31, C02-applicable named evidence in S32-S33, S35, and the native feature/tooling limits in S36-S37. The sequence records the user's explicit authorization to skip the remaining final specification re-review after its findings were incorporated.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at commit `ff0d4a3c478f6f89cceab3962883bd53396cba6b`, content SHA-256 `1ff25dbd5bb0382e2e66573affd058a3e3f939bede561a896ce6e1dea7d73840`, entry `C02 Async GPU Transactions And Device Terminality`.
 - Outcome: make non-readback GPU entry points asynchronous; validate renderer and device identity before slot access; make each selected device terminal on its first loss or uncaptured fault; scope and classify owned GPU work; and commit headless or presented frame state only at the specified clean transaction boundary.
 
@@ -23,7 +23,7 @@
 
 ## Impacts
 
-- Public API: breaking sync-to-async changes for the four non-readback renderer methods; additive `Renderer::runtime_capabilities`; additive `SurfaceResourceState::Empty`; corrected runtime/lifecycle errors and removal of obsolete adapter/surface backend codes once all current uses are migrated. `read_headless` stays synchronous until C03.
+- Public API: breaking sync-to-async changes for the four non-readback renderer methods; additive `Renderer::runtime_capabilities`; additive `SurfaceResourceState::Empty`, which is breaking for downstream exhaustive matches; corrected runtime/lifecycle errors and removal of obsolete adapter/surface backend codes once all current uses are migrated. `read_headless` stays synchronous until C03.
 - Dependencies/features: unchanged. Default, `render-window`, `render-web`, and their additive combination remain supported native check states.
 - Generated artifacts: none.
 - Docs/examples: changed public methods and lifecycle values receive contract rustdocs; README and the native presented example remain C12-owned.
@@ -71,7 +71,7 @@ CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features 
 - Outcome: snapshot selected adapter format features and device limits; register first-record-wins loss and uncaptured-error callbacks for each new slot; implement idempotent per-generation `Ready -> Lost/Faulted` cleanup; and add allocation-free `Renderer::runtime_capabilities`.
 - RED evidence: first add `device_loss_is_terminal_idempotent_and_releases_device_resources`, `terminal_default_device_rejects_headless_without_disabling_ready_slots`, and `runtime_capabilities_project_the_selected_surface_without_gpu_work`; current backend has no signal, terminal state, or query.
 - Acceptance: poison recovery retains the first record; terminal observation drops only that slot's Vello renderer and blocks later GPU calls; another ready slot remains usable; reports use adapter features plus device limits and honor the complete S26 identity/lifecycle order.
-- Commands: the three named focused tests; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render destroyed_device_callback_reports_terminal_loss_without_stale_resource_use`; exact `C02-CHECK`.
+- Commands: `CARGO_NET_OFFLINE=true cargo test -p surgeist-render device_loss_is_terminal_idempotent_and_releases_device_resources`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render terminal_default_device_rejects_headless_without_disabling_ready_slots`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render runtime_capabilities_project_the_selected_surface_without_gpu_work`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render destroyed_device_callback_reports_terminal_loss_without_stale_resource_use`; exact `C02-CHECK`.
 - Dependencies: task 2. Intended worker commit: `Track terminal GPU device state`.
 
 ### 4. Scope And Classify Owned GPU Operations
@@ -80,7 +80,7 @@ CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features 
 - Outcome: add monotonic active operation generations, RAII draft/lease cleanup, and nested `Internal -> OutOfMemory -> Validation` WGPU scopes popped and awaited in reverse; map captured and uncaptured errors by owning create/render/present stage with loss precedence; remove non-readback `Device::poll`.
 - RED evidence: first add `gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage`, `dropped_gpu_operation_future_aborts_draft_state_and_leases`, and `real_gpu_error_scope_captures_deliberate_validation_error`; current code has no scope or cancellation boundary.
 - Acceptance: create/configure, Vello creation/draw, current submissions, and the clear/fill probe use the transaction boundary; captured errors do not fault the device; active/no-active uncaptured errors do; cancellation clears active generation and cannot publish draft state.
-- Commands: the three named focused tests; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render real_gpu_smoke_emits_no_uncaptured_error`; exact `C02-CHECK`.
+- Commands: `CARGO_NET_OFFLINE=true cargo test -p surgeist-render gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render dropped_gpu_operation_future_aborts_draft_state_and_leases`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render real_gpu_error_scope_captures_deliberate_validation_error`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render real_gpu_smoke_emits_no_uncaptured_error`; exact `C02-CHECK`.
 - Dependencies: task 3. Intended worker commit: `Add scoped GPU operation transactions`.
 
 ### 5. Publish Headless Frames Atomically
@@ -89,16 +89,16 @@ CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features 
 - Outcome: represent zero-size `Empty`, nonzero unpublished `Pending`, and one readable publication; render every nonzero frame to a separate draft and swap only after scopes/signals are clean; drop failed/canceled drafts and commit stats, parameters, uploads, and publication together.
 - RED evidence: first add `headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames` and `zero_size_headless_state_is_empty_and_render_diagnoses_without_gpu_work`; direct in-place rendering and the current successful zero-size render fail those contracts.
 - Acceptance: creation and physical-size changes allocate no publication; same-size resize preserves it; failure/cancellation preserves prior pixels or remains pending; zero-size render diagnoses before adapter lookup; C03-owned readback progress remains unchanged.
-- Commands: the two named focused tests; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render failed_frame_returns_all_leases_and_preserves_last_successful_stats`; exact `C02-CHECK`.
+- Commands: `CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render zero_size_headless_state_is_empty_and_render_diagnoses_without_gpu_work`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render failed_frame_returns_all_leases_and_preserves_last_successful_stats`; exact `C02-CHECK`.
 - Dependencies: task 4. Intended worker commit: `Publish headless frames atomically`.
 
 ### 6. Commit Presented Frames After Draw And Present Scopes
 
 - Files/area: presented create/resize/acquire/render/blit/present flow in `src/renderer.rs`, `src/backend.rs`, and `src/surface.rs`, plus feature-gated lifecycle tests in `src/tests.rs`.
 - Outcome: keep the acquired surface texture in transaction ownership; finish Vello drawing under one scope set; perform blit, submit, and `present` under a second scope set; then commit last-successful public state only after the final terminal-signal check.
-- RED evidence: first add `surface_loss_can_resume_but_device_loss_requires_a_new_renderer` and a deterministic presented transaction test proving a late fault after attempted presentation does not commit stats/parameters; current path has one unscoped sequence and polls the device.
+- RED evidence: first add `surface_loss_can_resume_but_device_loss_requires_a_new_renderer` and `presented_late_fault_after_attempt_does_not_commit_frame_state`; current path has one unscoped sequence, polls the device, and cannot represent the late-fault commit boundary.
 - Acceptance: unpresented textures discard on every exit; configure failure leaves resize pending; timeout/outdated/occluded/lost use exact lifecycle mappings; compatible resume is idempotent; an attempted external present is the sole documented non-rollback side effect. Live-window execution remains C12 evidence.
-- Commands: the two focused tests under `render-window`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_surface_lifecycle`; exact `C02-CHECK`.
+- Commands: `CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window surface_loss_can_resume_but_device_loss_requires_a_new_renderer`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_late_fault_after_attempt_does_not_commit_frame_state`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_surface_lifecycle`; exact `C02-CHECK`.
 - Dependencies: task 5. Intended worker commit: `Make presented frames transactional`.
 
 ### 7. Close The Non-Readback Lifecycle And Error Matrix
@@ -107,7 +107,7 @@ CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features 
 - Outcome: complete S13/S26/S31 non-readback ordering, duplicate transitions, terminal isolation, stage mappings, and backend-code removal; constrain the only remaining production poll/map path to C03's explicit and temporary readback helper.
 - RED evidence: first add `surface_operation_matrix_covers_every_kind_state_and_duplicate_transition` and `uncaptured_gpu_error_faults_only_its_device_generation`; current lifecycle and global backend state fail the matrix.
 - Acceptance: every C02-owned matrix cell is covered; no generic adapter/surface code substitutes for typed runtime evidence; no production blocking executor remains; production polling appears only in the C03-owned readback helper; no later-cycle capability, route, effect, or readback claim enters the range.
-- Commands: the two named focused tests; `rg -n 'pollster::block_on|block_on_wgpu' src --glob '!tests.rs'` (no match); `rg -n '\.poll\(wgpu::PollType|map_async|get_mapped_range' src -g '*.rs'` (all production matches inspected and confined to the C03 readback helper); exact `C02-CHECK`.
+- Commands: `CARGO_NET_OFFLINE=true cargo test -p surgeist-render surface_operation_matrix_covers_every_kind_state_and_duplicate_transition`; `CARGO_NET_OFFLINE=true cargo test -p surgeist-render uncaptured_gpu_error_faults_only_its_device_generation`; `rg -n 'pollster::block_on|block_on_wgpu' src --glob '!tests.rs'` (no match); `rg -n '\.poll\(wgpu::PollType|map_async|get_mapped_range' src -g '*.rs'` (all production matches inspected and confined to the C03 readback helper); exact `C02-CHECK`.
 - Dependencies: task 6. Intended worker commit: `Complete async lifecycle error matrix`.
 
 ## Completion
