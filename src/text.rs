@@ -400,12 +400,31 @@ pub struct FontData {
 }
 
 impl FontData {
-    #[must_use]
-    pub fn from_bytes(bytes: Vec<u8>, index: u32) -> Self {
-        Self {
+    /// Validates and owns OpenType bytes at the requested collection index.
+    pub fn try_from_bytes(bytes: Vec<u8>, index: u32) -> Result<Self> {
+        let byte_len = bytes.len();
+        skrifa::FontRef::from_index(bytes.as_slice(), index)
+            .map_err(|_| invalid_font_data(byte_len, index))?;
+        Ok(Self {
             data: peniko::FontData::new(bytes.into(), index),
-        }
+        })
     }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        self.data.data.as_ref()
+    }
+
+    pub(crate) const fn index(&self) -> u32 {
+        self.data.index
+    }
+}
+
+pub(crate) fn invalid_font_data(byte_len: usize, index: u32) -> super::Error {
+    super::Error::invalid_value(
+        "font_data",
+        format_args!("len={byte_len}, index={index}"),
+        "must contain a readable OpenType font at the requested collection index",
+    )
 }
 
 #[derive(Clone, Debug, PartialEq)]

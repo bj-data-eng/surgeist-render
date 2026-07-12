@@ -1,4 +1,5 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
+use super::vello_engine::{glyph::preflight_selected_glyphs, scene::VelloScene};
 use super::{
     backend::*,
     command,
@@ -19,10 +20,13 @@ use super::{
 };
 use std::{
     future::{Future, pending},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::Arc,
     task::{Context, Poll, Waker},
     time::Duration,
 };
+
+use proptest::prelude::*;
 
 use super::error::BackendErrorCode;
 use super::*;
@@ -32,6 +36,468 @@ const AHEM_FONT_ID: u64 = 9001;
 const AHEM_GLYPH_X: u32 = 58;
 const AHEM_GLYPH_DESCENT_P: u32 = 82;
 const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
+
+#[test]
+fn font_data_try_from_bytes_api_shape() {
+    let font_data: Result<FontData> = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0);
+
+    assert!(font_data.is_ok());
+}
+
+#[test]
+fn font_data_rejects_malformed_bytes_before_raster_lowering() {
+    let error = FontData::try_from_bytes(vec![0x00, 0x01, 0x02], 7)
+        .expect_err("malformed bytes must not construct FontData");
+
+    assert_font_data_error(&error, "len=3, index=7");
+}
+
+#[test]
+fn font_data_rejects_out_of_range_collection_index_before_raster_lowering() {
+    let error = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 1)
+        .expect_err("a single-font file has only collection index zero");
+
+    assert_font_data_error(
+        &error,
+        format!("len={}, index=1", AHEM_FONT_BYTES.len()).as_str(),
+    );
+}
+
+proptest! {
+    #[test]
+    fn font_data_constructor_never_panics_for_arbitrary_bytes_and_indices(
+        bytes in proptest::collection::vec(any::<u8>(), 0..2048),
+        index in any::<u32>(),
+    ) {
+        let expected_value = format!("len={}, index={index}", bytes.len());
+        let outcome = catch_unwind(AssertUnwindSafe(|| FontData::try_from_bytes(bytes, index)));
+
+        prop_assert!(outcome.is_ok());
+        if let Ok(Err(error)) = outcome {
+            let diagnostic = error
+                .invalid_value_diagnostic()
+                .expect("failed font construction must remain typed");
+            prop_assert_eq!(diagnostic.field(), "font_data");
+            prop_assert_eq!(diagnostic.value(), expected_value);
+            prop_assert_eq!(
+                diagnostic.invariant(),
+                "must contain a readable OpenType font at the requested collection index"
+            );
+        }
+    }
+}
+
+#[test]
+fn font_lowering_rejects_malformed_lazy_tables_without_panic_or_gpu_work() {
+    let font_data = FontData::try_from_bytes(ahem_with_tables(vec![(*b"glyf", vec![0])]), 0)
+        .expect("the SFNT container remains readable before lazy glyph access");
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
+    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
+    let outcome = catch_unwind(AssertUnwindSafe(|| preflight_selected_glyphs(&run)));
+
+    assert!(outcome.is_ok());
+    let error = match outcome.expect("preflight must return a typed failure") {
+        Ok(_) => panic!("malformed lazy outline data must not reach encoding"),
+        Err(error) => error,
+    };
+    assert_font_data_error(
+        &error,
+        format!(
+            "len={}, index=0",
+            run.font().data.as_ref().unwrap().bytes().len()
+        )
+        .as_str(),
+    );
+
+    let scene = VelloScene::new();
+    assert_eq!(scene.glyph_run_count(), 0);
+}
+
+#[test]
+fn selected_glyph_preflight_rejects_missing_outline_before_external_encoding() {
+    let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap();
+    let glyphs = [TextGlyph::try_new(u32::MAX, 0.0, 16.0, 8.0).unwrap()];
+    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
+    let error = preflight_selected_glyphs(&run)
+        .err()
+        .expect("a nonexistent glyph must not reach Vello encoding");
+
+    assert_missing_glyph_error(&error, u32::MAX);
+}
+
+#[test]
+fn selected_glyph_preflight_validates_exact_outline_draw_settings() {
+    let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap();
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 3.0, 19.0, 9.0).unwrap()];
+    let transform = Transform::try_new([1.25, 0.0, 0.0, 1.25, 2.0, -3.0]).unwrap();
+    let run = text_run_for(font_data, 19.5, transform, &glyphs);
+    let validated = preflight_selected_glyphs(&run).expect("Ahem outline must preflight");
+
+    assert_eq!(validated.size(), 19.5);
+    assert_eq!(validated.transform(), transform);
+    assert_eq!(validated.normalized_coords(), &[]);
+    assert!(!validated.hinting_enabled());
+    assert!(validated.uses_non_zero_fill());
+    assert_eq!(validated.embolden_amount(), (0.0, 0.0));
+}
+
+#[test]
+fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
+    let color_font = FontData::try_from_bytes(ahem_color_font(valid_cpal()), 0).unwrap();
+    let color_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
+    let color_run = text_run_for(color_font, 16.0, Transform::identity(), &color_glyphs);
+    assert!(preflight_selected_glyphs(&color_run).is_ok());
+
+    let bitmap_font = FontData::try_from_bytes(ahem_sbix_font(rgba_png()), 0).unwrap();
+    let bitmap_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
+    let bitmap_run = text_run_for(bitmap_font, 16.0, Transform::identity(), &bitmap_glyphs);
+    assert!(preflight_selected_glyphs(&bitmap_run).is_ok());
+
+    let invalid_palette_font =
+        FontData::try_from_bytes(ahem_color_font(invalid_cpal()), 0).unwrap();
+    let invalid_palette_run = text_run_for(
+        invalid_palette_font,
+        16.0,
+        Transform::identity(),
+        &color_glyphs,
+    );
+    let palette_error = preflight_selected_glyphs(&invalid_palette_run)
+        .err()
+        .expect("a selected invalid CPAL reference must be rejected");
+    assert_font_data_error(
+        &palette_error,
+        format!(
+            "len={}, index=0",
+            invalid_palette_run
+                .font()
+                .data
+                .as_ref()
+                .unwrap()
+                .bytes()
+                .len()
+        )
+        .as_str(),
+    );
+
+    let malformed_png_font = FontData::try_from_bytes(ahem_sbix_font(malformed_png()), 0).unwrap();
+    let malformed_png_run = text_run_for(
+        malformed_png_font,
+        16.0,
+        Transform::identity(),
+        &bitmap_glyphs,
+    );
+    let png_error = preflight_selected_glyphs(&malformed_png_run)
+        .err()
+        .expect("a selected malformed PNG must be rejected");
+    assert_font_data_error(
+        &png_error,
+        format!(
+            "len={}, index=0",
+            malformed_png_run
+                .font()
+                .data
+                .as_ref()
+                .unwrap()
+                .bytes()
+                .len()
+        )
+        .as_str(),
+    );
+}
+
+#[test]
+fn selected_glyph_preflight_distinguishes_unsupported_image_from_malformed_data() {
+    let font_data = FontData::try_from_bytes(ahem_sbix_font(grayscale_png()), 0).unwrap();
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
+    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
+    let error = preflight_selected_glyphs(&run)
+        .err()
+        .expect("a valid but unsupported image encoding must fail explicitly");
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(error.invalid_value_diagnostic().is_none());
+}
+
+#[test]
+fn external_glyph_resolver_omission_branches_are_blocked_by_preflight() {
+    let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap();
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
+    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
+    let validated = preflight_selected_glyphs(&run).expect("Ahem glyph must preflight");
+    let mut scene = VelloScene::new();
+
+    scene
+        .append_validated_glyph_run(validated)
+        .expect("preflighted glyphs must be appended without resolver omission");
+    assert_eq!(scene.glyph_run_count(), 1);
+    assert_eq!(scene.glyph_count(), 1);
+
+    let missing_glyphs = [TextGlyph::try_new(u32::MAX, 0.0, 16.0, 8.0).unwrap()];
+    let missing_run = text_run_for(
+        FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap(),
+        16.0,
+        Transform::identity(),
+        &missing_glyphs,
+    );
+    let mut missing_scene = VelloScene::new();
+    let error = missing_scene
+        .encode_text_run(&missing_run)
+        .expect_err("missing glyphs must fail before external encoding");
+    assert_missing_glyph_error(&error, u32::MAX);
+    assert_eq!(missing_scene.glyph_run_count(), 0);
+}
+
+#[test]
+fn unsupported_glyph_image_encoding_returns_render_failed_without_omission() {
+    let font_data = FontData::try_from_bytes(ahem_sbix_font(grayscale_png()), 0).unwrap();
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
+    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
+    let mut scene = VelloScene::new();
+    let error = scene
+        .encode_text_run(&run)
+        .expect_err("unsupported glyph images must not be omitted");
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(scene.glyph_run_count(), 0);
+    assert_eq!(scene.glyph_count(), 0);
+}
+
+#[test]
+fn ahem_font_data_validates_at_collection_index_zero() {
+    let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0);
+
+    assert!(font_data.is_ok());
+}
+
+#[test]
+fn internal_vello_font_parsing_is_fallible_and_never_unwraps() {
+    let glyph_source = include_str!("vello_engine/glyph.rs");
+    let scene_source = include_str!("vello_engine/scene.rs");
+
+    assert!(glyph_source.contains("FontRef::from_index"));
+    assert!(glyph_source.contains("map_err"));
+    for source in [glyph_source, scene_source] {
+        assert!(!source.contains(".unwrap()"));
+        assert!(!source.contains(".expect("));
+    }
+}
+
+fn assert_font_data_error(error: &Error, value: &str) {
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    let diagnostic = error
+        .invalid_value_diagnostic()
+        .expect("font failures must carry InvalidValue diagnostics");
+    assert_eq!(diagnostic.field(), "font_data");
+    assert_eq!(diagnostic.value(), value);
+    assert_eq!(
+        diagnostic.invariant(),
+        "must contain a readable OpenType font at the requested collection index"
+    );
+}
+
+fn assert_missing_glyph_error(error: &Error, glyph_id: u32) {
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    let diagnostic = error
+        .invalid_value_diagnostic()
+        .expect("missing glyph failures must carry InvalidValue diagnostics");
+    assert_eq!(diagnostic.field(), "text_glyph.id");
+    assert_eq!(diagnostic.value(), glyph_id.to_string());
+    assert_eq!(
+        diagnostic.invariant(),
+        "must identify a drawable glyph in the selected FontData"
+    );
+}
+
+fn text_run_for<'a>(
+    font_data: FontData,
+    size: f32,
+    transform: Transform,
+    glyphs: &'a [TextGlyph],
+) -> TextRun<'a> {
+    TextRun::try_new(
+        FontRef::new(AHEM_FONT_ID)
+            .named("C03 selected glyph preflight")
+            .with_data(font_data),
+        size,
+        transform,
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        glyphs,
+        TextRunBounds::unspecified(),
+    )
+    .unwrap()
+}
+
+fn ahem_with_tables(replacements: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {
+    let table_count = read_be_u16(AHEM_FONT_BYTES, 4) as usize;
+    let mut tables = (0..table_count)
+        .map(|index| {
+            let record = 12 + index * 16;
+            let tag = AHEM_FONT_BYTES[record..record + 4].try_into().unwrap();
+            let offset = read_be_u32(AHEM_FONT_BYTES, record + 8) as usize;
+            let length = read_be_u32(AHEM_FONT_BYTES, record + 12) as usize;
+            (tag, AHEM_FONT_BYTES[offset..offset + length].to_vec())
+        })
+        .collect::<Vec<([u8; 4], Vec<u8>)>>();
+
+    for (tag, replacement) in replacements {
+        if let Some((_, table)) = tables.iter_mut().find(|(existing, _)| *existing == tag) {
+            *table = replacement;
+        } else {
+            tables.push((tag, replacement));
+        }
+    }
+    tables.sort_by_key(|(tag, _)| *tag);
+
+    let count = tables.len();
+    let mut output = vec![0; 12 + count * 16];
+    output[0..4].copy_from_slice(&AHEM_FONT_BYTES[0..4]);
+    write_be_u16(&mut output, 4, count.try_into().unwrap());
+    let mut power = 1usize;
+    let mut selector = 0usize;
+    while power * 2 <= count {
+        power *= 2;
+        selector += 1;
+    }
+    write_be_u16(&mut output, 6, (power * 16).try_into().unwrap());
+    write_be_u16(&mut output, 8, selector.try_into().unwrap());
+    write_be_u16(&mut output, 10, ((count - power) * 16).try_into().unwrap());
+
+    let mut offset = output.len();
+    for (index, (tag, table)) in tables.into_iter().enumerate() {
+        let padding = (4 - offset % 4) % 4;
+        output.resize(offset + padding, 0);
+        offset += padding;
+        let record = 12 + index * 16;
+        output[record..record + 4].copy_from_slice(&tag);
+        write_be_u32(&mut output, record + 4, 0);
+        write_be_u32(&mut output, record + 8, offset.try_into().unwrap());
+        write_be_u32(&mut output, record + 12, table.len().try_into().unwrap());
+        output.extend_from_slice(&table);
+        offset += table.len();
+    }
+    output
+}
+
+fn ahem_color_font(cpal: Vec<u8>) -> Vec<u8> {
+    let mut colr = Vec::new();
+    push_be_u16(&mut colr, 0);
+    push_be_u16(&mut colr, 1);
+    push_be_u32(&mut colr, 14);
+    push_be_u32(&mut colr, 20);
+    push_be_u16(&mut colr, 1);
+    push_be_u16(&mut colr, AHEM_GLYPH_X.try_into().unwrap());
+    push_be_u16(&mut colr, 0);
+    push_be_u16(&mut colr, 1);
+    push_be_u16(&mut colr, AHEM_GLYPH_X.try_into().unwrap());
+    push_be_u16(&mut colr, 0);
+
+    ahem_with_tables(vec![(*b"COLR", colr), (*b"CPAL", cpal)])
+}
+
+fn valid_cpal() -> Vec<u8> {
+    let mut cpal = Vec::new();
+    push_be_u16(&mut cpal, 0);
+    push_be_u16(&mut cpal, 1);
+    push_be_u16(&mut cpal, 1);
+    push_be_u16(&mut cpal, 1);
+    push_be_u32(&mut cpal, 14);
+    push_be_u16(&mut cpal, 0);
+    cpal.extend_from_slice(&[0, 0, 255, 255]);
+    cpal
+}
+
+fn invalid_cpal() -> Vec<u8> {
+    let mut cpal = valid_cpal();
+    write_be_u32(&mut cpal, 8, u32::MAX);
+    cpal
+}
+
+fn ahem_sbix_font(png: Vec<u8>) -> Vec<u8> {
+    let glyph_count = ahem_num_glyphs();
+    let glyph_record_len = 8 + png.len();
+    let bitmap_offset = 4 + (glyph_count + 1) * 4;
+    let bitmap_end = bitmap_offset + glyph_record_len;
+    let mut sbix = Vec::new();
+    push_be_u16(&mut sbix, 1);
+    push_be_u16(&mut sbix, 1);
+    push_be_u32(&mut sbix, 1);
+    push_be_u32(&mut sbix, 12);
+    push_be_u16(&mut sbix, 16);
+    push_be_u16(&mut sbix, 72);
+    for glyph_id in 0..=glyph_count {
+        let offset = if glyph_id <= AHEM_GLYPH_X as usize {
+            bitmap_offset
+        } else {
+            bitmap_end
+        };
+        push_be_u32(&mut sbix, offset.try_into().unwrap());
+    }
+    push_be_u16(&mut sbix, 0);
+    push_be_u16(&mut sbix, 0);
+    sbix.extend_from_slice(b"png ");
+    sbix.extend_from_slice(&png);
+
+    ahem_with_tables(vec![(*b"sbix", sbix)])
+}
+
+fn ahem_num_glyphs() -> usize {
+    let table_count = read_be_u16(AHEM_FONT_BYTES, 4) as usize;
+    let maxp_record = (0..table_count)
+        .map(|index| 12 + index * 16)
+        .find(|record| &AHEM_FONT_BYTES[*record..*record + 4] == b"maxp")
+        .unwrap();
+    let offset = read_be_u32(AHEM_FONT_BYTES, maxp_record + 8) as usize;
+    read_be_u16(AHEM_FONT_BYTES, offset + 4) as usize
+}
+
+fn rgba_png() -> Vec<u8> {
+    encoded_png(png::ColorType::Rgba, &[255, 0, 0, 255])
+}
+
+fn grayscale_png() -> Vec<u8> {
+    encoded_png(png::ColorType::Grayscale, &[127])
+}
+
+fn malformed_png() -> Vec<u8> {
+    let mut png = rgba_png();
+    png.truncate(png.len() - 12);
+    png
+}
+
+fn encoded_png(color_type: png::ColorType, pixels: &[u8]) -> Vec<u8> {
+    let mut png = Vec::new();
+    let mut encoder = png::Encoder::new(&mut png, 1, 1);
+    encoder.set_color(color_type);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().unwrap();
+    writer.write_image_data(pixels).unwrap();
+    drop(writer);
+    png
+}
+
+fn read_be_u16(bytes: &[u8], offset: usize) -> u16 {
+    u16::from_be_bytes(bytes[offset..offset + 2].try_into().unwrap())
+}
+
+fn read_be_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_be_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+fn write_be_u16(bytes: &mut [u8], offset: usize, value: u16) {
+    bytes[offset..offset + 2].copy_from_slice(&value.to_be_bytes());
+}
+
+fn write_be_u32(bytes: &mut [u8], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_be_bytes());
+}
+
+fn push_be_u16(bytes: &mut Vec<u8>, value: u16) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
+
+fn push_be_u32(bytes: &mut Vec<u8>, value: u32) {
+    bytes.extend_from_slice(&value.to_be_bytes());
+}
 
 #[derive(Debug)]
 struct ErrorSourceFixture;
@@ -594,7 +1060,7 @@ fn scene_lowering_preserves_authored_text_run_bounds() {
 fn ahem_font(name: &'static str) -> FontRef<'static> {
     FontRef::new(AHEM_FONT_ID)
         .named(name)
-        .with_data(FontData::from_bytes(AHEM_FONT_BYTES.to_vec(), 0))
+        .with_data(FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap())
 }
 
 #[cfg(any(

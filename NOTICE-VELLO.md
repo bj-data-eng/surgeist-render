@@ -16,6 +16,18 @@
   `src/vello_engine/` imports. Each row must name the upstream file, its
   pre-adaptation SHA-256, and the exact adaptation or omission.
 
+## T2 private scene/glyph lowering
+
+| Local files | Upstream source | Pre-adaptation SHA-256 | Material adaptation |
+| --- | --- | --- | --- |
+| `src/vello_engine/scene.rs`, `src/vello_engine/glyph.rs` | `vello-0.9.0/src/scene.rs` | `7c225e73f56629b1b85e8e5cd296428176ec6e59a0813975e2d4123aaddd1718` | Retains the private glyph-run lowering boundary over `vello_encoding 0.9.0`; splits selected-glyph preflight into `glyph.rs`; replaces both `FontRef::from_index(...).unwrap()` sites and font-derived parse/length assumptions with fallible Skrifa validation and typed diagnostics; rejects omitted glyph paths rather than logging/continuing. |
+
+The T2 import omits Vello's public `Scene` API, non-text draw helpers,
+estimation, append/reset helpers, direct renderer/device integration, and all
+CPU/debug/map/poll/submission paths. It introduces no WGPU resource or
+submission authority. The private production boundary remains unused until the
+later T7 cutover.
+
 ## License artifacts
 
 `LICENSES/Vello-0.9.0-APACHE-2.0.txt` and
