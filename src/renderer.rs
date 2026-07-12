@@ -34,6 +34,8 @@ impl Renderer {
         let mut backend = default_slot.map(|_| Backend {
             context,
             device_states: Vec::new(),
+            #[cfg(test)]
+            terminal_signal_after_renderer_creation: None,
         });
         let default_device = match (backend.as_mut(), default_slot) {
             (Some(backend), Some(slot)) => Some(backend.device_slot_identity(slot)?),
@@ -97,7 +99,12 @@ impl Renderer {
                 {
                     return Err(error);
                 }
-                ensure_vello_renderer(backend, self.options, device_identity)?;
+                ensure_vello_renderer(
+                    backend,
+                    self.options,
+                    device_identity,
+                    RuntimeOperation::AdapterSelection,
+                )?;
                 Ok(Surface::with_backend(
                     Attachment::Window(handle),
                     options,
@@ -155,7 +162,12 @@ impl Renderer {
         {
             return Err(error);
         }
-        ensure_vello_renderer(backend, self.options, device_identity)?;
+        ensure_vello_renderer(
+            backend,
+            self.options,
+            device_identity,
+            RuntimeOperation::AdapterSelection,
+        )?;
         Ok(Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
@@ -214,7 +226,12 @@ impl Renderer {
             {
                 return Err(error);
             }
-            ensure_vello_renderer(backend, self.options, device_identity)?;
+            ensure_vello_renderer(
+                backend,
+                self.options,
+                device_identity,
+                RuntimeOperation::AdapterSelection,
+            )?;
             let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
                 return Err(Error::new(
                     BackendErrorCode::RendererCreateFailed,
@@ -546,6 +563,14 @@ impl Renderer {
         if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
         {
             backend.signal_loss_for_test(device_identity, reason);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn arm_default_terminal_signal_after_renderer_creation_for_test(&mut self) {
+        if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
+        {
+            backend.arm_terminal_signal_after_renderer_creation_for_test(device_identity);
         }
     }
 

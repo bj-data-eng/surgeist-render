@@ -11470,6 +11470,24 @@ fn terminal_default_device_rejects_headless_without_disabling_ready_slots() {
 }
 
 #[test]
+fn terminal_signal_during_renderer_creation_aborts_before_followup_gpu_work() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    renderer.arm_default_terminal_signal_after_renderer_creation_for_test();
+
+    let error = match pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)) {
+        Ok(_) => panic!("a terminal signal during renderer creation must abort headless creation"),
+        Err(error) => error,
+    };
+
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::AdapterSelection,
+        DeviceLossReason::Destroyed,
+    );
+    assert!(renderer.default_device_renderer_released_for_test());
+}
+
+#[test]
 fn runtime_capabilities_project_the_selected_surface_without_gpu_work() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
