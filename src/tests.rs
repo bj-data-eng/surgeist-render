@@ -11431,6 +11431,98 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
     );
 }
 
+#[test]
+fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
+
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("a signaled device loss must prevent further Vello use");
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Destroyed,
+    );
+    assert!(renderer.default_device_renderer_released_for_test());
+}
+
+#[test]
+fn terminal_default_device_rejects_headless_without_disabling_ready_slots() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    let error = match pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)) {
+        Ok(_) => panic!("a terminal default device must not be replaced automatically"),
+        Err(error) => error,
+    };
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::AdapterSelection,
+        DeviceLossReason::Destroyed,
+    );
+
+    assert!(DeviceState::ready_slot_remains_ready_after_other_slot_loss_for_test());
+}
+
+#[test]
+fn runtime_capabilities_project_the_selected_surface_without_gpu_work() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+
+    let report = renderer.runtime_capabilities(&surface);
+    let available = report
+        .available()
+        .expect("a device-backed headless surface must project immutable capabilities");
+    assert_eq!(available.surface_format(), Format::Rgba8);
+    assert_eq!(
+        available,
+        renderer.default_device_capabilities_for_test(),
+        "the query must project the snapshotted state without another GPU call"
+    );
+}
+
+#[test]
+fn destroyed_device_callback_reports_terminal_loss_without_stale_resource_use() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+
+    assert!(renderer.destroy_default_device_for_test());
+    assert!(
+        renderer.wait_for_default_terminal_signal_for_test(Duration::from_secs(5)),
+        "device destruction did not invoke the loss callback within the diagnostic deadline"
+    );
+
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("a destroyed device must be observed before any stale Vello use");
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Destroyed,
+    );
+    assert!(renderer.default_device_renderer_released_for_test());
+}
+
+fn assert_runtime_device_lost(error: Error, operation: RuntimeOperation, reason: DeviceLossReason) {
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                operation,
+                RuntimeCapabilityUnavailableReason::DeviceLost { reason },
+            )
+            .unwrap()
+        )
+    );
+}
+
 fn assert_surface_identity_mismatch(
     error: Error,
     operation: RuntimeOperation,

@@ -92,6 +92,11 @@ impl Renderer {
                         .with_source(source)
                     })?;
                 let device_identity = backend.device_slot_identity(surface.dev_id)?;
+                if let Some(error) =
+                    backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
+                {
+                    return Err(error);
+                }
                 ensure_vello_renderer(backend, self.options, device_identity)?;
                 Ok(Surface::with_backend(
                     Attachment::Window(handle),
@@ -145,6 +150,11 @@ impl Renderer {
                 .with_source(source)
             })?;
         let device_identity = backend.device_slot_identity(surface.dev_id)?;
+        if let Some(error) =
+            backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
+        {
+            return Err(error);
+        }
         ensure_vello_renderer(backend, self.options, device_identity)?;
         Ok(Surface::with_backend(
             Attachment::WebCanvas(canvas),
@@ -199,6 +209,11 @@ impl Renderer {
         let backend = if let (Some(backend), Some(device_identity)) =
             (self.backend.as_mut(), self.default_device)
         {
+            if let Some(error) =
+                backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
+            {
+                return Err(error);
+            }
             ensure_vello_renderer(backend, self.options, device_identity)?;
             let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
                 return Err(Error::new(
@@ -268,6 +283,7 @@ impl Renderer {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
         surface.ensure_available()?;
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
 
         let frame_start = Instant::now();
         let encode_start = Instant::now();
@@ -329,6 +345,7 @@ impl Renderer {
             ));
         }
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
 
         match &surface.backend {
             #[cfg(any(
@@ -356,6 +373,7 @@ impl Renderer {
             ));
         }
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceReadback)?;
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceReadback)?;
         let SurfaceBackend::Headless {
             device_identity,
             resources: HeadlessResources::Ready { texture, .. },
@@ -385,9 +403,63 @@ impl Renderer {
         )
     }
 
+    /// Projects immutable capabilities of the device selected by `surface`.
+    ///
+    /// This query observes pending terminal device signals but performs no
+    /// allocation, submission, mapping, polling, or Vello/WGPU resource call.
+    #[must_use]
+    pub fn runtime_capabilities(&mut self, surface: &Surface) -> RuntimeCapabilities {
+        if !self.identity.matches(&surface.renderer_identity) {
+            return RuntimeCapabilities::Unavailable(
+                RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+                    kind: SurfaceIdentityMismatchKind::ForeignRenderer,
+                },
+            );
+        }
+        let Some(device_identity) = surface.device_identity() else {
+            return RuntimeCapabilities::Unavailable(
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+            );
+        };
+        let Some(backend) = self.backend.as_mut() else {
+            return RuntimeCapabilities::Unavailable(
+                RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+                    kind: SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+                },
+            );
+        };
+        if !backend.has_device_slot(device_identity) {
+            return RuntimeCapabilities::Unavailable(
+                RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+                    kind: SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+                },
+            );
+        }
+        if let Some(reason) = backend.terminal_reason(device_identity) {
+            return RuntimeCapabilities::Unavailable(reason);
+        }
+        if let Some(reason) = runtime_surface_unavailable_reason(surface) {
+            return RuntimeCapabilities::Unavailable(reason);
+        }
+        let Some(capabilities) = backend.device_capabilities(device_identity) else {
+            return RuntimeCapabilities::Unavailable(
+                RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+                    kind: SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+                },
+            );
+        };
+        RuntimeCapabilities::Available(capabilities.runtime_report(runtime_surface_format(surface)))
+    }
+
     pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
         let backend = self.backend.as_mut()?;
         let device_identity = self.default_device?;
+        if backend
+            .terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
+            .is_some()
+        {
+            return None;
+        }
         let device_handle = backend.context.devices.get(device_identity.slot())?;
         Some((&device_handle.device, &device_handle.queue))
     }
@@ -397,6 +469,12 @@ impl Renderer {
     ) -> Option<OffscreenRenderGpuContext<'_>> {
         let backend = self.backend.as_mut()?;
         let device_identity = self.default_device?;
+        if backend
+            .terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
+            .is_some()
+        {
+            return None;
+        }
         Some(OffscreenRenderGpuContext::new(backend, device_identity))
     }
 
@@ -425,7 +503,7 @@ impl Renderer {
     }
 
     fn validate_surface_device_identity(
-        &self,
+        &mut self,
         surface: &Surface,
         operation: RuntimeOperation,
     ) -> Result<()> {
@@ -434,7 +512,7 @@ impl Renderer {
         };
         if self
             .backend
-            .as_ref()
+            .as_mut()
             .is_some_and(|backend| backend.has_device_slot(device_identity))
         {
             return Ok(());
@@ -443,6 +521,79 @@ impl Renderer {
             operation,
             SurfaceIdentityMismatchKind::StaleDeviceGeneration,
         ))
+    }
+
+    fn validate_surface_device_terminal(
+        &mut self,
+        surface: &Surface,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        let Some(device_identity) = surface.device_identity() else {
+            return Ok(());
+        };
+        if let Some(error) = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.terminal_error(device_identity, operation))
+        {
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_default_device_loss_for_test(&mut self, reason: DeviceLossReason) {
+        if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
+        {
+            backend.signal_loss_for_test(device_identity, reason);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn default_device_renderer_released_for_test(&mut self) -> bool {
+        match (self.backend.as_mut(), self.default_device) {
+            (Some(backend), Some(device_identity)) => {
+                backend.renderer_released_for_test(device_identity)
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn default_device_capabilities_for_test(&mut self) -> AvailableRuntimeCapabilities {
+        let device_identity = self.default_device.expect("test requires a default device");
+        self.backend
+            .as_mut()
+            .and_then(|backend| backend.device_capabilities(device_identity))
+            .expect("test requires a ready default device")
+            .runtime_report(Format::Rgba8)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destroy_default_device_for_test(&mut self) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return false;
+        };
+        let Some(backend) = self.backend.as_mut() else {
+            return false;
+        };
+        let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
+            return false;
+        };
+        device_handle.device.destroy();
+        let _ = device_handle.device.poll(wgpu::PollType::Poll);
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_default_terminal_signal_for_test(&mut self, timeout: Duration) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return false;
+        };
+        self.backend
+            .as_mut()
+            .is_some_and(|backend| backend.wait_for_terminal_for_test(device_identity, timeout))
     }
 
     fn materialize_resolved_backdrops(
@@ -714,6 +865,45 @@ impl Renderer {
     pub const fn capabilities(&self) -> Capabilities {
         Capabilities::VELLO_0_9
     }
+}
+
+fn runtime_surface_format(surface: &Surface) -> Format {
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    if let SurfaceBackend::Presented {
+        surface: native, ..
+    } = &surface.backend
+    {
+        return match native.format {
+            wgpu::TextureFormat::Rgba8Unorm => Format::Rgba8,
+            wgpu::TextureFormat::Bgra8Unorm => Format::Bgra8,
+            _ => surface.options.format,
+        };
+    }
+    surface.options.format
+}
+
+fn runtime_surface_unavailable_reason(
+    _surface: &Surface,
+) -> Option<RuntimeCapabilityUnavailableReason> {
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    if let SurfaceBackend::Presented { lifecycle, .. } = &_surface.backend {
+        let state = match lifecycle {
+            PresentedLifecycle::NonRenderable { .. } => RenderSurfaceAvailability::NonRenderable,
+            PresentedLifecycle::Occluded { .. } => RenderSurfaceAvailability::Occluded,
+            PresentedLifecycle::Lost => RenderSurfaceAvailability::Lost,
+            PresentedLifecycle::Ready { .. } | PresentedLifecycle::ResizePending { .. } => {
+                return None;
+            }
+        };
+        return Some(RuntimeCapabilityUnavailableReason::SurfaceUnavailable { state });
+    }
+    None
 }
 
 fn surface_identity_mismatch(

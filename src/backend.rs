@@ -17,8 +17,12 @@ use std::{
     collections::{HashMap, VecDeque},
     fmt,
     num::NonZeroUsize,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::sync::Condvar;
 
 pub(crate) struct Backend {
     pub(crate) context: vello::util::RenderContext,
@@ -28,14 +32,281 @@ pub(crate) struct Backend {
 pub(crate) struct DeviceState {
     generation: u64,
     renderer: Option<vello::Renderer>,
+    capabilities: DeviceCapabilities,
+    signal: Arc<DeviceSignal>,
+    terminal: Option<DeviceTerminalSignal>,
 }
 
 impl DeviceState {
-    const fn new() -> Self {
+    fn new(device_handle: &vello::util::DeviceHandle) -> Self {
+        let signal = Arc::new(DeviceSignal::new());
+        register_device_callbacks(&device_handle.device, Arc::clone(&signal));
         Self {
             generation: 0,
             renderer: None,
+            capabilities: DeviceCapabilities::from_device(device_handle),
+            signal,
+            terminal: None,
         }
+    }
+
+    fn observe_terminal(&mut self) {
+        let Some(signal) = self.signal.first_terminal() else {
+            return;
+        };
+        if self.terminal.is_none() {
+            self.terminal = Some(signal);
+            self.renderer.take();
+        }
+    }
+
+    fn terminal(&mut self) -> Option<&DeviceTerminalSignal> {
+        self.observe_terminal();
+        self.terminal.as_ref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn ready_slot_remains_ready_after_other_slot_loss_for_test() -> bool {
+        let first_signal = Arc::new(DeviceSignal::new());
+        let mut first = Self {
+            generation: 0,
+            renderer: None,
+            capabilities: DeviceCapabilities::empty(),
+            signal: Arc::clone(&first_signal),
+            terminal: None,
+        };
+        let mut second = Self {
+            generation: 0,
+            renderer: None,
+            capabilities: DeviceCapabilities::empty(),
+            signal: Arc::new(DeviceSignal::new()),
+            terminal: None,
+        };
+        first_signal.record(DeviceTerminalSignal::lost(
+            DeviceLossReason::Destroyed,
+            "test device loss".into(),
+        ));
+        first.observe_terminal();
+        second.observe_terminal();
+        first.terminal.is_some() && second.terminal.is_none()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DeviceCapabilities {
+    high_precision: bool,
+    reduced_precision: bool,
+    max_texture_dimension_2d: u32,
+}
+
+impl DeviceCapabilities {
+    fn from_device(device_handle: &vello::util::DeviceHandle) -> Self {
+        Self {
+            high_precision: supports_effect_texture_format(
+                device_handle
+                    .adapter()
+                    .get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
+            ),
+            reduced_precision: supports_effect_texture_format(
+                device_handle
+                    .adapter()
+                    .get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm),
+            ),
+            max_texture_dimension_2d: device_handle.device.limits().max_texture_dimension_2d,
+        }
+    }
+
+    #[cfg(test)]
+    const fn empty() -> Self {
+        Self {
+            high_precision: false,
+            reduced_precision: false,
+            max_texture_dimension_2d: 0,
+        }
+    }
+
+    pub(crate) const fn runtime_report(
+        self,
+        surface_format: Format,
+    ) -> AvailableRuntimeCapabilities {
+        AvailableRuntimeCapabilities::new(
+            surface_format,
+            EffectPrecisionCapabilities::new(self.high_precision, self.reduced_precision),
+            self.max_texture_dimension_2d,
+        )
+    }
+}
+
+fn supports_effect_texture_format(features: wgpu::TextureFormatFeatures) -> bool {
+    features
+        .allowed_usages
+        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        && features
+            .allowed_usages
+            .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+        && features
+            .flags
+            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+}
+
+#[derive(Clone, Debug)]
+enum DeviceTerminalSignal {
+    Lost {
+        reason: DeviceLossReason,
+        message: String,
+    },
+    Faulted {
+        kind: GpuFaultKind,
+        message: String,
+        operation_generation: Option<u64>,
+    },
+}
+
+impl DeviceTerminalSignal {
+    fn lost(reason: DeviceLossReason, message: String) -> Self {
+        Self::Lost { reason, message }
+    }
+
+    fn faulted(kind: GpuFaultKind, message: String, operation_generation: Option<u64>) -> Self {
+        Self::Faulted {
+            kind,
+            message,
+            operation_generation,
+        }
+    }
+
+    const fn unavailable_reason(&self) -> RuntimeCapabilityUnavailableReason {
+        match self {
+            Self::Lost { reason, .. } => {
+                RuntimeCapabilityUnavailableReason::DeviceLost { reason: *reason }
+            }
+            Self::Faulted { kind, .. } => {
+                RuntimeCapabilityUnavailableReason::DeviceFaulted { kind: *kind }
+            }
+        }
+    }
+
+    fn message(&self) -> &str {
+        match self {
+            Self::Lost { message, .. } => message,
+            Self::Faulted {
+                message,
+                operation_generation,
+                ..
+            } => {
+                let _ = operation_generation;
+                message
+            }
+        }
+    }
+
+    fn error(&self, operation: RuntimeOperation) -> Error {
+        let diagnostic =
+            RuntimeCapabilityUnavailable::try_new(operation, self.unavailable_reason())
+                .expect("terminal-device diagnostics always use a permitted operation/reason pair");
+        let mut error = Error::runtime_capability_unavailable(diagnostic);
+        error.append_message(format_args!(": {}", self.message()));
+        error
+    }
+}
+
+struct DeviceSignal {
+    state: Mutex<DeviceSignalState>,
+    #[cfg(test)]
+    changed: Condvar,
+}
+
+struct DeviceSignalState {
+    first_terminal: Option<DeviceTerminalSignal>,
+    // Task 4 owns transaction installation. Callbacks observe no active operation for now.
+    active_operation_generation: Option<u64>,
+}
+
+impl DeviceSignal {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(DeviceSignalState {
+                first_terminal: None,
+                active_operation_generation: None,
+            }),
+            #[cfg(test)]
+            changed: Condvar::new(),
+        }
+    }
+
+    fn record(&self, signal: DeviceTerminalSignal) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.first_terminal.is_none() {
+            state.first_terminal = Some(signal);
+            #[cfg(test)]
+            self.changed.notify_all();
+        }
+    }
+
+    fn first_terminal(&self) -> Option<DeviceTerminalSignal> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .first_terminal
+            .clone()
+    }
+
+    fn record_fault(&self, kind: GpuFaultKind, message: String) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.first_terminal.is_none() {
+            state.first_terminal = Some(DeviceTerminalSignal::faulted(
+                kind,
+                message,
+                state.active_operation_generation,
+            ));
+            #[cfg(test)]
+            self.changed.notify_all();
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_terminal(&self, timeout: Duration) -> bool {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (state, _) = self
+            .changed
+            .wait_timeout_while(state, timeout, |state| state.first_terminal.is_none())
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.first_terminal.is_some()
+    }
+}
+
+fn register_device_callbacks(device: &wgpu::Device, signal: Arc<DeviceSignal>) {
+    let loss_signal = Arc::clone(&signal);
+    device.set_device_lost_callback(move |reason, message| {
+        loss_signal.record(DeviceTerminalSignal::lost(
+            map_device_loss_reason(reason),
+            message,
+        ));
+    });
+    device.on_uncaptured_error(Arc::new(move |error| {
+        let message = error.to_string();
+        let kind = match error {
+            wgpu::Error::Validation { .. } => GpuFaultKind::Validation,
+            wgpu::Error::OutOfMemory { .. } => GpuFaultKind::OutOfMemory,
+            wgpu::Error::Internal { .. } => GpuFaultKind::Internal,
+        };
+        signal.record_fault(kind, message);
+    }));
+}
+
+const fn map_device_loss_reason(reason: wgpu::DeviceLostReason) -> DeviceLossReason {
+    match reason {
+        wgpu::DeviceLostReason::Unknown => DeviceLossReason::Unknown,
+        wgpu::DeviceLostReason::Destroyed => DeviceLossReason::Destroyed,
     }
 }
 
@@ -62,8 +333,12 @@ impl DeviceSlotIdentity {
 
 impl Backend {
     fn ensure_device_states(&mut self) {
-        self.device_states
-            .resize_with(self.context.devices.len(), DeviceState::new);
+        let known_slots = self.device_states.len();
+        self.device_states.extend(
+            self.context.devices[known_slots..]
+                .iter()
+                .map(DeviceState::new),
+        );
     }
 
     pub(crate) fn device_slot_identity(&mut self, slot: usize) -> Result<DeviceSlotIdentity> {
@@ -77,11 +352,104 @@ impl Backend {
         Ok(DeviceSlotIdentity::new(slot, state.generation))
     }
 
-    pub(crate) fn has_device_slot(&self, identity: DeviceSlotIdentity) -> bool {
+    pub(crate) fn has_device_slot(&mut self, identity: DeviceSlotIdentity) -> bool {
+        self.ensure_device_states();
+        let Some(state) = self.device_states.get_mut(identity.slot()) else {
+            return false;
+        };
+        if state.generation != identity.generation
+            || self.context.devices.get(identity.slot()).is_none()
+        {
+            return false;
+        }
+        state.observe_terminal();
+        true
+    }
+
+    pub(crate) fn terminal_error(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
+    ) -> Option<Error> {
+        self.ensure_device_states();
+        let state = self.device_states.get_mut(identity.slot())?;
+        if state.generation != identity.generation
+            || self.context.devices.get(identity.slot()).is_none()
+        {
+            return None;
+        }
+        state.terminal().map(|terminal| terminal.error(operation))
+    }
+
+    pub(crate) fn terminal_reason(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Option<RuntimeCapabilityUnavailableReason> {
+        self.ensure_device_states();
+        let state = self.device_states.get_mut(identity.slot())?;
+        if state.generation != identity.generation
+            || self.context.devices.get(identity.slot()).is_none()
+        {
+            return None;
+        }
+        state
+            .terminal()
+            .map(DeviceTerminalSignal::unavailable_reason)
+    }
+
+    pub(crate) fn device_capabilities(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Option<DeviceCapabilities> {
+        self.ensure_device_states();
+        let state = self.device_states.get_mut(identity.slot())?;
+        if state.generation != identity.generation
+            || self.context.devices.get(identity.slot()).is_none()
+        {
+            return None;
+        }
+        state.observe_terminal();
+        (state.terminal.is_none()).then_some(state.capabilities)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_loss_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        reason: DeviceLossReason,
+    ) {
+        self.ensure_device_states();
+        if let Some(state) = self.device_states.get(identity.slot())
+            && state.generation == identity.generation
+        {
+            state.signal.record(DeviceTerminalSignal::lost(
+                reason,
+                "test device loss".into(),
+            ));
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn wait_for_terminal_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        timeout: Duration,
+    ) -> bool {
+        self.ensure_device_states();
         self.device_states
             .get(identity.slot())
-            .is_some_and(|state| state.generation == identity.generation)
-            && self.context.devices.get(identity.slot()).is_some()
+            .filter(|state| state.generation == identity.generation)
+            .is_some_and(|state| state.signal.wait_for_terminal(timeout))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn renderer_released_for_test(&mut self, identity: DeviceSlotIdentity) -> bool {
+        self.ensure_device_states();
+        let Some(state) = self.device_states.get_mut(identity.slot()) else {
+            return false;
+        };
+        state.observe_terminal();
+        state.renderer.is_none()
     }
 }
 
@@ -659,6 +1027,10 @@ pub(crate) fn ensure_vello_renderer(
             BackendErrorCode::RendererCreateFailed,
             "Vello device slot is unavailable",
         ));
+    }
+    if let Some(error) = backend.terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
+    {
+        return Err(error);
     }
     let slot = device_identity.slot();
     let renderer_is_ready = backend
