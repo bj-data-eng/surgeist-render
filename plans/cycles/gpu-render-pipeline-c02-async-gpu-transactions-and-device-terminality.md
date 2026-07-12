@@ -4,7 +4,7 @@
 
 - Cycle: `C02`.
 - Owner: `surgeist-render`.
-- Status: `reviewed`.
+- Status: `in_progress`.
 - Cycle base: `5361e3460278dffb877b9d485a2d12977977c3ef`.
 - Specification: `plans/specs/gpu-render-pipeline.md` at commit `3826a9098e859874a515bbebaf470a47d754d76c`, content SHA-256 `f01972e19f8a5ddc90936edfc6ea7955feff3d1b1fdf5d181e77e8d10cc1f60a`, sections S12-S13, non-readback S13A, identity/device/publication portions of S25-S26, applicable S29 rows, S31, C02-applicable named evidence in S32-S33, S35, and the native feature/tooling limits in S36-S37.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at commit `ff0d4a3c478f6f89cceab3962883bd53396cba6b`, content SHA-256 `1ff25dbd5bb0382e2e66573affd058a3e3f939bede561a896ce6e1dea7d73840`, entry `C02 Async GPU Transactions And Device Terminality`.
