@@ -3,197 +3,198 @@
 ## Authority
 
 - Owning repository: `surgeist-render`.
-- Desired state: `plans/specs/gpu-render-pipeline.md` at commit `3826a9098e859874a515bbebaf470a47d754d76c`, content SHA-256
-  `f01972e19f8a5ddc90936edfc6ea7955feff3d1b1fdf5d181e77e8d10cc1f60a`.
-- Specification review disposition: the user explicitly waived the remaining clean-context re-review after the third review's findings were incorporated.
-- Ordering rule: a cycle becomes ready only after every prerequisite cycle is
-  landed, published, remotely verified, and handed forward without a material specification or sequence change.
-- Root integration remains outside this sequence and outside this repository.
+- Desired state: `plans/specs/gpu-render-pipeline.md` at commit
+  `1e6517e4e33669d97b1f45c0df9c1de78ec4d07e`, normalized semantic SHA-256
+  `db78f70e03a31430e949ac06de6628ca24a03cd53cf5dec453b43bcf4fbe53be`.
+- Specification review disposition: `CLEAN` for that exact revision.
+- Recovery base: published C01 commit
+  `5361e3460278dffb877b9d485a2d12977977c3ef`; the former C02 plan is
+  `superseded` and contributes no acceptance evidence.
+- Ordering rule: a cycle starts only after every prerequisite cycle is clean,
+  committed, published, remotely verified, and handed forward.
+- Root facade adaptation, API artifacts, integration tests, and gitlink movement
+  remain outside this leaf sequence.
 
 ## C01 Public Contract Foundation
 
-- Owner: `surgeist-render`.
-- Outcome: establish Options, text-bounds, runtime/error foundations, disable
-  Vello CPU selection, and remove the unsafe resize hint before any cycle can
-  publish; legacy capability/statistics APIs remain unchanged until C11.
-- Specification: S07-S08, S10, S12, non-readback S13, safe-resize S26, S29
-  Options/non-readback-error/runtime/text rows, and S35.
+- Status: complete and published at `5361e3460278dffb877b9d485a2d12977977c3ef`.
+- Outcome: establish options, text bounds, runtime/error foundations, GPU-only
+  selection, and safe resize behavior without exposing final graph reports.
+- Specification: S07-S08, S10, S12, non-readback S13, safe-resize S26, applicable
+  S29 rows, and S35.
 - Prerequisites: none.
-- Entry state: `main` contains the authority specification and this reviewed
-  sequence, with no unowned change.
-- Exit evidence: available native model/feature evidence is valid, legacy
-  capability/stat reports remain truthful, Vello CPU selection is absent, and
-  all owned source is `unsafe`-free; C12 retains actual wasm compilation.
-- Handoff: C02 consumes the public runtime/error/stat contracts; C12 owns target-specific compilation; no root handoff.
+- Entry state: initiative base `d59ad253300b68311f4e81a70e2b6ce73c922a4d` with external Vello ownership and legacy contracts.
+- Exit evidence: accepted C01 range and remote publication remain authoritative;
+  no successor reopens or rewrites it.
+- Handoff: C02 adopts only the provisional post-C01 foundation range under S06B.
 
-## C02 Async GPU Transactions And Device Terminality
+## C02 Foundation Adoption And Cleanup
 
-- Owner: `surgeist-render`.
-- Outcome: make create/render/resume/present asynchronous, establish identity
-  before slot access and draft-versus-published headless atomicity, and provide
-  scoped errors, per-device terminality, cancellation cleanup, and presentation;
-  C03 exclusively owns readback.
-- Specification: S12-S13, non-readback S13A, identity/device/publication S25-S26,
-  S29 async create/render/resume, identity, and publication rows, S31, S35.
+- Outcome: audit and correct the provisional identity, async API, terminal-device,
+  capability, error-scope, and transaction foundation; forward-remove the
+  rejected external-Vello presented-setup/no-op seam.
+- Specification: S06B, foundation portions of S07-S13A, identity/terminal portions
+  of S25-S26, applicable S29 and S31-S32 rows, and S35.
 - Prerequisites: C01.
-- Entry state: C01 contracts are the published public front door.
-- Exit evidence: identity precedes indexing, canceled/failed headless frames
-  preserve published pixels, and scoped non-readback operations follow terminal
-  mapping without cross-device damage; blocking readback remains owned by C03.
-- Handoff: C03 completes the async front door by replacing all explicit and temporary legacy readback progress; no root handoff.
+- Entry state: C01 is the sole published base; commits `64bc5cb..9aa1d97` are
+  provisional source evidence, not accepted implementation.
+- Exit evidence: the exact `5361e34..C02-tip` range is holistically clean; current
+  behavior remains available through unchanged temporary external Vello use,
+  with no new external-Vello ownership or publication/readback claim.
+- Handoff: C03 receives a clean backend-neutral transaction/device foundation.
 
-## C03 Surface Lifecycle And Readback
+## C03 Internal Vello Raster Engine Cutover
 
-- Owner: `surgeist-render`.
-- Outcome: close remaining lifecycle semantics and replace explicit plus legacy internal readback with cancellation-safe native/wasm async progress over
-  C02's published headless target.
-- Specification: S09 `ImageBuffer`, readback S13-S13A, S25-S26, S28, S29
-  `read_headless`/`ReadbackFailed`/image/surface behavior rows, S31, S33-S35.
+- Outcome: characterize pinned output, internalize/adapt the Vello 0.9 main crate,
+  validate selected glyphs before external encoding, establish raster leases and
+  transaction-owned encoding/submission, remove external `vello`, and close
+  provenance plus dependency roles.
+- Specification: S04-S06A, S07 raster phase, S10A, raster portions of S13A and
+  S16-S17, S25-S26, S28-S29 font/API rows, and applicable S31-S37 evidence.
 - Prerequisites: C02.
-- Entry state: non-readback GPU entrypoints and terminal states are async and stable; explicit and legacy materialization readback use the old blocking helper.
-- Exit evidence: available native evidence covers every remaining surface state
-  and one nonblocking readback state machine with complete cleanup; C12 retains
-  wasm compilation evidence.
-- Handoff: C04 consumes stable surface/output semantics and C12 consumes the wasm branch; no root handoff.
+- Entry state: async device/transaction ownership is clean, but external Vello
+  still owns raster execution and surface/device conveniences.
+- Exit evidence: production uses private checked WGPU raster modules with no CPU
+  mode, unsafe, map/poll, direct engine submit, or silent glyph omission; current
+  render behavior and characterization pixels remain supported.
+- Handoff: C04 receives one Surgeist-owned raster/device/resource boundary.
 
-## C04 Frame, Spatial, And Filter Planning
+## C04 Atomic Frame Publication And Presentation
 
-- Owner: `surgeist-render`.
-- Outcome: establish the closed direct-versus-graph plan, immutable resource
-  dependency graph, Vello partitioning, signed spatial model, text-effect
-  bounds, ordered filter bounds, and explicit fan-out lifetimes.
-- Specification: S15, S17, S19, private planning portions of S20/S22, S28, and S31-S32; C09 owns their public constructors/payloads.
+- Outcome: implement headless draft-versus-published ownership, presented
+  setup/configure/acquire/blit/present transactions, cancellation cleanup, and
+  the remaining non-readback lifecycle/error matrix on the internal engine.
+- Specification: S12-S13A, publication/lifecycle portions of S25-S26, applicable
+  S29 and S31-S35 evidence.
 - Prerequisites: C03.
-- Entry state: renderer operations and surfaces expose stable async/lifecycle
-  contracts, while current production pixel routes remain intact.
-- Exit evidence: all supported authored scenes normalize to one finite plan,
-  graph validation rejects invalid dependencies, and spatial/filter planning
-  requires no backend execution or guessed resource bounds.
-- Handoff: C05 consumes only validated graph resources, pass intents, and extents; no root handoff.
+- Entry state: all raster work encodes and submits through Surgeist transactions.
+- Exit evidence: failed/canceled headless frames preserve publication, presented
+  state commits only after clean scopes/signals, and no temporary readback path
+  is changed or counted.
+- Handoff: C05 receives stable surface publication and lifecycle semantics.
 
-## C05 Working Formats, Resources, And Pass Infrastructure
+## C05 Surface Readback
 
-- Owner: `surgeist-render`.
-- Outcome: establish deterministic effect-format selection, persistent
-  per-device resource ownership, generation-aware leases, budgets, shader and
-  pipeline caches, safe uniform encoding, and the finite executable pass
-  vocabulary.
-- Specification: S12, S16, S18, S25, S28, and S31-S35.
+- Outcome: replace explicit and temporary blocking readback with the native/wasm
+  cancellation-safe state machine over C04's published headless texture.
+- Specification: S09 `ImageBuffer`, readback S13-S13A, S25-S26, S28-S29 readback
+  rows, and applicable S31-S35 evidence.
 - Prerequisites: C04.
-- Entry state: every future GPU operation has a validated plan and bounded
-  resource description.
-- Exit evidence: high/reduced selection and failure are typed, reuse/trimming are deterministic, internal telemetry is coherent, and no public backend
-  type, final route statistic, capability flip, or dependency is added.
-- Handoff: C06 consumes the resource manager, working-format decision, and pass lowering boundary; no root handoff.
+- Entry state: non-readback operations and publication are async and atomic.
+- Exit evidence: one explicit readback path owns copy/map/progress/cleanup; no
+  production pass waits, maps, polls, or exposes partial bytes.
+- Handoff: C06 may plan against stable inputs, outputs, and surface states.
 
-## C06 Direct And Capture Graph Spine
+## C06 Frame Spatial And Filter Planning
 
-- Owner: `surgeist-render`.
-- Outcome: retain one-pass direct Vello rendering while executing root clear,
-  bounded capture, canonicalization, minimal root source-over, output conversion,
-  and headless/presented delivery through the GPU graph spine.
-- Specification: S15-S19, minimal root/source-over/present S23, S25-S26, S28,
-  and S31-S34.
+- Outcome: establish direct-versus-graph planning, immutable dependencies,
+  maximal raster partitioning, signed spatial mapping, text-effect bounds,
+  ordered filter bounds, and explicit fan-out lifetimes.
+- Specification: S15, S17, S19, planning portions of S20 and S22, S28, and
+  applicable S31-S32 evidence.
 - Prerequisites: C05.
-- Entry state: graph plans lower to owned resources and a finite pass set, but
-  no migrated CSS effect depends on the graph spine.
-- Exit evidence: the private production executor preserves capture/source-over/
-  output contracts in both precisions without readback or Vello re-entry; public
-  route/stat/capability surfaces remain on the legacy contract until C11.
-- Handoff: C07 consumes a complete source-to-output GPU graph; no root handoff.
+- Entry state: public operations, surfaces, raster execution, and readback have
+  stable phase and lifecycle contracts.
+- Exit evidence: every supported scene produces one finite validated plan without
+  backend execution, guessed bounds, forward edges, or stale aliases.
+- Handoff: C07 lowers only validated resources, pass intents, and extents.
 
-## C07 Composition, Clip, Mask, And Blend Passes
+## C07 Working Formats Resources And Pass Infrastructure
 
-- Owner: `surgeist-render`.
-- Outcome: implement advanced ordered composition for outer clips, resolved
-  alpha masks at all image qualities, opacity, isolation, and supported blends.
-- Specification: S09, S16, S18-S19, S23, S25, S27-S28, S29 resolved-mask API/Eq
-  rows, and S30-S34; C11 owns legacy execution-type removal and capability names.
+- Outcome: extend C03's one per-device resource manager to effect textures,
+  masks, kernels, budgets, leases, shader/pipeline caches, safe serialization,
+  quality selection, and the finite custom-pass vocabulary.
+- Specification: S12, S16, S18, S25, S28, and applicable S31-S35 evidence.
 - Prerequisites: C06.
-- Entry state: bounded Vello content can become and remain a canonical GPU
-  working image through output.
-- Exit evidence: private GPU composition uses exact ordering/sampling while
-  broad diagnostics and all public route/stat/capability reports retain their
-  truthful legacy state until C11.
-- Handoff: C08 may compose color-filter results through the same graph boundary; no root handoff.
+- Entry state: graph plans have complete resource intents and bounded extents.
+- Exit evidence: high/reduced selection is typed, reuse/trimming deterministic,
+  one manager owns raster and effect allocations, and no final report is exposed.
+- Handoff: C08 receives executable resources and pass lowering.
 
-## C08 Ordered Color-Filter Execution
+## C08 Direct And Capture Graph Spine
 
-- Owner: `surgeist-render`.
-- Outcome: execute brightness, contrast, grayscale, hue rotation, invert,
-  opacity, saturation, sepia, and legal fusion on the GPU with finite scalar
-  lowering and a clamp after every authored operation.
-- Specification: S16, S18, S20-S21, S27-S28, and S30-S34.
+- Outcome: preserve one-pass direct rasterization while executing root clear,
+  bounded capture, canonicalization, minimal source-over, output conversion, and
+  headless/presented delivery through the GPU graph spine.
+- Specification: S15-S19, minimal root/source-over/present S23, S25-S26, S28,
+  and applicable S31-S34 evidence.
 - Prerequisites: C07.
-- Entry state: graph content can be isolated, composited, and delivered without
-  a CPU pixel edge.
-- Exit evidence: private GPU color execution agrees with independent constants
-  and precision tolerances without changing public route/capability/stat reports
-  or enabling broad layer/reference filters.
-- Handoff: C09 composes spatial filters with the ordered color path; no root handoff.
+- Entry state: plans lower to one owned resource manager and a finite pass set.
+- Exit evidence: direct and graph-spine pixels agree in both precisions without
+  readback, CPU pixels, atlas re-entry, or premature public report changes.
+- Handoff: C09 receives a complete source-to-output GPU graph.
 
-## C09 Gaussian Blur And Filter Drop Shadow
+## C09 Composition Clip Mask And Blend Passes
 
-- Owner: `surgeist-render`.
-- Outcome: execute ordinary Gaussian blur and CSS filter drop shadow through
-  GPU image passes with transparent edges, continuous offset, SourceAlpha,
-  source fan-out, expanded signed bounds, and solid-paint diagnostics.
-- Specification: S16, S18-S22, S25, S27-S28, applicable S29
-  `FilterBlur`/`FilterDropShadow` rows, and S30-S34.
+- Outcome: implement ordered outer clips, resolved alpha masks at every image
+  quality, opacity, isolation, and all currently supported blend modes.
+- Specification: S09, S16, S18-S19, S23, S25, S27-S30, and applicable S31-S34.
 - Prerequisites: C08.
-- Entry state: ordered color filters and composition share one canonical
-  working-image contract.
-- Exit evidence: private GPU pixels, bounds, lifetimes, and mixed order preserve
-  required clamps/precision without silent quality reduction, replay, CPU pixels,
-  public report changes, or non-solid support expansion.
-- Handoff: C10 consumes the complete supported filter pass chain; no root handoff.
+- Entry state: bounded raster content remains a canonical GPU working image.
+- Exit evidence: GPU composition matches ordering/sampling oracles while broad
+  diagnostics and legacy reports remain truthful.
+- Handoff: C10 composes color-filter output through the same graph boundary.
 
-## C10 Bounded Backdrop Execution
+## C10 Ordered Color Filter Execution
 
-- Owner: `surgeist-render`.
-- Outcome: execute the supported bounded backdrop subset by copying completed
-  parent pixels once, applying the ordered GPU filter chain with backdrop edge
-  semantics, and compositing unfiltered foreground in authored order.
-- Specification: S16-S17, S19-S20, S23-S24, S27-S28, and S30-S34.
+- Outcome: execute brightness, contrast, grayscale, hue rotation, invert,
+  opacity, saturation, sepia, and legal fusion on the GPU with authored-order
+  clamping and finite scalar lowering.
+- Specification: S16, S18, S20-S21, S27-S28, and applicable S30-S34 evidence.
 - Prerequisites: C09.
-- Entry state: every filter operation allowed inside a bounded backdrop has a
-  composable GPU implementation.
-- Exit evidence: private GPU backdrop behavior preserves base, siblings, clip,
-  foreground, and later observers without replay/readback or public report
-  changes; root/nested/transformed policies remain diagnostics.
-- Handoff: C11 may replace every selected legacy materialization route with the complete graph; no root handoff.
+- Entry state: graph content can be isolated, composited, and delivered GPU-only.
+- Exit evidence: high/reduced GPU results match independent constants/oracles
+  without enabling broad layer/reference filters.
+- Handoff: C11 composes spatial filters with the ordered color path.
 
-## C11 GPU-Only Cutover And Matrix Reconciliation
+## C11 Gaussian Blur And Filter Drop Shadow
 
-- Owner: `surgeist-render`.
-- Outcome: atomically expose direct/GPU-graph routes, final S11 capabilities and
-  S14 statistics, retire CPU/materialized execution and superseded public phases,
-  isolate the oracle to tests, and reconcile every final report.
-- Specification: S03, S11, S14, S20, S25, S27, all remaining S29 capability/
-  statistics/materialized/CPU/removal/diagnostic rows, S30-S30C, S35, and S38.
+- Outcome: execute Gaussian blur and CSS filter drop shadow through GPU image
+  passes with correct edges, continuous offset, SourceAlpha, fan-out, and signed
+  bounds while retaining non-solid-paint diagnostics.
+- Specification: S16, S18-S22, S25, S27-S30, and applicable S31-S34 evidence.
 - Prerequisites: C10.
-- Entry state: composition, color, blur/shadow, and bounded backdrop primitives
-  are independently GPU-complete and composable.
-- Exit evidence: all 101 primitive rows, 22 property mappings, and 53 typed
-  subcases reconcile mechanically; production contains no CPU pixel route,
-  Vello CPU selection, graph readback/re-entry, stale public phase, or owned
-  `unsafe`.
-- Handoff: C12 receives the final production architecture and public surface; no root handoff yet.
+- Entry state: color filters and composition share one working-pixel contract.
+- Exit evidence: pixels, bounds, lifetimes, ordering, and precision match the
+  oracle without readback, replay, or silent quality reduction.
+- Handoff: C12 receives the complete supported filter pass chain.
 
-## C12 Platform Evidence, Documentation, And Final Quality
+## C12 Bounded Backdrop Execution
 
-- Owner: `surgeist-render`.
-- Outcome: complete native feature combinations, presented direct/graph smoke,
-  applicable wasm compilation, MSRV evidence, API/docs/example updates, and the
-  full deterministic and real-GPU quality/lifecycle acceptance contract.
-- Specification: S02, S04-S06, S31-S38.
+- Outcome: copy completed parent pixels once, apply the ordered GPU filter chain
+  with backdrop edge semantics, and composite unfiltered foreground in authored
+  order for the supported bounded subset.
+- Specification: S16-S17, S19-S20, S23-S24, S27-S28, and applicable S30-S34.
 - Prerequisites: C11.
-- Entry state: final GPU-only behavior and matrix reconciliation are published
-  on the leaf mainline.
+- Entry state: every filter operation allowed inside a bounded backdrop is GPU
+  implemented and composable.
+- Exit evidence: base, sibling, clip, foreground, and later-observer behavior is
+  correct without replay/readback; broader backdrop policy remains diagnostic.
+- Handoff: C13 can replace every selected legacy materialization route.
+
+## C13 GPU Only Cutover And Matrix Reconciliation
+
+- Outcome: expose final routes/capabilities/statistics, remove CPU/materialized
+  execution and superseded public phases, isolate the oracle to tests, and
+  reconcile every primitive/property/diagnostic inventory row.
+- Specification: S01, S03, S11, S14, S20, S25, S27, remaining S29-S30C rows, S35,
+  and S38.
+- Prerequisites: C12.
+- Entry state: every selected replacement primitive is independently GPU-complete.
+- Exit evidence: production has no CPU pixel route, graph readback/re-entry,
+  stale public phase, external Vello, owned unsafe, or matrix drift.
+- Handoff: C14 receives the final production architecture and public surface.
+
+## C14 Platform Evidence Documentation And Final Quality
+
+- Outcome: complete native feature combinations, presented direct/graph smoke,
+  wasm compilation, Rust 1.97 evidence, dependency/provenance inspection,
+  API/docs/example updates, and full deterministic/real-GPU acceptance.
+- Specification: S02-S06B and S31-S38.
+- Prerequisites: C13.
+- Entry state: final GPU-only behavior and matrix reconciliation are published.
 - Exit evidence: every available required feature, target, quality, lifecycle,
-  lint, formatting, unsafe-absence, and Rust-1.89 gate is green; unavailable
-  toolchain/host evidence is reported only through its exact permission or host
-  blocker.
-- Handoff: publish the fetchable leaf candidate and report the complete public
-  API migration, target evidence, browser-host follow-up, and root-owned facade,
-  artifact, and submodule work to the root coordinator.
+  font-preflight, lint, format, unsafe-absence, and compatibility gate is green;
+  unavailable required target/host evidence is an exact canonical blocker.
+- Handoff: publish and remotely verify the leaf candidate, then report public API
+  migration, browser-host follow-up, and root-owned facade/artifact/gitlink work.
