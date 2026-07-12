@@ -45,6 +45,7 @@ fn encode_vello_commands(
                 transform: run_transform,
                 paint,
                 glyphs,
+                ..
             } => encode_text_run(scene, transform, font, *size, *run_transform, paint, glyphs)?,
             RenderCommand::Layer { layer, children } => {
                 let layer_transform = transform * kurbo::Affine::from(layer.transform);

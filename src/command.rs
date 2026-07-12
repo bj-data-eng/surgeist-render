@@ -57,6 +57,7 @@ pub(crate) enum RenderCommand {
         transform: Transform,
         paint: TextPaint,
         glyphs: Vec<TextGlyph>,
+        bounds: TextRunBounds,
     },
     Layer {
         layer: NormalizedLayer,
@@ -477,6 +478,7 @@ fn normalize_commands_in_context(
                 transform,
                 paint,
                 glyphs,
+                bounds,
             } => {
                 validate_text_run(*size, *transform, glyphs)?;
                 validate_paint(paint.fill())?;
@@ -486,6 +488,7 @@ fn normalize_commands_in_context(
                     transform: *transform,
                     paint: paint.clone(),
                     glyphs: glyphs.clone(),
+                    bounds: *bounds,
                 }
             }
             Command::TextShadowRun {

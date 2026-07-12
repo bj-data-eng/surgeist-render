@@ -72,6 +72,7 @@ impl Scene {
             transform: run.transform(),
             paint: run.paint().clone(),
             glyphs: run.glyphs().to_vec(),
+            bounds: run.bounds(),
         });
         self
     }
@@ -84,6 +85,7 @@ impl Scene {
             transform: text.transform(),
             paint: text.paint().clone(),
             glyphs: text.glyphs().to_vec(),
+            bounds: text.bounds(),
             shadows: run.shadows().clone(),
         });
         self
@@ -186,6 +188,7 @@ pub(crate) enum Command {
         transform: Transform,
         paint: TextPaint,
         glyphs: Vec<TextGlyph>,
+        bounds: TextRunBounds,
     },
     TextShadowRun {
         font: FontRef<'static>,
@@ -193,6 +196,7 @@ pub(crate) enum Command {
         transform: Transform,
         paint: TextPaint,
         glyphs: Vec<TextGlyph>,
+        bounds: TextRunBounds,
         shadows: ShadowList,
     },
     Layer {

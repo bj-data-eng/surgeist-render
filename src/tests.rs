@@ -174,6 +174,74 @@ fn text_run_bounds_distinguish_unspecified_empty_and_ink() {
     assert_eq!(shadowed.run().bounds(), ink);
 }
 
+#[test]
+fn scene_lowering_preserves_authored_text_run_bounds() {
+    let bounds = TextRunBounds::try_ink(Rect::new(-2.0, -3.0, 4.0, 5.0)).unwrap();
+    let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(1).named("Bounded scene text"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        bounds,
+    )
+    .unwrap();
+
+    let mut scene = Scene::new();
+    scene.text_run(run);
+
+    let [
+        scene::Command::TextRun {
+            bounds: scene_bounds,
+            ..
+        },
+    ] = scene.commands.as_slice()
+    else {
+        panic!("direct text run should retain authored bounds in the scene");
+    };
+    assert_eq!(*scene_bounds, bounds);
+
+    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let [
+        command::RenderCommand::TextRun {
+            bounds: normalized_bounds,
+            ..
+        },
+    ] = normalized.commands.as_slice()
+    else {
+        panic!("direct text run should retain authored bounds after normalization");
+    };
+    assert_eq!(*normalized_bounds, bounds);
+
+    let shadowed_run = TextRun::try_new(
+        FontRef::new(1).named("Bounded shadow text"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        bounds,
+    )
+    .unwrap();
+    let shadows = ShadowList::try_new(vec![
+        Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
+    ])
+    .unwrap();
+    let mut shadow_scene = Scene::new();
+    shadow_scene.text_shadow_run(TextShadowRun::try_new(shadowed_run, shadows).unwrap());
+
+    let [
+        scene::Command::TextShadowRun {
+            bounds: shadow_bounds,
+            ..
+        },
+    ] = shadow_scene.commands.as_slice()
+    else {
+        panic!("text shadow run should retain wrapped authored bounds in the scene");
+    };
+    assert_eq!(*shadow_bounds, bounds);
+}
+
 fn ahem_font(name: &'static str) -> FontRef<'static> {
     FontRef::new(AHEM_FONT_ID)
         .named(name)
