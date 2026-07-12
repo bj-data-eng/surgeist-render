@@ -315,16 +315,6 @@ pub(crate) fn encode_clear_fill_pass(
         });
     }
     context.queue.submit([encoder.finish()]);
-    context
-        .device
-        .poll(wgpu::PollType::Poll)
-        .map_err(|source| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "failed to poll render device",
-            )
-            .with_source(source)
-        })?;
     Ok(())
 }
 

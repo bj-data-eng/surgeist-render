@@ -14,6 +14,7 @@ mod encode;
 mod error;
 mod filter;
 mod geometry;
+mod gpu_transaction;
 mod image;
 mod layer;
 mod paint;

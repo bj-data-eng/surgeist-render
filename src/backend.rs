@@ -8,6 +8,7 @@ use super::*;
 use super::{
     command::OffscreenBounds,
     geometry::physical_size,
+    gpu_transaction::{GpuOperationStage, GpuOperationTransaction},
     texture::{
         OffscreenTextureCache, OffscreenTextureHandle, TextureCacheKey, TextureDescriptor,
         TextureLifecycleStats, TextureUsageIntent, headless_texture_descriptor,
@@ -37,6 +38,7 @@ pub(crate) struct DeviceState {
     capabilities: DeviceCapabilities,
     signal: Arc<DeviceSignal>,
     terminal: Option<DeviceTerminalSignal>,
+    next_operation_generation: u64,
 }
 
 impl DeviceState {
@@ -49,6 +51,7 @@ impl DeviceState {
             capabilities: DeviceCapabilities::from_device(device_handle),
             signal,
             terminal: None,
+            next_operation_generation: 0,
         }
     }
 
@@ -76,6 +79,7 @@ impl DeviceState {
             capabilities: DeviceCapabilities::empty(),
             signal: Arc::clone(&first_signal),
             terminal: None,
+            next_operation_generation: 0,
         };
         let mut second = Self {
             generation: 0,
@@ -83,6 +87,7 @@ impl DeviceState {
             capabilities: DeviceCapabilities::empty(),
             signal: Arc::new(DeviceSignal::new()),
             terminal: None,
+            next_operation_generation: 0,
         };
         first_signal.record(DeviceTerminalSignal::lost(
             DeviceLossReason::Destroyed,
@@ -152,7 +157,7 @@ fn supports_effect_texture_format(features: wgpu::TextureFormatFeatures) -> bool
 }
 
 #[derive(Clone, Debug)]
-enum DeviceTerminalSignal {
+pub(crate) enum DeviceTerminalSignal {
     Lost {
         reason: DeviceLossReason,
         message: String,
@@ -202,7 +207,7 @@ impl DeviceTerminalSignal {
         }
     }
 
-    fn error(&self, operation: RuntimeOperation) -> Error {
+    pub(crate) fn error(&self, operation: RuntimeOperation) -> Error {
         let diagnostic =
             RuntimeCapabilityUnavailable::try_new(operation, self.unavailable_reason())
                 .expect("terminal-device diagnostics always use a permitted operation/reason pair");
@@ -212,7 +217,7 @@ impl DeviceTerminalSignal {
     }
 }
 
-struct DeviceSignal {
+pub(crate) struct DeviceSignal {
     state: Mutex<DeviceSignalState>,
     #[cfg(test)]
     changed: Condvar,
@@ -220,7 +225,7 @@ struct DeviceSignal {
 
 struct DeviceSignalState {
     first_terminal: Option<DeviceTerminalSignal>,
-    // Task 4 owns transaction installation. Callbacks observe no active operation for now.
+    // The lease clears this only when it still owns the recorded generation.
     active_operation_generation: Option<u64>,
 }
 
@@ -248,7 +253,7 @@ impl DeviceSignal {
         }
     }
 
-    fn first_terminal(&self) -> Option<DeviceTerminalSignal> {
+    pub(crate) fn first_terminal(&self) -> Option<DeviceTerminalSignal> {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -270,6 +275,56 @@ impl DeviceSignal {
             #[cfg(test)]
             self.changed.notify_all();
         }
+    }
+
+    pub(crate) fn activate(&self, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.active_operation_generation = Some(generation);
+    }
+
+    pub(crate) fn clear_active(&self, generation: u64) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.active_operation_generation == Some(generation) {
+            state.active_operation_generation = None;
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Arc<Self> {
+        Arc::new(Self::new())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn next_test_generation(&self) -> Result<u64> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state
+            .active_operation_generation
+            .map_or(Ok(1), |generation| {
+                generation.checked_add(1).ok_or_else(|| {
+                    Error::invalid_value(
+                        "GPU operation generation",
+                        generation,
+                        "must have remaining generation space",
+                    )
+                })
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_operation_generation
     }
 
     #[cfg(test)]
@@ -354,6 +409,53 @@ impl Backend {
         Ok(DeviceSlotIdentity::new(slot, state.generation))
     }
 
+    pub(crate) fn begin_gpu_operation(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        stage: GpuOperationStage,
+        operation: RuntimeOperation,
+    ) -> Result<GpuOperationTransaction> {
+        self.ensure_device_states();
+        if let Some(error) = self.terminal_error(identity, operation) {
+            return Err(error);
+        }
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before transaction setup",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before transaction setup",
+            ));
+        }
+        state.next_operation_generation = state
+            .next_operation_generation
+            .checked_add(1)
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "GPU operation generation",
+                    state.next_operation_generation,
+                    "must have remaining generation space",
+                )
+            })?;
+        let signal = Arc::clone(&state.signal);
+        let device = self.context.devices.get(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before transaction scopes",
+            )
+        })?;
+        Ok(GpuOperationTransaction::begin(
+            &device.device,
+            signal,
+            state.next_operation_generation,
+            stage,
+        ))
+    }
+
     pub(crate) fn has_device_slot(&mut self, identity: DeviceSlotIdentity) -> bool {
         self.ensure_device_states();
         let Some(state) = self.device_states.get_mut(identity.slot()) else {
@@ -397,6 +499,16 @@ impl Backend {
         state
             .terminal()
             .map(DeviceTerminalSignal::unavailable_reason)
+    }
+
+    pub(crate) fn observe_device_terminal(&mut self, identity: DeviceSlotIdentity) {
+        self.ensure_device_states();
+        if let Some(state) = self.device_states.get_mut(identity.slot())
+            && state.generation == identity.generation
+            && self.context.devices.get(identity.slot()).is_some()
+        {
+            state.observe_terminal();
+        }
     }
 
     pub(crate) fn device_capabilities(
@@ -452,6 +564,18 @@ impl Backend {
         };
         state.observe_terminal();
         state.renderer.is_none()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn active_operation_generation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Option<u64> {
+        self.ensure_device_states();
+        self.device_states
+            .get(identity.slot())
+            .filter(|state| state.generation == identity.generation)
+            .and_then(|state| state.signal.active_generation_for_test())
     }
 
     #[cfg(test)]
@@ -1030,16 +1154,6 @@ pub(crate) fn render_vello_surface(
             );
             device_handle.queue.submit([encoder.finish()]);
             surface_texture.present();
-            device_handle
-                .device
-                .poll(wgpu::PollType::Poll)
-                .map_err(|source| {
-                    Error::new(
-                        BackendErrorCode::PresentFailed,
-                        "failed to poll render device",
-                    )
-                    .with_source(source)
-                })?;
             Ok(RenderTimings {
                 render_time,
                 present_time: present_start.elapsed(),

@@ -1,3 +1,4 @@
+use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::{
     backend::*,
     command,
@@ -16,7 +17,12 @@ use super::{
         headless_texture_descriptor,
     },
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    future::{Future, pending},
+    sync::Arc,
+    task::{Context, Poll, Waker},
+    time::Duration,
+};
 
 use super::error::BackendErrorCode;
 use super::*;
@@ -11301,6 +11307,120 @@ fn vello_out_of_memory_maps_to_stable_surface_error() {
         BackendErrorCode::SurfaceOutOfMemory
     );
     assert!(vello_error_message(&error).contains("memory"));
+}
+
+#[test]
+fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage() {
+    let stages = [
+        (
+            GpuOperationStage::SurfaceCreate,
+            BackendErrorCode::SurfaceCreateFailed,
+        ),
+        (
+            GpuOperationStage::RendererCreate,
+            BackendErrorCode::RendererCreateFailed,
+        ),
+        (
+            GpuOperationStage::SurfaceConfigure,
+            BackendErrorCode::SurfaceConfigureFailed,
+        ),
+        (GpuOperationStage::Render, BackendErrorCode::RenderFailed),
+        (GpuOperationStage::Present, BackendErrorCode::PresentFailed),
+    ];
+    let faults = [
+        GpuFaultKind::Validation,
+        GpuFaultKind::OutOfMemory,
+        GpuFaultKind::Internal,
+    ];
+
+    for (stage, expected_code) in stages {
+        for fault in faults {
+            let error = stage.classify_fault_for_test(fault, "injected GPU error");
+            assert_eq!(
+                error.code(),
+                if fault == GpuFaultKind::OutOfMemory {
+                    ErrorCode::SurfaceOutOfMemory
+                } else {
+                    Error::new(expected_code, "expected stage error").code()
+                }
+            );
+        }
+    }
+}
+
+#[test]
+fn dropped_gpu_operation_future_aborts_draft_state_and_leases() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    if let Some(transaction) = renderer.start_default_gpu_operation_for_test() {
+        let mut published = None;
+        {
+            let future = async {
+                let draft = GpuOperationDraft::new(&mut published, true);
+                pending::<()>().await;
+                transaction
+                    .finish(RuntimeOperation::SurfaceRendering)
+                    .await?;
+                draft.commit();
+                Result::<()>::Ok(())
+            };
+            let mut future = std::pin::pin!(future);
+            let mut context = Context::from_waker(Waker::noop());
+            assert!(matches!(
+                Future::poll(future.as_mut(), &mut context),
+                Poll::Pending
+            ));
+            assert!(
+                renderer
+                    .default_device_active_operation_generation_for_test()
+                    .is_some()
+            );
+        }
+        assert_eq!(published, None);
+        assert_eq!(
+            renderer.default_device_active_operation_generation_for_test(),
+            None
+        );
+        return;
+    }
+
+    let signal = super::backend::DeviceSignal::new_for_test();
+    let mut published = None;
+    let future = async {
+        let draft = GpuOperationDraft::new(&mut published, true);
+        let lease = GpuOperationLease::begin_for_test(&signal).unwrap();
+        assert!(signal.active_generation_for_test().is_some());
+        pending::<()>().await;
+        drop(lease);
+        draft.commit();
+    };
+    {
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert_eq!(Future::poll(future.as_mut(), &mut context), Poll::Pending);
+    }
+    assert_eq!(published, None);
+    assert_eq!(signal.active_generation_for_test(), None);
+}
+
+#[test]
+fn real_gpu_error_scope_captures_deliberate_validation_error() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let Some(result) = pollster::block_on(renderer.deliberate_validation_error_for_test()) else {
+        return;
+    };
+    let error = result.expect_err("the deliberate invalid texture must be captured by the scope");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[test]
+fn real_gpu_smoke_emits_no_uncaptured_error() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("headless creation should succeed on the configured runtime");
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("an empty scoped render should succeed");
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
 #[test]
