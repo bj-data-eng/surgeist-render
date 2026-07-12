@@ -11469,6 +11469,16 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         device_identity.mark_stale_for_test();
     }
 
+    assert_eq!(
+        foreign_renderer.runtime_capabilities(&foreign_surface),
+        RuntimeCapabilities::Unavailable(
+            RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+                kind: SurfaceIdentityMismatchKind::ForeignRenderer,
+            }
+        ),
+        "a foreign renderer must reject the surface before consulting its stale device identity"
+    );
+
     let error = pollster::block_on(foreign_renderer.render(
         &mut foreign_surface,
         &Scene::new(),
@@ -11508,6 +11518,16 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         panic!("the test environment must provide a device-backed headless surface");
     };
     device_identity.mark_stale_for_test();
+
+    assert_eq!(
+        owner.runtime_capabilities(&stale_surface),
+        RuntimeCapabilities::Unavailable(
+            RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch {
+                kind: SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+            }
+        ),
+        "a stale surface must be rejected before runtime capability projection"
+    );
 
     let error =
         pollster::block_on(owner.render(&mut stale_surface, &Scene::new(), Parameters::default()))
