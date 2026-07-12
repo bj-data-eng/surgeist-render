@@ -13438,6 +13438,549 @@ fn headless_render_can_be_read_back() {
     assert!(image.rgba.iter().any(|channel| *channel != 0));
 }
 
+#[derive(Clone, Copy, Debug)]
+struct PinnedVelloCharacterizationCase {
+    antialiasing: Antialiasing,
+    scale: f64,
+    logical_dimensions: [u32; 2],
+    physical_origin: [u32; 2],
+    physical_dimensions: [u32; 2],
+    solid_fill: [u8; 4],
+    stroke: [u8; 4],
+    gradient_left: [u8; 4],
+    gradient_right: [u8; 4],
+    image_top_left: [u8; 4],
+    image_top_right: [u8; 4],
+    clip_inside: [u8; 4],
+    clip_excluded: [u8; 4],
+    transformed_inside: [u8; 4],
+    transformed_excluded: [u8; 4],
+    ahem_ascent_ink: [u8; 4],
+    ahem_descent_ink: [u8; 4],
+    solid_edge: AlphaSupport,
+    stroke_edge: AlphaSupport,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct AlphaSupport {
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+    centroid_x_hundredths: i32,
+    centroid_y_hundredths: i32,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PinnedVelloVariation {
+    physical_dimensions: [u32; 2],
+    stroke_alpha: u8,
+    gradient_left: [u8; 2],
+    gradient_right: [u8; 2],
+    solid_edge: AlphaSupport,
+    stroke_edge: AlphaSupport,
+}
+
+// Each row is `{AA, scale, physical dimensions, stroke alpha, gradient left/right,
+// solid edge support, stroke edge support}`. Other samples are stable across all rows.
+const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = &[
+    pinned_vello_case(
+        Antialiasing::Area,
+        1.0,
+        variation(
+            [72, 48],
+            191,
+            [223, 32],
+            [32, 223],
+            edge(2, 2, 10, 10, 575, 575),
+            edge(12, 0, 24, 12, 1824, 624),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Area,
+        1.25,
+        variation(
+            [90, 60],
+            175,
+            [223, 32],
+            [32, 223],
+            edge(2, 2, 12, 12, 731, 731),
+            edge(15, 0, 30, 15, 2293, 793),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Area,
+        2.0,
+        variation(
+            [144, 96],
+            127,
+            [215, 40],
+            [24, 231],
+            edge(4, 4, 20, 20, 1200, 1200),
+            edge(25, 1, 49, 25, 3699, 1300),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Msaa8,
+        1.0,
+        variation(
+            [72, 48],
+            191,
+            [223, 32],
+            [32, 223],
+            edge(2, 2, 10, 10, 575, 575),
+            edge(12, 0, 24, 12, 1824, 624),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Msaa8,
+        1.25,
+        variation(
+            [90, 60],
+            191,
+            [223, 32],
+            [32, 223],
+            edge(2, 2, 12, 12, 737, 730),
+            edge(16, 1, 30, 15, 2299, 796),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Msaa8,
+        2.0,
+        variation(
+            [144, 96],
+            128,
+            [215, 40],
+            [24, 231],
+            edge(4, 4, 20, 20, 1200, 1200),
+            edge(25, 1, 49, 25, 3700, 1300),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Msaa16,
+        1.0,
+        variation(
+            [72, 48],
+            191,
+            [223, 32],
+            [32, 223],
+            edge(2, 2, 10, 10, 575, 575),
+            edge(12, 0, 24, 12, 1824, 624),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Msaa16,
+        1.25,
+        variation(
+            [90, 60],
+            175,
+            [223, 32],
+            [32, 223],
+            edge(2, 2, 12, 12, 731, 731),
+            edge(15, 0, 30, 15, 2293, 794),
+        ),
+    ),
+    pinned_vello_case(
+        Antialiasing::Msaa16,
+        2.0,
+        variation(
+            [144, 96],
+            128,
+            [215, 40],
+            [24, 231],
+            edge(4, 4, 20, 20, 1200, 1200),
+            edge(25, 1, 49, 25, 3700, 1300),
+        ),
+    ),
+];
+
+const fn pinned_vello_case(
+    antialiasing: Antialiasing,
+    scale: f64,
+    variation: PinnedVelloVariation,
+) -> PinnedVelloCharacterizationCase {
+    PinnedVelloCharacterizationCase {
+        antialiasing,
+        scale,
+        logical_dimensions: [72, 48],
+        physical_origin: [0, 0],
+        physical_dimensions: variation.physical_dimensions,
+        solid_fill: [203, 52, 26, 128],
+        stroke: [26, 64, 230, variation.stroke_alpha],
+        gradient_left: [
+            variation.gradient_left[0],
+            0,
+            variation.gradient_left[1],
+            255,
+        ],
+        gradient_right: [
+            variation.gradient_right[0],
+            0,
+            variation.gradient_right[1],
+            255,
+        ],
+        image_top_left: [255, 0, 0, 255],
+        image_top_right: [0, 255, 0, 255],
+        clip_inside: [255, 255, 0, 255],
+        clip_excluded: [0, 0, 0, 0],
+        transformed_inside: [0, 255, 255, 255],
+        transformed_excluded: [0, 0, 0, 0],
+        ahem_ascent_ink: [0, 0, 0, 255],
+        ahem_descent_ink: [0, 0, 0, 255],
+        solid_edge: variation.solid_edge,
+        stroke_edge: variation.stroke_edge,
+    }
+}
+
+const fn variation(
+    physical_dimensions: [u32; 2],
+    stroke_alpha: u8,
+    gradient_left: [u8; 2],
+    gradient_right: [u8; 2],
+    solid_edge: AlphaSupport,
+    stroke_edge: AlphaSupport,
+) -> PinnedVelloVariation {
+    PinnedVelloVariation {
+        physical_dimensions,
+        stroke_alpha,
+        gradient_left,
+        gradient_right,
+        solid_edge,
+        stroke_edge,
+    }
+}
+
+const fn edge(
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+    centroid_x_hundredths: i32,
+    centroid_y_hundredths: i32,
+) -> AlphaSupport {
+    AlphaSupport {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        centroid_x_hundredths,
+        centroid_y_hundredths,
+    }
+}
+
+#[test]
+fn pinned_vello_characterization_cases_are_source_readable() {
+    let configurations = [
+        (Antialiasing::Area, 1.0),
+        (Antialiasing::Area, 1.25),
+        (Antialiasing::Area, 2.0),
+        (Antialiasing::Msaa8, 1.0),
+        (Antialiasing::Msaa8, 1.25),
+        (Antialiasing::Msaa8, 2.0),
+        (Antialiasing::Msaa16, 1.0),
+        (Antialiasing::Msaa16, 1.25),
+        (Antialiasing::Msaa16, 2.0),
+    ];
+    let mut observed = Vec::with_capacity(configurations.len());
+
+    for (antialiasing, scale) in configurations {
+        let mut renderer = pollster::block_on(Renderer::new(
+            Options::default().with_antialiasing(antialiasing),
+        ))
+        .expect("pinned Vello characterization requires a host adapter");
+        let scene = pinned_vello_characterization_scene();
+        let mut surface =
+            pollster::block_on(renderer.create_headless(Size::new(72.0, 48.0), scale))
+                .expect("pinned Vello characterization requires a real headless surface");
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+            .expect("pinned Vello characterization must render through the production Vello route");
+        let output = renderer
+            .read_headless(&surface)
+            .expect("pinned Vello characterization must read the rendered headless surface");
+        observed.push(observe_pinned_vello_characterization(
+            antialiasing,
+            scale,
+            &output,
+        ));
+    }
+
+    assert_eq!(
+        observed.len(),
+        PINNED_VELLO_CHARACTERIZATION_CASES.len(),
+        "missing source-readable pinned Vello samples; observed rows: {observed:#?}"
+    );
+    assert_eq!(
+        PINNED_VELLO_CHARACTERIZATION_CASES.len(),
+        configurations.len(),
+        "the pinned table must cover every AA/scale Cartesian pair"
+    );
+
+    for (actual, expected) in observed.iter().zip(PINNED_VELLO_CHARACTERIZATION_CASES) {
+        assert_pinned_vello_characterization_case(*actual, *expected);
+    }
+}
+
+fn pinned_vello_characterization_scene() -> Scene {
+    let partial_red = Color::try_rgba(0.8, 0.2, 0.1, 0.5).unwrap();
+    let blue = Color::try_rgba(0.1, 0.25, 0.9, 1.0).unwrap();
+    let gradient = Gradient::try_linear(
+        Point::new(2.0, 16.0),
+        Point::new(18.0, 16.0),
+        vec![
+            GradientStop::try_new(0.0, Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap()).unwrap(),
+            GradientStop::try_new(1.0, Color::try_rgba(0.0, 0.0, 1.0, 1.0).unwrap()).unwrap(),
+        ],
+    )
+    .unwrap();
+    let image = Image::from_rgba(
+        Size::new(2.0, 2.0),
+        Arc::<[u8]>::from([
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ]),
+    )
+    .unwrap();
+    let glyphs = [
+        TextGlyph::try_new(AHEM_GLYPH_ASCENT_E_ACUTE, 2.0, 38.0, 10.0).unwrap(),
+        TextGlyph::try_new(AHEM_GLYPH_DESCENT_P, 14.0, 38.0, 10.0).unwrap(),
+    ];
+    let mut scene = Scene::new();
+
+    scene.fill(Rect::new(2.25, 2.25, 8.0, 8.0), partial_red);
+    scene.stroke(
+        Rect::new(14.25, 2.25, 9.0, 9.0),
+        Stroke::try_new(3.0).unwrap(),
+        blue,
+    );
+    scene.fill(Rect::new(2.0, 16.0, 16.0, 8.0), Paint::gradient(gradient));
+    scene.image(image, Rect::new(22.0, 16.0, 8.0, 8.0), ImageFit::Stretch);
+    scene.clip(Rect::new(36.0, 16.0, 6.0, 8.0), |scene| {
+        scene.fill(
+            Rect::new(32.0, 14.0, 14.0, 12.0),
+            Color::try_rgba(1.0, 1.0, 0.0, 1.0).unwrap(),
+        );
+    });
+    scene.transform(Transform::translation(6.0, 3.0).unwrap(), |scene| {
+        scene.fill(
+            Rect::new(48.0, 14.0, 8.0, 7.0),
+            Color::try_rgba(0.0, 1.0, 1.0, 1.0).unwrap(),
+        );
+    });
+    scene.text_run(
+        TextRun::try_new(
+            ahem_font("C03 pinned Vello characterization"),
+            10.0,
+            Transform::identity(),
+            TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+            &glyphs,
+            TextRunBounds::unspecified(),
+        )
+        .unwrap(),
+    );
+    scene
+}
+
+fn observe_pinned_vello_characterization(
+    antialiasing: Antialiasing,
+    scale: f64,
+    image: &ImageBuffer,
+) -> PinnedVelloCharacterizationCase {
+    PinnedVelloCharacterizationCase {
+        antialiasing,
+        scale,
+        logical_dimensions: [72, 48],
+        physical_origin: [0, 0],
+        physical_dimensions: [image.size.width(), image.size.height()],
+        solid_fill: characterization_pixel(image, scale, 5.0, 5.0),
+        stroke: characterization_pixel(image, scale, 15.0, 5.0),
+        gradient_left: characterization_pixel(image, scale, 4.0, 20.0),
+        gradient_right: characterization_pixel(image, scale, 16.0, 20.0),
+        image_top_left: characterization_pixel(image, scale, 23.0, 17.0),
+        image_top_right: characterization_pixel(image, scale, 28.0, 17.0),
+        clip_inside: characterization_pixel(image, scale, 38.0, 20.0),
+        clip_excluded: characterization_pixel(image, scale, 33.0, 20.0),
+        transformed_inside: characterization_pixel(image, scale, 56.0, 20.0),
+        transformed_excluded: characterization_pixel(image, scale, 50.0, 20.0),
+        ahem_ascent_ink: characterization_pixel(image, scale, 7.0, 34.0),
+        ahem_descent_ink: characterization_pixel(image, scale, 19.0, 39.0),
+        solid_edge: characterization_alpha_support(image, scale, 1.0, 1.0, 11.0, 11.0),
+        stroke_edge: characterization_alpha_support(image, scale, 12.0, 0.0, 25.0, 13.0),
+    }
+}
+
+fn characterization_pixel(image: &ImageBuffer, scale: f64, x: f64, y: f64) -> [u8; 4] {
+    let x = ((x + 0.5) * scale).floor() as u32;
+    let y = ((y + 0.5) * scale).floor() as u32;
+    pixel_rgba(image, x, y)
+}
+
+fn characterization_alpha_support(
+    image: &ImageBuffer,
+    scale: f64,
+    x: f64,
+    y: f64,
+    width: f64,
+    height: f64,
+) -> AlphaSupport {
+    let x_start = (x * scale).floor() as u32;
+    let y_start = (y * scale).floor() as u32;
+    let x_end = ((x + width) * scale).ceil() as u32;
+    let y_end = ((y + height) * scale).ceil() as u32;
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0;
+    let mut max_y = 0;
+    let mut alpha_sum = 0_u64;
+    let mut weighted_x = 0_u64;
+    let mut weighted_y = 0_u64;
+
+    for pixel_y in y_start..y_end {
+        for pixel_x in x_start..x_end {
+            let alpha = u64::from(pixel_alpha(image, pixel_x, pixel_y));
+            if alpha == 0 {
+                continue;
+            }
+            min_x = min_x.min(pixel_x);
+            min_y = min_y.min(pixel_y);
+            max_x = max_x.max(pixel_x);
+            max_y = max_y.max(pixel_y);
+            alpha_sum += alpha;
+            weighted_x += alpha * u64::from(pixel_x);
+            weighted_y += alpha * u64::from(pixel_y);
+        }
+    }
+
+    assert!(
+        alpha_sum > 0,
+        "characterization edge region must contain ink"
+    );
+    AlphaSupport {
+        min_x,
+        min_y,
+        max_x,
+        max_y,
+        centroid_x_hundredths: ((weighted_x * 100) / alpha_sum) as i32,
+        centroid_y_hundredths: ((weighted_y * 100) / alpha_sum) as i32,
+    }
+}
+
+fn assert_pinned_vello_characterization_case(
+    actual: PinnedVelloCharacterizationCase,
+    expected: PinnedVelloCharacterizationCase,
+) {
+    assert_eq!(actual.antialiasing, expected.antialiasing);
+    assert_eq!(actual.scale, expected.scale);
+    assert_eq!(actual.logical_dimensions, expected.logical_dimensions);
+    assert_eq!(actual.physical_origin, expected.physical_origin);
+    assert_eq!(actual.physical_dimensions, expected.physical_dimensions);
+
+    for (name, actual, expected) in [
+        ("solid fill", actual.solid_fill, expected.solid_fill),
+        ("stroke", actual.stroke, expected.stroke),
+        (
+            "gradient left",
+            actual.gradient_left,
+            expected.gradient_left,
+        ),
+        (
+            "gradient right",
+            actual.gradient_right,
+            expected.gradient_right,
+        ),
+        (
+            "image top left",
+            actual.image_top_left,
+            expected.image_top_left,
+        ),
+        (
+            "image top right",
+            actual.image_top_right,
+            expected.image_top_right,
+        ),
+        ("clip inside", actual.clip_inside, expected.clip_inside),
+        (
+            "transformed inside",
+            actual.transformed_inside,
+            expected.transformed_inside,
+        ),
+        (
+            "Ahem ascent ink",
+            actual.ahem_ascent_ink,
+            expected.ahem_ascent_ink,
+        ),
+        (
+            "Ahem descent ink",
+            actual.ahem_descent_ink,
+            expected.ahem_descent_ink,
+        ),
+    ] {
+        assert_straight_rgba8_premultiplies(actual, name);
+        assert_rgba_within(actual, expected, 2, name);
+    }
+
+    assert_eq!(actual.clip_excluded, [0, 0, 0, 0]);
+    assert_eq!(actual.transformed_excluded, [0, 0, 0, 0]);
+    assert!(
+        actual.ahem_ascent_ink[3] > 0,
+        "Ahem ascent sample must contain ink"
+    );
+    assert!(
+        actual.ahem_descent_ink[3] > 0,
+        "Ahem descent sample must contain ink"
+    );
+    assert_alpha_support_within(actual.solid_edge, expected.solid_edge, "solid fill edge");
+    assert_alpha_support_within(actual.stroke_edge, expected.stroke_edge, "stroke edge");
+    assert!(actual.gradient_left[0] > actual.gradient_left[2]);
+    assert!(actual.gradient_right[2] > actual.gradient_right[0]);
+    assert!(actual.image_top_left[0] > actual.image_top_left[1]);
+    assert!(actual.image_top_right[1] > actual.image_top_right[0]);
+}
+
+fn assert_straight_rgba8_premultiplies(pixel: [u8; 4], name: &str) {
+    let premultiplied = [
+        ((u16::from(pixel[0]) * u16::from(pixel[3]) + 127) / 255) as u8,
+        ((u16::from(pixel[1]) * u16::from(pixel[3]) + 127) / 255) as u8,
+        ((u16::from(pixel[2]) * u16::from(pixel[3]) + 127) / 255) as u8,
+        pixel[3],
+    ];
+    assert!(
+        premultiplied[..3]
+            .iter()
+            .all(|channel| *channel <= premultiplied[3]),
+        "{name} must retain alpha when converted to premultiplied RGBA8: {pixel:?}"
+    );
+}
+
+fn assert_rgba_within(actual: [u8; 4], expected: [u8; 4], tolerance: u8, name: &str) {
+    for (channel, (actual, expected)) in actual.into_iter().zip(expected).enumerate() {
+        assert!(
+            actual.abs_diff(expected) <= tolerance,
+            "{name} channel {channel} expected {expected} +/- {tolerance}, got {actual}"
+        );
+    }
+}
+
+fn assert_alpha_support_within(actual: AlphaSupport, expected: AlphaSupport, name: &str) {
+    for (component, actual, expected) in [
+        ("min_x", actual.min_x, expected.min_x),
+        ("min_y", actual.min_y, expected.min_y),
+        ("max_x", actual.max_x, expected.max_x),
+        ("max_y", actual.max_y, expected.max_y),
+    ] {
+        assert!(
+            actual.abs_diff(expected) <= 1,
+            "{name} nonzero support {component} expected {expected} +/- 1, got {actual}"
+        );
+    }
+    assert!(
+        (actual.centroid_x_hundredths - expected.centroid_x_hundredths).abs() <= 35,
+        "{name} centroid x exceeds the S34 0.35-device-pixel tolerance"
+    );
+    assert!(
+        (actual.centroid_y_hundredths - expected.centroid_y_hundredths).abs() <= 35,
+        "{name} centroid y exceeds the S34 0.35-device-pixel tolerance"
+    );
+}
+
 fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Option<ImageBuffer> {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
