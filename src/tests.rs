@@ -26,6 +26,65 @@ const AHEM_GLYPH_X: u32 = 58;
 const AHEM_GLYPH_DESCENT_P: u32 = 82;
 const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
 
+#[test]
+fn options_default_requires_high_precision_and_bounds_retention() {
+    let options = Options::new();
+
+    assert_eq!(options, Options::default());
+    assert_eq!(options.antialiasing(), Antialiasing::Area);
+    assert!(!options.debug());
+    assert_eq!(
+        options.effect_quality_policy(),
+        EffectQualityPolicy::RequireHighPrecision
+    );
+    assert_eq!(
+        options.resource_cache_budget(),
+        ResourceCacheBudget::DEFAULT
+    );
+
+    let configured = options
+        .with_antialiasing(Antialiasing::Msaa16)
+        .with_debug(true)
+        .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+        .with_resource_cache_budget(ResourceCacheBudget::new(8));
+
+    assert_eq!(configured.antialiasing(), Antialiasing::Msaa16);
+    assert!(configured.debug());
+    assert_eq!(
+        configured.effect_quality_policy(),
+        EffectQualityPolicy::AllowReducedPrecision
+    );
+    assert_eq!(configured.resource_cache_budget().bytes(), 8);
+    assert_eq!(
+        pollster::block_on(Renderer::new(configured))
+            .unwrap()
+            .options(),
+        configured
+    );
+}
+
+#[test]
+fn resource_cache_budget_zero_disables_idle_retention() {
+    let disabled = ResourceCacheBudget::new(0);
+
+    assert_eq!(disabled, ResourceCacheBudget::DISABLED);
+    assert_eq!(disabled.bytes(), 0);
+    assert_eq!(ResourceCacheBudget::default(), ResourceCacheBudget::DEFAULT);
+    assert_eq!(ResourceCacheBudget::DEFAULT.bytes(), 64 * 1024 * 1024);
+}
+
+#[test]
+fn vello_renderer_options_force_gpu_execution() {
+    let options = Options::new().with_antialiasing(Antialiasing::Msaa8);
+    let vello_options = vello_renderer_options(options);
+
+    assert!(!vello_options.use_cpu);
+    assert_eq!(
+        vello_options.antialiasing_support,
+        vello_aa_support(Antialiasing::Msaa8)
+    );
+}
+
 fn ahem_font(name: &'static str) -> FontRef<'static> {
     FontRef::new(AHEM_FONT_ID)
         .named(name)

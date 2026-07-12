@@ -59,7 +59,7 @@ pub use layer::{BlendMode, Filter, Layer, ResolvedLayerAlphaMask, Shadow, Shadow
 pub use paint::{
     Color, Gradient, GradientStop, NormalizedPaintLayer, Paint, PaintColor, PaintColorSpace,
 };
-pub use renderer::{Antialiasing, Options, Renderer};
+pub use renderer::{Antialiasing, EffectQualityPolicy, Options, Renderer, ResourceCacheBudget};
 pub use scene::Scene;
 pub use shape::{
     Dash, FillRule, FilledPath, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign,

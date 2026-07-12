@@ -329,7 +329,7 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
             &vello_render_params(
                 request.parameters,
                 resource.target.descriptor().physical_size(),
-                options.antialiasing,
+                options.antialiasing(),
             ),
         );
     if let Err(source) = result {
@@ -391,7 +391,7 @@ pub(crate) fn render_vello_surface(
                     &device_handle.queue,
                     scene,
                     view,
-                    &vello_render_params(parameters, *physical_size, options.antialiasing),
+                    &vello_render_params(parameters, *physical_size, options.antialiasing()),
                 )
                 .map_err(|source| {
                     Error::new(vello_error_code(&source), vello_error_message(&source))
@@ -446,7 +446,7 @@ pub(crate) fn render_vello_surface(
                         width: native.config.width,
                         height: native.config.height,
                         base_color: parameters.base_color.into(),
-                        antialiasing_method: options.antialiasing.into(),
+                        antialiasing_method: options.antialiasing().into(),
                     },
                 )
                 .map_err(|source| {
@@ -542,12 +542,7 @@ pub(crate) fn ensure_vello_renderer(
     if backend.renderers[dev_id].is_none() {
         let renderer = vello::Renderer::new(
             &backend.context.devices[dev_id].device,
-            vello::RendererOptions {
-                use_cpu: options.use_cpu,
-                antialiasing_support: vello_aa_support(options.antialiasing),
-                num_init_threads: NonZeroUsize::new(1),
-                ..vello::RendererOptions::default()
-            },
+            vello_renderer_options(options),
         )
         .map_err(|source| {
             Error::new(
@@ -559,6 +554,15 @@ pub(crate) fn ensure_vello_renderer(
         backend.renderers[dev_id] = Some(renderer);
     }
     Ok(())
+}
+
+pub(crate) fn vello_renderer_options(options: Options) -> vello::RendererOptions {
+    vello::RendererOptions {
+        use_cpu: false,
+        antialiasing_support: vello_aa_support(options.antialiasing()),
+        num_init_threads: NonZeroUsize::new(1),
+        ..vello::RendererOptions::default()
+    }
 }
 
 pub(crate) fn vello_error_code(error: &vello::Error) -> ErrorCode {

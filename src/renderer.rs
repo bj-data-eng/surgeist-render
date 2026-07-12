@@ -263,7 +263,7 @@ impl Renderer {
         }
         stats.frame_time = frame_start.elapsed();
 
-        if parameters.debug || self.options.debug {
+        if parameters.debug || self.options.debug() {
             stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
         }
         self.stats = stats;
@@ -645,16 +645,130 @@ fn backdrop_execution_error() -> Error {
     error
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+/// Renderer configuration that is fixed when a [`Renderer`] is created.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
-    pub antialiasing: Antialiasing,
-    /// Uses Vello's CPU pipeline stages where Vello supports them.
-    ///
-    /// This is a diagnostic/debug option, not a lower-memory rendering mode.
-    /// Vello still uses GPU presentation resources, and CPU mode can increase
-    /// total resident memory.
-    pub use_cpu: bool,
-    pub debug: bool,
+    antialiasing: Antialiasing,
+    debug: bool,
+    effect_quality_policy: EffectQualityPolicy,
+    resource_cache_budget: ResourceCacheBudget,
+}
+
+impl Options {
+    /// Creates the default GPU-only renderer configuration.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            antialiasing: Antialiasing::Area,
+            debug: false,
+            effect_quality_policy: EffectQualityPolicy::RequireHighPrecision,
+            resource_cache_budget: ResourceCacheBudget::DEFAULT,
+        }
+    }
+
+    /// Returns the configured antialiasing method.
+    #[must_use]
+    pub const fn antialiasing(self) -> Antialiasing {
+        self.antialiasing
+    }
+
+    /// Returns this configuration with a different antialiasing method.
+    #[must_use]
+    pub const fn with_antialiasing(mut self, antialiasing: Antialiasing) -> Self {
+        self.antialiasing = antialiasing;
+        self
+    }
+
+    /// Returns whether renderer diagnostics are enabled.
+    #[must_use]
+    pub const fn debug(self) -> bool {
+        self.debug
+    }
+
+    /// Returns this configuration with renderer diagnostics enabled or disabled.
+    #[must_use]
+    pub const fn with_debug(mut self, debug: bool) -> Self {
+        self.debug = debug;
+        self
+    }
+
+    /// Returns the policy for effect precision when high precision is unavailable.
+    #[must_use]
+    pub const fn effect_quality_policy(self) -> EffectQualityPolicy {
+        self.effect_quality_policy
+    }
+
+    /// Returns this configuration with a different effect precision policy.
+    #[must_use]
+    pub const fn with_effect_quality_policy(
+        mut self,
+        effect_quality_policy: EffectQualityPolicy,
+    ) -> Self {
+        self.effect_quality_policy = effect_quality_policy;
+        self
+    }
+
+    /// Returns the maximum retained idle effect-resource cache budget.
+    #[must_use]
+    pub const fn resource_cache_budget(self) -> ResourceCacheBudget {
+        self.resource_cache_budget
+    }
+
+    /// Returns this configuration with a different idle effect-resource cache budget.
+    #[must_use]
+    pub const fn with_resource_cache_budget(
+        mut self,
+        resource_cache_budget: ResourceCacheBudget,
+    ) -> Self {
+        self.resource_cache_budget = resource_cache_budget;
+        self
+    }
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Policy for choosing effect precision on a compatible GPU.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EffectQualityPolicy {
+    /// Require high-precision effect execution.
+    #[default]
+    RequireHighPrecision,
+    /// Prefer high precision and allow reduced precision only when it is unavailable.
+    AllowReducedPrecision,
+}
+
+/// Byte budget for retaining idle effect resources.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ResourceCacheBudget(u64);
+
+impl ResourceCacheBudget {
+    /// Disables idle effect-resource retention.
+    pub const DISABLED: Self = Self(0);
+
+    /// Retains up to 64 MiB of idle effect resources by default.
+    pub const DEFAULT: Self = Self(64 * 1024 * 1024);
+
+    /// Creates an idle effect-resource retention budget in bytes.
+    #[must_use]
+    pub const fn new(bytes: u64) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns this retention budget in bytes.
+    #[must_use]
+    pub const fn bytes(self) -> u64 {
+        self.0
+    }
+}
+
+impl Default for ResourceCacheBudget {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
