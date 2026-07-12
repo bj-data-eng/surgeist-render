@@ -39,6 +39,35 @@ impl std::fmt::Display for ErrorSourceFixture {
 impl std::error::Error for ErrorSourceFixture {}
 
 #[test]
+fn runtime_capability_report_keeps_precision_flags_independent() {
+    let combinations = [(true, true), (true, false), (false, true), (false, false)];
+
+    for (high_precision, reduced_precision) in combinations {
+        let precisions = EffectPrecisionCapabilities::new(high_precision, reduced_precision);
+        let available = AvailableRuntimeCapabilities::new(Format::Bgra8, precisions, 8_192);
+        let report = RuntimeCapabilities::Available(available);
+
+        assert_eq!(precisions.supports_high_precision(), high_precision);
+        assert_eq!(precisions.supports_reduced_precision(), reduced_precision);
+        assert_eq!(available.surface_format(), Format::Bgra8);
+        assert_eq!(available.effect_precisions(), precisions);
+        assert_eq!(available.max_effect_texture_dimension_2d(), 8_192);
+        assert_eq!(report.available(), Some(available));
+        assert_eq!(report.unavailable_reason(), None);
+    }
+
+    let unavailable_reason = RuntimeCapabilityUnavailableReason::AdapterUnavailable;
+    let unavailable = RuntimeCapabilities::Unavailable(unavailable_reason);
+    assert_eq!(unavailable.available(), None);
+    assert_eq!(unavailable.unavailable_reason(), Some(unavailable_reason));
+
+    fn assert_report_traits<T: Clone + Copy + std::fmt::Debug + Eq + PartialEq>() {}
+    assert_report_traits::<RuntimeCapabilities>();
+    assert_report_traits::<AvailableRuntimeCapabilities>();
+    assert_report_traits::<EffectPrecisionCapabilities>();
+}
+
+#[test]
 fn runtime_errors_distinguish_semantic_unsupported_from_device_unavailable() {
     let unsupported = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
         PrimitiveFamily::Filters,

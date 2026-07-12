@@ -1,4 +1,138 @@
-use super::{Error, PrimitiveFamily, PrimitiveOperation, Result, UnsupportedPrimitive};
+use super::{
+    Error, Format, PrimitiveFamily, PrimitiveOperation, Result, RuntimeCapabilityUnavailableReason,
+    UnsupportedPrimitive,
+};
+
+/// Runtime facts reported for a selected safe WGPU device and surface.
+///
+/// These facts describe the selected runtime device/surface rather than semantic
+/// rendering support or enabled Cargo features.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RuntimeCapabilities {
+    /// The selected device or surface cannot provide a runtime capability report.
+    ///
+    /// This is runtime device/surface evidence, not a statement about semantic
+    /// rendering support or Cargo features.
+    Unavailable(RuntimeCapabilityUnavailableReason),
+    /// Runtime facts for an available selected device and surface.
+    ///
+    /// These are device/surface facts rather than semantic rendering support or
+    /// Cargo features.
+    Available(AvailableRuntimeCapabilities),
+}
+
+impl RuntimeCapabilities {
+    /// Returns the selected device/surface facts when the runtime report is available.
+    ///
+    /// The returned value describes runtime device/surface facts, not semantic
+    /// rendering support or Cargo features.
+    #[must_use]
+    pub const fn available(self) -> Option<AvailableRuntimeCapabilities> {
+        match self {
+            Self::Unavailable(_) => None,
+            Self::Available(capabilities) => Some(capabilities),
+        }
+    }
+
+    /// Returns why the selected device or surface could not provide a runtime report.
+    ///
+    /// The reason concerns runtime device/surface availability, not semantic
+    /// rendering support or Cargo features.
+    #[must_use]
+    pub const fn unavailable_reason(self) -> Option<RuntimeCapabilityUnavailableReason> {
+        match self {
+            Self::Unavailable(reason) => Some(reason),
+            Self::Available(_) => None,
+        }
+    }
+}
+
+/// Available runtime facts for a selected safe WGPU device and surface.
+///
+/// The fields are runtime device/surface facts rather than semantic rendering
+/// support or enabled Cargo features.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct AvailableRuntimeCapabilities {
+    surface_format: Format,
+    effect_precisions: EffectPrecisionCapabilities,
+    max_effect_texture_dimension_2d: u32,
+}
+
+impl AvailableRuntimeCapabilities {
+    #[cfg(test)]
+    pub(crate) const fn new(
+        surface_format: Format,
+        effect_precisions: EffectPrecisionCapabilities,
+        max_effect_texture_dimension_2d: u32,
+    ) -> Self {
+        Self {
+            surface_format,
+            effect_precisions,
+            max_effect_texture_dimension_2d,
+        }
+    }
+
+    /// Returns the format of the selected runtime surface.
+    ///
+    /// This is a selected device/surface fact, not semantic rendering support or
+    /// a Cargo feature.
+    #[must_use]
+    pub const fn surface_format(self) -> Format {
+        self.surface_format
+    }
+
+    /// Returns the effect texture precisions supported by the selected runtime device.
+    ///
+    /// These are device facts, not semantic rendering support or Cargo features.
+    #[must_use]
+    pub const fn effect_precisions(self) -> EffectPrecisionCapabilities {
+        self.effect_precisions
+    }
+
+    /// Returns the selected device's maximum two-dimensional effect texture dimension.
+    ///
+    /// This runtime device limit is not semantic rendering support or a Cargo feature.
+    #[must_use]
+    pub const fn max_effect_texture_dimension_2d(self) -> u32 {
+        self.max_effect_texture_dimension_2d
+    }
+}
+
+/// Runtime effect texture precision facts for a selected safe WGPU device.
+///
+/// Each flag is independent and describes runtime device support rather than
+/// semantic rendering support or enabled Cargo features.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct EffectPrecisionCapabilities {
+    high_precision: bool,
+    reduced_precision: bool,
+}
+
+impl EffectPrecisionCapabilities {
+    #[cfg(test)]
+    pub(crate) const fn new(high_precision: bool, reduced_precision: bool) -> Self {
+        Self {
+            high_precision,
+            reduced_precision,
+        }
+    }
+
+    /// Returns whether the selected runtime device supports high-precision effect textures.
+    ///
+    /// This is a runtime device fact, not semantic rendering support or a Cargo feature.
+    #[must_use]
+    pub const fn supports_high_precision(self) -> bool {
+        self.high_precision
+    }
+
+    /// Returns whether the selected runtime device supports reduced-precision effect textures.
+    ///
+    /// This is a runtime device fact, not semantic rendering support or a Cargo feature.
+    #[must_use]
+    pub const fn supports_reduced_precision(self) -> bool {
+        self.reduced_precision
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {

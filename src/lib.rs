@@ -32,12 +32,12 @@ mod validation;
 pub(crate) use error::BackendErrorCode;
 
 pub use capability::{
-    BackgroundAttachmentCoordinatePolicy, BoxDecorationCapabilities, Capabilities,
-    CompositingCapabilities, FilterCapabilities, GeometryTargetCapabilities, HitTestOwnership,
-    ImageColorProfilePolicy, ImageOrientationPolicy, ImageSamplingCapabilities,
-    MaskClipCapabilities, OffscreenPipelineCapabilities, PaintSourceCapabilities,
-    ShadowCapabilities, SurfaceCapabilities, SymbolicColorPolicy,
-    TransformCoordinateSpaceCapabilities,
+    AvailableRuntimeCapabilities, BackgroundAttachmentCoordinatePolicy, BoxDecorationCapabilities,
+    Capabilities, CompositingCapabilities, EffectPrecisionCapabilities, FilterCapabilities,
+    GeometryTargetCapabilities, HitTestOwnership, ImageColorProfilePolicy, ImageOrientationPolicy,
+    ImageSamplingCapabilities, MaskClipCapabilities, OffscreenPipelineCapabilities,
+    PaintSourceCapabilities, RuntimeCapabilities, ShadowCapabilities, SurfaceCapabilities,
+    SymbolicColorPolicy, TransformCoordinateSpaceCapabilities,
 };
 pub use error::{
     DegradedQuality, DegradedQualityKind, DeviceLossReason, Error, ErrorCode, GpuFaultKind,
