@@ -98,10 +98,43 @@ fn text_run_bounds_distinguish_unspecified_empty_and_ink() {
     assert_eq!(unspecified.ink_rect(), None);
     assert_eq!(empty.ink_rect(), None);
     assert_eq!(ink.ink_rect(), Some(ink_rect));
+    let non_finite_x = TextRunBounds::try_ink(Rect::new(f64::NAN, 0.0, 1.0, 1.0)).unwrap_err();
+    let non_finite_y = TextRunBounds::try_ink(Rect::new(0.0, f64::INFINITY, 1.0, 1.0)).unwrap_err();
+    let non_finite_width = TextRunBounds::try_ink(Rect::new(0.0, 0.0, f64::NAN, 1.0)).unwrap_err();
+    let non_finite_height =
+        TextRunBounds::try_ink(Rect::new(0.0, 0.0, 1.0, f64::NEG_INFINITY)).unwrap_err();
     let zero_width = TextRunBounds::try_ink(Rect::new(0.0, 0.0, 0.0, 1.0)).unwrap_err();
     let zero_height = TextRunBounds::try_ink(Rect::new(0.0, 0.0, 1.0, 0.0)).unwrap_err();
+    assert_eq!(non_finite_x.code, ErrorCode::InvalidInput);
+    assert_eq!(non_finite_y.code, ErrorCode::InvalidInput);
+    assert_eq!(non_finite_width.code, ErrorCode::InvalidInput);
+    assert_eq!(non_finite_height.code, ErrorCode::InvalidInput);
     assert_eq!(zero_width.code, ErrorCode::InvalidInput);
     assert_eq!(zero_height.code, ErrorCode::InvalidInput);
+    assert_eq!(
+        non_finite_x
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("text run ink bounds x")
+    );
+    assert_eq!(
+        non_finite_y
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("text run ink bounds y")
+    );
+    assert_eq!(
+        non_finite_width
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("text run ink bounds width")
+    );
+    assert_eq!(
+        non_finite_height
+            .invalid_value_diagnostic()
+            .map(InvalidValue::field),
+        Some("text run ink bounds height")
+    );
     assert_eq!(
         zero_width
             .invalid_value_diagnostic()
