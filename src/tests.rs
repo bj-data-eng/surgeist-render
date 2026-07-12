@@ -11397,6 +11397,13 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         SurfaceIdentityMismatchKind::StaleDeviceGeneration,
     );
     let error = owner
+        .resume_surface(
+            &mut stale_surface,
+            Attachment::from_web_canvas("incompatible-canvas"),
+        )
+        .expect_err("incompatible resume must fail before stale device validation");
+    assert_eq!(error.code(), ErrorCode::SurfaceCreateFailed);
+    let error = owner
         .resume_surface(&mut stale_surface, Attachment::Headless)
         .expect_err("stale resume must fail before indexing the device slot");
     assert_surface_identity_mismatch(

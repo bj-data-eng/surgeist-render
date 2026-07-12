@@ -294,13 +294,13 @@ impl Renderer {
 
     pub fn resume_surface(&mut self, surface: &mut Surface, attachment: Attachment) -> Result<()> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceResume)?;
-        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
         if surface.attachment.kind() != attachment.kind() {
             return Err(Error::new(
                 BackendErrorCode::SurfaceCreateFailed,
                 "surface cannot resume with an incompatible attachment",
             ));
         }
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
 
         match &surface.backend {
             #[cfg(any(
