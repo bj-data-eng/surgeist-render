@@ -350,6 +350,8 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
         font_data_value(&malformed_bitmap_head_run).as_str(),
     );
     assert_no_glyph_encoding(&malformed_bitmap_head_scene);
+
+    assert_bdt_glyph_preflight_cases(&bitmap_glyphs);
 }
 
 #[test]
@@ -540,6 +542,545 @@ fn text_run_for<'a>(
         TextRunBounds::unspecified(),
     )
     .unwrap()
+}
+
+fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
+    for kind in BdtKind::ALL {
+        for index_format in BdtIndexFormat::ALL {
+            assert_bdt_selected_bitmap(
+                kind,
+                &[BdtStrikeFixture::new(
+                    16,
+                    index_format,
+                    BdtGlyphFixture::Present,
+                )],
+                16.0,
+                glyphs,
+            );
+        }
+
+        for index_format in [BdtIndexFormat::Format4, BdtIndexFormat::Format5] {
+            assert_bdt_outline_fallback(
+                kind,
+                &[BdtStrikeFixture::new(
+                    16,
+                    index_format,
+                    BdtGlyphFixture::SparseMissing,
+                )],
+                16.0,
+                glyphs,
+            );
+        }
+
+        let exact_or_nearest_larger = [
+            BdtStrikeFixture::new(12, BdtIndexFormat::Format1, BdtGlyphFixture::Missing),
+            BdtStrikeFixture::new(16, BdtIndexFormat::Format2, BdtGlyphFixture::Present),
+            BdtStrikeFixture::new(20, BdtIndexFormat::Format3, BdtGlyphFixture::Missing),
+        ];
+        let nearest_smaller = [
+            BdtStrikeFixture::new(12, BdtIndexFormat::Format1, BdtGlyphFixture::Missing),
+            BdtStrikeFixture::new(16, BdtIndexFormat::Format2, BdtGlyphFixture::Present),
+        ];
+        for (size, strikes) in [
+            (16.0, exact_or_nearest_larger.as_slice()),
+            (14.0, exact_or_nearest_larger.as_slice()),
+            (18.0, nearest_smaller.as_slice()),
+        ] {
+            assert_bdt_selected_bitmap(kind, strikes, size, glyphs);
+        }
+        assert_bdt_selected_bitmap(
+            kind,
+            &[
+                BdtStrikeFixture::new(16, BdtIndexFormat::Format1, BdtGlyphFixture::Empty),
+                BdtStrikeFixture::new(20, BdtIndexFormat::Format2, BdtGlyphFixture::Present),
+            ],
+            16.0,
+            glyphs,
+        );
+
+        for index_format in [BdtIndexFormat::Format4, BdtIndexFormat::Format5] {
+            for glyph in [
+                BdtGlyphFixture::SparseUnsorted,
+                BdtGlyphFixture::SparseDuplicate,
+            ] {
+                assert_bdt_sparse_invalid(
+                    kind,
+                    &[BdtStrikeFixture::new(16, index_format, glyph)],
+                    glyphs,
+                );
+            }
+        }
+
+        assert_bdt_selected_bitmap(
+            kind,
+            &[
+                BdtStrikeFixture::new(
+                    16,
+                    BdtIndexFormat::Format4,
+                    BdtGlyphFixture::UnselectedSparseUnsorted,
+                ),
+                BdtStrikeFixture::new(16, BdtIndexFormat::Format1, BdtGlyphFixture::Present),
+            ],
+            16.0,
+            glyphs,
+        );
+    }
+
+    for kind in BdtKind::ALL {
+        assert_bdt_outline_fallback(
+            kind,
+            &[BdtStrikeFixture::new(
+                16,
+                BdtIndexFormat::Format1,
+                BdtGlyphFixture::Empty,
+            )],
+            16.0,
+            glyphs,
+        );
+    }
+
+    assert_cbdt_precedes_ebdt(glyphs);
+}
+
+fn assert_bdt_selected_bitmap(
+    kind: BdtKind,
+    strikes: &[BdtStrikeFixture],
+    size: f32,
+    glyphs: &[TextGlyph],
+) {
+    let font_data = FontData::try_from_bytes(ahem_bdt_font(kind, strikes), 0)
+        .expect("the BDT fixture must remain readable before selected bitmap lowering");
+    let run = text_run_for(font_data, size, Transform::identity(), glyphs);
+    let mut scene = VelloScene::default();
+    let error = scene
+        .encode_text_run(&run)
+        .expect_err("a valid selected BDT bitmap must reach the explicit T2 omission boundary");
+
+    assert_render_failed_without_font_diagnostic(&error);
+    assert_no_glyph_encoding(&scene);
+}
+
+fn assert_bdt_outline_fallback(
+    kind: BdtKind,
+    strikes: &[BdtStrikeFixture],
+    size: f32,
+    glyphs: &[TextGlyph],
+) {
+    let font_data = FontData::try_from_bytes(ahem_bdt_font(kind, strikes), 0)
+        .expect("the BDT fixture must remain readable before selected bitmap lowering");
+    let run = text_run_for(font_data, size, Transform::identity(), glyphs);
+    let mut scene = VelloScene::default();
+
+    scene
+        .encode_text_run(&run)
+        .expect("a valid absent BDT bitmap must fall back to the outline");
+    assert_outline_glyph_encoding(&scene, glyphs[0].id());
+}
+
+fn assert_bdt_sparse_invalid(kind: BdtKind, strikes: &[BdtStrikeFixture], glyphs: &[TextGlyph]) {
+    let font_data = FontData::try_from_bytes(ahem_bdt_font(kind, strikes), 0)
+        .expect("the malformed sparse BDT fixture must remain container-readable");
+    let run = text_run_for(font_data, 16.0, Transform::identity(), glyphs);
+    let expected_value = font_data_value(&run);
+    let mut scene = VelloScene::default();
+    let error = scene
+        .encode_text_run(&run)
+        .expect_err("a malformed selected sparse BDT record must not fall back to the outline");
+
+    assert_font_data_error(&error, expected_value.as_str());
+    assert_no_glyph_encoding(&scene);
+}
+
+fn assert_cbdt_precedes_ebdt(glyphs: &[TextGlyph]) {
+    let (cblc, cbdt) = bdt_tables(
+        BdtKind::Cbdt,
+        &[BdtStrikeFixture::new(
+            16,
+            BdtIndexFormat::Format1,
+            BdtGlyphFixture::Present,
+        )],
+    );
+    let (eblc, ebdt) = bdt_tables(
+        BdtKind::Ebdt,
+        &[BdtStrikeFixture::new(
+            16,
+            BdtIndexFormat::Format1,
+            BdtGlyphFixture::Empty,
+        )],
+    );
+    let font_data = FontData::try_from_bytes(
+        ahem_with_tables(vec![
+            (*b"CBLC", cblc),
+            (*b"CBDT", cbdt),
+            (*b"EBLC", eblc),
+            (*b"EBDT", ebdt),
+        ]),
+        0,
+    )
+    .expect("the combined BDT fixture must remain readable before glyph lowering");
+    let run = text_run_for(font_data, 16.0, Transform::identity(), glyphs);
+    let mut scene = VelloScene::default();
+    let error = scene
+        .encode_text_run(&run)
+        .expect_err("CBLC/CBDT must retain precedence over EBLC/EBDT");
+
+    assert_render_failed_without_font_diagnostic(&error);
+    assert_no_glyph_encoding(&scene);
+}
+
+fn assert_outline_glyph_encoding(scene: &VelloScene, glyph_id: u32) {
+    let encoding = scene.encoding_for_test();
+
+    assert_eq!(encoding.resources.glyph_runs.len(), 1);
+    assert_eq!(encoding.resources.glyphs.len(), 1);
+    assert_eq!(encoding.resources.patches.len(), 1);
+    assert_eq!(encoding.resources.glyphs[0].id, glyph_id);
+}
+
+#[derive(Clone, Copy)]
+enum BdtKind {
+    Cbdt,
+    Ebdt,
+}
+
+impl BdtKind {
+    const ALL: [Self; 2] = [Self::Cbdt, Self::Ebdt];
+
+    const fn location_tag(self) -> [u8; 4] {
+        match self {
+            Self::Cbdt => *b"CBLC",
+            Self::Ebdt => *b"EBLC",
+        }
+    }
+
+    const fn data_tag(self) -> [u8; 4] {
+        match self {
+            Self::Cbdt => *b"CBDT",
+            Self::Ebdt => *b"EBDT",
+        }
+    }
+
+    const fn location_major_version(self) -> u16 {
+        match self {
+            Self::Cbdt => 3,
+            Self::Ebdt => 2,
+        }
+    }
+
+    const fn data_major_version(self) -> u16 {
+        self.location_major_version()
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BdtIndexFormat {
+    Format1,
+    Format2,
+    Format3,
+    Format4,
+    Format5,
+}
+
+impl BdtIndexFormat {
+    const ALL: [Self; 5] = [
+        Self::Format1,
+        Self::Format2,
+        Self::Format3,
+        Self::Format4,
+        Self::Format5,
+    ];
+
+    const fn number(self) -> u16 {
+        match self {
+            Self::Format1 => 1,
+            Self::Format2 => 2,
+            Self::Format3 => 3,
+            Self::Format4 => 4,
+            Self::Format5 => 5,
+        }
+    }
+
+    const fn uses_constant_metrics(self) -> bool {
+        matches!(self, Self::Format2 | Self::Format5)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum BdtGlyphFixture {
+    Present,
+    Empty,
+    Missing,
+    SparseMissing,
+    SparseUnsorted,
+    SparseDuplicate,
+    UnselectedSparseUnsorted,
+}
+
+#[derive(Clone, Copy)]
+struct BdtStrikeFixture {
+    ppem: u8,
+    index_format: BdtIndexFormat,
+    glyph: BdtGlyphFixture,
+}
+
+impl BdtStrikeFixture {
+    const fn new(ppem: u8, index_format: BdtIndexFormat, glyph: BdtGlyphFixture) -> Self {
+        Self {
+            ppem,
+            index_format,
+            glyph,
+        }
+    }
+}
+
+fn ahem_bdt_font(kind: BdtKind, strikes: &[BdtStrikeFixture]) -> Vec<u8> {
+    let (location, data) = bdt_tables(kind, strikes);
+
+    ahem_with_tables(vec![
+        (kind.location_tag(), location),
+        (kind.data_tag(), data),
+    ])
+}
+
+fn bdt_tables(kind: BdtKind, strikes: &[BdtStrikeFixture]) -> (Vec<u8>, Vec<u8>) {
+    let mut data = Vec::new();
+    push_be_u16(&mut data, kind.data_major_version());
+    push_be_u16(&mut data, 0);
+    let mut strike_parts = Vec::with_capacity(strikes.len());
+
+    for strike in strikes {
+        let data_offset = u32::try_from(data.len()).unwrap();
+        let (first_glyph, last_glyph, subtable, image_data) =
+            bdt_strike_parts(*strike, data_offset);
+        data.extend_from_slice(image_data.as_slice());
+        strike_parts.push((first_glyph, last_glyph, subtable));
+    }
+
+    let mut location = Vec::new();
+    push_be_u16(&mut location, kind.location_major_version());
+    push_be_u16(&mut location, 0);
+    push_be_u32(&mut location, strikes.len().try_into().unwrap());
+    let bitmap_sizes_offset = location.len();
+    location.resize(bitmap_sizes_offset + strikes.len() * 48, 0);
+
+    for (index, (strike, (first_glyph, last_glyph, subtable))) in
+        strikes.iter().zip(strike_parts).enumerate()
+    {
+        while location.len() % 4 != 0 {
+            location.push(0);
+        }
+        let index_subtable_list_offset = u32::try_from(location.len()).unwrap();
+        let list = bdt_index_subtable_list(first_glyph, last_glyph, subtable.as_slice());
+        let bitmap_size_offset = bitmap_sizes_offset + index * 48;
+        write_bdt_bitmap_size(
+            location.as_mut_slice(),
+            bitmap_size_offset,
+            index_subtable_list_offset,
+            u32::try_from(list.len()).unwrap(),
+            strike.ppem,
+        );
+        location.extend_from_slice(list.as_slice());
+    }
+
+    (location, data)
+}
+
+fn bdt_strike_parts(
+    strike: BdtStrikeFixture,
+    image_data_offset: u32,
+) -> (u16, u16, Vec<u8>, Vec<u8>) {
+    let selected_glyph = u16::try_from(AHEM_GLYPH_X).unwrap();
+    let (first_glyph, last_glyph) = match strike.glyph {
+        BdtGlyphFixture::Missing | BdtGlyphFixture::UnselectedSparseUnsorted => {
+            (selected_glyph + 1, selected_glyph + 1)
+        }
+        _ if matches!(
+            strike.index_format,
+            BdtIndexFormat::Format1 | BdtIndexFormat::Format2 | BdtIndexFormat::Format3
+        ) =>
+        {
+            (selected_glyph, selected_glyph)
+        }
+        _ => (selected_glyph, selected_glyph + 2),
+    };
+    let image_data = bdt_image_data(strike.index_format, strike.glyph);
+    let mut subtable = Vec::new();
+
+    push_be_u16(&mut subtable, strike.index_format.number());
+    push_be_u16(
+        &mut subtable,
+        if strike.index_format.uses_constant_metrics() {
+            5
+        } else {
+            2
+        },
+    );
+    push_be_u32(&mut subtable, image_data_offset);
+
+    match strike.index_format {
+        BdtIndexFormat::Format1 => {
+            push_be_u32(&mut subtable, 0);
+            push_be_u32(&mut subtable, image_data.len().try_into().unwrap());
+        }
+        BdtIndexFormat::Format2 => {
+            push_be_u32(&mut subtable, image_data.len().try_into().unwrap());
+            push_bdt_big_metrics(&mut subtable);
+        }
+        BdtIndexFormat::Format3 => {
+            push_be_u16(&mut subtable, 0);
+            push_be_u16(&mut subtable, image_data.len().try_into().unwrap());
+        }
+        BdtIndexFormat::Format4 => push_bdt_format4_array(
+            &mut subtable,
+            selected_glyph,
+            strike.glyph,
+            image_data_offset.try_into().unwrap(),
+            image_data.len().try_into().unwrap(),
+        ),
+        BdtIndexFormat::Format5 => {
+            push_be_u32(&mut subtable, 1);
+            push_bdt_big_metrics(&mut subtable);
+            push_bdt_format5_array(&mut subtable, selected_glyph, strike.glyph);
+        }
+    }
+
+    (first_glyph, last_glyph, subtable, image_data)
+}
+
+fn bdt_image_data(index_format: BdtIndexFormat, glyph: BdtGlyphFixture) -> Vec<u8> {
+    if matches!(glyph, BdtGlyphFixture::Empty) {
+        return Vec::new();
+    }
+
+    let image = if index_format.uses_constant_metrics() {
+        &[0x80][..]
+    } else {
+        &[1, 1, 0, 1, 1, 0x80][..]
+    };
+    let count = match glyph {
+        BdtGlyphFixture::SparseUnsorted
+        | BdtGlyphFixture::SparseDuplicate
+        | BdtGlyphFixture::UnselectedSparseUnsorted => 3,
+        _ => 1,
+    };
+    let mut data = Vec::with_capacity(image.len() * count);
+    for _ in 0..count {
+        data.extend_from_slice(image);
+    }
+    data
+}
+
+fn bdt_index_subtable_list(first_glyph: u16, last_glyph: u16, subtable: &[u8]) -> Vec<u8> {
+    let mut list = Vec::new();
+    push_be_u16(&mut list, first_glyph);
+    push_be_u16(&mut list, last_glyph);
+    push_be_u32(&mut list, 8);
+    list.extend_from_slice(subtable);
+    list
+}
+
+fn write_bdt_bitmap_size(
+    bytes: &mut [u8],
+    offset: usize,
+    index_subtable_list_offset: u32,
+    index_subtable_list_size: u32,
+    ppem: u8,
+) {
+    write_be_u32(bytes, offset, index_subtable_list_offset);
+    write_be_u32(bytes, offset + 4, index_subtable_list_size);
+    write_be_u32(bytes, offset + 8, 1);
+    let selected_glyph = u16::try_from(AHEM_GLYPH_X).unwrap();
+    write_be_u16(bytes, offset + 40, selected_glyph);
+    write_be_u16(bytes, offset + 42, selected_glyph + 2);
+    bytes[offset + 44] = ppem;
+    bytes[offset + 45] = ppem;
+    bytes[offset + 46] = 1;
+    bytes[offset + 47] = 1;
+}
+
+fn push_bdt_big_metrics(bytes: &mut Vec<u8>) {
+    bytes.extend_from_slice(&[1, 1, 0, 1, 1, 0, 1, 1]);
+}
+
+fn push_bdt_format4_array(
+    bytes: &mut Vec<u8>,
+    selected_glyph: u16,
+    glyph: BdtGlyphFixture,
+    image_data_offset: u16,
+    image_data_len: u16,
+) {
+    match glyph {
+        BdtGlyphFixture::SparseMissing => {
+            push_be_u32(bytes, 1);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph + 1, image_data_offset);
+            push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
+        }
+        BdtGlyphFixture::SparseUnsorted | BdtGlyphFixture::UnselectedSparseUnsorted => {
+            push_be_u32(bytes, 3);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph, image_data_offset);
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph - 1,
+                image_data_offset + image_data_len / 3,
+            );
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 2,
+                image_data_offset + image_data_len / 3 * 2,
+            );
+            push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
+        }
+        BdtGlyphFixture::SparseDuplicate => {
+            push_be_u32(bytes, 3);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph, image_data_offset);
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph,
+                image_data_offset + image_data_len / 3,
+            );
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 2,
+                image_data_offset + image_data_len / 3 * 2,
+            );
+            push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
+        }
+        _ => {
+            push_be_u32(bytes, 1);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph, image_data_offset);
+            push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
+        }
+    }
+}
+
+fn push_bdt_format5_array(bytes: &mut Vec<u8>, selected_glyph: u16, glyph: BdtGlyphFixture) {
+    match glyph {
+        BdtGlyphFixture::SparseMissing => {
+            push_be_u32(bytes, 1);
+            push_be_u16(bytes, selected_glyph + 1);
+        }
+        BdtGlyphFixture::SparseUnsorted | BdtGlyphFixture::UnselectedSparseUnsorted => {
+            push_be_u32(bytes, 3);
+            push_be_u16(bytes, selected_glyph);
+            push_be_u16(bytes, selected_glyph - 1);
+            push_be_u16(bytes, selected_glyph + 2);
+        }
+        BdtGlyphFixture::SparseDuplicate => {
+            push_be_u32(bytes, 3);
+            push_be_u16(bytes, selected_glyph);
+            push_be_u16(bytes, selected_glyph);
+            push_be_u16(bytes, selected_glyph + 2);
+        }
+        _ => {
+            push_be_u32(bytes, 1);
+            push_be_u16(bytes, selected_glyph);
+        }
+    }
+}
+
+fn push_bdt_glyph_offset_pair(bytes: &mut Vec<u8>, glyph_id: u16, offset: u16) {
+    push_be_u16(bytes, glyph_id);
+    push_be_u16(bytes, offset);
 }
 
 fn ahem_with_tables(replacements: Vec<([u8; 4], Vec<u8>)>) -> Vec<u8> {

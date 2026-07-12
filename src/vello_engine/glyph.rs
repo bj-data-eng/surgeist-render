@@ -368,6 +368,9 @@ where
         else {
             continue;
         };
+        if location.is_empty() {
+            continue;
+        }
         let data = bitmap_data(&location).map_err(|_| font_data_error(font_data))?;
         let bitmap = selected_bdt_glyph(bitmap_size, data, font_data)?;
         best = Some((strike_size, bitmap));
@@ -510,6 +513,15 @@ fn selected_bdt_location_for_subtable(
             if glyphs.len() != checked_count(subtable.num_glyphs(), 1, font_data)? {
                 return Err(font_data_error(font_data));
             }
+            let (sentinel, glyphs) = glyphs
+                .split_last()
+                .ok_or_else(|| font_data_error(font_data))?;
+            if glyphs
+                .windows(2)
+                .any(|entries| entries[0].glyph_id().to_u32() >= entries[1].glyph_id().to_u32())
+            {
+                return Err(font_data_error(font_data));
+            }
             let glyph_index =
                 glyphs.binary_search_by(|entry| entry.glyph_id().to_u32().cmp(&glyph_id.to_u32()));
             let Ok(glyph_index) = glyph_index else {
@@ -521,16 +533,14 @@ fn selected_bdt_location_for_subtable(
                     .ok_or_else(|| font_data_error(font_data))?
                     .sbit_offset(),
             );
-            let end = usize::from(
-                glyphs
-                    .get(
-                        glyph_index
-                            .checked_add(1)
-                            .ok_or_else(|| font_data_error(font_data))?,
-                    )
-                    .ok_or_else(|| font_data_error(font_data))?
-                    .sbit_offset(),
-            );
+            let next_index = glyph_index
+                .checked_add(1)
+                .ok_or_else(|| font_data_error(font_data))?;
+            let end = if let Some(entry) = glyphs.get(next_index) {
+                usize::from(entry.sbit_offset())
+            } else {
+                usize::from(sentinel.sbit_offset())
+            };
             location.format = subtable.image_format();
             location.data_offset = start;
             location.data_size = end
@@ -540,6 +550,12 @@ fn selected_bdt_location_for_subtable(
         IndexSubtable::Format5(subtable) => {
             let glyphs = subtable.glyph_array();
             if glyphs.len() != checked_count(subtable.num_glyphs(), 0, font_data)? {
+                return Err(font_data_error(font_data));
+            }
+            if glyphs
+                .windows(2)
+                .any(|entries| entries[0].get().to_u32() >= entries[1].get().to_u32())
+            {
                 return Err(font_data_error(font_data));
             }
             let glyph_index =
