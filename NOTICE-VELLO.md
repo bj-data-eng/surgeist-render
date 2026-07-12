@@ -22,6 +22,11 @@
 | --- | --- | --- | --- |
 | `src/vello_engine/scene.rs`, `src/vello_engine/glyph.rs` | `vello-0.9.0/src/scene.rs` | `7c225e73f56629b1b85e8e5cd296428176ec6e59a0813975e2d4123aaddd1718` | Retains the private glyph-run lowering boundary over `vello_encoding 0.9.0`; splits selected-glyph preflight into `glyph.rs`; replaces both `FontRef::from_index(...).unwrap()` sites and font-derived parse/length assumptions with fallible Skrifa validation and typed diagnostics; rejects omitted glyph paths rather than logging/continuing. |
 
+T2 intentionally omits COLR and bitmap text lowering (BGRA, PNG, and packed-mask
+images). After their selected data preflights successfully, `VelloScene` stops at
+the explicit `RenderFailed` append boundary; it does not silently omit or fall
+back from those paths.
+
 The T2 import omits Vello's public `Scene` API, non-text draw helpers,
 estimation, append/reset helpers, direct renderer/device integration, and all
 CPU/debug/map/poll/submission paths. It introduces no WGPU resource or

@@ -10,25 +10,32 @@ use super::glyph::{
     BitmapEncoding, SelectedGlyphRepresentation, ValidatedGlyphRun, preflight_selected_glyphs,
 };
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C03 T2 private Vello scene state is intentionally staged for T7 cutover."
+    )
+)]
 #[derive(Default)]
 pub(crate) struct VelloScene {
     encoding: Encoding,
 }
 
 impl VelloScene {
-    pub(crate) fn new() -> Self {
-        Self::default()
-    }
-
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T2 private text encoding entry point is intentionally staged for T7 cutover."
+        )
+    )]
     pub(crate) fn encode_text_run(&mut self, run: &TextRun<'_>) -> Result<()> {
         let validated = preflight_selected_glyphs(run)?;
         self.append_validated_glyph_run(validated)
     }
 
-    pub(crate) fn append_validated_glyph_run(
-        &mut self,
-        validated: ValidatedGlyphRun<'_>,
-    ) -> Result<()> {
+    fn append_validated_glyph_run(&mut self, validated: ValidatedGlyphRun<'_>) -> Result<()> {
         if let Some(representation) = validated
             .representations()
             .iter()
@@ -71,7 +78,7 @@ impl VelloScene {
             brush_transform: None,
             font_size: validated.size(),
             font_embolden: vello_encoding::FontEmbolden::default(),
-            hint: validated.hinting_enabled(),
+            hint: false,
             normalized_coords: self.encoding.resources.normalized_coords.len()
                 ..self.encoding.resources.normalized_coords.len(),
             style: Fill::NonZero.into(),
@@ -87,11 +94,8 @@ impl VelloScene {
         Ok(())
     }
 
-    pub(crate) const fn glyph_run_count(&self) -> usize {
-        self.encoding.resources.glyph_runs.len()
-    }
-
-    pub(crate) const fn glyph_count(&self) -> usize {
-        self.encoding.resources.glyphs.len()
+    #[cfg(test)]
+    pub(crate) const fn encoding_for_test(&self) -> &Encoding {
+        &self.encoding
     }
 }

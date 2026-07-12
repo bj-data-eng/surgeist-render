@@ -19,7 +19,6 @@ use crate::{
 };
 
 const SKRIFA_NORMALIZED_COORDS: &[skrifa::instance::NormalizedCoord] = &[];
-const VELLO_NORMALIZED_COORDS: &[vello_encoding::NormalizedCoord] = &[];
 
 pub(crate) struct ValidatedGlyphRun<'a> {
     font_data: &'a FontData,
@@ -49,22 +48,6 @@ impl<'a> ValidatedGlyphRun<'a> {
 
     pub(crate) const fn transform(&self) -> Transform {
         self.transform
-    }
-
-    pub(crate) const fn normalized_coords(&self) -> &[vello_encoding::NormalizedCoord] {
-        VELLO_NORMALIZED_COORDS
-    }
-
-    pub(crate) const fn hinting_enabled(&self) -> bool {
-        false
-    }
-
-    pub(crate) const fn uses_non_zero_fill(&self) -> bool {
-        true
-    }
-
-    pub(crate) const fn embolden_amount(&self) -> (f64, f64) {
-        (0.0, 0.0)
     }
 
     pub(crate) const fn font_data(&self) -> &FontData {
@@ -100,7 +83,6 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
         .table_data(skrifa::Tag::new(b"COLR"))
         .map(|_| font.colr().map_err(|_| font_data_error(font_data)))
         .transpose()?;
-    let colors = font.color_glyphs();
     let bitmaps = font.bitmap_strikes();
     let outlines = font.outline_glyphs();
     let mut representations = Vec::with_capacity(run.glyphs().len());
@@ -110,19 +92,22 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
             return Err(missing_glyph_error(glyph.id()));
         }
         let glyph_id = GlyphId::new(glyph.id());
-        let representation =
-            if selected_color_glyph(&colors, colr.as_ref(), glyph_id, font_data)?.is_some() {
-                let cpal = font.cpal().map_err(|_| font_data_error(font_data))?;
-                let color = selected_color_glyph(&colors, colr.as_ref(), glyph_id, font_data)?
-                    .ok_or_else(|| font_data_error(font_data))?;
-                preflight_color_glyph(&color, &outlines, &cpal, run.size(), font_data)?;
-                SelectedGlyphRepresentation::Colr
-            } else if let Some(bitmap) = bitmaps.glyph_for_size(Size::new(run.size()), glyph_id) {
-                SelectedGlyphRepresentation::Bitmap(preflight_bitmap(&bitmap, font_data)?)
-            } else {
-                preflight_outline(&outlines, glyph_id, run.size(), font_data)?;
-                SelectedGlyphRepresentation::Outline
-            };
+        let representation = if selected_color_glyph(colr.as_ref(), glyph_id, font_data)? {
+            preflight_selected_image_head(&font, font_data)?;
+            let cpal = font.cpal().map_err(|_| font_data_error(font_data))?;
+            let color = font
+                .color_glyphs()
+                .get(glyph_id)
+                .ok_or_else(|| font_data_error(font_data))?;
+            preflight_color_glyph(&color, &outlines, &cpal, run.size(), font_data)?;
+            SelectedGlyphRepresentation::Colr
+        } else if let Some(bitmap) = bitmaps.glyph_for_size(Size::new(run.size()), glyph_id) {
+            preflight_selected_image_head(&font, font_data)?;
+            SelectedGlyphRepresentation::Bitmap(preflight_bitmap(&bitmap, font_data)?)
+        } else {
+            preflight_outline(&outlines, glyph_id, run.size(), font_data)?;
+            SelectedGlyphRepresentation::Outline
+        };
         representations.push(representation);
     }
 
@@ -137,13 +122,12 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
 }
 
 fn selected_color_glyph<'a>(
-    colors: &skrifa::color::ColorGlyphCollection<'a>,
     colr: Option<&skrifa::raw::tables::colr::Colr<'a>>,
     glyph_id: GlyphId,
     font_data: &FontData,
-) -> Result<Option<ColorGlyph<'a>>> {
+) -> Result<bool> {
     let Some(colr) = colr else {
-        return Ok(None);
+        return Ok(false);
     };
     let selected = match colr.version() {
         0 => colr
@@ -156,13 +140,14 @@ fn selected_color_glyph<'a>(
             .is_some(),
         _ => return Err(font_data_error(font_data)),
     };
-    if !selected {
-        return Ok(None);
-    }
-    colors
-        .get(glyph_id)
-        .map(Some)
-        .ok_or_else(|| font_data_error(font_data))
+    Ok(selected)
+}
+
+fn preflight_selected_image_head(font: &skrifa::FontRef<'_>, font_data: &FontData) -> Result<()> {
+    font.head()
+        .map_err(|_| font_data_error(font_data))?
+        .units_per_em();
+    Ok(())
 }
 
 fn preflight_outline(
@@ -255,9 +240,7 @@ fn preflight_png(
     let mut reader = decoder
         .read_info()
         .map_err(|_| font_data_error(font_data))?;
-    if reader.output_color_type() != (ColorType::Rgba, BitDepth::Eight) {
-        return Err(unsupported_image_error());
-    }
+    let output_color_type = reader.output_color_type();
     let output_size = reader
         .output_buffer_size()
         .ok_or_else(|| font_data_error(font_data))?;
@@ -267,6 +250,9 @@ fn preflight_png(
         .map_err(|_| font_data_error(font_data))?;
     if info.width != width || info.height != height {
         return Err(font_data_error(font_data));
+    }
+    if output_color_type != (ColorType::Rgba, BitDepth::Eight) {
+        return Err(unsupported_image_error());
     }
     Ok(BitmapEncoding::Png)
 }

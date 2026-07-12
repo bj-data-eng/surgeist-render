@@ -29,13 +29,6 @@ mod surface;
 mod text;
 mod texture;
 mod validation;
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T2 establishes the private fallible lowering boundary before T7 production cutover."
-    )
-)]
 mod vello_engine;
 
 pub(crate) use error::BackendErrorCode;
