@@ -463,7 +463,7 @@ fn offset_rect(rect: Rect, offset: Point) -> Rect {
 pub(crate) fn image_transform(size: Size, rect: Rect, fit: ImageFit) -> Result<kurbo::Affine> {
     if size.width() <= 0.0 || size.height() <= 0.0 {
         return Err(Error::new(
-            ErrorCode::ImageUploadFailed,
+            BackendErrorCode::ImageUploadFailed,
             "image size must be positive",
         ));
     }

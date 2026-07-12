@@ -1,5 +1,6 @@
 use super::{
-    Color, Error, ErrorCode, PhysicalSize, Result, Size, geometry::physical_size, validation::*,
+    BackendErrorCode, Color, Error, PhysicalSize, Result, Size, geometry::physical_size,
+    validation::*,
 };
 
 pub struct Surface {
@@ -68,7 +69,7 @@ impl Surface {
     pub fn resume(&mut self, attachment: Attachment) -> Result<()> {
         if self.attachment.kind() != attachment.kind() {
             return Err(Error::new(
-                ErrorCode::SurfaceCreateFailed,
+                BackendErrorCode::SurfaceCreateFailed,
                 "surface cannot resume with an incompatible attachment",
             ));
         }
@@ -78,7 +79,7 @@ impl Surface {
         ))]
         if let SurfaceBackend::Presented { .. } = &self.backend {
             return Err(Error::new(
-                ErrorCode::SurfaceUnavailable,
+                BackendErrorCode::SurfaceUnavailable,
                 "presented surfaces must be resumed through Renderer::resume_surface",
             ));
         }
@@ -95,7 +96,7 @@ impl Surface {
     pub(crate) fn ensure_available(&self) -> Result<()> {
         if self.state == SurfaceState::Suspended {
             return Err(Error::new(
-                ErrorCode::SurfaceUnavailable,
+                BackendErrorCode::SurfaceUnavailable,
                 "surface is suspended",
             ));
         }

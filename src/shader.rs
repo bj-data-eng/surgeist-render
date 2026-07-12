@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::{
-    Color, Error, ErrorCode, Format, Result,
+    BackendErrorCode, Color, Error, Format, Result,
     texture::{TextureDescriptor, TextureUsageIntent},
 };
 
@@ -281,7 +281,7 @@ pub(crate) fn encode_clear_fill_pass(
     }
     let Some(context) = context else {
         return Err(Error::new(
-            ErrorCode::AdapterUnavailable,
+            BackendErrorCode::AdapterUnavailable,
             "rect/fullscreen shader pass requires an available wgpu device context",
         ));
     };
@@ -319,7 +319,11 @@ pub(crate) fn encode_clear_fill_pass(
         .device
         .poll(wgpu::PollType::Poll)
         .map_err(|source| {
-            Error::new(ErrorCode::RenderFailed, "failed to poll render device").with_source(source)
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "failed to poll render device",
+            )
+            .with_source(source)
         })?;
     Ok(())
 }

@@ -29,6 +29,8 @@ mod text;
 mod texture;
 mod validation;
 
+pub(crate) use error::BackendErrorCode;
+
 pub use capability::{
     BackgroundAttachmentCoordinatePolicy, BoxDecorationCapabilities, Capabilities,
     CompositingCapabilities, FilterCapabilities, GeometryTargetCapabilities, HitTestOwnership,

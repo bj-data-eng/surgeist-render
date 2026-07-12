@@ -563,7 +563,7 @@ fn nested_backdrop_capture_error() -> Error {
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BackdropExecution,
     ));
-    error.message.push_str(
+    error.append_message(
         ": nested backdrop capture crosses a layer isolation boundary and is not normalized in this task",
     );
     error
@@ -574,7 +574,7 @@ fn transformed_backdrop_capture_error() -> Error {
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BackdropExecution,
     ));
-    error.message.push_str(
+    error.append_message(
         ": transformed backdrop capture requires coordinate-space reconciliation before materialized execution",
     );
     error
@@ -585,7 +585,7 @@ fn repeated_top_level_backdrop_capture_error() -> Error {
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BackdropExecution,
     ));
-    error.message.push_str(
+    error.append_message(
         ": repeated top-level backdrop capture requires staged source reconciliation before materialized execution",
     );
     error
@@ -626,12 +626,12 @@ fn unsupported_text_shadow_error(plan: TextShadowPlan) -> Error {
     ));
     match plan {
         TextShadowPlan::SupportedZeroBlurSolid | TextShadowPlan::UnsupportedZeroBlurSolid => {
-            error.message.push_str(
+            error.append_message(
                 ": zero-blur solid text shadows could be represented as repeated shifted glyph draws behind text, but this renderer has not claimed or enabled that executable subset yet",
             );
         }
         TextShadowPlan::UnsupportedGlyphAlphaCapture => {
-            error.message.push_str(
+            error.append_message(
                 ": text-shadow execution depends on glyph-alpha/offscreen text capture before blurred shadows can be composited behind text",
             );
         }

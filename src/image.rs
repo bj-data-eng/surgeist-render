@@ -1,6 +1,6 @@
 use super::{
-    Error, ErrorCode, FilterList, FilteredImagePaint, MaskMode, PhysicalSize, PrimitiveFamily,
-    PrimitiveOperation, Result, Size, UnsupportedPrimitive,
+    BackendErrorCode, Error, FilterList, FilteredImagePaint, MaskMode, PhysicalSize,
+    PrimitiveFamily, PrimitiveOperation, Result, Size, UnsupportedPrimitive,
     filter::{
         BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
         FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
@@ -95,7 +95,7 @@ fn validate_rgba_image(size: Size, byte_len: usize) -> Result<()> {
     let actual_len = u64::try_from(byte_len).unwrap_or(u64::MAX);
     if actual_len != expected_len {
         return Err(Error::new(
-            ErrorCode::ImageUploadFailed,
+            BackendErrorCode::ImageUploadFailed,
             format!(
                 "RGBA image data length {byte_len} does not match {}x{} image size; expected {expected_len} bytes",
                 width, height
@@ -108,7 +108,7 @@ fn validate_rgba_image(size: Size, byte_len: usize) -> Result<()> {
 fn image_dimension(value: f64, name: &str) -> Result<u32> {
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
         return Err(Error::new(
-            ErrorCode::ImageUploadFailed,
+            BackendErrorCode::ImageUploadFailed,
             format!("image {name} {value} must be a finite non-negative integer pixel size"),
         ));
     }

@@ -300,7 +300,7 @@ fn unsupported_text_decoration_style_error(style: TextDecorationLineStyle) -> su
         PrimitiveFamily::TextDecorations,
         PrimitiveOperation::TextDecorationStyle,
     ));
-    error.message.push_str(&format!(
+    error.append_message(format!(
         ": text decoration style '{}' requires root/text to expand the decoration into explicit render geometry",
         style.label()
     ));

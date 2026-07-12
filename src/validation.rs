@@ -100,7 +100,7 @@ pub(crate) fn validate_gradient(gradient: &Gradient) -> Result<()> {
 pub(crate) fn validate_gradient_stops(stops: &[GradientStop]) -> Result<()> {
     if stops.is_empty() {
         let mut error = Error::invalid_value("gradient stops", "[]", "must not be empty");
-        error.message = "gradient stops must not be empty".to_owned();
+        error.replace_message("gradient stops must not be empty");
         return Err(error);
     }
     for stop in stops {
@@ -251,5 +251,5 @@ pub(crate) fn validate_finite_f64(value: f64, name: &str) -> Result<()> {
 }
 
 pub(crate) fn invalid_input(message: impl Into<String>) -> Error {
-    Error::new(ErrorCode::InvalidInput, message)
+    Error::invalid_input_message(message)
 }

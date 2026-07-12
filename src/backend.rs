@@ -157,7 +157,7 @@ impl OffscreenTextureResourceCache {
                 None => {
                     let _ = self.lifecycle.release(handle);
                     return Err(Error::new(
-                        ErrorCode::RenderFailed,
+                        BackendErrorCode::RenderFailed,
                         "offscreen texture resource cache lost a released GPU resource",
                     ));
                 }
@@ -310,7 +310,7 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
         offscreen_local_scene_texture_descriptor(request.bounds, request.scale, request.format)?;
     let Some(context) = context else {
         return Err(Error::new(
-            ErrorCode::AdapterUnavailable,
+            BackendErrorCode::AdapterUnavailable,
             "offscreen Vello local scene rendering requires an available wgpu device context",
         ));
     };
@@ -465,7 +465,7 @@ pub(crate) fn render_vello_surface(
                 | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
                     backend.context.configure_surface(native);
                     return Err(Error::new(
-                        ErrorCode::SurfaceOutdated,
+                        BackendErrorCode::SurfaceOutdated,
                         "surface is outdated and requires reconfiguration",
                     ));
                 }
@@ -478,17 +478,20 @@ pub(crate) fn render_vello_surface(
                 }
                 wgpu::CurrentSurfaceTexture::Timeout => {
                     return Err(Error::new(
-                        ErrorCode::SurfaceTimeout,
+                        BackendErrorCode::SurfaceTimeout,
                         "timed out acquiring surface texture",
                     ));
                 }
                 wgpu::CurrentSurfaceTexture::Lost => {
                     *lifecycle = PresentedLifecycle::Lost;
-                    return Err(Error::new(ErrorCode::SurfaceLost, "surface was lost"));
+                    return Err(Error::new(
+                        BackendErrorCode::SurfaceLost,
+                        "surface was lost",
+                    ));
                 }
                 wgpu::CurrentSurfaceTexture::Validation => {
                     return Err(Error::new(
-                        ErrorCode::RenderFailed,
+                        BackendErrorCode::RenderFailed,
                         "surface texture validation failed",
                     ));
                 }
@@ -514,8 +517,11 @@ pub(crate) fn render_vello_surface(
                 .device
                 .poll(wgpu::PollType::Poll)
                 .map_err(|source| {
-                    Error::new(ErrorCode::PresentFailed, "failed to poll render device")
-                        .with_source(source)
+                    Error::new(
+                        BackendErrorCode::PresentFailed,
+                        "failed to poll render device",
+                    )
+                    .with_source(source)
                 })?;
             Ok(RenderTimings {
                 render_time,
@@ -546,7 +552,7 @@ pub(crate) fn ensure_vello_renderer(
         )
         .map_err(|source| {
             Error::new(
-                ErrorCode::RendererCreateFailed,
+                BackendErrorCode::RendererCreateFailed,
                 "failed to create Vello renderer",
             )
             .with_source(source)
@@ -565,18 +571,18 @@ pub(crate) fn vello_renderer_options(options: Options) -> vello::RendererOptions
     }
 }
 
-pub(crate) fn vello_error_code(error: &vello::Error) -> ErrorCode {
+pub(crate) fn vello_error_code(error: &vello::Error) -> BackendErrorCode {
     match error {
         vello::Error::WgpuErrorFromScope(wgpu::Error::OutOfMemory { .. }) => {
-            ErrorCode::SurfaceOutOfMemory
+            BackendErrorCode::SurfaceOutOfMemory
         }
-        _ => ErrorCode::RenderFailed,
+        _ => BackendErrorCode::RenderFailed,
     }
 }
 
 pub(crate) fn vello_error_message(error: &vello::Error) -> &'static str {
     match vello_error_code(error) {
-        ErrorCode::SurfaceOutOfMemory => "rendering exhausted GPU memory",
+        BackendErrorCode::SurfaceOutOfMemory => "rendering exhausted GPU memory",
         _ => "failed to render scene",
     }
 }
@@ -679,19 +685,26 @@ pub(crate) fn read_texture_rgba(
     device
         .poll(wgpu::PollType::wait_indefinitely())
         .map_err(|source| {
-            Error::new(ErrorCode::RenderFailed, "failed to poll render device").with_source(source)
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "failed to poll render device",
+            )
+            .with_source(source)
         })?;
     receiver
         .recv()
         .map_err(|_| {
             Error::new(
-                ErrorCode::RenderFailed,
+                BackendErrorCode::RenderFailed,
                 "headless readback callback dropped",
             )
         })?
         .map_err(|source| {
-            Error::new(ErrorCode::RenderFailed, "failed to map headless readback")
-                .with_source(source)
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "failed to map headless readback",
+            )
+            .with_source(source)
         })?;
 
     let mapped = slice.get_mapped_range();

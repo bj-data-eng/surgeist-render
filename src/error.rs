@@ -2,21 +2,121 @@ use std::{error, fmt};
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Stable render diagnostic.
+/// Stable render diagnostic with optional typed semantic context.
 #[derive(Debug)]
 pub struct Error {
-    pub code: ErrorCode,
-    pub message: String,
-    pub source: Option<Box<dyn error::Error + Send + Sync>>,
+    code: ErrorCode,
+    message: String,
+    source: Option<BackendErrorSource>,
     invalid_value: Option<Box<InvalidValue>>,
     unsupported_primitive: Option<UnsupportedPrimitive>,
     unresolved_resource: Option<Box<UnresolvedResource>>,
     degraded_quality: Option<Box<DegradedQuality>>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type BackendErrorSource = Box<dyn error::Error + Send + Sync + 'static>;
+
+#[cfg(target_arch = "wasm32")]
+type BackendErrorSource = Box<dyn error::Error + 'static>;
+
+/// Private code domain accepted by backend error construction.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackendErrorCode {
+    AdapterUnavailable,
+    RendererCreateFailed,
+    SurfaceCreateFailed,
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    SurfaceLost,
+    SurfaceOutOfMemory,
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    SurfaceTimeout,
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    SurfaceOutdated,
+    SurfaceUnavailable,
+    ImageUploadFailed,
+    RenderFailed,
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    PresentFailed,
+    UnsupportedBackend,
+}
+
+impl BackendErrorCode {
+    const fn error_code(self) -> ErrorCode {
+        match self {
+            Self::AdapterUnavailable => ErrorCode::AdapterUnavailable,
+            Self::RendererCreateFailed => ErrorCode::RendererCreateFailed,
+            Self::SurfaceCreateFailed => ErrorCode::SurfaceCreateFailed,
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::SurfaceLost => ErrorCode::SurfaceLost,
+            Self::SurfaceOutOfMemory => ErrorCode::SurfaceOutOfMemory,
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::SurfaceTimeout => ErrorCode::SurfaceTimeout,
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::SurfaceOutdated => ErrorCode::SurfaceOutdated,
+            Self::SurfaceUnavailable => ErrorCode::SurfaceUnavailable,
+            Self::ImageUploadFailed => ErrorCode::ImageUploadFailed,
+            Self::RenderFailed => ErrorCode::RenderFailed,
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::PresentFailed => ErrorCode::PresentFailed,
+            Self::UnsupportedBackend => ErrorCode::UnsupportedBackend,
+        }
+    }
+}
+
 impl Error {
     #[must_use]
-    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+    pub(crate) fn new(code: BackendErrorCode, message: impl Into<String>) -> Self {
+        Self {
+            code: code.error_code(),
+            message: message.into(),
+            source: None,
+            invalid_value: None,
+            unsupported_primitive: None,
+            unresolved_resource: None,
+            degraded_quality: None,
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub(crate) fn with_source(mut self, source: impl error::Error + Send + Sync + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    #[must_use]
+    pub(crate) fn with_source(mut self, source: impl error::Error + 'static) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
+    fn semantic(code: ErrorCode, message: impl Into<String>) -> Self {
         Self {
             code,
             message: message.into(),
@@ -28,12 +128,31 @@ impl Error {
         }
     }
 
-    #[must_use]
-    pub fn with_source(mut self, source: impl error::Error + Send + Sync + 'static) -> Self {
-        self.source = Some(Box::new(source));
-        self
+    pub(crate) fn append_message(&mut self, suffix: impl fmt::Display) {
+        self.message.push_str(&suffix.to_string());
     }
 
+    pub(crate) fn replace_message(&mut self, message: impl Into<String>) {
+        self.message = message.into();
+    }
+
+    pub(crate) fn invalid_input_message(message: impl Into<String>) -> Self {
+        Self::semantic(ErrorCode::InvalidInput, message)
+    }
+
+    /// Returns this diagnostic's stable classification.
+    #[must_use]
+    pub const fn code(&self) -> ErrorCode {
+        self.code
+    }
+
+    /// Returns the human-readable diagnostic message.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// Creates an invalid-input diagnostic with its structured payload.
     #[must_use]
     pub fn invalid_value(
         name: impl Into<String>,
@@ -45,15 +164,15 @@ impl Error {
 
     #[must_use]
     pub fn from_invalid_value(invalid_value: InvalidValue) -> Self {
-        let mut error = Self::new(ErrorCode::InvalidInput, invalid_value.message());
+        let mut error = Self::semantic(ErrorCode::InvalidInput, invalid_value.message());
         error.invalid_value = Some(Box::new(invalid_value));
         error
     }
 
     #[must_use]
     pub fn unsupported_render_primitive(primitive: UnsupportedPrimitive) -> Self {
-        let mut error = Self::new(
-            ErrorCode::UnsupportedBackend,
+        let mut error = Self::semantic(
+            ErrorCode::UnsupportedPrimitive,
             format!(
                 "render primitive is unsupported: {} / {}",
                 primitive.family().label(),
@@ -66,14 +185,14 @@ impl Error {
 
     #[must_use]
     pub fn unresolved_resource(resource: UnresolvedResource) -> Self {
-        let mut error = Self::new(ErrorCode::UnresolvedResource, resource.message());
+        let mut error = Self::semantic(ErrorCode::UnresolvedResource, resource.message());
         error.unresolved_resource = Some(Box::new(resource));
         error
     }
 
     #[must_use]
     pub fn degraded_quality(diagnostic: DegradedQuality) -> Self {
-        let mut error = Self::new(ErrorCode::DegradedQuality, diagnostic.message());
+        let mut error = Self::semantic(ErrorCode::DegradedQuality, diagnostic.message());
         error.degraded_quality = Some(Box::new(diagnostic));
         error
     }
@@ -133,6 +252,7 @@ pub enum ErrorCode {
     SurfaceOutdated,
     SurfaceUnavailable,
     InvalidInput,
+    UnsupportedPrimitive,
     UnresolvedResource,
     DegradedQuality,
     ImageUploadFailed,
@@ -483,8 +603,7 @@ impl DegradedQuality {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DegradedQualityKind {
-    FastBlurClamp,
-    SoftwareFallback,
+    ReducedIntermediatePrecision,
     UnsupportedPaintSpaceConversion,
 }
 
@@ -492,8 +611,7 @@ impl DegradedQualityKind {
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
-            Self::FastBlurClamp => "fast blur clamp",
-            Self::SoftwareFallback => "software fallback",
+            Self::ReducedIntermediatePrecision => "reduced intermediate precision",
             Self::UnsupportedPaintSpaceConversion => "unsupported paint-space conversion",
         }
     }

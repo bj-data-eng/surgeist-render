@@ -57,7 +57,7 @@ impl Renderer {
             Attachment::Window(handle) => {
                 let Some(backend) = self.backend.as_mut() else {
                     return Err(Error::new(
-                        ErrorCode::AdapterUnavailable,
+                        BackendErrorCode::AdapterUnavailable,
                         "no compatible wgpu adapter is available",
                     ));
                 };
@@ -70,7 +70,7 @@ impl Renderer {
                 ))
                 .map_err(|source| {
                     Error::new(
-                        ErrorCode::SurfaceCreateFailed,
+                        BackendErrorCode::SurfaceCreateFailed,
                         "failed to create native surface",
                     )
                     .with_source(source)
@@ -99,13 +99,13 @@ impl Renderer {
     ) -> Result<Surface> {
         let Some(html_canvas) = canvas.canvas.clone() else {
             return Err(Error::new(
-                ErrorCode::SurfaceCreateFailed,
+                BackendErrorCode::SurfaceCreateFailed,
                 format!("web canvas surface '{}' has no canvas handle", canvas.id),
             ));
         };
         let Some(backend) = self.backend.as_mut() else {
             return Err(Error::new(
-                ErrorCode::AdapterUnavailable,
+                BackendErrorCode::AdapterUnavailable,
                 "no compatible WebGPU adapter is available",
             ));
         };
@@ -118,7 +118,7 @@ impl Renderer {
         ))
         .map_err(|source| {
             Error::new(
-                ErrorCode::SurfaceCreateFailed,
+                BackendErrorCode::SurfaceCreateFailed,
                 "failed to create web canvas surface",
             )
             .with_source(source)
@@ -164,7 +164,7 @@ impl Renderer {
         validate_surface_options(options)?;
         if options.format != Format::Rgba8 {
             return Err(Error::new(
-                ErrorCode::SurfaceCreateFailed,
+                BackendErrorCode::SurfaceCreateFailed,
                 "headless surfaces require Rgba8 format for Vello storage rendering",
             ));
         }
@@ -275,7 +275,7 @@ impl Renderer {
     pub fn resume_surface(&mut self, surface: &mut Surface, attachment: Attachment) -> Result<()> {
         if surface.attachment.kind() != attachment.kind() {
             return Err(Error::new(
-                ErrorCode::SurfaceCreateFailed,
+                BackendErrorCode::SurfaceCreateFailed,
                 "surface cannot resume with an incompatible attachment",
             ));
         }
@@ -306,13 +306,13 @@ impl Renderer {
         } = &surface.backend
         else {
             return Err(Error::new(
-                ErrorCode::UnsupportedBackend,
+                BackendErrorCode::UnsupportedBackend,
                 "only rendered headless surfaces can be read back",
             ));
         };
         let Some(backend) = self.backend.as_mut() else {
             return Err(Error::new(
-                ErrorCode::AdapterUnavailable,
+                BackendErrorCode::AdapterUnavailable,
                 "no compatible wgpu adapter is available",
             ));
         };
@@ -398,7 +398,7 @@ impl Renderer {
         let mut cache = OffscreenTextureResourceCache::new();
         let Some(context) = self.default_offscreen_render_context() else {
             return Err(Error::new(
-                ErrorCode::AdapterUnavailable,
+                BackendErrorCode::AdapterUnavailable,
                 "materialized backdrop captures require an available wgpu device context",
             ));
         };
@@ -412,7 +412,7 @@ impl Renderer {
         let source = {
             let Some((device, queue)) = self.default_wgpu_device_queue() else {
                 return Err(Error::new(
-                    ErrorCode::AdapterUnavailable,
+                    BackendErrorCode::AdapterUnavailable,
                     "materialized backdrop captures require an available wgpu device queue",
                 ));
             };
@@ -517,7 +517,7 @@ impl Renderer {
         let mut cache = OffscreenTextureResourceCache::new();
         let Some(context) = self.default_offscreen_render_context() else {
             return Err(Error::new(
-                ErrorCode::AdapterUnavailable,
+                BackendErrorCode::AdapterUnavailable,
                 "resolved layer alpha masks require an available wgpu device context",
             ));
         };
@@ -531,7 +531,7 @@ impl Renderer {
         let source = {
             let Some((device, queue)) = self.default_wgpu_device_queue() else {
                 return Err(Error::new(
-                    ErrorCode::AdapterUnavailable,
+                    BackendErrorCode::AdapterUnavailable,
                     "resolved layer alpha masks require an available wgpu device queue",
                 ));
             };
@@ -639,7 +639,7 @@ fn backdrop_execution_error() -> Error {
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BackdropExecution,
     ));
-    error.message.push_str(
+    error.append_message(
         ": backdrop capture was planned during normalization but render-time backdrop execution is not implemented",
     );
     error

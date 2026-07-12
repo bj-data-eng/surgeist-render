@@ -18,6 +18,7 @@ use super::{
 };
 use std::{sync::Arc, time::Duration};
 
+use super::error::BackendErrorCode;
 use super::*;
 
 const AHEM_FONT_BYTES: &[u8] = include_bytes!("../tests/fixtures/fonts/ahem/Ahem.ttf");
@@ -25,6 +26,81 @@ const AHEM_FONT_ID: u64 = 9001;
 const AHEM_GLYPH_X: u32 = 58;
 const AHEM_GLYPH_DESCENT_P: u32 = 82;
 const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
+
+#[derive(Debug)]
+struct ErrorSourceFixture;
+
+impl std::fmt::Display for ErrorSourceFixture {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("error source fixture")
+    }
+}
+
+impl std::error::Error for ErrorSourceFixture {}
+
+#[test]
+fn semantic_error_accessors_preserve_payloads() {
+    let invalid = Error::invalid_value("radius", -1, "must be non-negative");
+    let unsupported = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::LayerFilter,
+    ));
+    let unresolved = Error::unresolved_resource(UnresolvedResource::new(
+        UnresolvedResourceKind::Image,
+        "hero-image",
+    ));
+    let degraded = Error::degraded_quality(DegradedQuality::new(
+        DegradedQualityKind::ReducedIntermediatePrecision,
+        "rgba16float unavailable",
+    ));
+
+    assert_eq!(invalid.code(), ErrorCode::InvalidInput);
+    assert_eq!(
+        invalid.message(),
+        "radius value -1 is invalid: must be non-negative"
+    );
+    assert_eq!(
+        invalid.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("radius")
+    );
+    assert_eq!(unsupported.code(), ErrorCode::UnsupportedPrimitive);
+    assert!(unsupported.unsupported_primitive().is_some());
+    assert_eq!(unresolved.code(), ErrorCode::UnresolvedResource);
+    assert_eq!(
+        unresolved
+            .unresolved_resource_diagnostic()
+            .map(UnresolvedResource::identifier),
+        Some("hero-image")
+    );
+    assert_eq!(degraded.code(), ErrorCode::DegradedQuality);
+    assert_eq!(
+        degraded
+            .degraded_quality_diagnostic()
+            .map(DegradedQuality::kind),
+        Some(DegradedQualityKind::ReducedIntermediatePrecision)
+    );
+}
+
+#[test]
+fn native_and_wasm_error_source_storage_preserves_source_contract() {
+    #[cfg(not(target_arch = "wasm32"))]
+    fn assert_send_sync<T: Send + Sync>() {}
+
+    #[cfg(not(target_arch = "wasm32"))]
+    assert_send_sync::<Error>();
+
+    let error = Error::new(BackendErrorCode::RenderFailed, "backend failed")
+        .with_source(ErrorSourceFixture);
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(error.message(), "backend failed");
+    assert_eq!(
+        std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("error source fixture")
+    );
+}
 
 #[test]
 fn options_default_requires_high_precision_and_bounds_retention() {
@@ -105,12 +181,12 @@ fn text_run_bounds_distinguish_unspecified_empty_and_ink() {
         TextRunBounds::try_ink(Rect::new(0.0, 0.0, 1.0, f64::NEG_INFINITY)).unwrap_err();
     let zero_width = TextRunBounds::try_ink(Rect::new(0.0, 0.0, 0.0, 1.0)).unwrap_err();
     let zero_height = TextRunBounds::try_ink(Rect::new(0.0, 0.0, 1.0, 0.0)).unwrap_err();
-    assert_eq!(non_finite_x.code, ErrorCode::InvalidInput);
-    assert_eq!(non_finite_y.code, ErrorCode::InvalidInput);
-    assert_eq!(non_finite_width.code, ErrorCode::InvalidInput);
-    assert_eq!(non_finite_height.code, ErrorCode::InvalidInput);
-    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
-    assert_eq!(zero_height.code, ErrorCode::InvalidInput);
+    assert_eq!(non_finite_x.code(), ErrorCode::InvalidInput);
+    assert_eq!(non_finite_y.code(), ErrorCode::InvalidInput);
+    assert_eq!(non_finite_width.code(), ErrorCode::InvalidInput);
+    assert_eq!(non_finite_height.code(), ErrorCode::InvalidInput);
+    assert_eq!(zero_width.code(), ErrorCode::InvalidInput);
+    assert_eq!(zero_height.code(), ErrorCode::InvalidInput);
     assert_eq!(
         non_finite_x
             .invalid_value_diagnostic()
@@ -310,19 +386,19 @@ fn reference_buffer_allocation_validates_positive_size_and_overflow() {
 
     let zero_width = ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(0, 1))
         .expect_err("zero-width reference buffers should be rejected");
-    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+    assert_eq!(zero_width.code(), ErrorCode::InvalidInput);
 
     let overflow =
         ReferencePremultipliedRgba8Buffer::try_new(PhysicalSize::new(u32::MAX, u32::MAX))
             .expect_err("overflow-sized reference buffers should be rejected before allocation");
-    assert_eq!(overflow.code, ErrorCode::InvalidInput);
+    assert_eq!(overflow.code(), ErrorCode::InvalidInput);
 
     let wrong_data_len = ReferencePremultipliedRgba8Buffer::from_pixels(
         PhysicalSize::new(2, 2),
         vec![PremultipliedRgba8::TRANSPARENT],
     )
     .expect_err("raw pixel data should match validated dimensions");
-    assert_eq!(wrong_data_len.code, ErrorCode::InvalidInput);
+    assert_eq!(wrong_data_len.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -337,14 +413,14 @@ fn reference_buffer_pixel_access_preserves_bounds_checks() {
         buffer
             .pixel(2, 0)
             .expect_err("x outside width should fail")
-            .code,
+            .code(),
         ErrorCode::InvalidInput
     );
     assert_eq!(
         buffer
             .set_pixel(0, 2, pixel)
             .expect_err("y outside height should fail")
-            .code,
+            .code(),
         ErrorCode::InvalidInput
     );
 }
@@ -355,7 +431,7 @@ fn reference_premultiplied_pixels_apply_clamped_finite_opacity() {
 
     let invalid_pixel =
         PremultipliedRgba8::try_new(200, 0, 0, 128).expect_err("red must be premultiplied");
-    assert_eq!(invalid_pixel.code, ErrorCode::InvalidInput);
+    assert_eq!(invalid_pixel.code(), ErrorCode::InvalidInput);
 
     assert_eq!(
         pixel.apply_opacity(0.5).unwrap(),
@@ -370,7 +446,7 @@ fn reference_premultiplied_pixels_apply_clamped_finite_opacity() {
         pixel
             .apply_opacity(f32::NAN)
             .expect_err("non-finite opacity should be rejected")
-            .code,
+            .code(),
         ErrorCode::InvalidInput
     );
 
@@ -545,7 +621,7 @@ fn reference_buffer_blend_over_rejects_mismatched_destination_size() {
         .blend_over(&destination, BlendMode::Multiply)
         .expect_err("blend buffers must map one-to-one to destination pixels");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("reference blend destination size")
@@ -564,7 +640,7 @@ fn reference_buffer_alpha_composites_reject_mismatched_buffer_sizes() {
         .invalid_value_diagnostic()
         .expect("source-in mismatch should include invalid value details");
 
-    assert_eq!(source_in_error.code, ErrorCode::InvalidInput);
+    assert_eq!(source_in_error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         source_in_diagnostic.field(),
         "reference source-in destination size"
@@ -579,7 +655,7 @@ fn reference_buffer_alpha_composites_reject_mismatched_buffer_sizes() {
         .invalid_value_diagnostic()
         .expect("destination-in mismatch should include invalid value details");
 
-    assert_eq!(destination_in_error.code, ErrorCode::InvalidInput);
+    assert_eq!(destination_in_error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         destination_in_diagnostic.field(),
         "reference destination-in source size"
@@ -775,7 +851,7 @@ fn reference_alpha_masks_reject_mismatched_mask_buffer_size() {
         .apply_alpha_mask(&mask)
         .expect_err("mask buffers must map one-to-one to source pixels");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("reference alpha mask size")
@@ -854,7 +930,7 @@ fn resolved_alpha_mask_execution_rejects_mismatched_buffers() {
     let error = ResolvedAlphaMaskExecution::try_new(&source, &mask)
         .expect_err("materialized alpha masks must match source buffer size");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("resolved alpha mask size")
@@ -1548,7 +1624,7 @@ fn compiled_color_filter_pipeline_rejects_empty_construction() {
     let error = CompiledColorFilterPipeline::try_from_ops(Vec::new())
         .expect_err("empty compiled pipelines should be unconstructable");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("compiled color filter pipeline")
@@ -2401,7 +2477,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
     );
     assert!(
         text_error
-            .message
+            .message()
             .contains("glyph-alpha/offscreen text capture")
     );
 
@@ -2798,7 +2874,7 @@ fn texture_cache_rejects_stale_handle_after_reuse() {
         .release(stale)
         .expect_err("stale handles must not release a new lease");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(cache.live_count(), 1);
     assert_eq!(cache.stats().releases, 1);
     cache.release(current).unwrap();
@@ -2822,7 +2898,7 @@ fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
         .release(foreign)
         .expect_err("foreign handles must not release matching local entries");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(second_cache.live_count(), 1);
     assert_eq!(second_cache.stats().releases, 0);
     second_cache.release(local).unwrap();
@@ -2846,7 +2922,7 @@ fn texture_cache_default_construction_rejects_same_descriptor_foreign_release() 
         .release(foreign)
         .expect_err("default-constructed caches must still have unique identities");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(second_cache.live_count(), 1);
     assert_eq!(second_cache.stats().releases, 0);
     second_cache.release(local).unwrap();
@@ -2861,7 +2937,7 @@ fn texture_descriptors_reject_zero_size_and_overflow() {
         TextureUsageIntent::OffscreenLayer,
     )
     .expect_err("zero-width textures should be rejected");
-    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+    assert_eq!(zero_width.code(), ErrorCode::InvalidInput);
 
     let overflow = TextureDescriptor::try_new(
         PhysicalSize::new(u32::MAX, u32::MAX),
@@ -2869,7 +2945,7 @@ fn texture_descriptors_reject_zero_size_and_overflow() {
         TextureUsageIntent::ReadbackReference,
     )
     .expect_err("overflow-sized textures should be rejected");
-    assert_eq!(overflow.code, ErrorCode::InvalidInput);
+    assert_eq!(overflow.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -3021,11 +3097,11 @@ fn shader_rect_bounds_reject_zero_and_out_of_range_regions() {
 
     let zero_width = RectPassBounds::try_new(0, 0, 0, 1, source, destination)
         .expect_err("zero-width shader bounds should be rejected");
-    assert_eq!(zero_width.code, ErrorCode::InvalidInput);
+    assert_eq!(zero_width.code(), ErrorCode::InvalidInput);
 
     let source_overflow = RectPassBounds::try_new(3, 0, 2, 1, source, destination)
         .expect_err("source bounds must fit source texture");
-    assert_eq!(source_overflow.code, ErrorCode::InvalidInput);
+    assert_eq!(source_overflow.code(), ErrorCode::InvalidInput);
 
     let destination_overflow = RectPassBounds::try_new(
         0,
@@ -3041,7 +3117,7 @@ fn shader_rect_bounds_reject_zero_and_out_of_range_regions() {
         .unwrap(),
     )
     .expect_err("destination bounds must fit destination texture");
-    assert_eq!(destination_overflow.code, ErrorCode::InvalidInput);
+    assert_eq!(destination_overflow.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -3076,7 +3152,7 @@ fn shader_pass_descriptor_revalidates_bounds_against_named_textures() {
     )
     .expect_err("descriptor must revalidate bounds against its own destination");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("rect shader pass destination x extent")
@@ -3109,7 +3185,7 @@ fn shader_clear_fill_descriptor_rejects_partial_destination_bounds() {
     )
     .expect_err("clear/fill uses attachment clear and must be fullscreen");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("rect shader clear/fill bounds")
@@ -3144,8 +3220,8 @@ fn shader_pass_contract_only_context_reports_adapter_unavailable() {
     let error = encode_clear_fill_pass(None, pass, Color::BLACK)
         .expect_err("contract-only shader pass should report missing GPU context");
 
-    assert_eq!(error.code, ErrorCode::AdapterUnavailable);
-    assert!(error.message.contains("rect/fullscreen shader pass"));
+    assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
+    assert!(error.message().contains("rect/fullscreen shader pass"));
 }
 
 #[test]
@@ -3177,7 +3253,7 @@ fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
         assert_eq!(
             encode_clear_fill_pass(None, pass, Color::BLACK)
                 .expect_err("no GPU machines should report the explicit diagnostic")
-                .code,
+                .code(),
             ErrorCode::AdapterUnavailable
         );
         return;
@@ -3273,8 +3349,8 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
     )
     .expect_err("contract-only offscreen render should report missing GPU context");
 
-    assert_eq!(error.code, ErrorCode::AdapterUnavailable);
-    assert!(error.message.contains("offscreen Vello local scene"));
+    assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
+    assert!(error.message().contains("offscreen Vello local scene"));
     assert_eq!(cache.stats().allocations, 0);
     assert_eq!(cache.live_count(), 0);
 }
@@ -3300,7 +3376,7 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
             None, options, &mut cache, &scene, request,
         )
         .expect_err("no GPU machines should report the explicit diagnostic");
-        assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+        assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
         return;
     };
 
@@ -3344,7 +3420,7 @@ fn offscreen_local_scene_texture_descriptor_rejects_bgra8_for_vello_target() {
     let error = offscreen_local_scene_texture_descriptor(bounds, 1.0, Format::Bgra8)
         .expect_err("minimal offscreen Vello targets are Rgba8-only");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("offscreen Vello scene texture format")
@@ -3368,7 +3444,7 @@ fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
     )
     .expect_err("Bgra8 should be rejected before GPU context allocation");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(cache.stats().allocations, 0);
     assert_eq!(cache.live_count(), 0);
 }
@@ -3472,7 +3548,7 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
             None, options, &mut cache, &scene, request,
         )
         .expect_err("no GPU machines should report the explicit diagnostic");
-        assert_eq!(error.code, ErrorCode::AdapterUnavailable);
+        assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
         return;
     };
     let first = render_vello_local_scene_to_offscreen_texture(
@@ -3741,9 +3817,9 @@ fn sequence9_guardrail_layer_mask_and_filter_inputs_keep_typed_diagnostics() {
             .normalize(Capabilities::VELLO_0_9)
             .expect_err("Sequence 9 must not execute mask or layer effect semantics");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains(unsupported.label()));
     }
 }
 
@@ -3762,7 +3838,7 @@ fn scene_normalization_rejects_unsupported_commands_before_encoding() {
     let error = scene
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("unsupported masks should fail during normalization");
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
 }
 
 #[test]
@@ -3931,14 +4007,14 @@ fn rejects_invalid_surface_geometry() {
         Err(error) => error,
     };
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 
     let mut surface = renderer.create_headless(Size::new(1.0, 1.0), 1.0).unwrap();
     let error = surface
         .resize(Size::new(1.0, 1.0), 0.0)
         .expect_err("invalid scale should fail before resize");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -3949,16 +4025,16 @@ fn invalid_value_errors_name_rejected_value() {
         "must be finite and non-negative",
     );
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert!(
-        error.message.contains("rectangle width"),
+        error.message().contains("rectangle width"),
         "error should name the rejected field: {}",
-        error.message
+        error.message()
     );
     assert!(
-        error.message.contains("NaN"),
+        error.message().contains("NaN"),
         "error should include the rejected value: {}",
-        error.message
+        error.message()
     );
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
@@ -4068,7 +4144,7 @@ fn normalized_paint_layers_reject_invalid_paint_sources() {
     )
     .expect_err("invalid gradient construction should fail before paint layer");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -4116,7 +4192,7 @@ fn gradients_preserve_transparent_stops() {
 fn style_reference_identifiers_must_not_be_empty() {
     let error = StyleResourceRef::try_new("  ").expect_err("empty identifiers are invalid");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("style resource reference")
@@ -4158,7 +4234,7 @@ fn image_resource_density_rejects_invalid_values() {
     let error = ImageResourceDensity::try_new(0.0)
         .expect_err("image density must be positive when supplied");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("image resource density")
@@ -4178,7 +4254,7 @@ fn unresolved_style_image_sources_report_image_resource_diagnostics() {
     let error = source
         .require_resolved()
         .expect_err("unresolved image source must report an image resource diagnostic");
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
         error.unresolved_resource_diagnostic(),
         Some(&UnresolvedResource::new(
@@ -4303,7 +4379,7 @@ fn image_placement_rejects_invalid_paint_or_intrinsic_size() {
     )
     .expect_err("paint rect must be positive");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("image placement paint rect")
@@ -4425,7 +4501,7 @@ fn image_repeat_plan_rejects_excessive_resolved_tile_count() {
         .resolve(placement)
         .expect_err("excessive repeat tiling must be rejected before allocation");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("image repeat tile count")
@@ -4548,7 +4624,7 @@ fn image_attachment_plan_uses_root_resolved_scroll_and_local_coordinates() {
 fn fixed_image_attachment_requires_viewport_coordinate_tag() {
     let missing = ImageAttachmentPlan::try_new(BackgroundAttachment::Fixed, None)
         .expect_err("fixed backgrounds require an explicit viewport tag");
-    assert_eq!(missing.code, ErrorCode::InvalidInput);
+    assert_eq!(missing.code(), ErrorCode::InvalidInput);
     assert_eq!(
         missing.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background attachment coordinate space")
@@ -4576,7 +4652,7 @@ fn resolved_image_resources_reject_invalid_intrinsic_size() {
     let error = ResolvedImageResource::try_new(ImageId::new(7), Size::new(f64::NAN, 12.0))
         .expect_err("invalid intrinsic size should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("resolved image intrinsic size width")
@@ -4588,7 +4664,7 @@ fn background_position_rejects_non_finite_percent() {
     let error = BackgroundPosition::percent(f64::NAN, 0.0)
         .expect_err("non-finite percentages should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background position x percent")
@@ -4600,7 +4676,7 @@ fn background_size_rejects_negative_length() {
     let error = SizeComponent::try_length(-1.0)
         .expect_err("negative explicit background sizes should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background size length")
@@ -4897,7 +4973,7 @@ fn filter_blur_policy_names_large_radius_clamp_and_rejection() {
 
     let error = FilterOutset::from_blur(FilterBlur::try_new(12.0).unwrap(), reject)
         .expect_err("rejecting large blur radii should report a typed invalid value");
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("filter blur radius")
@@ -4908,7 +4984,7 @@ fn filter_blur_policy_names_large_radius_clamp_and_rejection() {
 fn filter_region_models_reject_invalid_bounds_and_radii() {
     let zero_source = FilterSourceBounds::try_new(Rect::new(0.0, 0.0, 0.0, 10.0))
         .expect_err("filter source bounds must have area");
-    assert_eq!(zero_source.code, ErrorCode::InvalidInput);
+    assert_eq!(zero_source.code(), ErrorCode::InvalidInput);
     assert_eq!(
         zero_source
             .invalid_value_diagnostic()
@@ -5006,7 +5082,7 @@ fn filter_color_pipeline_rejects_drop_shadow_with_typed_diagnostic() {
 fn filter_lists_reject_empty_ordered_ops() {
     let error = FilterList::try_ops(Vec::new()).expect_err("empty op lists must use none");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("filter operations")
@@ -5031,7 +5107,7 @@ fn filtered_image_paint_rejects_none_filter_list_and_reports_execution_boundary(
     let resource = ResolvedImageResource::try_new(ImageId::new(31), Size::new(8.0, 8.0)).unwrap();
     let error = FilteredImagePaint::try_new(resource.clone(), FilterList::none())
         .expect_err("filtered image paint requires a non-empty filter list");
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 
     let filters = FilterList::try_ops(vec![FilterOp::contrast(
         FilterAmount::try_new(0.75).unwrap(),
@@ -5070,7 +5146,7 @@ fn backdrop_filter_input_rejects_empty_filters() {
     let error = BackdropFilterInput::try_new(FilterList::none(), bounds, None)
         .expect_err("backdrop filters must be an explicit non-empty filter list");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("backdrop filter input filters")
@@ -5082,7 +5158,7 @@ fn backdrop_capture_bounds_reject_invalid_rectangles() {
     let zero = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 0.0, 10.0))
         .expect_err("backdrop capture bounds must have positive area");
 
-    assert_eq!(zero.code, ErrorCode::InvalidInput);
+    assert_eq!(zero.code(), ErrorCode::InvalidInput);
     assert_eq!(
         zero.invalid_value_diagnostic().map(InvalidValue::field),
         Some("backdrop capture bounds width")
@@ -5110,7 +5186,7 @@ fn backdrop_filter_input_rejects_unresolved_clip_references() {
     let error = BackdropFilterInput::try_new(filters, bounds, Some(clip))
         .expect_err("backdrop clip geometry must already be render-owned");
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
         error
             .unresolved_resource_diagnostic()
@@ -5434,7 +5510,7 @@ fn nested_backdrop_layer_normalization_reports_typed_boundary() {
             PrimitiveOperation::BackdropExecution,
         ))
     );
-    assert!(error.message.contains("nested backdrop capture"));
+    assert!(error.message().contains("nested backdrop capture"));
 }
 
 #[test]
@@ -5463,7 +5539,7 @@ fn transformed_backdrop_layer_normalization_reports_typed_boundary() {
             PrimitiveOperation::BackdropExecution,
         ))
     );
-    assert!(error.message.contains("transformed backdrop capture"));
+    assert!(error.message().contains("transformed backdrop capture"));
 }
 
 #[test]
@@ -5496,7 +5572,7 @@ fn repeated_top_level_backdrop_normalization_reports_typed_boundary() {
     );
     assert!(
         error
-            .message
+            .message()
             .contains("repeated top-level backdrop capture")
     );
 }
@@ -5765,7 +5841,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         let error = Capabilities::VELLO_0_9
             .ensure_supported(unsupported)
             .expect_err("broad backdrop execution must stay diagnostic");
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
 
@@ -5786,7 +5862,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("nested backdrop capture crosses the bounded Sequence 13 path");
     assert_eq!(nested.unsupported_primitive(), Some(unsupported_broad));
-    assert!(nested.message.contains("nested backdrop capture"));
+    assert!(nested.message().contains("nested backdrop capture"));
 
     let mut repeated_scene = Scene::new();
     repeated_scene
@@ -5799,7 +5875,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
     assert_eq!(repeated.unsupported_primitive(), Some(unsupported_broad));
     assert!(
         repeated
-            .message
+            .message()
             .contains("repeated top-level backdrop capture")
     );
 
@@ -5814,7 +5890,11 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("transformed backdrop capture needs coordinate reconciliation");
     assert_eq!(transformed.unsupported_primitive(), Some(unsupported_broad));
-    assert!(transformed.message.contains("transformed backdrop capture"));
+    assert!(
+        transformed
+            .message()
+            .contains("transformed backdrop capture")
+    );
 }
 
 #[test]
@@ -6107,7 +6187,7 @@ fn background_blend_lists_model_normal_layers_and_reject_blend_modes() {
 fn filter_blur_rejects_negative_radius() {
     let error = FilterBlur::try_new(-0.1).expect_err("negative blur radius should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("filter blur radius")
@@ -6119,7 +6199,7 @@ fn filter_unit_amount_rejects_out_of_range_value() {
     let error = UnitFilterAmount::try_new(1.5)
         .expect_err("unit filter amounts must be clamped before render");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("filter unit amount")
@@ -6130,7 +6210,7 @@ fn filter_unit_amount_rejects_out_of_range_value() {
 fn filter_angle_rejects_nan() {
     let error = FilterAngle::try_radians(f64::NAN).expect_err("filter angles must be finite");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("filter angle")
@@ -6201,7 +6281,7 @@ fn ordered_mask_layer_stacks_preserve_layer_and_composite_lists() {
 #[test]
 fn mask_layer_stacks_validate_empty_lists_and_single_layer_diagnostics() {
     let error = MaskLayerStack::try_new([]).expect_err("mask layer lists must not be empty");
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("mask layer stack")
@@ -6297,7 +6377,7 @@ fn multi_layer_mask_stacks_report_composition_boundary_after_input_validation() 
     let error = unresolved
         .ensure_supported(Capabilities::VELLO_0_9)
         .expect_err("unresolved references remain a narrower diagnostic than composition");
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
         error
             .unresolved_resource_diagnostic()
@@ -6350,7 +6430,7 @@ fn clip_inputs_diagnose_unresolved_reference_boundaries() {
         .ensure_supported(Capabilities::VELLO_0_9)
         .expect_err("clip references must be root-resolved before render execution");
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     let diagnostic = error
         .unresolved_resource_diagnostic()
         .expect("clip references should report an unresolved resource");
@@ -6438,7 +6518,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     let reference_error = reference_mask
         .ensure_supported(Capabilities::VELLO_0_9)
         .expect_err("mask references must be root-resolved before render execution");
-    assert_eq!(reference_error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(reference_error.code(), ErrorCode::UnresolvedResource);
     let diagnostic = reference_error
         .unresolved_resource_diagnostic()
         .expect("mask references should report an unresolved resource");
@@ -6558,7 +6638,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
     let clip_error = clip
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("unresolved clip references remain root-owned");
-    assert_eq!(clip_error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(clip_error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
         clip_error
             .unresolved_resource_diagnostic()
@@ -6725,7 +6805,7 @@ fn clip_inputs_reject_invalid_shape_points() {
 
     let error = ClipInput::try_shape(Shape::path(path)).expect_err("invalid clip paths fail");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("path point x")
@@ -6740,7 +6820,7 @@ fn mask_inputs_reject_invalid_shape_points() {
     let error = MaskInput::try_shape(Shape::path(path), MaskMode::Alpha)
         .expect_err("invalid mask paths fail");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("path point x")
@@ -6779,7 +6859,7 @@ fn filled_paths_reject_invalid_path_points() {
     let error = FilledPath::try_new(path, FillRule::NonZero)
         .expect_err("filled paths validate stored path elements");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("path point x")
@@ -6879,7 +6959,7 @@ fn clip_input_normalization_reports_reference_and_invalid_path_diagnostics() {
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("unresolved clip references should stay a typed diagnostic");
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
         error
             .unresolved_resource_diagnostic()
@@ -6896,7 +6976,7 @@ fn clip_input_normalization_reports_reference_and_invalid_path_diagnostics() {
     let mut path = Path::new();
     path.move_to(Point::new(f64::NAN, 0.0));
     let error = ClipInput::try_shape(Shape::path(path)).expect_err("invalid path points fail");
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("path point x")
@@ -6923,7 +7003,7 @@ fn clip_input_normalization_preserves_coordinate_space_tags_and_rejects_nonfinit
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("transformed clip bounds must remain finite");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("clip transformed bounds")
@@ -6994,7 +7074,7 @@ fn background_areas_reject_invalid_rects() {
     )
     .expect_err("background areas require positive boxes");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background padding box")
@@ -7306,7 +7386,7 @@ fn background_stack_reports_unresolved_image_layers() {
     .normalize(Capabilities::VELLO_0_9)
     .expect_err("unresolved image layer should fail normalization");
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     let diagnostic = error.unresolved_resource_diagnostic().unwrap();
     assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Image);
     assert_eq!(diagnostic.identifier(), "hero.png");
@@ -7332,7 +7412,7 @@ fn background_normalization_rejects_clip_override_length_mismatch() {
     .with_layer_clip_overrides(Vec::new())
     .expect_err("clip override list must match background layer count");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background layer clip overrides")
@@ -7428,7 +7508,7 @@ fn border_sides_reject_negative_width() {
     let error = BorderSide::try_new(BorderStyle::Solid, -1.0, Color::BLACK)
         .expect_err("negative border widths should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("border side width")
@@ -7440,7 +7520,7 @@ fn outlines_reject_non_finite_offset() {
     let error = Outline::try_new(OutlineStyle::Solid, 1.0, Color::BLACK, f64::NAN)
         .expect_err("outline offset must be finite");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("outline offset")
@@ -7475,7 +7555,7 @@ fn box_decoration_inputs_reject_empty_fragments() {
     let error = BoxDecorationInput::try_new(None, None, Vec::new())
         .expect_err("box decoration inputs require at least one fragment");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("box decoration fragments")
@@ -7525,7 +7605,7 @@ fn box_decoration_fragments_validate_clip_override_geometry() {
     let error = BackgroundClipGeometry::try_rect(Rect::new(0.0, 0.0, 0.0, 10.0))
         .expect_err("clip overrides reuse background clip validation");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background clip rect")
@@ -8073,7 +8153,7 @@ fn box_decoration_normalization_handles_negative_outline_offsets_deterministical
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("over-contracted outline target rects should be invalid");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("outline target rect")
@@ -8318,7 +8398,7 @@ fn background_stacks_reject_empty_and_colorless_inputs() {
     let error = BackgroundStack::try_new(None, Vec::new())
         .expect_err("empty transparent background stacks should use no value");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("background stack")
@@ -8330,9 +8410,9 @@ fn invalid_value_diagnostic_captures_non_finite_constructor_value() {
     let error =
         Point::try_new(f64::NAN, 0.0).expect_err("non-finite point coordinates should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
-        error.message,
+        error.message(),
         "point x value NaN is invalid: must be finite"
     );
     assert_eq!(
@@ -8356,9 +8436,9 @@ fn invalid_value_diagnostic_captures_impossible_geometry_constructor_value() {
     let error = Rect::try_new(0.0, 0.0, -1.0, 1.0)
         .expect_err("negative rectangle dimensions should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
-        error.message,
+        error.message(),
         "rectangle width value -1 is invalid: must be finite and non-negative"
     );
     assert_eq!(
@@ -8381,9 +8461,9 @@ fn invalid_value_diagnostic_captures_impossible_geometry_constructor_value() {
 fn invalid_value_constructor_captures_empty_list_invariant() {
     let error = Error::invalid_value("gradient stops", "[]", "must not be empty");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
-        error.message,
+        error.message(),
         "gradient stops value [] is invalid: must not be empty"
     );
     assert_eq!(
@@ -8411,8 +8491,8 @@ fn invalid_value_existing_empty_list_constructor_preserves_invalid_input_message
     )
     .expect_err("empty gradient stop lists should be rejected");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
-    assert_eq!(error.message, "gradient stops must not be empty");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(error.message(), "gradient stops must not be empty");
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("gradient stops")
@@ -8437,12 +8517,12 @@ fn unsupported_primitive_errors_name_operation() {
     );
     let error = Error::unsupported_render_primitive(unsupported);
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
     assert!(
-        error.message.contains("layer mask"),
+        error.message().contains("layer mask"),
         "message should name the unsupported primitive: {}",
-        error.message
+        error.message()
     );
 }
 
@@ -8451,13 +8531,13 @@ fn unresolved_resource_diagnostics_name_image_resources() {
     let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Image, "hero.png");
     let error = Error::unresolved_resource(diagnostic.clone());
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
     assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Image);
     assert_eq!(diagnostic.kind().label(), "image");
     assert_eq!(diagnostic.identifier(), "hero.png");
     assert_eq!(
-        error.message,
+        error.message(),
         "image resource hero.png could not be resolved"
     );
 }
@@ -8467,13 +8547,13 @@ fn unresolved_resource_diagnostics_name_mask_resources() {
     let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Mask, "#avatar-mask");
     let error = Error::unresolved_resource(diagnostic.clone());
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
     assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Mask);
     assert_eq!(diagnostic.kind().label(), "mask");
     assert_eq!(diagnostic.identifier(), "#avatar-mask");
     assert_eq!(
-        error.message,
+        error.message(),
         "mask resource #avatar-mask could not be resolved"
     );
 }
@@ -8483,12 +8563,15 @@ fn unresolved_resource_diagnostics_name_filter_resources() {
     let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#blur");
     let error = Error::unresolved_resource(diagnostic.clone());
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
     assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Filter);
     assert_eq!(diagnostic.kind().label(), "filter");
     assert_eq!(diagnostic.identifier(), "#blur");
-    assert_eq!(error.message, "filter resource #blur could not be resolved");
+    assert_eq!(
+        error.message(),
+        "filter resource #blur could not be resolved"
+    );
 }
 
 #[test]
@@ -8496,47 +8579,36 @@ fn unresolved_resource_diagnostics_name_clip_resources() {
     let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Clip, "#content-clip");
     let error = Error::unresolved_resource(diagnostic.clone());
 
-    assert_eq!(error.code, ErrorCode::UnresolvedResource);
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
     assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Clip);
     assert_eq!(diagnostic.kind().label(), "clip");
     assert_eq!(diagnostic.identifier(), "#content-clip");
     assert_eq!(
-        error.message,
+        error.message(),
         "clip resource #content-clip could not be resolved"
     );
 }
 
 #[test]
-fn degraded_quality_diagnostics_name_fast_blur_clamps() {
-    let diagnostic =
-        DegradedQuality::new(DegradedQualityKind::FastBlurClamp, "radius 512px -> 128px");
-    let error = Error::degraded_quality(diagnostic.clone());
-
-    assert_eq!(error.code, ErrorCode::DegradedQuality);
-    assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
-    assert_eq!(diagnostic.kind(), DegradedQualityKind::FastBlurClamp);
-    assert_eq!(diagnostic.kind().label(), "fast blur clamp");
-    assert_eq!(diagnostic.value(), "radius 512px -> 128px");
-    assert_eq!(
-        error.message,
-        "render quality degraded: fast blur clamp (radius 512px -> 128px)"
+fn degraded_quality_diagnostics_name_reduced_intermediate_precision() {
+    let diagnostic = DegradedQuality::new(
+        DegradedQualityKind::ReducedIntermediatePrecision,
+        "rgba16float unavailable",
     );
-}
-
-#[test]
-fn degraded_quality_diagnostics_name_software_fallbacks() {
-    let diagnostic = DegradedQuality::new(DegradedQualityKind::SoftwareFallback, "layer filter");
     let error = Error::degraded_quality(diagnostic.clone());
 
-    assert_eq!(error.code, ErrorCode::DegradedQuality);
+    assert_eq!(error.code(), ErrorCode::DegradedQuality);
     assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
-    assert_eq!(diagnostic.kind(), DegradedQualityKind::SoftwareFallback);
-    assert_eq!(diagnostic.kind().label(), "software fallback");
-    assert_eq!(diagnostic.value(), "layer filter");
     assert_eq!(
-        error.message,
-        "render quality degraded: software fallback (layer filter)"
+        diagnostic.kind(),
+        DegradedQualityKind::ReducedIntermediatePrecision
+    );
+    assert_eq!(diagnostic.kind().label(), "reduced intermediate precision");
+    assert_eq!(diagnostic.value(), "rgba16float unavailable");
+    assert_eq!(
+        error.message(),
+        "render quality degraded: reduced intermediate precision (rgba16float unavailable)"
     );
 }
 
@@ -8548,7 +8620,7 @@ fn degraded_quality_diagnostics_name_unsupported_paint_space_conversions() {
     );
     let error = Error::degraded_quality(diagnostic.clone());
 
-    assert_eq!(error.code, ErrorCode::DegradedQuality);
+    assert_eq!(error.code(), ErrorCode::DegradedQuality);
     assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
     assert_eq!(
         diagnostic.kind(),
@@ -8560,7 +8632,7 @@ fn degraded_quality_diagnostics_name_unsupported_paint_space_conversions() {
     );
     assert_eq!(diagnostic.value(), "display-p3 -> srgb");
     assert_eq!(
-        error.message,
+        error.message(),
         "render quality degraded: unsupported paint-space conversion (display-p3 -> srgb)"
     );
 }
@@ -8924,9 +8996,9 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         let error = Capabilities::VELLO_0_9
             .ensure_supported(unsupported)
             .expect_err("later sequence diagnostics stay named without execution");
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains(label));
+        assert!(error.message().contains(label));
     }
 }
 
@@ -8949,9 +9021,9 @@ fn capabilities_map_unsupported_primitives_to_typed_errors() {
     let error = capabilities
         .ensure_supported(unsupported)
         .expect_err("layer masks are not supported in this milestone");
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
-    assert!(error.message.contains("layer mask"));
+    assert!(error.message().contains("layer mask"));
 }
 
 #[test]
@@ -8969,7 +9041,7 @@ fn unsupported_geometry_operations_report_typed_diagnostics() {
         let error = Capabilities::VELLO_0_9
             .ensure_supported(unsupported)
             .expect_err("geometry operation should be explicitly unsupported");
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
 }
@@ -8986,7 +9058,7 @@ fn unsupported_symbolic_color_inputs_report_typed_diagnostics() {
             .ensure_supported(unsupported)
             .expect_err("symbolic or unsupported color input is not render-resolved");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
 }
@@ -9002,7 +9074,7 @@ fn repeating_gradients_report_typed_diagnostics() {
         .ensure_supported(unsupported)
         .expect_err("repeating gradients require later normalization");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
 }
 
@@ -9020,9 +9092,9 @@ fn unsupported_image_sampling_operations_report_typed_diagnostics() {
             .ensure_supported(unsupported)
             .expect_err("Vello baseline should reject this image sampling primitive");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains(unsupported.label()));
     }
 }
 
@@ -9041,10 +9113,10 @@ fn unsupported_box_decoration_style_capability_diagnostics_are_typed() {
             .ensure_supported(unsupported)
             .expect_err("Vello baseline should reject this box-decoration style");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains("box decorations"));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains("box decorations"));
+        assert!(error.message().contains(unsupported.label()));
     }
 }
 
@@ -9064,7 +9136,7 @@ fn unsupported_3d_transforms_report_typed_diagnostics() {
             .ensure_supported(unsupported)
             .expect_err("3D transforms are unsupported in this render phase");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
 }
@@ -9087,10 +9159,10 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
             .ensure_supported(unsupported)
             .expect_err("offscreen pipeline operation is not implemented in this phase");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains("offscreen pipeline"));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains("offscreen pipeline"));
+        assert!(error.message().contains(unsupported.label()));
     }
 }
 
@@ -9127,10 +9199,10 @@ fn backdrop_and_advanced_compositing_diagnostics_have_granular_names() {
             .ensure_supported(unsupported)
             .expect_err("Sequence 13 Task 1 only names future compositing boundaries");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains("compositing"));
-        assert!(error.message.contains(label));
+        assert!(error.message().contains("compositing"));
+        assert!(error.message().contains(label));
     }
 }
 
@@ -9149,10 +9221,10 @@ fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
             .ensure_supported(unsupported)
             .expect_err("Sequence 12 Task 1 should only name unsupported mask/clip boundaries");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains("masks and clips"));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains("masks and clips"));
+        assert!(error.message().contains(unsupported.label()));
     }
 }
 
@@ -9191,9 +9263,9 @@ fn vello_baseline_reports_current_unsupported_primitives() {
         let error = capabilities
             .ensure_supported(unsupported)
             .expect_err("Vello 0.9 should reject this primitive");
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains(unsupported.label()));
     }
 }
 
@@ -9209,9 +9281,9 @@ fn vello_baseline_reports_web_canvas_surface_as_unsupported_off_wasm_web() {
         .ensure_supported(unsupported)
         .expect_err("web canvas surfaces require render-web on wasm32");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
-    assert!(error.message.contains("web canvas surface"));
+    assert!(error.message().contains("web canvas surface"));
 }
 
 #[cfg(all(feature = "render-web", target_arch = "wasm32"))]
@@ -9247,7 +9319,7 @@ fn unsupported_layer_masks_report_typed_error() {
     let error = renderer
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("unsupported mask should fail render");
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -9255,7 +9327,7 @@ fn unsupported_layer_masks_report_typed_error() {
             PrimitiveOperation::LayerMask,
         ))
     );
-    assert!(error.message.contains("layer mask"));
+    assert!(error.message().contains("layer mask"));
 }
 
 #[test]
@@ -9330,7 +9402,7 @@ fn coordinate_space_tags_preserve_kind_and_transform() {
 fn coordinate_space_ids_reject_reserved_zero() {
     let error = CoordinateSpaceId::try_new(0).expect_err("zero is reserved");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
         Some("coordinate space id")
@@ -9361,7 +9433,7 @@ fn rect_try_from_kurbo_rejects_invalid_bounds() {
 fn physical_size_try_from_logical_size_rejects_invalid_scale() {
     let error = PhysicalSize::try_from_logical(Size::try_new(10.0, 10.0).unwrap(), 0.0)
         .expect_err("scale zero should be rejected before conversion");
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -9369,7 +9441,7 @@ fn physical_size_try_from_logical_size_rejects_u32_overflow() {
     let error =
         PhysicalSize::try_from_logical(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0)
             .expect_err("physical device pixels should fit in u32");
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -9382,7 +9454,7 @@ fn create_headless_rejects_physical_size_overflow() {
             Err(error) => error,
         };
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
 }
 
 #[test]
@@ -9534,8 +9606,8 @@ fn zero_blur_multi_text_shadow_preserves_authored_order_but_rejects_execution() 
             PrimitiveOperation::TextShadow,
         ))
     );
-    assert!(error.message.contains("zero-blur solid text shadows"));
-    assert!(error.message.contains("not claimed or enabled"));
+    assert!(error.message().contains("zero-blur solid text shadows"));
+    assert!(error.message().contains("not claimed or enabled"));
 }
 
 #[test]
@@ -9591,8 +9663,8 @@ fn transformed_text_shadow_inputs_are_stored_but_not_claimed_as_shifted_glyph_ex
             PrimitiveOperation::TextShadow,
         ))
     );
-    assert!(error.message.contains("repeated shifted glyph draws"));
-    assert!(error.message.contains("not claimed or enabled"));
+    assert!(error.message().contains("repeated shifted glyph draws"));
+    assert!(error.message().contains("not claimed or enabled"));
 }
 
 #[test]
@@ -9642,12 +9714,14 @@ fn non_solid_or_spread_text_shadow_stays_on_glyph_alpha_offscreen_diagnostic_pat
             Err(error) => error,
         };
         assert!(
-            error.message.contains("glyph-alpha/offscreen text capture"),
+            error
+                .message()
+                .contains("glyph-alpha/offscreen text capture"),
             "{label} used the wrong text-shadow diagnostic: {}",
-            error.message
+            error.message()
         );
         assert!(
-            !error.message.contains("zero-blur solid text shadows"),
+            !error.message().contains("zero-blur solid text shadows"),
             "{label} should not be classified as the shifted-glyph candidate path"
         );
     }
@@ -9676,7 +9750,7 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("text-shadow execution is not implemented in this phase");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -9684,9 +9758,9 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
             PrimitiveOperation::TextShadow,
         ))
     );
-    assert!(error.message.contains("text shadow"));
-    assert!(error.message.contains("zero-blur solid"));
-    assert!(error.message.contains("repeated shifted glyph draws"));
+    assert!(error.message().contains("text shadow"));
+    assert!(error.message().contains("zero-blur solid"));
+    assert!(error.message().contains("repeated shifted glyph draws"));
 }
 
 #[test]
@@ -9698,7 +9772,7 @@ fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
     let capability_error = Capabilities::VELLO_0_9
         .ensure_supported(unsupported)
         .expect_err("text-shadow capability should stay false until execution exists");
-    assert_eq!(capability_error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(capability_error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(capability_error.unsupported_primitive(), Some(unsupported));
 
     let glyphs = [TextGlyph::try_new(1, 0.0, 0.0, 5.0).unwrap()];
@@ -9721,16 +9795,16 @@ fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
     let normalize_error = scene
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("normalization should report the same unsupported text-shadow boundary");
-    assert_eq!(normalize_error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(normalize_error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(normalize_error.unsupported_primitive(), Some(unsupported));
     assert_eq!(
         normalize_error.unsupported_primitive(),
         capability_error.unsupported_primitive()
     );
-    assert!(normalize_error.message.contains("zero-blur solid"));
+    assert!(normalize_error.message().contains("zero-blur solid"));
     assert!(
         normalize_error
-            .message
+            .message()
             .contains("repeated shifted glyph draws")
     );
 }
@@ -9765,8 +9839,12 @@ fn blurred_text_shadow_reports_same_typed_boundary() {
             PrimitiveOperation::TextShadow,
         ))
     );
-    assert!(error.message.contains("text shadow"));
-    assert!(error.message.contains("glyph-alpha/offscreen text capture"));
+    assert!(error.message().contains("text shadow"));
+    assert!(
+        error
+            .message()
+            .contains("glyph-alpha/offscreen text capture")
+    );
 }
 
 #[test]
@@ -10096,7 +10174,7 @@ fn non_solid_text_decoration_styles_report_typed_boundary() {
         )
         .expect_err("non-solid decoration styles require root/text expansion");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(
             error.unsupported_primitive(),
             Some(UnsupportedPrimitive::new(
@@ -10104,8 +10182,8 @@ fn non_solid_text_decoration_styles_report_typed_boundary() {
                 PrimitiveOperation::TextDecorationStyle,
             ))
         );
-        assert!(error.message.contains("text decoration style"));
-        assert!(error.message.contains("root/text"));
+        assert!(error.message().contains("text decoration style"));
+        assert!(error.message().contains("root/text"));
     }
 }
 
@@ -10436,7 +10514,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
             PrimitiveOperation::TextShadow,
         ))
     );
-    assert!(error.message.contains("zero-blur solid text shadows"));
+    assert!(error.message().contains("zero-blur solid text shadows"));
 }
 
 #[test]
@@ -10545,9 +10623,9 @@ fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
             ))
         );
         assert!(
-            error.message.contains(expected_message),
+            error.message().contains(expected_message),
             "{label} text-shadow used the wrong diagnostic: {}",
-            error.message
+            error.message()
         );
     }
 }
@@ -10904,7 +10982,7 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
     );
     assert!(
         backdrop_error
-            .message
+            .message()
             .contains("transformed backdrop capture")
     );
 }
@@ -10920,7 +10998,7 @@ fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
         .resize(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0)
         .expect_err("physical device pixels should fit in u32");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(surface.size(), Size::new(10.0, 20.0));
     assert_eq!(surface.scale(), 1.5);
     assert_eq!(surface.physical_size(), PhysicalSize::new(15, 30));
@@ -10932,7 +11010,10 @@ fn vello_out_of_memory_maps_to_stable_surface_error() {
         source: Box::new(std::io::Error::other("oom")),
     });
 
-    assert_eq!(vello_error_code(&error), ErrorCode::SurfaceOutOfMemory);
+    assert_eq!(
+        vello_error_code(&error),
+        BackendErrorCode::SurfaceOutOfMemory
+    );
     assert!(vello_error_message(&error).contains("memory"));
 }
 
@@ -10951,8 +11032,8 @@ fn create_headless_reports_unsupported_format() {
         Err(error) => error,
     };
 
-    assert_eq!(error.code, ErrorCode::SurfaceCreateFailed);
-    assert!(error.message.contains("Rgba8"));
+    assert_eq!(error.code(), ErrorCode::SurfaceCreateFailed);
+    assert!(error.message().contains("Rgba8"));
 }
 
 #[test]
@@ -10968,7 +11049,7 @@ fn surface_suspend_and_resume_preserve_attachment_kind() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("suspended surfaces should be unavailable");
 
-    assert_eq!(error.code, ErrorCode::SurfaceUnavailable);
+    assert_eq!(error.code(), ErrorCode::SurfaceUnavailable);
 
     renderer
         .resume_surface(&mut surface, Attachment::Headless)
@@ -10981,7 +11062,7 @@ fn surface_suspend_and_resume_preserve_attachment_kind() {
         .resume(Attachment::from_web_canvas("canvas"))
         .expect_err("surface backend kind should not change on resume");
 
-    assert_eq!(error.code, ErrorCode::SurfaceCreateFailed);
+    assert_eq!(error.code(), ErrorCode::SurfaceCreateFailed);
 }
 
 #[cfg(not(all(feature = "render-web", target_arch = "wasm32")))]
@@ -11003,7 +11084,7 @@ fn unsupported_web_canvas_attachment_reports_target_requirement() {
         Err(error) => error,
     };
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -11011,7 +11092,7 @@ fn unsupported_web_canvas_attachment_reports_target_requirement() {
             PrimitiveOperation::WebCanvasSurface,
         ))
     );
-    assert!(error.message.contains("web canvas surface"));
+    assert!(error.message().contains("web canvas surface"));
 }
 
 #[test]
@@ -11112,7 +11193,7 @@ fn failed_render_does_not_warm_image_reuse_stats() {
     let error = renderer
         .render(&mut surface, &failing, Parameters::default())
         .expect_err("unsupported mask should fail render");
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
 
     let mut valid = Scene::new();
     valid.image(image, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch);
@@ -11130,14 +11211,14 @@ fn rejects_malformed_rgba_images() {
     let error = Image::from_rgba(Size::new(2.0, 2.0), Arc::<[u8]>::from([0, 0, 0, 255]))
         .expect_err("wrong byte length should fail");
 
-    assert_eq!(error.code, ErrorCode::ImageUploadFailed);
-    assert!(error.message.contains("expected 16 bytes"));
+    assert_eq!(error.code(), ErrorCode::ImageUploadFailed);
+    assert!(error.message().contains("expected 16 bytes"));
 
     let error = Image::from_rgba(Size::new(1.5, 2.0), Arc::<[u8]>::from([]))
         .expect_err("fractional source image size should fail");
 
-    assert_eq!(error.code, ErrorCode::ImageUploadFailed);
-    assert!(error.message.contains("integer pixel size"));
+    assert_eq!(error.code(), ErrorCode::ImageUploadFailed);
+    assert!(error.message().contains("integer pixel size"));
 }
 
 #[test]
@@ -11145,8 +11226,8 @@ fn rejects_malformed_scene_values() {
     let error = Color::try_rgba(f32::NAN, 0.0, 0.0, 1.0)
         .expect_err("invalid paint should fail at construction");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
-    assert!(error.message.contains("red channel"));
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert!(error.message().contains("red channel"));
 }
 
 #[test]
@@ -11725,7 +11806,7 @@ fn layer_pass_plan_rejects_mask_filter_boundaries_with_typed_diagnostics() {
             .normalize(Capabilities::VELLO_0_9)
             .expect_err("mask/filter layer pass planning should stop at diagnostic boundary");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(primitive));
     }
 }
@@ -11767,7 +11848,7 @@ fn layer_mask_filter_parent_diagnostics_win_over_unsupported_children() {
             .normalize(Capabilities::VELLO_0_9)
             .expect_err("parent layer diagnostic should be reported before child geometry");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(primitive));
     }
 }
@@ -12090,9 +12171,9 @@ fn unsupported_blend_and_composite_boundaries_remain_typed_diagnostics() {
 
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
         assert!(
-            error.message.contains(unsupported.label()),
+            error.message().contains(unsupported.label()),
             "diagnostic should name unsupported compositing boundary: {}",
-            error.message
+            error.message()
         );
     }
 }
@@ -12114,10 +12195,10 @@ fn unsupported_porter_duff_css_and_mask_composite_policy_stays_typed() {
             .ensure_supported(unsupported)
             .expect_err("unsupported CSS and Porter-Duff composite policy stays typed");
 
-        assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message.contains("compositing"));
-        assert!(error.message.contains(unsupported.label()));
+        assert!(error.message().contains("compositing"));
+        assert!(error.message().contains(unsupported.label()));
     }
 
     let alpha_mask =
@@ -12166,8 +12247,8 @@ fn text_run_requires_font_data() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("prepared glyphs cannot render without font data");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
-    assert!(error.message.contains("font data"));
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert!(error.message().contains("font data"));
 }
 
 #[test]
@@ -12203,9 +12284,9 @@ fn text_run_with_gradient_fill_still_requires_font_data_before_brush_encoding() 
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("prepared glyphs cannot render without font data");
 
-    assert_eq!(error.code, ErrorCode::InvalidInput);
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(error.unsupported_primitive(), None);
-    assert!(error.message.contains("font data"));
+    assert!(error.message().contains("font data"));
 }
 
 #[test]
@@ -12410,7 +12491,7 @@ fn inset_box_shadow_reports_typed_unsupported_diagnostic() {
         .normalize(Capabilities::VELLO_0_9)
         .expect_err("inset shadow execution is not implemented in this phase");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12418,7 +12499,7 @@ fn inset_box_shadow_reports_typed_unsupported_diagnostic() {
             PrimitiveOperation::InsetBoxShadow,
         ))
     );
-    assert!(error.message.contains("inset box shadow"));
+    assert!(error.message().contains("inset box shadow"));
 }
 
 #[test]
@@ -12537,7 +12618,7 @@ fn inside_outside_path_strokes_keep_typed_geometry_diagnostic() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("inside path stroke alignment requires offset lowering");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12567,7 +12648,7 @@ fn unsupported_aligned_path_strokes_report_explicit_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("path offsetting is deliberately explicit");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12577,7 +12658,7 @@ fn unsupported_aligned_path_strokes_report_explicit_error() {
     );
     assert!(
         error
-            .message
+            .message()
             .contains("inside/outside path stroke alignment")
     );
 }
@@ -12600,7 +12681,7 @@ fn unsupported_layer_masks_report_explicit_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("mask lowering should be explicit until implemented");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12608,7 +12689,7 @@ fn unsupported_layer_masks_report_explicit_error() {
             PrimitiveOperation::LayerMask,
         ))
     );
-    assert!(error.message.contains("layer mask"));
+    assert!(error.message().contains("layer mask"));
 }
 
 #[test]
@@ -12631,7 +12712,7 @@ fn unsupported_layer_filters_report_explicit_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("filter lowering should be explicit until implemented");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12639,7 +12720,7 @@ fn unsupported_layer_filters_report_explicit_error() {
             PrimitiveOperation::LayerFilter,
         ))
     );
-    assert!(error.message.contains("layer filter"));
+    assert!(error.message().contains("layer filter"));
 }
 
 #[test]
@@ -12665,7 +12746,7 @@ fn unsupported_non_solid_shadow_paint_reports_typed_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("shadow lowering requires solid paint in this milestone");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12673,7 +12754,7 @@ fn unsupported_non_solid_shadow_paint_reports_typed_error() {
             PrimitiveOperation::NonSolidShadowPaint,
         ))
     );
-    assert!(error.message.contains("non-solid shadow paint"));
+    assert!(error.message().contains("non-solid shadow paint"));
 }
 
 #[test]
@@ -12690,7 +12771,7 @@ fn unsupported_shadow_shapes_report_typed_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("ellipse shadows should remain unsupported in this milestone");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12698,7 +12779,7 @@ fn unsupported_shadow_shapes_report_typed_error() {
             PrimitiveOperation::EllipsePathShadowShape,
         ))
     );
-    assert!(error.message.contains("ellipse/path shadow shape"));
+    assert!(error.message().contains("ellipse/path shadow shape"));
 }
 
 #[test]
@@ -12720,7 +12801,7 @@ fn unsupported_path_shadows_report_typed_error() {
         .render(&mut surface, &scene, Parameters::default())
         .expect_err("path shadows should remain unsupported in this milestone");
 
-    assert_eq!(error.code, ErrorCode::UnsupportedBackend);
+    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -12728,7 +12809,7 @@ fn unsupported_path_shadows_report_typed_error() {
             PrimitiveOperation::EllipsePathShadowShape,
         ))
     );
-    assert!(error.message.contains("ellipse/path shadow shape"));
+    assert!(error.message().contains("ellipse/path shadow shape"));
 }
 
 #[test]
@@ -12753,11 +12834,11 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
     let mut surface = renderer.create_headless(size, 1.0).unwrap();
     match renderer.render(&mut surface, scene, Parameters::default()) {
         Ok(_) => {}
-        Err(error) if error.code == ErrorCode::AdapterUnavailable => {
+        Err(error) if error.code() == ErrorCode::AdapterUnavailable => {
             assert!(
-                error.message.contains("backdrop") || error.message.contains("offscreen"),
+                error.message().contains("backdrop") || error.message().contains("offscreen"),
                 "adapter diagnostic should name the offscreen backdrop boundary: {}",
-                error.message
+                error.message()
             );
             return None;
         }
@@ -12767,14 +12848,14 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
         Ok(output) => Some(output),
         Err(error)
             if matches!(
-                error.code,
+                error.code(),
                 ErrorCode::AdapterUnavailable | ErrorCode::UnsupportedBackend
             ) =>
         {
             assert!(
-                error.message.contains("headless") || error.message.contains("readback"),
+                error.message().contains("headless") || error.message().contains("readback"),
                 "readback diagnostic should name the headless readback boundary: {}",
-                error.message
+                error.message()
             );
             None
         }
