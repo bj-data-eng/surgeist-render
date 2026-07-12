@@ -59,7 +59,13 @@ pub struct AvailableRuntimeCapabilities {
 }
 
 impl AvailableRuntimeCapabilities {
-    #[cfg(test)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C02 runtime capability query consumes this constructor"
+        )
+    )]
     pub(crate) const fn new(
         surface_format: Format,
         effect_precisions: EffectPrecisionCapabilities,
@@ -109,7 +115,13 @@ pub struct EffectPrecisionCapabilities {
 }
 
 impl EffectPrecisionCapabilities {
-    #[cfg(test)]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C02 runtime capability query consumes this constructor"
+        )
+    )]
     pub(crate) const fn new(high_precision: bool, reduced_precision: bool) -> Self {
         Self {
             high_precision,
