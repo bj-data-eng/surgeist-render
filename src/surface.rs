@@ -1,7 +1,22 @@
+use super::backend::DeviceSlotIdentity;
 use super::{
     BackendErrorCode, Color, Error, PhysicalSize, Result, Size, geometry::physical_size,
     validation::*,
 };
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub(crate) struct RendererIdentity(Arc<()>);
+
+impl RendererIdentity {
+    pub(crate) fn new() -> Self {
+        Self(Arc::new(()))
+    }
+
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+}
 
 pub struct Surface {
     pub(crate) attachment: Attachment,
@@ -9,6 +24,7 @@ pub struct Surface {
     pub(crate) state: SurfaceState,
     pub(crate) last_parameters: Option<Parameters>,
     pub(crate) backend: SurfaceBackend,
+    pub(crate) renderer_identity: RendererIdentity,
 }
 
 impl Surface {
@@ -16,6 +32,7 @@ impl Surface {
         attachment: Attachment,
         options: SurfaceOptions,
         backend: SurfaceBackend,
+        renderer_identity: RendererIdentity,
     ) -> Self {
         Self {
             attachment,
@@ -23,6 +40,7 @@ impl Surface {
             state: SurfaceState::Available,
             last_parameters: None,
             backend,
+            renderer_identity,
         }
     }
 
@@ -143,6 +161,22 @@ impl Surface {
             SurfaceBackend::Presented { .. } => SurfaceResourceState::Presented,
         }
     }
+
+    pub(crate) const fn device_identity(&self) -> Option<DeviceSlotIdentity> {
+        match &self.backend {
+            SurfaceBackend::ContractOnly { .. } => None,
+            SurfaceBackend::Headless {
+                device_identity, ..
+            } => Some(*device_identity),
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            SurfaceBackend::Presented {
+                device_identity, ..
+            } => Some(*device_identity),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -164,7 +198,7 @@ pub(crate) enum SurfaceBackend {
         physical_size: PhysicalSize,
     },
     Headless {
-        dev_id: usize,
+        device_identity: DeviceSlotIdentity,
         resources: HeadlessResources,
         physical_size: PhysicalSize,
     },
@@ -174,6 +208,7 @@ pub(crate) enum SurfaceBackend {
     ))]
     Presented {
         surface: Box<vello::util::RenderSurface<'static>>,
+        device_identity: DeviceSlotIdentity,
         lifecycle: PresentedLifecycle,
     },
 }

@@ -9,7 +9,7 @@ use super::{
     encode::encode_vello_scene,
     geometry::physical_size,
     stats::collect_render_stats,
-    surface::{HeadlessResources, SurfaceBackend},
+    surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
     validation::*,
     *,
 };
@@ -19,23 +19,30 @@ use std::{
 };
 
 pub struct Renderer {
+    identity: RendererIdentity,
     options: Options,
     stats: Stats,
     uploaded_images: HashSet<ImageId>,
     backend: Option<Backend>,
-    default_device: Option<usize>,
+    default_device: Option<DeviceSlotIdentity>,
 }
 
 impl Renderer {
     pub async fn new(options: Options) -> Result<Self> {
         let mut context = vello::util::RenderContext::new();
-        let default_device = context.device(None).await;
-        let backend = default_device.map(|_| Backend {
+        let default_slot = context.device(None).await;
+        let mut backend = default_slot.map(|_| Backend {
             context,
-            renderers: Vec::new(),
+            device_states: Vec::new(),
         });
+        let default_device = match (backend.as_mut(), default_slot) {
+            (Some(backend), Some(slot)) => Some(backend.device_slot_identity(slot)?),
+            (None, None) => None,
+            _ => unreachable!("a selected device always creates a backend"),
+        };
 
         Ok(Self {
+            identity: RendererIdentity::new(),
             options,
             stats: Stats::default(),
             uploaded_images: HashSet::new(),
@@ -75,17 +82,19 @@ impl Renderer {
                     )
                     .with_source(source)
                 })?;
-                let dev_id = surface.dev_id;
-                ensure_vello_renderer(backend, self.options, dev_id)?;
+                let device_identity = backend.device_slot_identity(surface.dev_id)?;
+                ensure_vello_renderer(backend, self.options, device_identity)?;
                 Ok(Surface::with_backend(
                     Attachment::Window(handle),
                     options,
                     SurfaceBackend::Presented {
                         surface: Box::new(surface),
+                        device_identity,
                         lifecycle: PresentedLifecycle::Ready {
                             resizing: ResizeState::Idle,
                         },
                     },
+                    self.identity.clone(),
                 ))
             }
         }
@@ -123,17 +132,19 @@ impl Renderer {
             )
             .with_source(source)
         })?;
-        let dev_id = surface.dev_id;
-        ensure_vello_renderer(backend, self.options, dev_id)?;
+        let device_identity = backend.device_slot_identity(surface.dev_id)?;
+        ensure_vello_renderer(backend, self.options, device_identity)?;
         Ok(Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
             SurfaceBackend::Presented {
                 surface: Box::new(surface),
+                device_identity,
                 lifecycle: PresentedLifecycle::Ready {
                     resizing: ResizeState::Idle,
                 },
             },
+            self.identity.clone(),
         ))
     }
 
@@ -169,31 +180,38 @@ impl Renderer {
             ));
         }
         let physical_size = physical_size(options.size, options.scale)?;
-        let backend =
-            if let (Some(backend), Some(dev_id)) = (self.backend.as_mut(), self.default_device) {
-                ensure_vello_renderer(backend, self.options, dev_id)?;
-                let (texture, view) = create_headless_texture(
-                    &backend.context.devices[dev_id].device,
-                    physical_size,
-                    options.format,
-                )?;
-                SurfaceBackend::Headless {
-                    dev_id,
-                    resources: HeadlessResources::Ready { texture, view },
-                    physical_size,
-                }
-            } else {
-                SurfaceBackend::ContractOnly { physical_size }
+        let backend = if let (Some(backend), Some(device_identity)) =
+            (self.backend.as_mut(), self.default_device)
+        {
+            ensure_vello_renderer(backend, self.options, device_identity)?;
+            let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
+                return Err(Error::new(
+                    BackendErrorCode::RendererCreateFailed,
+                    "default Vello device slot disappeared before headless creation",
+                ));
             };
+            let (texture, view) =
+                create_headless_texture(&device_handle.device, physical_size, options.format)?;
+            SurfaceBackend::Headless {
+                device_identity,
+                resources: HeadlessResources::Ready { texture, view },
+                physical_size,
+            }
+        } else {
+            SurfaceBackend::ContractOnly { physical_size }
+        };
 
         Ok(Surface::with_backend(
             Attachment::Headless,
             options,
             backend,
+            self.identity.clone(),
         ))
     }
 
     pub fn set_surface_resizing(&mut self, surface: &mut Surface, resizing: bool) -> Result<()> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
         surface.ensure_available()?;
 
         #[cfg(not(any(
@@ -227,6 +245,8 @@ impl Renderer {
         scene: &Scene,
         parameters: Parameters,
     ) -> Result<Stats> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
         surface.ensure_available()?;
 
         let frame_start = Instant::now();
@@ -273,6 +293,8 @@ impl Renderer {
     }
 
     pub fn resume_surface(&mut self, surface: &mut Surface, attachment: Attachment) -> Result<()> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceResume)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
         if surface.attachment.kind() != attachment.kind() {
             return Err(Error::new(
                 BackendErrorCode::SurfaceCreateFailed,
@@ -298,17 +320,22 @@ impl Renderer {
     }
 
     pub fn read_headless(&mut self, surface: &Surface) -> Result<ImageBuffer> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceReadback)?;
+        if !matches!(surface.backend, SurfaceBackend::Headless { .. }) {
+            return Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "only rendered headless surfaces can be read back",
+            ));
+        }
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceReadback)?;
         let SurfaceBackend::Headless {
-            dev_id,
+            device_identity,
             resources: HeadlessResources::Ready { texture, .. },
             physical_size,
             ..
         } = &surface.backend
         else {
-            return Err(Error::new(
-                BackendErrorCode::UnsupportedBackend,
-                "only rendered headless surfaces can be read back",
-            ));
+            unreachable!("headless backend-kind validation succeeded");
         };
         let Some(backend) = self.backend.as_mut() else {
             return Err(Error::new(
@@ -316,7 +343,12 @@ impl Renderer {
                 "no compatible wgpu adapter is available",
             ));
         };
-        let device_handle = &backend.context.devices[*dev_id];
+        let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "headless Vello device slot disappeared before readback",
+            ));
+        };
         read_texture_rgba(
             &device_handle.device,
             &device_handle.queue,
@@ -327,8 +359,8 @@ impl Renderer {
 
     pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
         let backend = self.backend.as_mut()?;
-        let dev_id = self.default_device?;
-        let device_handle = &backend.context.devices[dev_id];
+        let device_identity = self.default_device?;
+        let device_handle = backend.context.devices.get(device_identity.slot())?;
         Some((&device_handle.device, &device_handle.queue))
     }
 
@@ -336,8 +368,8 @@ impl Renderer {
         &mut self,
     ) -> Option<OffscreenRenderGpuContext<'_>> {
         let backend = self.backend.as_mut()?;
-        let dev_id = self.default_device?;
-        Some(OffscreenRenderGpuContext::new(backend, dev_id))
+        let device_identity = self.default_device?;
+        Some(OffscreenRenderGpuContext::new(backend, device_identity))
     }
 
     #[must_use]
@@ -348,6 +380,41 @@ impl Renderer {
     #[must_use]
     pub const fn options(&self) -> Options {
         self.options
+    }
+
+    fn validate_surface_renderer_identity(
+        &self,
+        surface: &Surface,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        if self.identity.matches(&surface.renderer_identity) {
+            return Ok(());
+        }
+        Err(surface_identity_mismatch(
+            operation,
+            SurfaceIdentityMismatchKind::ForeignRenderer,
+        ))
+    }
+
+    fn validate_surface_device_identity(
+        &self,
+        surface: &Surface,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        let Some(device_identity) = surface.device_identity() else {
+            return Ok(());
+        };
+        if self
+            .backend
+            .as_ref()
+            .is_some_and(|backend| backend.has_device_slot(device_identity))
+        {
+            return Ok(());
+        }
+        Err(surface_identity_mismatch(
+            operation,
+            SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+        ))
     }
 
     fn materialize_resolved_backdrops(
@@ -619,6 +686,18 @@ impl Renderer {
     pub const fn capabilities(&self) -> Capabilities {
         Capabilities::VELLO_0_9
     }
+}
+
+fn surface_identity_mismatch(
+    operation: RuntimeOperation,
+    kind: SurfaceIdentityMismatchKind,
+) -> Error {
+    let diagnostic = RuntimeCapabilityUnavailable::try_new(
+        operation,
+        RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch { kind },
+    )
+    .expect("surface identity mismatch is valid for every surface operation");
+    Error::runtime_capability_unavailable(diagnostic)
 }
 
 fn reject_backdrop_execution(commands: &[RenderCommand]) -> Result<()> {

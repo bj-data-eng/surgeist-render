@@ -22,20 +22,83 @@ use std::{
 
 pub(crate) struct Backend {
     pub(crate) context: vello::util::RenderContext,
-    pub(crate) renderers: Vec<Option<vello::Renderer>>,
+    pub(crate) device_states: Vec<DeviceState>,
+}
+
+pub(crate) struct DeviceState {
+    generation: u64,
+    renderer: Option<vello::Renderer>,
+}
+
+impl DeviceState {
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            renderer: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DeviceSlotIdentity {
+    slot: usize,
+    generation: u64,
+}
+
+impl DeviceSlotIdentity {
+    const fn new(slot: usize, generation: u64) -> Self {
+        Self { slot, generation }
+    }
+
+    pub(crate) const fn slot(self) -> usize {
+        self.slot
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_stale_for_test(&mut self) {
+        self.generation = self.generation.checked_add(1).unwrap();
+    }
+}
+
+impl Backend {
+    fn ensure_device_states(&mut self) {
+        self.device_states
+            .resize_with(self.context.devices.len(), DeviceState::new);
+    }
+
+    pub(crate) fn device_slot_identity(&mut self, slot: usize) -> Result<DeviceSlotIdentity> {
+        self.ensure_device_states();
+        let Some(state) = self.device_states.get(slot) else {
+            return Err(Error::new(
+                BackendErrorCode::RendererCreateFailed,
+                "Vello selected an unavailable device slot",
+            ));
+        };
+        Ok(DeviceSlotIdentity::new(slot, state.generation))
+    }
+
+    pub(crate) fn has_device_slot(&self, identity: DeviceSlotIdentity) -> bool {
+        self.device_states
+            .get(identity.slot())
+            .is_some_and(|state| state.generation == identity.generation)
+            && self.context.devices.get(identity.slot()).is_some()
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OffscreenRenderGpuContext<'a> {
     backend: &'a mut Backend,
-    dev_id: usize,
+    device_identity: DeviceSlotIdentity,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl<'a> OffscreenRenderGpuContext<'a> {
     #[must_use]
-    pub(crate) fn new(backend: &'a mut Backend, dev_id: usize) -> Self {
-        Self { backend, dev_id }
+    pub(crate) fn new(backend: &'a mut Backend, device_identity: DeviceSlotIdentity) -> Self {
+        Self {
+            backend,
+            device_identity,
+        }
     }
 }
 
@@ -314,24 +377,38 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
             "offscreen Vello local scene rendering requires an available wgpu device context",
         ));
     };
-    ensure_vello_renderer(context.backend, options, context.dev_id)?;
-    let device_handle = &context.backend.context.devices[context.dev_id];
+    ensure_vello_renderer(context.backend, options, context.device_identity)?;
+    let slot = context.device_identity.slot();
+    let (render_context, device_states) =
+        (&context.backend.context, &mut context.backend.device_states);
+    let Some(device_handle) = render_context.devices.get(slot) else {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "offscreen Vello device slot disappeared before rendering",
+        ));
+    };
     let resource = cache.acquire(&device_handle.device, request.bounds, descriptor)?;
     let render_start = Instant::now();
-    let result = context.backend.renderers[context.dev_id]
-        .as_mut()
-        .expect("renderer should exist")
-        .render_to_texture(
-            &device_handle.device,
-            &device_handle.queue,
-            scene,
-            &resource.view,
-            &vello_render_params(
-                request.parameters,
-                resource.target.descriptor().physical_size(),
-                options.antialiasing(),
-            ),
-        );
+    let Some(renderer) = device_states
+        .get_mut(slot)
+        .and_then(|state| state.renderer.as_mut())
+    else {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "offscreen Vello renderer disappeared before rendering",
+        ));
+    };
+    let result = renderer.render_to_texture(
+        &device_handle.device,
+        &device_handle.queue,
+        scene,
+        &resource.view,
+        &vello_render_params(
+            request.parameters,
+            resource.target.descriptor().physical_size(),
+            options.antialiasing(),
+        ),
+    );
     if let Err(source) = result {
         let error =
             Error::new(vello_error_code(&source), vello_error_message(&source)).with_source(source);
@@ -359,17 +436,24 @@ pub(crate) fn render_vello_surface(
     match &mut surface.backend {
         SurfaceBackend::ContractOnly { .. } => Ok(RenderTimings::default()),
         SurfaceBackend::Headless {
-            dev_id,
+            device_identity,
             resources,
             physical_size,
         } => {
             if physical_size.width() == 0 || physical_size.height() == 0 {
                 return Ok(RenderTimings::default());
             }
-            ensure_vello_renderer(backend, options, *dev_id)?;
+            ensure_vello_renderer(backend, options, *device_identity)?;
+            let slot = device_identity.slot();
             if matches!(resources, HeadlessResources::Pending) {
+                let Some(device_handle) = backend.context.devices.get(slot) else {
+                    return Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "headless Vello device slot disappeared before allocation",
+                    ));
+                };
                 let (next_texture, next_view) = create_headless_texture(
-                    &backend.context.devices[*dev_id].device,
+                    &device_handle.device,
                     *physical_size,
                     surface.options.format,
                 )?;
@@ -381,11 +465,24 @@ pub(crate) fn render_vello_surface(
             let HeadlessResources::Ready { view, .. } = resources else {
                 unreachable!("headless resources should be ready after allocation");
             };
-            let device_handle = &backend.context.devices[*dev_id];
+            let (render_context, device_states) = (&backend.context, &mut backend.device_states);
+            let Some(device_handle) = render_context.devices.get(slot) else {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "headless Vello device slot disappeared before rendering",
+                ));
+            };
             let render_start = Instant::now();
-            backend.renderers[*dev_id]
-                .as_mut()
-                .expect("renderer should exist")
+            let Some(renderer) = device_states
+                .get_mut(slot)
+                .and_then(|state| state.renderer.as_mut())
+            else {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "headless Vello renderer disappeared before rendering",
+                ));
+            };
+            renderer
                 .render_to_texture(
                     &device_handle.device,
                     &device_handle.queue,
@@ -408,6 +505,7 @@ pub(crate) fn render_vello_surface(
         ))]
         SurfaceBackend::Presented {
             surface: native,
+            device_identity,
             lifecycle,
             ..
         } => {
@@ -430,13 +528,27 @@ pub(crate) fn render_vello_surface(
                 }
                 PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
             }
-            ensure_vello_renderer(backend, options, native.dev_id)?;
-            let device_handle = &backend.context.devices[native.dev_id];
+            ensure_vello_renderer(backend, options, *device_identity)?;
+            let slot = device_identity.slot();
+            let (render_context, device_states) = (&backend.context, &mut backend.device_states);
+            let Some(device_handle) = render_context.devices.get(slot) else {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "presented Vello device slot disappeared before rendering",
+                ));
+            };
             let resizing = lifecycle.resize_state();
             let render_start = Instant::now();
-            backend.renderers[native.dev_id]
-                .as_mut()
-                .expect("renderer should exist")
+            let Some(renderer) = device_states
+                .get_mut(slot)
+                .and_then(|state| state.renderer.as_mut())
+            else {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "presented Vello renderer disappeared before rendering",
+                ));
+            };
+            renderer
                 .render_to_texture(
                     &device_handle.device,
                     &device_handle.queue,
@@ -540,24 +652,41 @@ pub(crate) struct RenderTimings {
 pub(crate) fn ensure_vello_renderer(
     backend: &mut Backend,
     options: Options,
-    dev_id: usize,
+    device_identity: DeviceSlotIdentity,
 ) -> Result<()> {
-    backend
-        .renderers
-        .resize_with(backend.context.devices.len(), || None);
-    if backend.renderers[dev_id].is_none() {
-        let renderer = vello::Renderer::new(
-            &backend.context.devices[dev_id].device,
-            vello_renderer_options(options),
-        )
-        .map_err(|source| {
-            Error::new(
+    if !backend.has_device_slot(device_identity) {
+        return Err(Error::new(
+            BackendErrorCode::RendererCreateFailed,
+            "Vello device slot is unavailable",
+        ));
+    }
+    let slot = device_identity.slot();
+    let renderer_is_ready = backend
+        .device_states
+        .get(slot)
+        .is_some_and(|state| state.renderer.is_some());
+    if !renderer_is_ready {
+        let Some(device_handle) = backend.context.devices.get(slot) else {
+            return Err(Error::new(
                 BackendErrorCode::RendererCreateFailed,
-                "failed to create Vello renderer",
-            )
-            .with_source(source)
-        })?;
-        backend.renderers[dev_id] = Some(renderer);
+                "Vello device slot disappeared before renderer creation",
+            ));
+        };
+        let renderer = vello::Renderer::new(&device_handle.device, vello_renderer_options(options))
+            .map_err(|source| {
+                Error::new(
+                    BackendErrorCode::RendererCreateFailed,
+                    "failed to create Vello renderer",
+                )
+                .with_source(source)
+            })?;
+        let Some(state) = backend.device_states.get_mut(slot) else {
+            return Err(Error::new(
+                BackendErrorCode::RendererCreateFailed,
+                "Vello device state disappeared before renderer creation",
+            ));
+        };
+        state.renderer = Some(renderer);
     }
     Ok(())
 }

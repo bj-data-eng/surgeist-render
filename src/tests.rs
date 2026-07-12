@@ -11332,6 +11332,98 @@ fn surface_suspend_and_resume_preserve_attachment_kind() {
     assert_eq!(error.code(), ErrorCode::SurfaceCreateFailed);
 }
 
+#[test]
+fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
+    let mut owner = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut foreign_renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut foreign_surface = owner.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+
+    if let SurfaceBackend::Headless {
+        device_identity, ..
+    } = &mut foreign_surface.backend
+    {
+        device_identity.mark_stale_for_test();
+    }
+
+    let error = foreign_renderer
+        .render(&mut foreign_surface, &Scene::new(), Parameters::default())
+        .expect_err("foreign surfaces must fail before indexing their device slot");
+
+    assert_surface_identity_mismatch(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        SurfaceIdentityMismatchKind::ForeignRenderer,
+    );
+    let error = foreign_renderer
+        .read_headless(&foreign_surface)
+        .expect_err("foreign readback must fail before indexing the device slot");
+    assert_surface_identity_mismatch(
+        error,
+        RuntimeOperation::SurfaceReadback,
+        SurfaceIdentityMismatchKind::ForeignRenderer,
+    );
+    let error = foreign_renderer
+        .resume_surface(&mut foreign_surface, Attachment::Headless)
+        .expect_err("foreign resume must fail before indexing the device slot");
+    assert_surface_identity_mismatch(
+        error,
+        RuntimeOperation::SurfaceResume,
+        SurfaceIdentityMismatchKind::ForeignRenderer,
+    );
+
+    let mut stale_surface = owner.create_headless(Size::new(4.0, 4.0), 1.0).unwrap();
+    let SurfaceBackend::Headless {
+        device_identity, ..
+    } = &mut stale_surface.backend
+    else {
+        panic!("the test environment must provide a device-backed headless surface");
+    };
+    device_identity.mark_stale_for_test();
+
+    let error = owner
+        .render(&mut stale_surface, &Scene::new(), Parameters::default())
+        .expect_err("stale rendering must fail before indexing the device slot");
+    assert_surface_identity_mismatch(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+    );
+    let error = owner
+        .read_headless(&stale_surface)
+        .expect_err("stale readback must fail before indexing the device slot");
+    assert_surface_identity_mismatch(
+        error,
+        RuntimeOperation::SurfaceReadback,
+        SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+    );
+    let error = owner
+        .resume_surface(&mut stale_surface, Attachment::Headless)
+        .expect_err("stale resume must fail before indexing the device slot");
+    assert_surface_identity_mismatch(
+        error,
+        RuntimeOperation::SurfaceResume,
+        SurfaceIdentityMismatchKind::StaleDeviceGeneration,
+    );
+}
+
+fn assert_surface_identity_mismatch(
+    error: Error,
+    operation: RuntimeOperation,
+    kind: SurfaceIdentityMismatchKind,
+) {
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                operation,
+                RuntimeCapabilityUnavailableReason::SurfaceIdentityMismatch { kind },
+            )
+            .unwrap()
+        )
+    );
+}
+
 #[cfg(not(all(feature = "render-web", target_arch = "wasm32")))]
 #[test]
 fn unsupported_web_canvas_attachment_reports_target_requirement() {
