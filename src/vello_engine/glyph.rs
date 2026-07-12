@@ -5,12 +5,23 @@ use std::io::Cursor;
 
 use png::{BitDepth, ColorType, Transformations};
 use skrifa::{
-    GlyphId, MetadataProvider,
-    bitmap::{BitmapData, BitmapGlyph},
+    GlyphId, MetadataProvider, Tag,
+    bitmap::MaskData,
     color::{Brush as ColorBrush, ColorGlyph, ColorPainter, CompositeMode},
     instance::{LocationRef, Size},
     outline::{DrawSettings, OutlinePen},
-    raw::{TableProvider, tables::cpal::Cpal, types::BoundingBox},
+    raw::{
+        FontData as RawFontData, ReadError as RawReadError, TableProvider,
+        tables::{
+            bitmap::{
+                BitmapContent as RawBitmapContent, BitmapData as RawBitmapData,
+                BitmapDataFormat as RawBitmapDataFormat, BitmapLocation,
+                BitmapMetrics as RawBitmapMetrics, BitmapSize, IndexSubtable,
+            },
+            cpal::Cpal,
+        },
+        types::BoundingBox,
+    },
 };
 
 use crate::{
@@ -39,6 +50,26 @@ pub(crate) enum BitmapEncoding {
     Bgra,
     Png,
     PackedMask,
+}
+
+struct SelectedBitmap<'a> {
+    width: u32,
+    height: u32,
+    data: SelectedBitmapData<'a>,
+}
+
+enum SelectedBitmapData<'a> {
+    Bgra(&'a [u8]),
+    Png {
+        data: &'a [u8],
+        expected_dimensions: Option<(u32, u32)>,
+    },
+    Mask {
+        bpp: u8,
+        is_packed: bool,
+        data: &'a [u8],
+    },
+    Unsupported,
 }
 
 impl<'a> ValidatedGlyphRun<'a> {
@@ -83,7 +114,6 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
         .table_data(skrifa::Tag::new(b"COLR"))
         .map(|_| font.colr().map_err(|_| font_data_error(font_data)))
         .transpose()?;
-    let bitmaps = font.bitmap_strikes();
     let outlines = font.outline_glyphs();
     let mut representations = Vec::with_capacity(run.glyphs().len());
 
@@ -101,7 +131,9 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
                 .ok_or_else(|| font_data_error(font_data))?;
             preflight_color_glyph(&color, &outlines, &cpal, run.size(), font_data)?;
             SelectedGlyphRepresentation::Colr
-        } else if let Some(bitmap) = bitmaps.glyph_for_size(Size::new(run.size()), glyph_id) {
+        } else if let Some(bitmap) =
+            select_bitmap(&font, Size::new(run.size()), glyph_id, font_data)?
+        {
             preflight_selected_image_head(&font, font_data)?;
             SelectedGlyphRepresentation::Bitmap(preflight_bitmap(&bitmap, font_data)?)
         } else {
@@ -192,10 +224,446 @@ fn preflight_color_glyph(
     Ok(())
 }
 
-fn preflight_bitmap(bitmap: &BitmapGlyph<'_>, font_data: &FontData) -> Result<BitmapEncoding> {
-    let pixel_count = checked_pixel_count(bitmap.width, bitmap.height, font_data)?;
+fn select_bitmap<'a>(
+    font: &skrifa::FontRef<'a>,
+    size: Size,
+    glyph_id: GlyphId,
+    font_data: &FontData,
+) -> Result<Option<SelectedBitmap<'a>>> {
+    if font_has_table(font, Tag::new(b"sbix")) {
+        return select_sbix_bitmap(font, size, glyph_id, font_data);
+    }
+    if bitmap_table_pair_is_present(font, Tag::new(b"CBLC"), Tag::new(b"CBDT"), font_data)? {
+        let cblc = font.cblc().map_err(|_| font_data_error(font_data))?;
+        let cbdt = font.cbdt().map_err(|_| font_data_error(font_data))?;
+        return select_bdt_bitmap(
+            cblc.bitmap_sizes(),
+            cblc.num_sizes(),
+            cblc.offset_data(),
+            size,
+            glyph_id,
+            font_data,
+            |location| cbdt.data(location),
+        );
+    }
+    if bitmap_table_pair_is_present(font, Tag::new(b"EBLC"), Tag::new(b"EBDT"), font_data)? {
+        let eblc = font.eblc().map_err(|_| font_data_error(font_data))?;
+        let ebdt = font.ebdt().map_err(|_| font_data_error(font_data))?;
+        return select_bdt_bitmap(
+            eblc.bitmap_sizes(),
+            eblc.num_sizes(),
+            eblc.offset_data(),
+            size,
+            glyph_id,
+            font_data,
+            |location| ebdt.data(location),
+        );
+    }
+    Ok(None)
+}
+
+fn font_has_table(font: &skrifa::FontRef<'_>, tag: Tag) -> bool {
+    font.table_directory()
+        .table_records()
+        .iter()
+        .any(|record| record.tag() == tag)
+}
+
+fn bitmap_table_pair_is_present(
+    font: &skrifa::FontRef<'_>,
+    location_tag: Tag,
+    data_tag: Tag,
+    font_data: &FontData,
+) -> Result<bool> {
+    match (
+        font_has_table(font, location_tag),
+        font_has_table(font, data_tag),
+    ) {
+        (false, false) => Ok(false),
+        (true, true) => Ok(true),
+        _ => Err(font_data_error(font_data)),
+    }
+}
+
+fn select_sbix_bitmap<'a>(
+    font: &skrifa::FontRef<'a>,
+    size: Size,
+    glyph_id: GlyphId,
+    font_data: &FontData,
+) -> Result<Option<SelectedBitmap<'a>>> {
+    let sbix = font.sbix().map_err(|_| font_data_error(font_data))?;
+    let strike_count = checked_count(sbix.num_strikes(), 0, font_data)?;
+    let strikes = sbix.strikes();
+    if strikes.len() != strike_count {
+        return Err(font_data_error(font_data));
+    }
+
+    let requested_size = size.ppem().unwrap_or(f32::MAX);
+    let mut best = None;
+    for index in 0..strike_count {
+        let strike = strikes.get(index).map_err(|_| font_data_error(font_data))?;
+        let strike_size = f32::from(strike.ppem());
+        if !should_consider_bitmap_strike(strike_size, requested_size, best.as_ref()) {
+            continue;
+        }
+        if let Some(bitmap) = select_sbix_glyph(&strike, glyph_id, font_data)? {
+            best = Some((strike_size, bitmap));
+        }
+    }
+    Ok(best.map(|(_, bitmap)| bitmap))
+}
+
+fn select_sbix_glyph<'a>(
+    strike: &skrifa::raw::tables::sbix::Strike<'a>,
+    glyph_id: GlyphId,
+    font_data: &FontData,
+) -> Result<Option<SelectedBitmap<'a>>> {
+    let Some(glyph) = strike
+        .glyph_data(glyph_id)
+        .map_err(|_| font_data_error(font_data))?
+    else {
+        return Ok(None);
+    };
+    if glyph.graphic_type() != Tag::new(b"png ") {
+        return Ok(Some(SelectedBitmap {
+            width: 0,
+            height: 0,
+            data: SelectedBitmapData::Unsupported,
+        }));
+    }
+    Ok(Some(SelectedBitmap {
+        width: 0,
+        height: 0,
+        data: SelectedBitmapData::Png {
+            data: glyph.data(),
+            expected_dimensions: None,
+        },
+    }))
+}
+
+fn select_bdt_bitmap<'a, F>(
+    bitmap_sizes: &'a [BitmapSize],
+    declared_size_count: u32,
+    offset_data: RawFontData<'a>,
+    size: Size,
+    glyph_id: GlyphId,
+    font_data: &FontData,
+    bitmap_data: F,
+) -> Result<Option<SelectedBitmap<'a>>>
+where
+    F: Fn(&BitmapLocation) -> std::result::Result<RawBitmapData<'a>, RawReadError>,
+{
+    if bitmap_sizes.len() != checked_count(declared_size_count, 0, font_data)? {
+        return Err(font_data_error(font_data));
+    }
+
+    let requested_size = size.ppem().unwrap_or(f32::MAX);
+    let mut best = None;
+    for bitmap_size in bitmap_sizes {
+        let strike_size = f32::from(bitmap_size.ppem_y());
+        if !should_consider_bitmap_strike(strike_size, requested_size, best.as_ref()) {
+            continue;
+        }
+        let Some(location) = select_bdt_location(bitmap_size, offset_data, glyph_id, font_data)?
+        else {
+            continue;
+        };
+        let data = bitmap_data(&location).map_err(|_| font_data_error(font_data))?;
+        let bitmap = selected_bdt_glyph(bitmap_size, data, font_data)?;
+        best = Some((strike_size, bitmap));
+    }
+    Ok(best.map(|(_, bitmap)| bitmap))
+}
+
+fn should_consider_bitmap_strike(
+    candidate_size: f32,
+    requested_size: f32,
+    best: Option<&(f32, SelectedBitmap<'_>)>,
+) -> bool {
+    let Some((best_size, _)) = best else {
+        return true;
+    };
+    (candidate_size >= requested_size && candidate_size < *best_size)
+        || (*best_size < requested_size && candidate_size > *best_size)
+}
+
+fn select_bdt_location(
+    bitmap_size: &BitmapSize,
+    offset_data: RawFontData<'_>,
+    glyph_id: GlyphId,
+    font_data: &FontData,
+) -> Result<Option<BitmapLocation>> {
+    if !(bitmap_size.start_glyph_index()..=bitmap_size.end_glyph_index()).contains(&glyph_id) {
+        return Ok(None);
+    }
+    let subtable_list = bitmap_size
+        .index_subtable_list(offset_data)
+        .map_err(|_| font_data_error(font_data))?;
+    let records = subtable_list.index_subtable_records();
+    if records.len() != checked_count(bitmap_size.number_of_index_subtables(), 0, font_data)? {
+        return Err(font_data_error(font_data));
+    }
+    let Some(record) = records.iter().find(|record| {
+        (record.first_glyph_index()..=record.last_glyph_index()).contains(&glyph_id)
+    }) else {
+        return Ok(None);
+    };
+    let subtable = record
+        .index_subtable(subtable_list.offset_data())
+        .map_err(|_| font_data_error(font_data))?;
+    let glyph_index =
+        checked_glyph_index(glyph_id, record.first_glyph_index().to_u32(), font_data)?;
+    selected_bdt_location_for_subtable(bitmap_size, &subtable, glyph_id, glyph_index, font_data)
+}
+
+fn selected_bdt_location_for_subtable(
+    bitmap_size: &BitmapSize,
+    subtable: &IndexSubtable<'_>,
+    glyph_id: GlyphId,
+    glyph_index: usize,
+    font_data: &FontData,
+) -> Result<Option<BitmapLocation>> {
+    let mut location = BitmapLocation {
+        bit_depth: bitmap_size.bit_depth(),
+        ..BitmapLocation::default()
+    };
+    match subtable {
+        IndexSubtable::Format1(subtable) => {
+            let offsets = subtable.sbit_offsets();
+            let start = checked_offset(
+                subtable.image_data_offset(),
+                offsets
+                    .get(glyph_index)
+                    .ok_or_else(|| font_data_error(font_data))?
+                    .get(),
+                font_data,
+            )?;
+            let end = checked_offset(
+                subtable.image_data_offset(),
+                offsets
+                    .get(
+                        glyph_index
+                            .checked_add(1)
+                            .ok_or_else(|| font_data_error(font_data))?,
+                    )
+                    .ok_or_else(|| font_data_error(font_data))?
+                    .get(),
+                font_data,
+            )?;
+            location.format = subtable.image_format();
+            location.data_offset = start;
+            location.data_size = end
+                .checked_sub(start)
+                .ok_or_else(|| font_data_error(font_data))?;
+        }
+        IndexSubtable::Format2(subtable) => {
+            location.format = subtable.image_format();
+            location.data_size =
+                usize::try_from(subtable.image_size()).map_err(|_| font_data_error(font_data))?;
+            location.data_offset = checked_indexed_offset(
+                subtable.image_data_offset(),
+                glyph_index,
+                subtable.image_size(),
+                font_data,
+            )?;
+            location.metrics = Some(
+                *subtable
+                    .big_metrics()
+                    .first()
+                    .ok_or_else(|| font_data_error(font_data))?,
+            );
+        }
+        IndexSubtable::Format3(subtable) => {
+            let offsets = subtable.sbit_offsets();
+            let start = checked_offset(
+                subtable.image_data_offset(),
+                u32::from(
+                    offsets
+                        .get(glyph_index)
+                        .ok_or_else(|| font_data_error(font_data))?
+                        .get(),
+                ),
+                font_data,
+            )?;
+            let end = checked_offset(
+                subtable.image_data_offset(),
+                u32::from(
+                    offsets
+                        .get(
+                            glyph_index
+                                .checked_add(1)
+                                .ok_or_else(|| font_data_error(font_data))?,
+                        )
+                        .ok_or_else(|| font_data_error(font_data))?
+                        .get(),
+                ),
+                font_data,
+            )?;
+            location.format = subtable.image_format();
+            location.data_offset = start;
+            location.data_size = end
+                .checked_sub(start)
+                .ok_or_else(|| font_data_error(font_data))?;
+        }
+        IndexSubtable::Format4(subtable) => {
+            let glyphs = subtable.glyph_array();
+            if glyphs.len() != checked_count(subtable.num_glyphs(), 1, font_data)? {
+                return Err(font_data_error(font_data));
+            }
+            let glyph_index =
+                glyphs.binary_search_by(|entry| entry.glyph_id().to_u32().cmp(&glyph_id.to_u32()));
+            let Ok(glyph_index) = glyph_index else {
+                return Ok(None);
+            };
+            let start = usize::from(
+                glyphs
+                    .get(glyph_index)
+                    .ok_or_else(|| font_data_error(font_data))?
+                    .sbit_offset(),
+            );
+            let end = usize::from(
+                glyphs
+                    .get(
+                        glyph_index
+                            .checked_add(1)
+                            .ok_or_else(|| font_data_error(font_data))?,
+                    )
+                    .ok_or_else(|| font_data_error(font_data))?
+                    .sbit_offset(),
+            );
+            location.format = subtable.image_format();
+            location.data_offset = start;
+            location.data_size = end
+                .checked_sub(start)
+                .ok_or_else(|| font_data_error(font_data))?;
+        }
+        IndexSubtable::Format5(subtable) => {
+            let glyphs = subtable.glyph_array();
+            if glyphs.len() != checked_count(subtable.num_glyphs(), 0, font_data)? {
+                return Err(font_data_error(font_data));
+            }
+            let glyph_index =
+                glyphs.binary_search_by(|entry| entry.get().to_u32().cmp(&glyph_id.to_u32()));
+            let Ok(glyph_index) = glyph_index else {
+                return Ok(None);
+            };
+            location.format = subtable.image_format();
+            location.data_size =
+                usize::try_from(subtable.image_size()).map_err(|_| font_data_error(font_data))?;
+            location.data_offset = checked_indexed_offset(
+                subtable.image_data_offset(),
+                glyph_index,
+                subtable.image_size(),
+                font_data,
+            )?;
+            location.metrics = Some(
+                *subtable
+                    .big_metrics()
+                    .first()
+                    .ok_or_else(|| font_data_error(font_data))?,
+            );
+        }
+    }
+    Ok(Some(location))
+}
+
+fn selected_bdt_glyph<'a>(
+    bitmap_size: &BitmapSize,
+    bitmap_data: RawBitmapData<'a>,
+    font_data: &FontData,
+) -> Result<SelectedBitmap<'a>> {
+    let (width, height) = match bitmap_data.metrics {
+        RawBitmapMetrics::Small(metrics) => {
+            (u32::from(metrics.width()), u32::from(metrics.height()))
+        }
+        RawBitmapMetrics::Big(metrics) => (u32::from(metrics.width()), u32::from(metrics.height())),
+    };
+    let data = match (bitmap_size.bit_depth(), bitmap_data.content) {
+        (32, RawBitmapContent::Data(RawBitmapDataFormat::Png, data)) => SelectedBitmapData::Png {
+            data,
+            expected_dimensions: Some((width, height)),
+        },
+        (32, RawBitmapContent::Data(RawBitmapDataFormat::ByteAligned, data)) => {
+            SelectedBitmapData::Bgra(data)
+        }
+        (1 | 2 | 4 | 8, RawBitmapContent::Data(RawBitmapDataFormat::ByteAligned, data)) => {
+            SelectedBitmapData::Mask {
+                bpp: bitmap_size.bit_depth(),
+                is_packed: false,
+                data,
+            }
+        }
+        (1 | 2 | 4 | 8, RawBitmapContent::Data(RawBitmapDataFormat::BitAligned, data)) => {
+            SelectedBitmapData::Mask {
+                bpp: bitmap_size.bit_depth(),
+                is_packed: true,
+                data,
+            }
+        }
+        (1 | 2 | 4 | 8 | 32, _) => SelectedBitmapData::Unsupported,
+        _ => return Err(font_data_error(font_data)),
+    };
+    Ok(SelectedBitmap {
+        width,
+        height,
+        data,
+    })
+}
+
+fn checked_count(count: u32, extra: usize, font_data: &FontData) -> Result<usize> {
+    usize::try_from(count)
+        .ok()
+        .and_then(|count| count.checked_add(extra))
+        .ok_or_else(|| font_data_error(font_data))
+}
+
+fn checked_glyph_index(
+    glyph_id: GlyphId,
+    first_glyph_id: u32,
+    font_data: &FontData,
+) -> Result<usize> {
+    usize::try_from(glyph_id.to_u32())
+        .ok()
+        .and_then(|glyph_id| {
+            usize::try_from(first_glyph_id)
+                .ok()
+                .and_then(|first_glyph_id| glyph_id.checked_sub(first_glyph_id))
+        })
+        .ok_or_else(|| font_data_error(font_data))
+}
+
+fn checked_offset(base: u32, offset: u32, font_data: &FontData) -> Result<usize> {
+    usize::try_from(base)
+        .ok()
+        .and_then(|base| {
+            usize::try_from(offset)
+                .ok()
+                .and_then(|offset| base.checked_add(offset))
+        })
+        .ok_or_else(|| font_data_error(font_data))
+}
+
+fn checked_indexed_offset(
+    base: u32,
+    index: usize,
+    stride: u32,
+    font_data: &FontData,
+) -> Result<usize> {
+    usize::try_from(base)
+        .ok()
+        .and_then(|base| {
+            usize::try_from(stride)
+                .ok()
+                .and_then(|stride| index.checked_mul(stride))
+                .and_then(|offset| base.checked_add(offset))
+        })
+        .ok_or_else(|| font_data_error(font_data))
+}
+
+fn preflight_bitmap(bitmap: &SelectedBitmap<'_>, font_data: &FontData) -> Result<BitmapEncoding> {
     match &bitmap.data {
-        BitmapData::Bgra(data) => {
+        SelectedBitmapData::Bgra(data) => {
+            let pixel_count = checked_pixel_count(bitmap.width, bitmap.height, font_data)?;
             let expected = pixel_count
                 .checked_mul(4)
                 .ok_or_else(|| font_data_error(font_data))?;
@@ -204,35 +672,48 @@ fn preflight_bitmap(bitmap: &BitmapGlyph<'_>, font_data: &FontData) -> Result<Bi
             }
             Ok(BitmapEncoding::Bgra)
         }
-        BitmapData::Png(data) => preflight_png(data, bitmap.width, bitmap.height, font_data),
-        BitmapData::Mask(mask) => {
-            if !matches!(mask.bpp, 1 | 2 | 4 | 8) {
+        SelectedBitmapData::Png {
+            data,
+            expected_dimensions,
+        } => preflight_png(data, *expected_dimensions, font_data),
+        SelectedBitmapData::Mask {
+            bpp,
+            is_packed,
+            data,
+        } => {
+            let pixel_count = checked_pixel_count(bitmap.width, bitmap.height, font_data)?;
+            if !matches!(bpp, 1 | 2 | 4 | 8) {
                 return Err(font_data_error(font_data));
             }
-            if !mask.is_packed {
+            if !is_packed {
                 return Err(unsupported_image_error());
             }
             let bits = pixel_count
-                .checked_mul(usize::from(mask.bpp))
+                .checked_mul(usize::from(*bpp))
                 .ok_or_else(|| font_data_error(font_data))?;
             let expected = bits
                 .checked_add(7)
                 .and_then(|bits| bits.checked_div(8))
                 .ok_or_else(|| font_data_error(font_data))?;
-            if mask.data.len() != expected {
+            if data.len() != expected {
                 return Err(font_data_error(font_data));
             }
-            mask.decode(bitmap.width, bitmap.height)
-                .map_err(|_| font_data_error(font_data))?;
+            MaskData {
+                bpp: *bpp,
+                is_packed: *is_packed,
+                data,
+            }
+            .decode(bitmap.width, bitmap.height)
+            .map_err(|_| font_data_error(font_data))?;
             Ok(BitmapEncoding::PackedMask)
         }
+        SelectedBitmapData::Unsupported => Err(unsupported_image_error()),
     }
 }
 
 fn preflight_png(
     data: &[u8],
-    width: u32,
-    height: u32,
+    expected_dimensions: Option<(u32, u32)>,
     font_data: &FontData,
 ) -> Result<BitmapEncoding> {
     let mut decoder = png::Decoder::new(Cursor::new(data));
@@ -248,7 +729,9 @@ fn preflight_png(
     let info = reader
         .next_frame(output.as_mut_slice())
         .map_err(|_| font_data_error(font_data))?;
-    if info.width != width || info.height != height {
+    if let Some((width, height)) = expected_dimensions
+        && (info.width != width || info.height != height)
+    {
         return Err(font_data_error(font_data));
     }
     if output_color_type != (ColorType::Rgba, BitDepth::Eight) {

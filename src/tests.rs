@@ -227,6 +227,80 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
     assert_font_data_error(&png_error, font_data_value(&malformed_png_run).as_str());
     assert_no_glyph_encoding(&malformed_png_scene);
 
+    let short_header_font = FontData::try_from_bytes(ahem_sbix_font(png_without_height()), 0)
+        .expect("the short selected PNG header remains container-readable before glyph lowering");
+    let short_header_run = text_run_for(
+        short_header_font,
+        16.0,
+        Transform::identity(),
+        &bitmap_glyphs,
+    );
+    let mut short_header_scene = VelloScene::default();
+    let short_header_error = short_header_scene
+        .encode_text_run(&short_header_run)
+        .expect_err("a selected PNG without a readable height must not fall back to an outline");
+    assert_font_data_error(
+        &short_header_error,
+        font_data_value(&short_header_run).as_str(),
+    );
+    assert_no_glyph_encoding(&short_header_scene);
+
+    let malformed_sbix_font = FontData::try_from_bytes(
+        font_with_tables(
+            ahem_sbix_font(rgba_png()).as_slice(),
+            vec![(*b"sbix", vec![0])],
+        ),
+        0,
+    )
+    .expect("the malformed sbix table remains container-readable before glyph lowering");
+    let malformed_sbix_run = text_run_for(
+        malformed_sbix_font,
+        16.0,
+        Transform::identity(),
+        &bitmap_glyphs,
+    );
+    let mut malformed_sbix_scene = VelloScene::default();
+    let malformed_sbix_error = malformed_sbix_scene
+        .encode_text_run(&malformed_sbix_run)
+        .expect_err("a malformed selected sbix table must not fall back to an outline");
+    assert_font_data_error(
+        &malformed_sbix_error,
+        font_data_value(&malformed_sbix_run).as_str(),
+    );
+    assert_no_glyph_encoding(&malformed_sbix_scene);
+
+    let malformed_record_font =
+        FontData::try_from_bytes(ahem_sbix_font_with_truncated_selected_record(), 0).expect(
+            "the malformed selected sbix record remains container-readable before glyph lowering",
+        );
+    let malformed_record_run = text_run_for(
+        malformed_record_font,
+        16.0,
+        Transform::identity(),
+        &bitmap_glyphs,
+    );
+    let mut malformed_record_scene = VelloScene::default();
+    let malformed_record_error = malformed_record_scene
+        .encode_text_run(&malformed_record_run)
+        .expect_err("a malformed selected sbix record must not fall back to an outline");
+    assert_font_data_error(
+        &malformed_record_error,
+        font_data_value(&malformed_record_run).as_str(),
+    );
+    assert_no_glyph_encoding(&malformed_record_scene);
+
+    let no_bitmap_font =
+        FontData::try_from_bytes(ahem_sbix_font_without_selected_glyph(rgba_png()), 0)
+            .expect("the sbix font without the selected bitmap remains container-readable");
+    let no_bitmap_run = text_run_for(no_bitmap_font, 16.0, Transform::identity(), &bitmap_glyphs);
+    let mut no_bitmap_scene = VelloScene::default();
+    no_bitmap_scene
+        .encode_text_run(&no_bitmap_run)
+        .expect("a valid bitmap strike without the selected glyph must use the outline");
+    let no_bitmap_encoding = no_bitmap_scene.encoding_for_test();
+    assert_eq!(no_bitmap_encoding.resources.glyph_runs.len(), 1);
+    assert_eq!(no_bitmap_encoding.resources.glyphs.len(), 1);
+
     let malformed_colr_head_bytes = ahem_color_font(valid_cpal());
     let malformed_colr_head_font = FontData::try_from_bytes(
         font_with_tables(
@@ -558,6 +632,38 @@ fn invalid_cpal() -> Vec<u8> {
 }
 
 fn ahem_sbix_font(png: Vec<u8>) -> Vec<u8> {
+    ahem_sbix_font_with_selected_bitmap(png, true)
+}
+
+fn ahem_sbix_font_without_selected_glyph(png: Vec<u8>) -> Vec<u8> {
+    ahem_sbix_font_with_selected_bitmap(png, false)
+}
+
+fn ahem_sbix_font_with_truncated_selected_record() -> Vec<u8> {
+    let glyph_count = ahem_num_glyphs();
+    let bitmap_offset = 4 + (glyph_count + 1) * 4;
+    let bitmap_end = bitmap_offset + 7;
+    let mut sbix = Vec::new();
+    push_be_u16(&mut sbix, 1);
+    push_be_u16(&mut sbix, 1);
+    push_be_u32(&mut sbix, 1);
+    push_be_u32(&mut sbix, 12);
+    push_be_u16(&mut sbix, 16);
+    push_be_u16(&mut sbix, 72);
+    for glyph_id in 0..=glyph_count {
+        let offset = if glyph_id <= AHEM_GLYPH_X as usize {
+            bitmap_offset
+        } else {
+            bitmap_end
+        };
+        push_be_u32(&mut sbix, offset.try_into().unwrap());
+    }
+    sbix.extend_from_slice(&[0; 7]);
+
+    ahem_with_tables(vec![(*b"sbix", sbix)])
+}
+
+fn ahem_sbix_font_with_selected_bitmap(png: Vec<u8>, selected_bitmap: bool) -> Vec<u8> {
     let glyph_count = ahem_num_glyphs();
     let glyph_record_len = 8 + png.len();
     let bitmap_offset = 4 + (glyph_count + 1) * 4;
@@ -570,7 +676,9 @@ fn ahem_sbix_font(png: Vec<u8>) -> Vec<u8> {
     push_be_u16(&mut sbix, 16);
     push_be_u16(&mut sbix, 72);
     for glyph_id in 0..=glyph_count {
-        let offset = if glyph_id <= AHEM_GLYPH_X as usize {
+        let offset = if glyph_id < AHEM_GLYPH_X as usize
+            || selected_bitmap && glyph_id == AHEM_GLYPH_X as usize
+        {
             bitmap_offset
         } else {
             bitmap_end
@@ -606,6 +714,12 @@ fn grayscale_png() -> Vec<u8> {
 fn malformed_png() -> Vec<u8> {
     let mut png = rgba_png();
     png.truncate(png.len() - 12);
+    png
+}
+
+fn png_without_height() -> Vec<u8> {
+    let mut png = rgba_png();
+    png.truncate(20);
     png
 }
 
