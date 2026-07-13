@@ -144,7 +144,7 @@ pub(crate) fn validate_layer(layer: &Layer) -> Result<()> {
         validate_filter(filter)?;
     }
     if let Some(backdrop_filter) = layer.backdrop_filter() {
-        backdrop_filter.ensure_supported_for_planning(Capabilities::VELLO_0_9)?;
+        backdrop_filter.ensure_supported_for_planning(Capabilities::CURRENT)?;
     }
     Ok(())
 }

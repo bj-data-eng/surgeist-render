@@ -1404,7 +1404,7 @@ fn validate_backdrop_clip(clip: Option<&ClipInput>) -> Result<()> {
     let Some(clip) = clip else {
         return Ok(());
     };
-    clip.ensure_supported(Capabilities::VELLO_0_9)
+    clip.ensure_supported(Capabilities::CURRENT)
 }
 
 #[derive(Clone, Debug, PartialEq)]

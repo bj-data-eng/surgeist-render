@@ -625,13 +625,6 @@ impl From<ImageHandle> for ResourceReference {
 }
 
 /// A recorded compute dispatch with only symbolic resource bindings.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 dispatch IR is retained for T4 transaction-owned encoding."
-    )
-)]
 pub(super) struct DispatchIntent {
     phase: RasterPhase,
     kernel: RasterKernel,
@@ -640,38 +633,17 @@ pub(super) struct DispatchIntent {
     indirect: Option<IndirectDispatch>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 indirect-dispatch data is consumed by the later checked realization stage."
-    )
-)]
 pub(super) struct IndirectDispatch {
     buffer: BufferHandle,
     offset: u64,
 }
 
 /// A typed resource request, not a live allocation.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 resource intents are deliberately held for later private resource ownership."
-    )
-)]
 pub(super) enum ResourceIntent {
     Buffer(BufferIntent),
     Image(ImageIntent),
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 buffer intent metadata is consumed by the later checked realization stage."
-    )
-)]
 pub(super) struct BufferIntent {
     resource: BufferHandle,
     role: BufferRole,
@@ -738,24 +710,10 @@ pub(super) enum ImageRole {
 }
 
 /// A runtime-resource-free sequence of uploads, compute dispatches, and symbolic releases.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 recordings are intentionally staged until T4 owns checked encoding."
-    )
-)]
 pub(super) struct Recording {
     commands: Vec<RasterCommand>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 recording commands are intentionally consumed by the later realization stage."
-    )
-)]
 pub(super) enum RasterCommand {
     UploadScene {
         buffer: BufferHandle,

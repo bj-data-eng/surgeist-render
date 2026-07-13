@@ -148,7 +148,7 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    pub const VELLO_0_9: Self = Self {
+    pub const CURRENT: Self = Self {
         geometry_targets: GeometryTargetCapabilities {
             rect_fill_stroke: true,
             rounded_rect_fill_stroke: true,
@@ -202,7 +202,7 @@ impl Capabilities {
             materialized_blur_filter_execution: true,
             materialized_drop_shadow_filter_execution: true,
             filter_region_outset_planning: true,
-            cpu_reference_blur_fallback: true,
+            cpu_reference_blur_fallback: false,
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,

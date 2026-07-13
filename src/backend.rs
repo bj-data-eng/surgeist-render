@@ -1,7 +1,6 @@
 #[cfg(test)]
 use super::gpu_transaction::{
-    AfterInternalVelloSubmitCheckpointForTest, InternalVelloPayload,
-    InternalVelloSubmissionObservationForTest,
+    AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
 #[cfg(any(
     feature = "render-window",
@@ -14,17 +13,17 @@ use super::surface::PresentedLifecycle;
 ))]
 use super::surface::PresentedSurface;
 use super::surface::{HeadlessResources, SurfaceBackend};
-#[cfg(test)]
 use super::vello_engine::{
-    ActiveVelloEncodingScope, EncodedVelloPass, PreparedVelloPass, TransactionEncodingState,
-    TransactionTargetIntent, VelloResourceManagerObservationForTest,
+    ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
+    TransactionTargetIntent, VelloEngineState, VelloResourceManager, scene::VelloScene,
 };
-use super::vello_engine::{VelloEngineState, VelloResourceManager};
+#[cfg(test)]
+use super::vello_engine::{PreparedVelloPass, VelloResourceManagerObservationForTest};
 use super::*;
 use super::{
     command::OffscreenBounds,
     geometry::physical_size,
-    gpu_transaction::{GpuOperationStage, GpuOperationTransaction},
+    gpu_transaction::{GpuOperationStage, GpuOperationTransaction, InternalVelloPayload},
     texture::{
         OffscreenTextureCache, OffscreenTextureHandle, TextureCacheKey, TextureDescriptor,
         TextureLifecycleStats, TextureUsageIntent, headless_texture_descriptor,
@@ -33,7 +32,6 @@ use super::{
 use std::{
     collections::{HashMap, VecDeque},
     fmt,
-    num::NonZeroUsize,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -92,8 +90,17 @@ fn record_offscreen_texture_acquire_for_test() {
 pub(crate) struct Backend {
     instance: wgpu::Instance,
     device_states: Vec<DeviceState>,
-    #[cfg(test)]
-    pub(crate) terminal_signal_after_renderer_creation: Option<DeviceSlotIdentity>,
+}
+
+struct InternalVelloRenderRequest<'a> {
+    identity: DeviceSlotIdentity,
+    operation: RuntimeOperation,
+    scene: &'a VelloScene,
+    target: &'a wgpu::TextureView,
+    target_extent: PhysicalSize,
+    base_color: Color,
+    antialiasing: Antialiasing,
+    target_usage: wgpu::TextureUsages,
 }
 
 pub(crate) struct DeviceState {
@@ -108,23 +115,8 @@ struct ReadyDeviceState {
     adapter: wgpu::Adapter,
     device: wgpu::Device,
     queue: wgpu::Queue,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 establishes the per-device checked engine owner that T6 will encode through."
-        )
-    )]
     engine: VelloEngineState,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 establishes the per-device resource owner that T6 will adopt leases into."
-        )
-    )]
     resources: VelloResourceManager,
-    renderer: Option<vello::Renderer>,
     #[cfg(test)]
     drop_witness: Arc<()>,
 }
@@ -160,7 +152,6 @@ pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
     queue: &'ready wgpu::Queue,
     engine: &'ready VelloEngineState,
     resources: &'ready VelloResourceManager,
-    renderer: Option<&'ready vello::Renderer>,
     drop_witness: ReadyDeviceStateDropWitnessForTest,
 }
 
@@ -192,10 +183,6 @@ impl ReadyDeviceStateBorrowForTest<'_> {
         self.resources.observation_for_test()
     }
 
-    pub(crate) fn external_renderer_for_test(&self) -> Option<&vello::Renderer> {
-        self.renderer
-    }
-
     pub(crate) fn drop_witness_for_test(&self) -> ReadyDeviceStateDropWitnessForTest {
         self.drop_witness.clone()
     }
@@ -210,7 +197,6 @@ impl ReadyDeviceState {
             queue: &self.queue,
             engine: &self.engine,
             resources: &self.resources,
-            renderer: self.renderer.as_ref(),
             drop_witness: ReadyDeviceStateDropWitnessForTest::from_ready_bundle(&self.drop_witness),
         }
     }
@@ -240,7 +226,6 @@ impl DeviceState {
                 queue,
                 engine,
                 resources,
-                renderer: None,
                 #[cfg(test)]
                 drop_witness: Arc::new(()),
             })),
@@ -619,8 +604,6 @@ impl Backend {
                 backend_options,
             }),
             device_states: Vec::new(),
-            #[cfg(test)]
-            terminal_signal_after_renderer_creation: None,
         }
     }
 
@@ -776,32 +759,67 @@ impl Backend {
         create_headless_texture(&ready.device, physical_size, format)
     }
 
-    fn render_vello_to_texture(
+    async fn render_internal_vello_to_texture(
         &mut self,
-        identity: DeviceSlotIdentity,
-        operation: RuntimeOperation,
-        scene: &vello::Scene,
-        target: &wgpu::TextureView,
-        parameters: &vello::RenderParams,
+        transaction: GpuOperationTransaction,
+        request: InternalVelloRenderRequest<'_>,
     ) -> Result<()> {
+        let prepared = request.scene.prepare_raster(RasterParameters::try_new(
+            request.target_extent,
+            peniko::Color::from(request.base_color),
+            request.antialiasing,
+        )?)?;
         let ready = self.ready_state_mut(
-            identity,
-            operation,
+            request.identity,
+            request.operation,
             BackendErrorCode::RenderFailed,
-            "Vello device resources are unavailable before rendering",
+            "internal Vello device resources are unavailable before rendering",
         )?;
-        let renderer = ready.renderer.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "Vello renderer disappeared before rendering",
-            )
-        })?;
-        renderer
-            .render_to_texture(&ready.device, &ready.queue, scene, target, parameters)
-            .map_err(|source| {
-                Error::new(vello_error_code(&source), vello_error_message(&source))
-                    .with_source(source)
-            })
+        let mut command_encoder =
+            ready
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("Surgeist internal Vello frame encoder"),
+                });
+        let mut scope = ActiveVelloEncodingScope::begin(&ready.device);
+        let encoded: EncodedVelloPass = {
+            let mut encoding = TransactionEncodingState::new(
+                &mut scope,
+                &ready.queue,
+                &mut command_encoder,
+                request.target,
+                TransactionTargetIntent::new(
+                    request.target_extent,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    request.target_usage,
+                ),
+            );
+            match prepared.encode_into(&ready.engine, &mut encoding) {
+                Ok(encoded) => encoded,
+                Err(failure) => {
+                    let (error, aborted) = failure.into_error_and_aborted_resources();
+                    ready.resources.record_aborted_resources(aborted);
+                    return Err(error);
+                }
+            }
+        };
+        let (lease, logical_pass) = encoded.into_resources_and_logical_pass();
+        let lease = match scope.finish_with_lease(lease).await {
+            Ok(lease) => lease,
+            Err(failure) => {
+                let (error, aborted) = failure.into_error_and_aborted_resources();
+                ready.resources.record_aborted_resources(aborted);
+                return Err(error);
+            }
+        };
+        let payload = InternalVelloPayload::new(
+            command_encoder.finish(),
+            ready.resources.pending_commit(lease),
+            logical_pass,
+        );
+        transaction
+            .submit_internal_vello(&ready.queue, payload, request.operation)
+            .await
     }
 
     #[cfg(any(
@@ -1197,7 +1215,7 @@ impl Backend {
             return false;
         };
         state.observe_terminal();
-        state.ready().is_none_or(|ready| ready.renderer.is_none())
+        state.ready().is_none()
     }
 
     #[cfg(test)]
@@ -1221,26 +1239,6 @@ impl Backend {
             .get(identity.slot())
             .filter(|state| state.generation == identity.generation)
             .and_then(|state| state.signal.active_generation_for_test())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn arm_terminal_signal_after_renderer_creation_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-    ) {
-        self.terminal_signal_after_renderer_creation = Some(identity);
-    }
-
-    #[cfg(test)]
-    fn inject_terminal_signal_after_renderer_creation_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-    ) {
-        if self.terminal_signal_after_renderer_creation != Some(identity) {
-            return;
-        }
-        self.terminal_signal_after_renderer_creation = None;
-        self.signal_loss_for_test(identity, DeviceLossReason::Destroyed);
     }
 
     #[cfg(test)]
@@ -1549,11 +1547,11 @@ pub(crate) fn offscreen_local_scene_texture_descriptor(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn render_vello_local_scene_to_offscreen_texture(
+pub(crate) fn render_internal_vello_local_scene_to_offscreen_texture(
     context: Option<OffscreenRenderGpuContext<'_>>,
     options: Options,
     cache: &mut OffscreenTextureResourceCache,
-    scene: &vello::Scene,
+    scene: &VelloScene,
     request: OffscreenLocalSceneRenderRequest,
 ) -> Result<OffscreenRenderedTextureLease> {
     let descriptor =
@@ -1564,12 +1562,6 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
             "offscreen Vello local scene rendering requires an available wgpu device context",
         ));
     };
-    ensure_vello_renderer(
-        context.backend,
-        options,
-        context.device_identity,
-        RuntimeOperation::SurfaceRendering,
-    )?;
     let resource = {
         let (device, _) = context
             .backend
@@ -1577,17 +1569,27 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
         cache.acquire(device, request.bounds, descriptor)?
     };
     let render_start = Instant::now();
-    let result = context.backend.render_vello_to_texture(
+    let transaction = context.backend.begin_gpu_operation(
         context.device_identity,
+        GpuOperationStage::Render,
         RuntimeOperation::SurfaceRendering,
-        scene,
-        &resource.view,
-        &vello_render_params(
-            request.parameters,
-            resource.target.descriptor().physical_size(),
-            options.antialiasing(),
-        ),
-    );
+    )?;
+    let result = pollster::block_on(context.backend.render_internal_vello_to_texture(
+        transaction,
+        InternalVelloRenderRequest {
+            identity: context.device_identity,
+            operation: RuntimeOperation::SurfaceRendering,
+            scene,
+            target: &resource.view,
+            target_extent: resource.target.descriptor().physical_size(),
+            base_color: request.parameters.base_color,
+            antialiasing: options.antialiasing(),
+            target_usage: resource.target.descriptor().wgpu_usage(),
+        },
+    ));
+    context
+        .backend
+        .observe_device_terminal(context.device_identity);
     if let Err(error) = result {
         cache.release_resource(resource)?;
         return Err(error);
@@ -1603,12 +1605,19 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
     })
 }
 
-pub(crate) fn render_vello_surface(
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct RenderTimings {
+    pub(crate) render_time: Duration,
+    pub(crate) present_time: Duration,
+}
+
+pub(crate) async fn render_internal_vello_surface(
     backend: &mut Backend,
-    options: Options,
+    transaction: GpuOperationTransaction,
     surface: &mut Surface,
-    scene: &vello::Scene,
+    scene: &VelloScene,
     parameters: Parameters,
+    antialiasing: Antialiasing,
 ) -> Result<RenderTimings> {
     match &mut surface.backend {
         SurfaceBackend::ContractOnly { .. } => Ok(RenderTimings::default()),
@@ -1620,34 +1629,35 @@ pub(crate) fn render_vello_surface(
             if physical_size.width() == 0 || physical_size.height() == 0 {
                 return Ok(RenderTimings::default());
             }
-            ensure_vello_renderer(
-                backend,
-                options,
-                *device_identity,
-                RuntimeOperation::SurfaceRendering,
-            )?;
             if matches!(resources, HeadlessResources::Pending) {
-                let (next_texture, next_view) = backend.create_headless_surface_texture(
+                let (texture, view) = backend.create_headless_surface_texture(
                     *device_identity,
                     *physical_size,
                     surface.options.format,
                 )?;
-                *resources = HeadlessResources::Ready {
-                    texture: next_texture,
-                    view: next_view,
-                };
+                *resources = HeadlessResources::Ready { texture, view };
             }
             let HeadlessResources::Ready { view, .. } = resources else {
-                unreachable!("headless resources should be ready after allocation");
+                unreachable!("headless resources must be ready before internal raster encoding");
             };
             let render_start = Instant::now();
-            backend.render_vello_to_texture(
-                *device_identity,
-                RuntimeOperation::SurfaceRendering,
-                scene,
-                view,
-                &vello_render_params(parameters, *physical_size, options.antialiasing()),
-            )?;
+            backend
+                .render_internal_vello_to_texture(
+                    transaction,
+                    InternalVelloRenderRequest {
+                        identity: *device_identity,
+                        operation: RuntimeOperation::SurfaceRendering,
+                        scene,
+                        target: view,
+                        target_extent: *physical_size,
+                        base_color: parameters.base_color,
+                        antialiasing,
+                        target_usage: wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_SRC,
+                    },
+                )
+                .await?;
             Ok(RenderTimings {
                 render_time: render_start.elapsed(),
                 present_time: Duration::ZERO,
@@ -1661,7 +1671,6 @@ pub(crate) fn render_vello_surface(
             surface: native,
             device_identity,
             lifecycle,
-            ..
         } => {
             match lifecycle {
                 PresentedLifecycle::ResizePending {
@@ -1678,26 +1687,25 @@ pub(crate) fn render_vello_surface(
                 }
                 PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
             }
-            ensure_vello_renderer(
-                backend,
-                options,
-                *device_identity,
-                RuntimeOperation::SurfaceRendering,
-            )?;
+
             let resizing = lifecycle.resize_state();
             let render_start = Instant::now();
-            backend.render_vello_to_texture(
-                *device_identity,
-                RuntimeOperation::SurfaceRendering,
-                scene,
-                &native.target_view,
-                &vello::RenderParams {
-                    width: native.config.width,
-                    height: native.config.height,
-                    base_color: parameters.base_color.into(),
-                    antialiasing_method: options.antialiasing().into(),
-                },
-            )?;
+            backend
+                .render_internal_vello_to_texture(
+                    transaction,
+                    InternalVelloRenderRequest {
+                        identity: *device_identity,
+                        operation: RuntimeOperation::SurfaceRendering,
+                        scene,
+                        target: &native.target_view,
+                        target_extent: PhysicalSize::new(native.config.width, native.config.height),
+                        base_color: parameters.base_color,
+                        antialiasing,
+                        target_usage: wgpu::TextureUsages::STORAGE_BINDING
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                    },
+                )
+                .await?;
             let render_time = render_start.elapsed();
 
             let present_start = Instant::now();
@@ -1741,7 +1749,6 @@ pub(crate) fn render_vello_surface(
                     ));
                 }
             };
-
             let (device, queue) =
                 backend.device_queue(*device_identity, RuntimeOperation::SurfaceRendering)?;
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1763,112 +1770,6 @@ pub(crate) fn render_vello_surface(
             })
         }
     }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct RenderTimings {
-    pub(crate) render_time: Duration,
-    pub(crate) present_time: Duration,
-}
-
-pub(crate) fn ensure_vello_renderer(
-    backend: &mut Backend,
-    options: Options,
-    device_identity: DeviceSlotIdentity,
-    operation: RuntimeOperation,
-) -> Result<()> {
-    if !backend.has_device_slot(device_identity) {
-        return Err(Error::new(
-            BackendErrorCode::RendererCreateFailed,
-            "Vello device slot is unavailable",
-        ));
-    }
-    if let Some(error) = backend.terminal_error(device_identity, operation) {
-        return Err(error);
-    }
-    let renderer_is_ready = backend
-        .ready_state_mut(
-            device_identity,
-            operation,
-            BackendErrorCode::RendererCreateFailed,
-            "Vello device resources are unavailable before renderer creation",
-        )?
-        .renderer
-        .is_some();
-    if !renderer_is_ready {
-        let renderer = {
-            let ready = backend.ready_state_mut(
-                device_identity,
-                operation,
-                BackendErrorCode::RendererCreateFailed,
-                "Vello device resources are unavailable before renderer creation",
-            )?;
-            vello::Renderer::new(&ready.device, vello_renderer_options(options))
-        };
-        #[cfg(test)]
-        backend.inject_terminal_signal_after_renderer_creation_for_test(device_identity);
-        if let Some(error) = backend.terminal_error(device_identity, operation) {
-            return Err(error);
-        }
-        let renderer = renderer.map_err(|source| {
-            Error::new(
-                BackendErrorCode::RendererCreateFailed,
-                "failed to create Vello renderer",
-            )
-            .with_source(source)
-        })?;
-        backend
-            .ready_state_mut(
-                device_identity,
-                operation,
-                BackendErrorCode::RendererCreateFailed,
-                "Vello device resources are unavailable before renderer creation",
-            )?
-            .renderer = Some(renderer);
-    }
-    Ok(())
-}
-
-pub(crate) fn vello_renderer_options(options: Options) -> vello::RendererOptions {
-    vello::RendererOptions {
-        use_cpu: false,
-        antialiasing_support: vello_aa_support(options.antialiasing()),
-        num_init_threads: NonZeroUsize::new(1),
-        ..vello::RendererOptions::default()
-    }
-}
-
-pub(crate) fn vello_error_code(error: &vello::Error) -> BackendErrorCode {
-    match error {
-        vello::Error::WgpuErrorFromScope(wgpu::Error::OutOfMemory { .. }) => {
-            BackendErrorCode::SurfaceOutOfMemory
-        }
-        _ => BackendErrorCode::RenderFailed,
-    }
-}
-
-pub(crate) fn vello_error_message(error: &vello::Error) -> &'static str {
-    match vello_error_code(error) {
-        BackendErrorCode::SurfaceOutOfMemory => "rendering exhausted GPU memory",
-        _ => "failed to render scene",
-    }
-}
-
-pub(crate) fn vello_render_params(
-    parameters: Parameters,
-    physical_size: PhysicalSize,
-    antialiasing: Antialiasing,
-) -> vello::RenderParams {
-    vello::RenderParams {
-        base_color: parameters.base_color.into(),
-        width: physical_size.width(),
-        height: physical_size.height(),
-        antialiasing_method: antialiasing.into(),
-    }
-}
-
-pub(crate) fn vello_aa_support(antialiasing: Antialiasing) -> vello::AaSupport {
-    [vello::AaConfig::from(antialiasing)].into_iter().collect()
 }
 
 pub(crate) fn create_headless_texture(
@@ -1988,14 +1889,4 @@ pub(crate) fn read_texture_rgba(
         size: physical_size,
         rgba,
     })
-}
-
-impl From<Antialiasing> for vello::AaConfig {
-    fn from(antialiasing: Antialiasing) -> Self {
-        match antialiasing {
-            Antialiasing::Area => Self::Area,
-            Antialiasing::Msaa8 => Self::Msaa8,
-            Antialiasing::Msaa16 => Self::Msaa16,
-        }
-    }
 }

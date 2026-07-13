@@ -6,12 +6,12 @@ use super::{
     },
     geometry::{expand_rect, offset_radii},
     paint::PaintKind,
-    validation::*,
+    vello_engine::scene::VelloScene,
     *,
 };
 
-pub(crate) fn encode_vello_scene(commands: &RenderCommands, scale: f64) -> Result<vello::Scene> {
-    let mut encoded = vello::Scene::new();
+pub(crate) fn encode_vello_scene(commands: &RenderCommands, scale: f64) -> Result<VelloScene> {
+    let mut encoded = VelloScene::default();
     encode_vello_commands(
         &commands.commands,
         &mut encoded,
@@ -22,7 +22,7 @@ pub(crate) fn encode_vello_scene(commands: &RenderCommands, scale: f64) -> Resul
 
 fn encode_vello_commands(
     commands: &[RenderCommand],
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
 ) -> Result<()> {
     for command in commands {
@@ -63,7 +63,7 @@ fn encode_vello_commands(
 }
 
 fn encode_fill(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     shape: &RenderShape,
     paint: &RenderPaint,
@@ -74,7 +74,7 @@ fn encode_fill(
 }
 
 fn encode_solid_fill(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     shape: &RenderShape,
     brush: &peniko::Brush,
@@ -123,7 +123,7 @@ fn encode_solid_fill(
 }
 
 fn encode_stroke(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     shape: &RenderStrokeShape,
     stroke: &RenderStroke,
@@ -148,7 +148,7 @@ fn encode_stroke(
 }
 
 fn encode_shadow(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     shape: &ShadowShape,
     shadow: &RenderShadow,
@@ -196,7 +196,7 @@ fn encode_shadow(
 }
 
 fn encode_non_uniform_rounded_shadow(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     rect: Rect,
     radii: Radii,
@@ -256,7 +256,7 @@ fn encode_non_uniform_rounded_shadow(
 }
 
 fn encode_image(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     image: &Image,
     rect: Rect,
@@ -286,7 +286,7 @@ pub(crate) fn image_data(image: &Image) -> peniko::ImageData {
 }
 
 fn encode_text_run(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     transform: kurbo::Affine,
     font: &FontRef<'static>,
     size: f32,
@@ -294,29 +294,18 @@ fn encode_text_run(
     paint: &TextPaint,
     glyphs: &[TextGlyph],
 ) -> Result<()> {
-    let Some(data) = font.data.as_ref().map(|data| &data.data) else {
-        return Err(invalid_input(
-            "text run font data is required for rendering prepared glyphs",
-        ));
-    };
-    let brush = glyph_paint_brush(paint.fill())?;
-    scene
-        .draw_glyphs(data)
-        .font_size(size)
-        .transform(transform * kurbo::Affine::from(run_transform))
-        .brush(&brush)
-        .draw(
-            peniko::Fill::NonZero,
-            glyphs.iter().map(|glyph| vello::Glyph {
-                id: glyph.id(),
-                x: glyph.x(),
-                y: glyph.y(),
-            }),
-        );
-    Ok(())
+    let run = TextRun::try_new(
+        font.clone(),
+        size,
+        run_transform,
+        paint.clone(),
+        glyphs,
+        TextRunBounds::unspecified(),
+    )?;
+    scene.encode_text_run_with_transform(&run, transform)
 }
 
-fn encode_layer_start(scene: &mut vello::Scene, layer: &NormalizedLayer, transform: kurbo::Affine) {
+fn encode_layer_start(scene: &mut VelloScene, layer: &NormalizedLayer, transform: kurbo::Affine) {
     let blend = vello_blend(layer.blend);
     let alpha = layer.opacity.clamp(0.0, 1.0);
     let use_clip = layer.isolation == LayerIsolation::ClipOnly;
@@ -388,7 +377,7 @@ fn encode_layer_start(scene: &mut vello::Scene, layer: &NormalizedLayer, transfo
 }
 
 fn push_vello_layer(
-    scene: &mut vello::Scene,
+    scene: &mut VelloScene,
     use_clip: bool,
     fill: peniko::Fill,
     blend: peniko::BlendMode,

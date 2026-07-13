@@ -1,8 +1,10 @@
 // Copyright 2022 the Vello Authors
 // SPDX-License-Identifier: Apache-2.0 OR MIT
 
-use peniko::Fill;
-use vello_encoding::{Encoding, Glyph, GlyphRun, Patch, Transform as VelloTransform};
+use peniko::{BrushRef, Fill, ImageBrushRef};
+use vello_encoding::{
+    DrawBeginClip, Encoding, Glyph, GlyphRun, Patch, Transform as VelloTransform,
+};
 
 use crate::{BackendErrorCode, Error, Result, TextRun, encode::glyph_paint_brush};
 
@@ -20,19 +22,165 @@ pub(crate) enum VelloRasterScenario {
     LargePathAndClip,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T2 private Vello scene state is intentionally staged for T7 cutover."
-    )
-)]
 #[derive(Default)]
 pub(crate) struct VelloScene {
     encoding: Encoding,
 }
 
 impl VelloScene {
+    pub(crate) fn fill<'a>(
+        &mut self,
+        style: Fill,
+        transform: kurbo::Affine,
+        brush: impl Into<BrushRef<'a>>,
+        brush_transform: Option<kurbo::Affine>,
+        shape: &impl kurbo::Shape,
+    ) {
+        self.encoding
+            .encode_transform(VelloTransform::from_kurbo(&transform));
+        self.encoding.encode_fill_style(style);
+        if self.encoding.encode_shape(shape, true) {
+            if let Some(brush_transform) = brush_transform
+                && self
+                    .encoding
+                    .encode_transform(VelloTransform::from_kurbo(&(transform * brush_transform)))
+            {
+                self.encoding.swap_last_path_tags();
+            }
+            self.encoding.encode_brush(brush, 1.0);
+        }
+    }
+
+    pub(crate) fn stroke<'a>(
+        &mut self,
+        style: &kurbo::Stroke,
+        transform: kurbo::Affine,
+        brush: impl Into<BrushRef<'a>>,
+        brush_transform: Option<kurbo::Affine>,
+        shape: &impl kurbo::Shape,
+    ) {
+        if style.width == 0.0 {
+            return;
+        }
+        self.encoding
+            .encode_transform(VelloTransform::from_kurbo(&transform));
+        let encoded_stroke = self.encoding.encode_stroke_style(style);
+        debug_assert!(encoded_stroke, "non-zero strokes must encode");
+        let encoded_shape = if style.dash_pattern.is_empty() {
+            self.encoding.encode_shape(shape, false)
+        } else {
+            let dashed = kurbo::dash(
+                shape.path_elements(0.01),
+                style.dash_offset,
+                &style.dash_pattern,
+            )
+            .collect::<Vec<_>>();
+            self.encoding
+                .encode_path_elements(dashed.into_iter(), false)
+        };
+        if encoded_shape {
+            if let Some(brush_transform) = brush_transform
+                && self
+                    .encoding
+                    .encode_transform(VelloTransform::from_kurbo(&(transform * brush_transform)))
+            {
+                self.encoding.swap_last_path_tags();
+            }
+            self.encoding.encode_brush(brush, 1.0);
+        }
+    }
+
+    pub(crate) fn draw_image<'a>(
+        &mut self,
+        image: impl Into<ImageBrushRef<'a>>,
+        transform: kurbo::Affine,
+    ) {
+        let image = image.into();
+        let rect = kurbo::Rect::new(
+            0.0,
+            0.0,
+            f64::from(image.image.width),
+            f64::from(image.image.height),
+        );
+        self.fill(Fill::NonZero, transform, image, None, &rect);
+    }
+
+    pub(crate) fn push_layer(
+        &mut self,
+        fill: Fill,
+        blend: peniko::BlendMode,
+        alpha: f32,
+        transform: kurbo::Affine,
+        clip: &impl kurbo::Shape,
+    ) {
+        self.push_layer_inner(
+            DrawBeginClip::new(blend, alpha.clamp(0.0, 1.0)),
+            fill,
+            transform,
+            clip,
+        );
+    }
+
+    pub(crate) fn push_clip_layer(
+        &mut self,
+        fill: Fill,
+        transform: kurbo::Affine,
+        clip: &impl kurbo::Shape,
+    ) {
+        self.push_layer_inner(DrawBeginClip::clip(), fill, transform, clip);
+    }
+
+    pub(crate) fn pop_layer(&mut self) {
+        self.encoding.encode_end_clip();
+    }
+
+    pub(crate) fn draw_blurred_rounded_rect(
+        &mut self,
+        transform: kurbo::Affine,
+        rect: kurbo::Rect,
+        brush: peniko::Color,
+        radius: f64,
+        std_dev: f64,
+    ) {
+        let kernel_size = 2.5 * std_dev;
+        self.draw_blurred_rounded_rect_in(
+            &rect.inflate(kernel_size, kernel_size),
+            transform,
+            rect,
+            brush,
+            radius,
+            std_dev,
+        );
+    }
+
+    pub(crate) fn draw_blurred_rounded_rect_in(
+        &mut self,
+        shape: &impl kurbo::Shape,
+        transform: kurbo::Affine,
+        rect: kurbo::Rect,
+        brush: peniko::Color,
+        radius: f64,
+        std_dev: f64,
+    ) {
+        self.encoding
+            .encode_transform(VelloTransform::from_kurbo(&transform));
+        self.encoding.encode_fill_style(Fill::NonZero);
+        if self.encoding.encode_shape(shape, true) {
+            let brush_transform =
+                VelloTransform::from_kurbo(&(transform.pre_translate(rect.center().to_vec2())));
+            if self.encoding.encode_transform(brush_transform) {
+                self.encoding.swap_last_path_tags();
+            }
+            self.encoding.encode_blurred_rounded_rect(
+                brush,
+                rect.width() as f32,
+                rect.height() as f32,
+                radius as f32,
+                std_dev as f32,
+            );
+        }
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -42,21 +190,27 @@ impl VelloScene {
     )]
     pub(crate) fn encode_text_run(&mut self, run: &TextRun<'_>) -> Result<()> {
         let validated = preflight_selected_glyphs(run)?;
-        self.append_validated_glyph_run(validated)
+        self.append_validated_glyph_run(validated, kurbo::Affine::IDENTITY)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T3 scene-owned preparation is staged until T4 checked encoding and T7 cutover."
-        )
-    )]
+    pub(crate) fn encode_text_run_with_transform(
+        &mut self,
+        run: &TextRun<'_>,
+        transform: kurbo::Affine,
+    ) -> Result<()> {
+        let validated = preflight_selected_glyphs(run)?;
+        self.append_validated_glyph_run(validated, transform)
+    }
+
     pub(crate) fn prepare_raster(&self, parameters: RasterParameters) -> Result<PreparedVelloPass> {
         raster::prepare(&self.encoding, parameters)
     }
 
-    fn append_validated_glyph_run(&mut self, validated: ValidatedGlyphRun<'_>) -> Result<()> {
+    fn append_validated_glyph_run(
+        &mut self,
+        validated: ValidatedGlyphRun<'_>,
+        transform: kurbo::Affine,
+    ) -> Result<()> {
         if let Some(representation) = validated
             .representations()
             .iter()
@@ -94,7 +248,9 @@ impl VelloScene {
         let index = self.encoding.resources.glyph_runs.len();
         self.encoding.resources.glyph_runs.push(GlyphRun {
             font: validated.font_data().data.clone(),
-            transform: VelloTransform::from_kurbo(&kurbo::Affine::from(validated.transform())),
+            transform: VelloTransform::from_kurbo(
+                &(transform * kurbo::Affine::from(validated.transform())),
+            ),
             glyph_transform: None,
             brush_transform: None,
             font_size: validated.size(),
@@ -113,6 +269,22 @@ impl VelloScene {
         self.encoding.encode_brush(&brush, 1.0);
         self.encoding.force_next_transform_and_style();
         Ok(())
+    }
+
+    fn push_layer_inner(
+        &mut self,
+        parameters: DrawBeginClip,
+        fill: Fill,
+        transform: kurbo::Affine,
+        clip: &impl kurbo::Shape,
+    ) {
+        self.encoding
+            .encode_transform(VelloTransform::from_kurbo(&transform));
+        self.encoding.encode_fill_style(fill);
+        if !self.encoding.encode_shape(clip, true) {
+            self.encoding.encode_empty_shape();
+        }
+        self.encoding.encode_begin_clip(parameters);
     }
 
     #[cfg(test)]

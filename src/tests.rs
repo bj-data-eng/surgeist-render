@@ -2603,18 +2603,6 @@ fn resource_cache_budget_zero_disables_idle_retention() {
 }
 
 #[test]
-fn vello_renderer_options_force_gpu_execution() {
-    let options = Options::new().with_antialiasing(Antialiasing::Msaa8);
-    let vello_options = vello_renderer_options(options);
-
-    assert!(!vello_options.use_cpu);
-    assert_eq!(
-        vello_options.antialiasing_support,
-        vello_aa_support(Antialiasing::Msaa8)
-    );
-}
-
-#[test]
 fn text_run_bounds_distinguish_unspecified_empty_and_ink() {
     let unspecified = TextRunBounds::unspecified();
     let empty = TextRunBounds::empty();
@@ -2731,7 +2719,7 @@ fn scene_lowering_preserves_authored_text_run_bounds() {
     };
     assert_eq!(*scene_bounds, bounds);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let [
         command::RenderCommand::TextRun {
             bounds: normalized_bounds,
@@ -4573,7 +4561,7 @@ fn resource_only_drop_shadow_filtered_image_paint_stays_rejected() {
     let paint = FilteredImagePaint::try_new(resource, filters).unwrap();
 
     let unsupported = paint
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("resource-only filtered image paint is not materialized bytes");
 
     assert_eq!(
@@ -4717,7 +4705,7 @@ fn css_drop_shadow_rejects_non_solid_shadow_paint() {
 
 #[test]
 fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_effects() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
 
     assert!(
         capabilities
@@ -4740,7 +4728,7 @@ fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_e
             .supports_filter_region_outset_planning()
     );
     assert!(
-        capabilities
+        !capabilities
             .filters()
             .supports_cpu_reference_blur_fallback()
     );
@@ -4875,7 +4863,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         ])
         .unwrap(),
     );
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     assert_eq!(normalized.stats().shadows, 2);
     assert!(matches!(
         normalized.commands.as_slice(),
@@ -4890,7 +4878,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         Rect::new(0.0, 0.0, 8.0, 8.0),
         Shadow::try_inset(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
     );
-    let inset_error = inset_scene.normalize(Capabilities::VELLO_0_9).unwrap_err();
+    let inset_error = inset_scene.normalize(Capabilities::CURRENT).unwrap_err();
     assert_eq!(
         inset_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -4915,7 +4903,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
     .unwrap();
     let mut text_scene = Scene::new();
     text_scene.text_shadow_run(TextShadowRun::try_new(text_run, text_shadows).unwrap());
-    let text_error = text_scene.normalize(Capabilities::VELLO_0_9).unwrap_err();
+    let text_error = text_scene.normalize(Capabilities::CURRENT).unwrap_err();
     assert_eq!(
         text_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -4944,7 +4932,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Paint::gradient(gradient)).unwrap(),
     );
     let non_solid_error = non_solid_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .unwrap_err();
     assert_eq!(
         non_solid_error.unsupported_primitive(),
@@ -5054,7 +5042,7 @@ fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_i
 
 #[test]
 fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
 
     assert!(
         capabilities
@@ -5138,7 +5126,7 @@ fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
             PrimitiveOperation::BackdropExecution,
         ),
     ] {
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("later compositor execution should remain unsupported");
 
@@ -5151,7 +5139,7 @@ fn sequence10_guardrail_unfiltered_images_stay_on_direct_sampling_path() {
     let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 0, 0, 255])).unwrap();
     let mut scene = Scene::new();
     scene.image(image, Rect::new(0.0, 0.0, 2.0, 2.0), ImageFit::Stretch);
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(scene.stats().images, 1);
     assert_eq!(scene.stats().layers, 0);
@@ -5203,7 +5191,7 @@ fn normalize_single_layer_error(layer: Layer) -> Error {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
     });
     scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("Sequence 10 guardrail layer should reject during normalization")
 }
 
@@ -5716,7 +5704,7 @@ fn offscreen_texture_allocation_uses_explicit_bounded_layer_descriptor() {
 fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
     let mut cache = OffscreenTextureResourceCache::new();
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
-    let mut scene = vello::Scene::new();
+    let mut scene = VelloScene::default();
     scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::IDENTITY,
@@ -5725,7 +5713,7 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
         &kurbo::Rect::new(0.0, 0.0, 1.0, 1.0),
     );
 
-    let error = render_vello_local_scene_to_offscreen_texture(
+    let error = render_internal_vello_local_scene_to_offscreen_texture(
         None,
         Options::default(),
         &mut cache,
@@ -5744,7 +5732,7 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
 fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let bounds = command::OffscreenBounds::try_new(Rect::new(12.0, 8.0, 2.0, 2.0)).unwrap();
-    let mut scene = vello::Scene::new();
+    let mut scene = VelloScene::default();
     scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::IDENTITY,
@@ -5757,7 +5745,7 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
     let options = renderer.options();
     let mut cache = OffscreenTextureResourceCache::new();
     let Some(context) = renderer.default_offscreen_render_context() else {
-        let error = render_vello_local_scene_to_offscreen_texture(
+        let error = render_internal_vello_local_scene_to_offscreen_texture(
             None, options, &mut cache, &scene, request,
         )
         .expect_err("no GPU machines should report the explicit diagnostic");
@@ -5765,7 +5753,7 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
         return;
     };
 
-    let output = render_vello_local_scene_to_offscreen_texture(
+    let output = render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
         &mut cache,
@@ -5816,11 +5804,11 @@ fn offscreen_local_scene_texture_descriptor_rejects_bgra8_for_vello_target() {
 fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
     let mut cache = OffscreenTextureResourceCache::new();
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
-    let scene = vello::Scene::new();
+    let scene = VelloScene::default();
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Bgra8, Parameters::default());
 
-    let error = render_vello_local_scene_to_offscreen_texture(
+    let error = render_internal_vello_local_scene_to_offscreen_texture(
         None,
         Options::default(),
         &mut cache,
@@ -5876,7 +5864,7 @@ fn offscreen_nested_layer_opacity_stays_on_direct_vello_surface_path() {
             scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
         });
     });
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer {
         layer: outer,
         children,
@@ -5916,7 +5904,7 @@ fn offscreen_nested_layer_opacity_stays_on_direct_vello_surface_path() {
 fn offscreen_reuses_resources_across_repeated_bounded_requests() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 3.0, 2.0)).unwrap();
-    let mut scene = vello::Scene::new();
+    let mut scene = VelloScene::default();
     scene.fill(
         peniko::Fill::NonZero,
         kurbo::Affine::IDENTITY,
@@ -5929,14 +5917,14 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
     let options = renderer.options();
     let mut cache = OffscreenTextureResourceCache::new();
     let Some(context) = renderer.default_offscreen_render_context() else {
-        let error = render_vello_local_scene_to_offscreen_texture(
+        let error = render_internal_vello_local_scene_to_offscreen_texture(
             None, options, &mut cache, &scene, request,
         )
         .expect_err("no GPU machines should report the explicit diagnostic");
         assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
         return;
     };
-    let first = render_vello_local_scene_to_offscreen_texture(
+    let first = render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
         &mut cache,
@@ -5949,7 +5937,7 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
     first.release(&mut cache).unwrap();
 
     let context = renderer.default_offscreen_render_context().unwrap();
-    let second = render_vello_local_scene_to_offscreen_texture(
+    let second = render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
         &mut cache,
@@ -5976,7 +5964,7 @@ fn offscreen_no_allocation_when_layer_isolation_is_unnecessary() {
     scene.layer(Layer::new(), |scene| {
         scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
     });
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected layer command");
     };
@@ -6001,7 +5989,7 @@ fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_b
             Color::try_rgba(0.0, 1.0, 0.0, 1.0).unwrap(),
         );
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     assert!(
         normalized
             .commands
@@ -6047,7 +6035,7 @@ fn sequence9_guardrail_layer_pass_plans_keep_finite_bounds_without_offscreen_tex
         );
     });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer {
         layer: outer,
         children,
@@ -6201,7 +6189,7 @@ fn sequence9_guardrail_layer_mask_and_filter_inputs_keep_typed_diagnostics() {
         });
 
         let error = scene
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .expect_err("Sequence 9 must not execute mask or layer effect semantics");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -6223,7 +6211,7 @@ fn scene_normalization_rejects_unsupported_commands_before_encoding() {
     );
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("unsupported masks should fail during normalization");
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
 }
@@ -6241,7 +6229,7 @@ fn scene_normalization_preserves_stats() {
             );
         });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let stats = normalized.stats();
 
     assert_eq!(stats.commands, 3);
@@ -6781,7 +6769,7 @@ fn image_repeat_plan_maps_css_repeat_axes() {
     ];
 
     for (repeat, expected) in cases {
-        let plan = ImageRepeatPlan::try_new(repeat, Capabilities::VELLO_0_9).unwrap();
+        let plan = ImageRepeatPlan::try_new(repeat, Capabilities::CURRENT).unwrap();
         assert_eq!(plan.repeat(), repeat);
         assert_eq!(plan.mode(), expected);
     }
@@ -6795,7 +6783,7 @@ fn image_repeat_plan_resolves_tile_rects_inside_clip_rect() {
     )
     .unwrap();
 
-    let repeat_x = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::VELLO_0_9)
+    let repeat_x = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::CURRENT)
         .unwrap()
         .resolve(placement)
         .unwrap();
@@ -6810,7 +6798,7 @@ fn image_repeat_plan_resolves_tile_rects_inside_clip_rect() {
         ]
     );
 
-    let repeat_y = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_y(), Capabilities::VELLO_0_9)
+    let repeat_y = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_y(), Capabilities::CURRENT)
         .unwrap()
         .resolve(placement)
         .unwrap();
@@ -6834,7 +6822,7 @@ fn image_repeat_plan_includes_tiles_before_the_anchor_when_visible() {
     )
     .unwrap();
 
-    let repeated = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::VELLO_0_9)
+    let repeated = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::CURRENT)
         .unwrap()
         .resolve(placement)
         .unwrap();
@@ -6857,7 +6845,7 @@ fn image_repeat_plan_fast_forwards_from_huge_negative_tile_origin() {
     )
     .unwrap();
 
-    let repeated = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::VELLO_0_9)
+    let repeated = ImageRepeatPlan::try_new(BackgroundRepeat::repeat_x(), Capabilities::CURRENT)
         .unwrap()
         .resolve(placement)
         .unwrap();
@@ -6881,7 +6869,7 @@ fn image_repeat_plan_rejects_excessive_resolved_tile_count() {
     )
     .unwrap();
 
-    let error = ImageRepeatPlan::try_new(BackgroundRepeat::repeat(), Capabilities::VELLO_0_9)
+    let error = ImageRepeatPlan::try_new(BackgroundRepeat::repeat(), Capabilities::CURRENT)
         .unwrap()
         .resolve(placement)
         .expect_err("excessive repeat tiling must be rejected before allocation");
@@ -6918,7 +6906,7 @@ fn css_image_layer_normalizes_placement_repeat_and_attachment_together() {
     .unwrap()
     .resolve()
     .unwrap();
-    let repeat = ImageRepeatPlan::try_new(layer.repeat(), Capabilities::VELLO_0_9)
+    let repeat = ImageRepeatPlan::try_new(layer.repeat(), Capabilities::CURRENT)
         .unwrap()
         .resolve(placement)
         .unwrap();
@@ -6945,7 +6933,7 @@ fn css_image_layer_normalizes_placement_repeat_and_attachment_together() {
 fn image_repeat_plan_rejects_round_and_space_with_typed_diagnostics() {
     let round = ImageRepeatPlan::try_new(
         BackgroundRepeat::new(RepeatMode::Round, RepeatMode::Repeat),
-        Capabilities::VELLO_0_9,
+        Capabilities::CURRENT,
     )
     .expect_err("round repeat is not supported yet");
     assert_eq!(
@@ -6958,7 +6946,7 @@ fn image_repeat_plan_rejects_round_and_space_with_typed_diagnostics() {
 
     let space = ImageRepeatPlan::try_new(
         BackgroundRepeat::new(RepeatMode::NoRepeat, RepeatMode::Space),
-        Capabilities::VELLO_0_9,
+        Capabilities::CURRENT,
     )
     .expect_err("space repeat is not supported yet");
     assert_eq!(
@@ -7228,7 +7216,7 @@ fn materialized_filter_classification_does_not_make_resource_handles_bytes() {
     );
 
     let unsupported = paint
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("resource-only filtered image paint is still not materialized bytes");
     assert_eq!(
         unsupported.unsupported_primitive(),
@@ -7500,7 +7488,7 @@ fn filtered_image_paint_rejects_none_filter_list_and_reports_execution_boundary(
     .unwrap();
     let paint = FilteredImagePaint::try_new(resource, filters).unwrap();
     let unsupported = paint
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("filtered image paint execution belongs to filter phases");
     assert_eq!(
         unsupported.unsupported_primitive(),
@@ -7613,7 +7601,7 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
             );
         });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[1] else {
         panic!("expected backdrop layer command");
     };
@@ -7637,7 +7625,7 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
     assert_eq!(capture.filters(), &filters);
     assert_eq!(capture.capture_bounds().rect(), bounds.rect());
     assert_eq!(capture.source_commands().len(), 1);
-    let offscreen = Capabilities::VELLO_0_9.offscreen_pipeline();
+    let offscreen = Capabilities::CURRENT.offscreen_pipeline();
     assert!(offscreen.supports_bounded_backdrop_capture());
     assert!(offscreen.supports_materialized_backdrop_filter_execution());
     assert!(!offscreen.supports_backdrop_execution());
@@ -7666,7 +7654,7 @@ fn render_materializes_bounded_backdrop_capture_from_prior_siblings() {
         );
 
     let normalized = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect("backdrop planning should remain inspectable through normalization");
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[1] else {
         panic!("expected normalized backdrop layer");
@@ -7848,7 +7836,7 @@ fn backdrop_layer_normalization_preserves_command_order_for_capture_sources() {
         })
         .fill(Rect::new(4.0, 0.0, 1.0, 1.0), Color::BLACK);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, children } = &normalized.commands[1] else {
         panic!("expected backdrop layer command");
     };
@@ -7885,7 +7873,7 @@ fn nested_backdrop_layer_normalization_reports_typed_boundary() {
     });
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("nested backdrop capture is outside the normalization boundary");
 
     assert_eq!(
@@ -7914,7 +7902,7 @@ fn transformed_backdrop_layer_normalization_reports_typed_boundary() {
         .layer(backdrop, |_| {});
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("transformed backdrop capture needs coordinate-space reconciliation");
 
     assert_eq!(
@@ -7945,7 +7933,7 @@ fn repeated_top_level_backdrop_normalization_reports_typed_boundary() {
         .layer(second_backdrop, |_| {});
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("repeated top-level backdrop captures need staged source reconciliation");
 
     assert_eq!(
@@ -7997,7 +7985,7 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
     rounded_scene.layer(rounded_layer, |scene| {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
     });
-    let rounded_normalized = rounded_scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let rounded_normalized = rounded_scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer {
         layer: rounded_layer,
         ..
@@ -8014,7 +8002,7 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
     path_scene.layer(path_layer, |scene| {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
     });
-    let path_normalized = path_scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let path_normalized = path_scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer {
         layer: path_layer, ..
     } = &path_normalized.commands[0]
@@ -8063,7 +8051,7 @@ fn sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foregrou
             Color::try_rgba(0.0, 1.0, 0.0, 1.0).unwrap(),
         );
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, children } = &normalized.commands[1] else {
         panic!("expected bounded backdrop layer command");
     };
@@ -8223,7 +8211,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         PrimitiveOperation::BackdropExecution,
     );
     for unsupported in [unsupported_isolation, unsupported_broad] {
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("broad backdrop execution must stay diagnostic");
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -8244,7 +8232,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         scene.layer(backdrop_layer(), |_| {});
     });
     let nested = nested_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("nested backdrop capture crosses the bounded Sequence 13 path");
     assert_eq!(nested.unsupported_primitive(), Some(unsupported_broad));
     assert!(nested.message().contains("nested backdrop capture"));
@@ -8255,7 +8243,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         .layer(backdrop_layer(), |_| {})
         .layer(backdrop_layer(), |_| {});
     let repeated = repeated_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("repeated top-level backdrop capture remains bounded");
     assert_eq!(repeated.unsupported_primitive(), Some(unsupported_broad));
     assert!(
@@ -8272,7 +8260,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
         |_| {},
     );
     let transformed = transformed_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("transformed backdrop capture needs coordinate reconciliation");
     assert_eq!(transformed.unsupported_primitive(), Some(unsupported_broad));
     assert!(
@@ -8346,7 +8334,7 @@ fn sequence13_mix_blend_set_is_direct_vello_only_with_extra_modes_diagnostic() {
             );
         });
     });
-    let normalized = nested_scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = nested_scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer: outer, .. } = &normalized.commands[1] else {
         panic!("expected outer blend layer");
     };
@@ -8366,7 +8354,7 @@ fn sequence13_mix_blend_set_is_direct_vello_only_with_extra_modes_diagnostic() {
         PrimitiveFamily::Compositing,
         PrimitiveOperation::AdditionalMixBlendMode,
     );
-    let error = Capabilities::VELLO_0_9
+    let error = Capabilities::CURRENT
         .ensure_supported(unsupported)
         .expect_err("mix-blend modes outside BlendMode remain diagnostic");
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
@@ -8424,7 +8412,7 @@ fn sequence13_root_background_and_composite_boundaries_remain_typed() {
         PrimitiveFamily::Compositing,
         PrimitiveOperation::PorterDuffCompositeMode,
     );
-    let error = Capabilities::VELLO_0_9
+    let error = Capabilities::CURRENT
         .ensure_supported(porter_duff)
         .expect_err("Porter-Duff CSS operators stay behind a typed boundary");
     assert_eq!(error.unsupported_primitive(), Some(porter_duff));
@@ -8438,7 +8426,7 @@ fn sequence13_root_background_and_composite_boundaries_remain_typed() {
     ] {
         let stack = MaskLayerStack::single(MaskLayer::try_new(alpha_mask.clone(), mode).unwrap());
         let error = stack
-            .ensure_supported(Capabilities::VELLO_0_9)
+            .ensure_supported(Capabilities::CURRENT)
             .expect_err("non-default mask composites remain diagnostic");
         assert_eq!(
             error.unsupported_primitive(),
@@ -8452,7 +8440,7 @@ fn sequence13_root_background_and_composite_boundaries_remain_typed() {
 
 #[test]
 fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contract() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
     let offscreen = capabilities.offscreen_pipeline();
     assert!(offscreen.supports_direct_vello_opacity_isolation());
     assert!(offscreen.supports_direct_vello_blend_isolation());
@@ -8676,7 +8664,7 @@ fn mask_layer_stacks_validate_empty_lists_and_single_layer_diagnostics() {
         MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)), MaskMode::Alpha).unwrap(),
     );
     let error = stack
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("single authored alpha masks still stop at source execution");
 
     assert_eq!(
@@ -8698,7 +8686,7 @@ fn mask_layer_stacks_report_specific_luminance_and_composite_diagnostics() {
         .unwrap(),
     );
     let luminance_error = luminance
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("luminance mask stacks need a typed unsupported diagnostic");
     assert_eq!(
         luminance_error.unsupported_primitive(),
@@ -8717,7 +8705,7 @@ fn mask_layer_stacks_report_specific_luminance_and_composite_diagnostics() {
         .unwrap(),
     );
     let composite_error = composite
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("non-default mask composite modes are not implemented");
     assert_eq!(
         composite_error.unsupported_primitive(),
@@ -8737,7 +8725,7 @@ fn multi_layer_mask_stacks_report_composition_boundary_after_input_validation() 
     let stack = MaskLayerStack::try_new([MaskLayer::new(first), MaskLayer::new(second)]).unwrap();
 
     let error = stack
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("true multi-layer mask composition is not implemented");
     assert_eq!(
         error.unsupported_primitive(),
@@ -8760,7 +8748,7 @@ fn multi_layer_mask_stacks_report_composition_boundary_after_input_validation() 
     .unwrap();
 
     let error = unresolved
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("unresolved references remain a narrower diagnostic than composition");
     assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
@@ -8780,7 +8768,7 @@ fn mask_layer_stack_model_does_not_change_unmasked_render_paths() {
             scene.fill(Rect::new(1.0, 1.0, 2.0, 2.0), Color::BLACK);
         });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(scene.stats().fills, 2);
     assert_eq!(scene.stats().layers, 1);
@@ -8812,7 +8800,7 @@ fn clip_inputs_diagnose_unresolved_reference_boundaries() {
     let clip = ClipInput::reference(StyleResourceRef::try_new("#content-clip").unwrap());
 
     let error = clip
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("clip references must be root-resolved before render execution");
 
     assert_eq!(error.code(), ErrorCode::UnresolvedResource);
@@ -8827,9 +8815,9 @@ fn clip_inputs_diagnose_unresolved_reference_boundaries() {
 fn shape_clip_inputs_match_current_capability_contract() {
     let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0))).unwrap();
 
-    clip.ensure_supported(Capabilities::VELLO_0_9)
+    clip.ensure_supported(Capabilities::CURRENT)
         .expect("shape clips are supported by the current Vello layer path");
-    assert!(Capabilities::VELLO_0_9.masks_clips().supports_shape_clips());
+    assert!(Capabilities::CURRENT.masks_clips().supports_shape_clips());
 }
 
 #[test]
@@ -8857,7 +8845,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     );
 
     let alpha_error = alpha_mask
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("shape masks need a real rasterization path before execution");
     assert_eq!(
         alpha_error.unsupported_primitive(),
@@ -8868,7 +8856,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     );
 
     let image_error = image_mask
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("image-layer masks need materialized placement before execution");
     assert_eq!(
         image_error.unsupported_primitive(),
@@ -8879,7 +8867,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     );
 
     let transformed_error = transformed_mask
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("transformed authored masks need materialized execution inputs");
     assert_eq!(
         transformed_error.unsupported_primitive(),
@@ -8890,7 +8878,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     );
 
     let luminance_error = luminance_mask
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("luminance mask mode is not implemented in Task 1");
     assert_eq!(
         luminance_error.unsupported_primitive(),
@@ -8901,7 +8889,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
     );
 
     let reference_error = reference_mask
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("mask references must be root-resolved before render execution");
     assert_eq!(reference_error.code(), ErrorCode::UnresolvedResource);
     let diagnostic = reference_error
@@ -8946,7 +8934,7 @@ fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() 
     for (shape, expected_geometry) in clips {
         let normalized = ClipInput::try_shape(shape.clone())
             .unwrap()
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .unwrap();
         assert_eq!(normalized.geometry().kind(), &expected_geometry);
 
@@ -8989,7 +8977,7 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
         let filled_path = FilledPath::try_new(nested_rect_path(), fill_rule).unwrap();
         let normalized = ClipInput::try_filled_path(filled_path.clone())
             .unwrap()
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .unwrap();
         assert_eq!(
             normalized.geometry().kind(),
@@ -9021,7 +9009,7 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
 fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_inputs() {
     let clip = ClipInput::reference(StyleResourceRef::try_new("#clip").unwrap());
     let clip_error = clip
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("unresolved clip references remain root-owned");
     assert_eq!(clip_error.code(), ErrorCode::UnresolvedResource);
     assert_eq!(
@@ -9039,7 +9027,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
         .unwrap(),
     );
     let luminance_error = luminance_stack
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("luminance mask conversion is outside Sequence 12");
     assert_eq!(
         luminance_error.unsupported_primitive(),
@@ -9052,7 +9040,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
     let alpha_mask =
         MaskInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)), MaskMode::Alpha).unwrap();
     let source_error = MaskLayerStack::single(alpha_mask.clone())
-        .ensure_supported(Capabilities::VELLO_0_9)
+        .ensure_supported(Capabilities::CURRENT)
         .expect_err("authored alpha mask sources still need materialization before execution");
     assert_eq!(
         source_error.unsupported_primitive(),
@@ -9067,7 +9055,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
         MaskLayer::new(alpha_mask.clone()),
     ])
     .unwrap()
-    .ensure_supported(Capabilities::VELLO_0_9)
+    .ensure_supported(Capabilities::CURRENT)
     .expect_err("multi-layer mask composition has a typed Sequence 12 boundary");
     assert_eq!(
         multi_layer_error.unsupported_primitive(),
@@ -9079,7 +9067,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
 
     let composite_error =
         MaskLayerStack::single(MaskLayer::try_new(alpha_mask, MaskCompositeMode::Exclude).unwrap())
-            .ensure_supported(Capabilities::VELLO_0_9)
+            .ensure_supported(Capabilities::CURRENT)
             .expect_err("non-default mask composites have a typed Sequence 12 boundary");
     assert_eq!(
         composite_error.unsupported_primitive(),
@@ -9127,7 +9115,7 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
 
 #[test]
 fn sequence12_capabilities_claim_only_implemented_mask_clip_and_no_broad_backdrop_behavior() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
     let masks_clips = capabilities.masks_clips();
     assert!(masks_clips.supports_shape_clips());
     assert!(masks_clips.supports_materialized_alpha_mask_execution());
@@ -9285,7 +9273,7 @@ fn clip_input_normalization_lowers_concrete_shape_geometry() {
     ];
 
     for (input, expected) in cases {
-        let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+        let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
         assert_eq!(normalized.geometry().kind(), &expected);
         assert_eq!(normalized.coordinate_space(), None);
@@ -9302,7 +9290,7 @@ fn clip_input_normalization_preserves_path_fill_rules_and_bounds() {
     let filled = FilledPath::try_new(path.clone(), FillRule::EvenOdd).unwrap();
     let input = ClipInput::try_filled_path(filled.clone()).unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(
         normalized.geometry().kind(),
@@ -9319,7 +9307,7 @@ fn clip_input_normalization_preserves_path_fill_rules_and_bounds() {
     scene.layer(layer, |scene| {
         scene.fill(Rect::new(-10.0, -10.0, 40.0, 40.0), Color::BLACK);
     });
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected layer command");
     };
@@ -9341,7 +9329,7 @@ fn clip_input_normalization_preserves_path_fill_rules_and_bounds() {
 fn clip_input_normalization_reports_reference_and_invalid_path_diagnostics() {
     let reference = ClipInput::reference(StyleResourceRef::try_new("#clip").unwrap());
     let error = reference
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("unresolved clip references should stay a typed diagnostic");
 
     assert_eq!(error.code(), ErrorCode::UnresolvedResource);
@@ -9374,7 +9362,7 @@ fn clip_input_normalization_preserves_coordinate_space_tags_and_rejects_nonfinit
     let normalized = ClipInput::try_shape(Shape::rect(Rect::new(1.0, 2.0, 3.0, 4.0)))
         .unwrap()
         .with_coordinate_space(tag)
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .unwrap();
 
     assert_eq!(normalized.coordinate_space(), Some(tag));
@@ -9385,7 +9373,7 @@ fn clip_input_normalization_preserves_coordinate_space_tags_and_rejects_nonfinit
             CoordinateSpaceTag::surface(Transform::scale(2.0, 1.0).unwrap()).unwrap(),
         );
     let error = huge
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("transformed clip bounds must remain finite");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
@@ -9501,7 +9489,7 @@ fn background_stack_normalization_paints_color_behind_layers() {
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
     assert_eq!(normalized.commands().len(), 3);
     let NormalizedBackgroundCommandKind::ColorFill { color, .. } = normalized.commands()[0].kind()
     else {
@@ -9542,7 +9530,7 @@ fn background_normalization_mixes_color_paint_and_image_layers_in_render_order()
         .unwrap(),
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     assert!(matches!(
@@ -9593,7 +9581,7 @@ fn background_stack_normalization_preserves_top_layer_as_last_render_command() {
         .unwrap(),
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     let last = normalized.commands().last().unwrap();
@@ -9626,7 +9614,7 @@ fn background_stack_normalization_preserves_paint_layer_sampling_semantics() {
         .unwrap(),
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     let NormalizedBackgroundCommandKind::Layer { layer } = normalized.commands()[0].kind() else {
@@ -9681,7 +9669,7 @@ fn background_stack_normalizes_image_layers_with_origin_clip_repeat_and_attachme
         .unwrap(),
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     let command = normalized.commands().first().unwrap();
@@ -9737,7 +9725,7 @@ fn background_stack_normalizes_resolved_image_layers_with_intrinsic_size() {
         .unwrap(),
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     let NormalizedBackgroundCommandKind::Layer { layer } = normalized.commands()[0].kind() else {
@@ -9768,7 +9756,7 @@ fn background_stack_reports_unresolved_image_layers() {
         .unwrap(),
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .expect_err("unresolved image layer should fail normalization");
 
     assert_eq!(error.code(), ErrorCode::UnresolvedResource);
@@ -9826,7 +9814,7 @@ fn background_normalization_accepts_shape_clip_overrides() {
         BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
     )])
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     assert_eq!(normalized.commands()[0].clip().shape(), Some(&shape));
@@ -9859,7 +9847,7 @@ fn background_normalization_accepts_path_clip_overrides() {
         BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
     )])
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     assert_eq!(normalized.commands()[0].clip().shape(), Some(&shape));
@@ -10072,7 +10060,7 @@ fn box_decoration_normalization_emits_four_independent_border_sides_in_order() {
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
     let commands = normalized.commands();
 
     assert_eq!(commands.len(), 4);
@@ -10133,7 +10121,7 @@ fn box_decoration_normalization_suppresses_none_hidden_and_zero_width_borders() 
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands().len(), 1);
     let border = normalized_border_command(&normalized.commands()[0]);
@@ -10162,7 +10150,7 @@ fn box_decoration_normalization_preserves_dashed_and_dotted_styles() {
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(
         normalized_border_command(&normalized.commands()[0]).style(),
@@ -10206,7 +10194,7 @@ fn box_decoration_normalization_computes_double_bands_for_thin_medium_and_large_
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands().len(), 3);
     let thin = normalized_border_command(&normalized.commands()[0]);
@@ -10260,7 +10248,7 @@ fn box_decoration_normalization_reports_unsupported_border_styles() {
         .unwrap();
 
         let error = input
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .expect_err("unsupported border styles should report typed diagnostics");
 
         assert_eq!(
@@ -10307,7 +10295,7 @@ fn box_decoration_normalization_emits_borders_for_multiple_fragments_in_order() 
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
     let commands: Vec<_> = normalized
         .commands()
         .iter()
@@ -10344,7 +10332,7 @@ fn box_decoration_normalization_expands_outline_target_by_offset_only() {
     let input =
         BoxDecorationInput::try_new(None, Some(outline.clone()), vec![fragment.clone()]).unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands().len(), 1);
     let command = normalized_outline_command(&normalized.commands()[0]);
@@ -10377,7 +10365,7 @@ fn box_decoration_normalization_keeps_outline_width_out_of_geometry() {
         ],
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
     let thick = BoxDecorationInput::try_new(
         None,
@@ -10392,7 +10380,7 @@ fn box_decoration_normalization_keeps_outline_width_out_of_geometry() {
         ],
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     assert_eq!(
@@ -10429,7 +10417,7 @@ fn box_decoration_normalization_preserves_dashed_and_dotted_outline_styles() {
         )
         .unwrap();
 
-        let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+        let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
         assert_eq!(
             normalized_outline_command(&normalized.commands()[0]).style(),
@@ -10459,7 +10447,7 @@ fn box_decoration_normalization_reports_unsupported_outline_styles() {
         .unwrap();
 
         let error = input
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .expect_err("unsupported outline styles should report typed diagnostics");
 
         assert_eq!(
@@ -10492,7 +10480,7 @@ fn box_decoration_normalization_suppresses_none_and_zero_width_outlines() {
         )
         .unwrap();
 
-        let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+        let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
         assert!(normalized.commands().is_empty());
     }
@@ -10513,7 +10501,7 @@ fn box_decoration_normalization_handles_negative_outline_offsets_deterministical
         ],
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     assert_eq!(
@@ -10535,7 +10523,7 @@ fn box_decoration_normalization_handles_negative_outline_offsets_deterministical
     )
     .unwrap();
     let error = invalid
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("over-contracted outline target rects should be invalid");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
@@ -10577,7 +10565,7 @@ fn box_decoration_normalization_emits_outline_after_borders_for_each_fragment() 
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands().len(), 4);
     assert_eq!(
@@ -10621,7 +10609,7 @@ fn background_and_box_decoration_normalization_reuse_border_box_area() {
         areas,
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
     let fragment = BoxDecorationFragment::try_new(
         areas,
@@ -10640,7 +10628,7 @@ fn background_and_box_decoration_normalization_reuse_border_box_area() {
         vec![fragment.clone()],
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
 
     assert_eq!(background.commands().len(), 1);
@@ -10702,8 +10690,8 @@ fn background_box_decoration_integration_preserves_command_boundaries_across_fra
     )
     .unwrap();
 
-    let normalized = input.normalize(Capabilities::VELLO_0_9).unwrap();
-    let repeated = input.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = input.normalize(Capabilities::CURRENT).unwrap();
+    let repeated = input.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands(), repeated.commands());
     assert_eq!(normalized.commands().len(), 6);
@@ -11098,7 +11086,7 @@ fn renderer_reports_backend_capabilities_by_family() {
 
 #[test]
 fn transform_capabilities_name_2d_origin_skew_and_coordinate_tags() {
-    let capabilities = Capabilities::VELLO_0_9.transform_coordinate_spaces();
+    let capabilities = Capabilities::CURRENT.transform_coordinate_spaces();
 
     assert!(capabilities.supports_affine_2d());
     assert!(capabilities.supports_transform_origin());
@@ -11109,7 +11097,7 @@ fn transform_capabilities_name_2d_origin_skew_and_coordinate_tags() {
 
 #[test]
 fn geometry_capabilities_name_boolean_offset_and_hit_test_boundaries() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
 
     assert!(!capabilities.geometry_targets().supports_geometry_booleans());
     assert!(!capabilities.geometry_targets().supports_geometry_offsets());
@@ -11122,7 +11110,7 @@ fn geometry_capabilities_name_boolean_offset_and_hit_test_boundaries() {
 
 #[test]
 fn paint_capabilities_name_color_policy_and_conversion_boundaries() {
-    let capabilities = Capabilities::VELLO_0_9.paint_sources();
+    let capabilities = Capabilities::CURRENT.paint_sources();
 
     assert!(capabilities.supports_solid_rgba());
     assert!(capabilities.supports_gradients());
@@ -11139,7 +11127,7 @@ fn paint_capabilities_name_color_policy_and_conversion_boundaries() {
 
 #[test]
 fn image_sampling_capabilities_name_css_sampling_boundaries() {
-    let capabilities = Capabilities::VELLO_0_9.image_sampling();
+    let capabilities = Capabilities::CURRENT.image_sampling();
 
     assert!(capabilities.supports_image_fit());
     assert!(capabilities.supports_background_position());
@@ -11167,7 +11155,7 @@ fn image_sampling_capabilities_name_css_sampling_boundaries() {
 
 #[test]
 fn box_decoration_capability_accessors_name_supported_paint_boundaries() {
-    let capabilities = Capabilities::VELLO_0_9.box_decorations();
+    let capabilities = Capabilities::CURRENT.box_decorations();
 
     assert!(capabilities.supports_border_none_hidden_styles());
     assert!(capabilities.supports_border_solid_style());
@@ -11183,7 +11171,7 @@ fn box_decoration_capability_accessors_name_supported_paint_boundaries() {
 
 #[test]
 fn box_decoration_capability_accessors_name_unsupported_style_boundaries() {
-    let capabilities = Capabilities::VELLO_0_9.box_decorations();
+    let capabilities = Capabilities::CURRENT.box_decorations();
 
     assert!(!capabilities.supports_border_groove_style());
     assert!(!capabilities.supports_border_ridge_style());
@@ -11195,7 +11183,7 @@ fn box_decoration_capability_accessors_name_unsupported_style_boundaries() {
 
 #[test]
 fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
-    let capabilities = Capabilities::VELLO_0_9.offscreen_pipeline();
+    let capabilities = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(capabilities.supports_direct_vello_opacity_isolation());
     assert!(capabilities.supports_direct_vello_blend_isolation());
@@ -11211,7 +11199,7 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
 
 #[test]
 fn backdrop_capability_accessors_claim_only_narrow_materialized_execution() {
-    let capabilities = Capabilities::VELLO_0_9.offscreen_pipeline();
+    let capabilities = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(capabilities.supports_bounded_backdrop_capture());
     assert!(capabilities.supports_materialized_backdrop_filter_execution());
@@ -11221,8 +11209,8 @@ fn backdrop_capability_accessors_claim_only_narrow_materialized_execution() {
 
 #[test]
 fn blend_capability_accessors_preserve_direct_vello_claims_without_background_blend() {
-    let compositing = Capabilities::VELLO_0_9.compositing();
-    let offscreen = Capabilities::VELLO_0_9.offscreen_pipeline();
+    let compositing = Capabilities::CURRENT.compositing();
+    let offscreen = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(compositing.supports_layer_opacity());
     assert!(compositing.supports_blend_modes());
@@ -11236,13 +11224,13 @@ fn blend_capability_accessors_preserve_direct_vello_claims_without_background_bl
 
 #[test]
 fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution() {
-    let capabilities = Capabilities::VELLO_0_9.masks_clips();
+    let capabilities = Capabilities::CURRENT.masks_clips();
 
     assert!(capabilities.supports_shape_clips());
     assert!(!capabilities.supports_clip_reference_execution());
     assert!(!capabilities.supports_layer_masks());
     assert!(capabilities.supports_materialized_alpha_mask_execution());
-    Capabilities::VELLO_0_9
+    Capabilities::CURRENT
         .ensure_supported(UnsupportedPrimitive::new(
             PrimitiveFamily::MasksAndClips,
             PrimitiveOperation::MaterializedAlphaMaskExecution,
@@ -11255,7 +11243,7 @@ fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution
 
 #[test]
 fn color_filter_capability_names_granular_execution_without_broad_effects() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
 
     assert!(
         capabilities
@@ -11287,7 +11275,7 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
 
 #[test]
 fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
 
     assert!(
         capabilities
@@ -11310,7 +11298,7 @@ fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() 
             .supports_filter_region_outset_planning()
     );
     assert!(
-        capabilities
+        !capabilities
             .filters()
             .supports_cpu_reference_blur_fallback()
     );
@@ -11347,13 +11335,13 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
             PrimitiveOperation::FilterRegionOutsetPlanning,
             "filter-region/outset planning",
         ),
+    ];
+    let unsupported_cases = [
         (
             PrimitiveFamily::Filters,
             PrimitiveOperation::CpuReferenceBlurFallback,
             "CPU/reference blur fallback",
         ),
-    ];
-    let unsupported_cases = [
         (
             PrimitiveFamily::Shadows,
             PrimitiveOperation::InsetBoxShadow,
@@ -11369,7 +11357,7 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
     for (family, operation, label) in supported_cases {
         let supported = UnsupportedPrimitive::new(family, operation);
         assert_eq!(supported.label(), label);
-        Capabilities::VELLO_0_9
+        Capabilities::CURRENT
             .ensure_supported(supported)
             .expect("Task 4 enables materialized blur execution and its planning pieces");
     }
@@ -11378,7 +11366,7 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         let unsupported = UnsupportedPrimitive::new(family, operation);
         assert_eq!(unsupported.label(), label);
 
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("later sequence diagnostics stay named without execution");
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -11390,14 +11378,14 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
 #[test]
 fn hit_test_geometry_is_root_owned_not_render_lowered() {
     assert_eq!(
-        Capabilities::VELLO_0_9.geometry_targets().hit_testing(),
+        Capabilities::CURRENT.geometry_targets().hit_testing(),
         HitTestOwnership::RootOwned
     );
 }
 
 #[test]
 fn capabilities_map_unsupported_primitives_to_typed_errors() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
     let unsupported = UnsupportedPrimitive::new(
         PrimitiveFamily::MasksAndClips,
         PrimitiveOperation::LayerMask,
@@ -11423,7 +11411,7 @@ fn unsupported_geometry_operations_report_typed_diagnostics() {
     );
 
     for unsupported in [boolean, offset] {
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("geometry operation should be explicitly unsupported");
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -11439,7 +11427,7 @@ fn unsupported_symbolic_color_inputs_report_typed_diagnostics() {
         PrimitiveOperation::UnsupportedColorSpace,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::PaintSources, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("symbolic or unsupported color input is not render-resolved");
 
@@ -11455,7 +11443,7 @@ fn repeating_gradients_report_typed_diagnostics() {
         PrimitiveOperation::RepeatingGradient,
     );
 
-    let error = Capabilities::VELLO_0_9
+    let error = Capabilities::CURRENT
         .ensure_supported(unsupported)
         .expect_err("repeating gradients require later normalization");
 
@@ -11473,7 +11461,7 @@ fn unsupported_image_sampling_operations_report_typed_diagnostics() {
         PrimitiveOperation::ImageColorProfileConversion,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::ImageSampling, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("Vello baseline should reject this image sampling primitive");
 
@@ -11494,7 +11482,7 @@ fn unsupported_box_decoration_style_capability_diagnostics_are_typed() {
         PrimitiveOperation::OutlineAutoStyle,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::BoxDecorations, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("Vello baseline should reject this box-decoration style");
 
@@ -11517,7 +11505,7 @@ fn unsupported_3d_transforms_report_typed_diagnostics() {
         let unsupported =
             UnsupportedPrimitive::new(PrimitiveFamily::TransformsAndCoordinateSpaces, operation);
 
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("3D transforms are unsupported in this render phase");
 
@@ -11540,7 +11528,7 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         PrimitiveOperation::BackdropIsolationComposition,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::OffscreenPipeline, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("offscreen pipeline operation is not implemented in this phase");
 
@@ -11580,7 +11568,7 @@ fn backdrop_and_advanced_compositing_diagnostics_have_granular_names() {
         let unsupported = UnsupportedPrimitive::new(family, operation);
         assert_eq!(unsupported.label(), label);
 
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("Sequence 13 Task 1 only names future compositing boundaries");
 
@@ -11602,7 +11590,7 @@ fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
         PrimitiveOperation::MaskCompositeMode,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::MasksAndClips, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("Sequence 12 Task 1 should only name unsupported mask/clip boundaries");
 
@@ -11615,7 +11603,7 @@ fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
 
 #[test]
 fn vello_baseline_reports_current_unsupported_primitives() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
     let cases = [
         UnsupportedPrimitive::new(
             PrimitiveFamily::MasksAndClips,
@@ -11662,7 +11650,7 @@ fn vello_baseline_reports_web_canvas_surface_as_unsupported_off_wasm_web() {
         PrimitiveOperation::WebCanvasSurface,
     );
 
-    let error = Capabilities::VELLO_0_9
+    let error = Capabilities::CURRENT
         .ensure_supported(unsupported)
         .expect_err("web canvas surfaces require render-web on wasm32");
 
@@ -11679,7 +11667,7 @@ fn vello_baseline_reports_web_canvas_surface_as_supported_on_wasm_web() {
         PrimitiveOperation::WebCanvasSurface,
     );
 
-    Capabilities::VELLO_0_9
+    Capabilities::CURRENT
         .ensure_supported(unsupported)
         .expect("web canvas surfaces are available with render-web on wasm32");
 }
@@ -11982,7 +11970,7 @@ fn zero_blur_multi_text_shadow_preserves_authored_order_but_rejects_execution() 
     }
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("zero-blur text-shadow candidates must not emit render commands yet");
     assert_eq!(
         error.unsupported_primitive(),
@@ -12039,7 +12027,7 @@ fn transformed_text_shadow_inputs_are_stored_but_not_claimed_as_shifted_glyph_ex
     }
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("transform-aware shifted glyph text-shadow execution is not implemented");
     assert_eq!(
         error.unsupported_primitive(),
@@ -12094,7 +12082,7 @@ fn non_solid_or_spread_text_shadow_stays_on_glyph_alpha_offscreen_diagnostic_pat
             TextShadowRun::try_new(run, ShadowList::try_new(vec![shadow]).unwrap()).unwrap(),
         );
 
-        let error = match scene.normalize(Capabilities::VELLO_0_9) {
+        let error = match scene.normalize(Capabilities::CURRENT) {
             Ok(_) => panic!("{label} should stay unsupported"),
             Err(error) => error,
         };
@@ -12132,7 +12120,7 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
     scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("text-shadow execution is not implemented in this phase");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -12152,9 +12140,9 @@ fn text_shadow_run_reports_typed_unsupported_diagnostic() {
 fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
     let unsupported =
         UnsupportedPrimitive::new(PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow);
-    assert!(!Capabilities::VELLO_0_9.shadows().supports_text_shadows());
+    assert!(!Capabilities::CURRENT.shadows().supports_text_shadows());
 
-    let capability_error = Capabilities::VELLO_0_9
+    let capability_error = Capabilities::CURRENT
         .ensure_supported(unsupported)
         .expect_err("text-shadow capability should stay false until execution exists");
     assert_eq!(capability_error.code(), ErrorCode::UnsupportedPrimitive);
@@ -12178,7 +12166,7 @@ fn text_shadow_capability_claim_matches_current_diagnostic_boundary() {
     scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
 
     let normalize_error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("normalization should report the same unsupported text-shadow boundary");
     assert_eq!(normalize_error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(normalize_error.unsupported_primitive(), Some(unsupported));
@@ -12214,7 +12202,7 @@ fn blurred_text_shadow_reports_same_typed_boundary() {
     scene.text_shadow_run(TextShadowRun::try_new(run, shadows).unwrap());
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("blurred text-shadow needs glyph-alpha capture before pixel-moving blur");
 
     assert_eq!(
@@ -12274,7 +12262,7 @@ fn text_shadow_run_command_storage_preserves_shadow_order_font_data_and_glyphs()
     }
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("stored text-shadow ordering should be rejected only at normalization");
     assert_eq!(
         error.unsupported_primitive(),
@@ -12301,7 +12289,7 @@ fn ordinary_text_run_normalization_remains_unaffected_by_text_shadow_boundary() 
     scene.text_run(run);
 
     let normalized = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect("ordinary text runs should not use the text-shadow diagnostic");
 
     assert_eq!(normalized.commands.len(), 1);
@@ -12357,7 +12345,7 @@ fn text_fill_paint_matches_concrete_render_paint_surface() {
         }
 
         let normalized = scene
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .unwrap_or_else(|_| panic!("{label} text fill should normalize"));
 
         match &normalized.commands[0] {
@@ -12398,7 +12386,7 @@ fn ahem_text_run_preserves_font_data_and_stable_glyph_stream() {
     scene.text_run(run);
 
     let normalized = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect("Ahem text run with prepared glyphs should normalize");
 
     let [
@@ -12491,7 +12479,7 @@ fn text_decoration_line_preserves_paint_thickness_transform_and_text_order() {
     let mut scene = Scene::new();
     scene.text_decoration_line(decoration).text_run(text);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands.len(), 2);
     assert!(matches!(
@@ -12531,7 +12519,7 @@ fn text_decoration_line_supports_solid_color_without_extra_text_semantics() {
     let mut scene = Scene::new();
     scene.text_decoration_line(decoration);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     let [command::RenderCommand::Stroke { stroke, paint, .. }] = normalized.commands.as_slice()
     else {
@@ -12574,7 +12562,7 @@ fn non_solid_text_decoration_styles_report_typed_boundary() {
 
 #[test]
 fn selection_and_generated_text_buckets_use_plain_render_capabilities() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
     assert!(capabilities.geometry_targets().supports_rect_fill_stroke());
     assert!(capabilities.paint_sources().supports_solid_rgba());
     assert!(
@@ -12651,7 +12639,7 @@ fn materialized_selection_background_and_text_foreground_stay_ordered_commands()
         .fill(selection_background, selection_background_paint)
         .text_run(selected_run);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.commands.len(), 2);
     assert_eq!(normalized.stats().fills, 1);
@@ -12718,7 +12706,7 @@ fn materialized_generated_text_content_preserves_render_command_order() {
     let mut scene = Scene::new();
     scene.text_run(before).text_run(principal).text_run(after);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.stats().glyphs, 3);
     let [
@@ -12765,7 +12753,7 @@ fn materialized_generated_image_marker_and_text_content_are_ordinary_image_text_
         .image(marker_image, marker_rect, ImageFit::Contain)
         .text_run(item_text);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.stats().images, 1);
     assert_eq!(normalized.stats().glyphs, 1);
@@ -12841,7 +12829,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
         .text_run(generated);
 
     let normalized = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect("implemented Sequence 14 rows should normalize as ordinary render commands");
 
     assert_eq!(normalized.stats().fills, 1);
@@ -12890,7 +12878,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
     shadow_scene.text_shadow_run(TextShadowRun::try_new(shadow_run, shadows).unwrap());
 
     let error = shadow_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("Sequence 14 text-shadow execution should stay explicitly diagnostic");
     assert_eq!(
         error.unsupported_primitive(),
@@ -12904,7 +12892,7 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
 
 #[test]
 fn sequence14_capabilities_advertise_only_render_owned_text_behavior() {
-    let capabilities = Capabilities::VELLO_0_9;
+    let capabilities = Capabilities::CURRENT;
 
     assert!(capabilities.paint_sources().supports_solid_rgba());
     assert!(capabilities.paint_sources().supports_gradients());
@@ -12951,7 +12939,7 @@ fn sequence14_capabilities_advertise_only_render_owned_text_behavior() {
 
 #[test]
 fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
-    assert!(!Capabilities::VELLO_0_9.shadows().supports_text_shadows());
+    assert!(!Capabilities::CURRENT.shadows().supports_text_shadows());
 
     let gradient = Gradient::try_linear(
         Point::new(0.0, 0.0),
@@ -12996,7 +12984,7 @@ fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
             TextShadowRun::try_new(run, ShadowList::try_new(vec![shadow]).unwrap()).unwrap(),
         );
 
-        let error = match scene.normalize(Capabilities::VELLO_0_9) {
+        let error = match scene.normalize(Capabilities::CURRENT) {
             Ok(_) => panic!("{label} text-shadow should stay unsupported"),
             Err(error) => error,
         };
@@ -13045,7 +13033,7 @@ fn matrix_full_background_box_image_text_stack_preserves_render_order() {
         areas,
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
     let decoration = BoxDecorationInput::try_new(
         Some(box_decoration_edges(
@@ -13065,7 +13053,7 @@ fn matrix_full_background_box_image_text_stack_preserves_render_order() {
         ],
     )
     .unwrap()
-    .normalize(Capabilities::VELLO_0_9)
+    .normalize(Capabilities::CURRENT)
     .unwrap();
     let decoration_line = TextDecorationLine::try_solid(
         Point::new(10.0, 24.0),
@@ -13133,7 +13121,7 @@ fn matrix_full_background_box_image_text_stack_preserves_render_order() {
         ["border", "outline"]
     );
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.stats().fills, 1);
     assert_eq!(normalized.stats().images, 1);
@@ -13209,7 +13197,7 @@ fn matrix_full_transform_clip_opacity_image_gradient_stack_plans_layers() {
         },
     );
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
 
     assert_eq!(normalized.stats().layers, 3);
     assert_eq!(normalized.stats().images, 1);
@@ -13289,7 +13277,7 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
         );
     });
     let filter_error = filter_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("layer filters remain a typed full-stack diagnostic boundary");
     assert_eq!(
         filter_error.unsupported_primitive(),
@@ -13305,7 +13293,7 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
         Shadow::try_inset(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap(),
     );
     let inset_shadow_error = inset_shadow_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("inset box shadows remain a typed shadow diagnostic boundary");
     assert_eq!(
         inset_shadow_error.unsupported_primitive(),
@@ -13323,7 +13311,7 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
         scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
     });
     let mask_error = mask_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("authored layer masks remain a typed full-stack diagnostic boundary");
     assert_eq!(
         mask_error.unsupported_primitive(),
@@ -13356,7 +13344,7 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
         },
     );
     let backdrop_error = backdrop_scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("transformed backdrop stacks remain explicitly unsupported");
     assert_eq!(
         backdrop_error.unsupported_primitive(),
@@ -13414,28 +13402,11 @@ fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
 }
 
 #[test]
-fn vello_out_of_memory_maps_to_stable_surface_error() {
-    let error = vello::Error::WgpuErrorFromScope(wgpu::Error::OutOfMemory {
-        source: Box::new(std::io::Error::other("oom")),
-    });
-
-    assert_eq!(
-        vello_error_code(&error),
-        BackendErrorCode::SurfaceOutOfMemory
-    );
-    assert!(vello_error_message(&error).contains("memory"));
-}
-
-#[test]
 fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage() {
     let stages = [
         (
             GpuOperationStage::SurfaceCreate,
             BackendErrorCode::SurfaceCreateFailed,
-        ),
-        (
-            GpuOperationStage::RendererCreate,
-            BackendErrorCode::RendererCreateFailed,
         ),
         (GpuOperationStage::Render, BackendErrorCode::RenderFailed),
         (GpuOperationStage::Present, BackendErrorCode::PresentFailed),
@@ -14063,11 +14034,6 @@ fn terminal_device_cleanup_drops_internal_engine_resources() {
             ready.internal_resources_empty_for_test(),
             "the ready DeviceState must retain an accessible internal resource owner"
         );
-        assert!(
-            ready.external_renderer_for_test().is_some(),
-            "the temporary comparison renderer must live in the ready ownership bundle"
-        );
-
         let drop_witness = ready.drop_witness_for_test();
         assert!(
             !drop_witness.was_dropped_for_test(),
@@ -14337,24 +14303,6 @@ fn terminal_default_device_rejects_headless_without_disabling_ready_slots() {
         RuntimeOperation::AdapterSelection,
         DeviceLossReason::Destroyed,
     );
-}
-
-#[test]
-fn terminal_signal_during_renderer_creation_aborts_before_followup_gpu_work() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    renderer.arm_default_terminal_signal_after_renderer_creation_for_test();
-
-    let error = match pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)) {
-        Ok(_) => panic!("a terminal signal during renderer creation must abort headless creation"),
-        Err(error) => error,
-    };
-
-    assert_runtime_device_lost(
-        error,
-        RuntimeOperation::AdapterSelection,
-        DeviceLossReason::Destroyed,
-    );
-    assert!(renderer.default_device_renderer_released_for_test());
 }
 
 #[test]
@@ -15028,7 +14976,7 @@ fn pure_transform_does_not_require_backend_layer() {
         .layer(clip, |_| {})
         .layer(opacity, |_| {});
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let isolations: Vec<_> = normalized
         .commands
         .iter()
@@ -15058,7 +15006,7 @@ fn layer_pass_plan_uses_clip_bounds_before_child_geometry() {
         scene.fill(Rect::new(-10.0, -10.0, 50.0, 50.0), Color::BLACK);
     });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected layer command");
     };
@@ -15088,7 +15036,7 @@ fn layer_pass_plan_names_opacity_and_blend_direct_layers() {
             scene.fill(Rect::new(4.0, 0.0, 2.0, 2.0), Color::BLACK);
         });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let plans: Vec<_> = normalized
         .commands
         .iter()
@@ -15133,7 +15081,7 @@ fn nested_layer_pass_plan_aggregates_transformed_child_bounds() {
         });
     });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected outer layer command");
     };
@@ -15171,7 +15119,7 @@ fn layer_pass_plan_rejects_mask_filter_boundaries_with_typed_diagnostics() {
         });
 
         let error = scene
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .expect_err("mask/filter layer pass planning should stop at diagnostic boundary");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -15213,7 +15161,7 @@ fn layer_mask_filter_parent_diagnostics_win_over_unsupported_children() {
         });
 
         let error = scene
-            .normalize(Capabilities::VELLO_0_9)
+            .normalize(Capabilities::CURRENT)
             .expect_err("parent layer diagnostic should be reported before child geometry");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -15232,7 +15180,7 @@ fn path_stroke_layer_bounds_include_miter_limit_conservatively() {
         scene.stroke(Shape::path(path), stroke, Color::BLACK);
     });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected layer command");
     };
@@ -15257,7 +15205,7 @@ fn exact_epsilon_opacity_with_clip_keeps_backend_layer_isolation() {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
     });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected layer command");
     };
@@ -15456,7 +15404,7 @@ fn nested_direct_vello_blend_groups_match_nested_reference_oracle() {
         });
     });
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Layer {
         layer: outer,
         children,
@@ -15533,7 +15481,7 @@ fn unsupported_blend_and_composite_boundaries_remain_typed_diagnostics() {
         PrimitiveOperation::RootBackdropPolicy,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::Compositing, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("future blend/composite policy must stay behind typed diagnostics");
 
@@ -15548,7 +15496,7 @@ fn unsupported_blend_and_composite_boundaries_remain_typed_diagnostics() {
 
 #[test]
 fn unsupported_porter_duff_css_and_mask_composite_policy_stays_typed() {
-    let compositing = Capabilities::VELLO_0_9.compositing();
+    let compositing = Capabilities::CURRENT.compositing();
     assert!(!compositing.supports_background_blend_modes());
     assert!(!compositing.supports_additional_mix_blend_modes());
     assert!(!compositing.supports_porter_duff_composite_modes());
@@ -15559,7 +15507,7 @@ fn unsupported_porter_duff_css_and_mask_composite_policy_stays_typed() {
         PrimitiveOperation::PorterDuffCompositeMode,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::Compositing, operation);
-        let error = Capabilities::VELLO_0_9
+        let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
             .expect_err("unsupported CSS and Porter-Duff composite policy stays typed");
 
@@ -15578,7 +15526,7 @@ fn unsupported_porter_duff_css_and_mask_composite_policy_stays_typed() {
     ] {
         let stack = MaskLayerStack::single(MaskLayer::try_new(alpha_mask.clone(), mode).unwrap());
         let error = stack
-            .ensure_supported(Capabilities::VELLO_0_9)
+            .ensure_supported(Capabilities::CURRENT)
             .expect_err("non-default mask composites remain unsupported until fully implemented");
 
         assert_eq!(
@@ -15762,7 +15710,7 @@ fn outer_box_shadow_list_normalizes_offset_blur_spread_and_order() {
 
     scene.shadows(Rect::new(8.0, 8.0, 10.0, 10.0), shadows);
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     assert_eq!(normalized.commands.len(), 2);
     assert_eq!(normalized.stats().shadows, 2);
 
@@ -15790,7 +15738,7 @@ fn non_uniform_rounded_outer_shadow_preserves_authored_radii() {
         Shadow::try_new(Point::new(2.0, 2.0), 4.0, 1.0, Color::BLACK).unwrap(),
     );
 
-    let normalized = scene.normalize(Capabilities::VELLO_0_9).unwrap();
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
     let command::RenderCommand::Shadow { shape, .. } = &normalized.commands[0] else {
         panic!("rounded rect shadow should lower to a render shadow");
     };
@@ -15840,7 +15788,7 @@ fn inset_box_shadow_reports_typed_unsupported_diagnostic() {
     );
 
     let error = scene
-        .normalize(Capabilities::VELLO_0_9)
+        .normalize(Capabilities::CURRENT)
         .expect_err("inset shadow execution is not implemented in this phase");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
@@ -16465,6 +16413,97 @@ fn pinned_vello_characterization_cases_are_source_readable() {
     for (actual, expected) in observed.iter().zip(PINNED_VELLO_CHARACTERIZATION_CASES) {
         assert_pinned_vello_characterization_case(*actual, *expected);
     }
+}
+
+#[test]
+fn internal_vello_direct_pixels_match_pinned_vello_characterization_cases() {
+    let source = include_str!("backend.rs");
+    assert!(
+        !source.contains("render_vello_to_texture"),
+        "production rasterization must not retain the external Vello renderer route"
+    );
+
+    for expected in PINNED_VELLO_CHARACTERIZATION_CASES {
+        let mut renderer = pollster::block_on(Renderer::new(
+            Options::default().with_antialiasing(expected.antialiasing),
+        ))
+        .expect("internal Vello characterization requires a host adapter");
+        let scene = pinned_vello_characterization_scene();
+        let mut surface =
+            pollster::block_on(renderer.create_headless(Size::new(72.0, 48.0), expected.scale))
+                .expect("internal Vello characterization requires a real headless surface");
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+            .expect("the production internal Vello route must render every characterization row");
+        let output = renderer
+            .read_headless(&surface)
+            .expect("the production internal Vello route must preserve headless readback");
+        let actual =
+            observe_pinned_vello_characterization(expected.antialiasing, &surface, &output);
+        assert_pinned_vello_characterization_case(actual, *expected);
+    }
+}
+
+#[test]
+fn capabilities_current_report_semantics_without_backend_or_cpu_names() {
+    let capabilities = Capabilities::CURRENT;
+    assert!(
+        !capabilities
+            .filters()
+            .supports_cpu_reference_blur_fallback(),
+        "production capability reporting must not claim a CPU fallback"
+    );
+    assert!(capabilities.paint_sources().supports_solid_rgba());
+    assert!(capabilities.paint_sources().supports_gradients());
+    assert!(capabilities.paint_sources().supports_image_paint());
+}
+
+#[test]
+fn render_path_submits_without_map_or_cpu_wait() {
+    let submission_scope =
+        gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("production submission coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("production submission coverage requires a headless surface");
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect("Renderer::render must submit the production internal raster pass");
+
+    let submission = submission_scope.observation_for_test();
+    assert_eq!(
+        submission.queue_submission_count_for_test(),
+        1,
+        "Renderer::render must use exactly one transaction-owned internal raster submission"
+    );
+    assert_eq!(
+        submission.transaction_generation_for_test(),
+        submission.active_generation_for_test(),
+        "the observed submission must remain inside its transaction lease"
+    );
+    assert_eq!(
+        submission.payload_raster_pass_count_for_test(),
+        1,
+        "the submitted transaction payload must contain the direct raster pass"
+    );
+    assert!(
+        submission.allocation_summary_for_test().is_some(),
+        "the observed submission must carry the internal raster resource lease"
+    );
+
+    let renderer_source = include_str!("renderer.rs");
+    let engine_source = include_str!("vello_engine/encoder.rs");
+    assert!(
+        !renderer_source.contains("render_vello_surface"),
+        "Renderer::render must route production raster work through the transaction-owned internal pass"
+    );
+    assert!(
+        !renderer_source.contains("map_async")
+            && !renderer_source.contains(".poll(")
+            && !engine_source.contains("map_async")
+            && !engine_source.contains(".poll("),
+        "production raster encoding must not map, poll, or wait on the CPU"
+    );
 }
 
 fn pinned_vello_characterization_scene() -> Scene {

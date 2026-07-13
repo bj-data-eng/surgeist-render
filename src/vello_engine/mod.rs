@@ -46,13 +46,6 @@ mod raster {
     include!("raster.rs");
 
     impl PreparedVelloPass {
-        #[cfg_attr(
-            not(test),
-            expect(
-                dead_code,
-                reason = "C03 T4 keeps private checked encoding ready for the later T7 cutover."
-            )
-        )]
         pub(crate) fn encode_into(
             &self,
             engine: &super::recording::VelloEngineState,
@@ -100,13 +93,6 @@ pub(crate) use raster::{
     DirectVelloLogicalPass, EncodedVelloPass, PreparedVelloPass, RasterParameters,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "C03 T4 keeps transaction-borrowed encoding state internal until the T7 cutover."
-    )
-)]
 pub(crate) use recording::{
     ActiveVelloEncodingScope, PendingVelloResourceCommit, TransactionEncodingState,
     TransactionTargetIntent, VelloEngineState, VelloResourceManager,

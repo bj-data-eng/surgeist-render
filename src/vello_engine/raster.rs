@@ -16,23 +16,9 @@ use super::recording::{
     ImageHandle, ImageRole, RasterImageFormat, Recording, RecordingBuilder, ResourceIntent,
 };
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 target validation is staged until production Vello lowering reaches this module."
-    )
-)]
 const VELLO_TILE_EXTENT: u32 = 16;
 
 /// Validated algorithm inputs for one private Vello recording pass.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 raster parameters are staged until T7 owns production Vello lowering."
-    )
-)]
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct RasterParameters {
     target_extent: PhysicalSize,
@@ -41,13 +27,6 @@ pub(crate) struct RasterParameters {
 }
 
 impl RasterParameters {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T3 validation is staged until production Vello lowering reaches this module."
-        )
-    )]
     pub(crate) fn try_new(
         target_extent: PhysicalSize,
         base_color: Color,
@@ -76,13 +55,6 @@ impl RasterParameters {
 }
 
 /// The required external output contract for one prepared Vello pass.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 target intent is consumed by the later transaction-owned realization stage."
-    )
-)]
 struct RasterTargetIntent {
     extent: PhysicalSize,
     format: RasterImageFormat,
@@ -95,13 +67,6 @@ enum RasterTargetAccess {
 }
 
 /// An opaque prepared pass that has no runtime resource or submission authority.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 prepared passes are intentionally staged until T4 adds checked realization."
-    )
-)]
 pub(crate) struct PreparedVelloPass {
     recording: Recording,
     target_intent: RasterTargetIntent,
@@ -122,26 +87,12 @@ impl DirectVelloLogicalPass {
 }
 
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T6 carries the private typed direct-Vello pass through transaction submission before T7 production cutover."
-    )
-)]
 pub(crate) struct EncodedVelloPass {
     resources: super::recording::VelloResourceLease,
     logical_pass: DirectVelloLogicalPass,
 }
 
 impl EncodedVelloPass {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 consumes the private typed direct-Vello pass only from transaction test coverage before T7 production cutover."
-        )
-    )]
     pub(crate) fn into_resources_and_logical_pass(
         self,
     ) -> (super::recording::VelloResourceLease, DirectVelloLogicalPass) {
@@ -149,13 +100,6 @@ impl EncodedVelloPass {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 scene-owned preparation is retained for T4 checked encoding and T7 cutover."
-    )
-)]
 pub(super) fn prepare(
     encoding: &Encoding,
     parameters: RasterParameters,
@@ -617,13 +561,6 @@ const fn fine_variant(antialiasing: Antialiasing) -> FineRasterVariant {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 target validation is staged until production Vello lowering reaches this module."
-    )
-)]
 fn validate_target_dimension(field: &'static str, value: u32) -> Result<()> {
     if value == 0 || value > u32::MAX - (VELLO_TILE_EXTENT - 1) {
         return Err(Error::invalid_value(

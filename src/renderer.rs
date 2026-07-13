@@ -14,6 +14,7 @@ use super::{
     stats::collect_render_stats,
     surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
     validation::*,
+    vello_engine::scene::VelloScene,
     *,
 };
 use std::{
@@ -89,12 +90,6 @@ impl Renderer {
                 {
                     return Err(error);
                 }
-                ensure_vello_renderer(
-                    backend,
-                    self.options,
-                    device_identity,
-                    RuntimeOperation::AdapterSelection,
-                )?;
                 Ok(Surface::with_backend(
                     Attachment::Window(handle),
                     options,
@@ -145,12 +140,6 @@ impl Renderer {
         {
             return Err(error);
         }
-        ensure_vello_renderer(
-            backend,
-            self.options,
-            device_identity,
-            RuntimeOperation::AdapterSelection,
-        )?;
         Ok(Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
@@ -172,7 +161,7 @@ impl Renderer {
         _options: SurfaceOptions,
     ) -> Result<Surface> {
         let _ = canvas;
-        Capabilities::VELLO_0_9.ensure_supported(UnsupportedPrimitive::new(
+        Capabilities::CURRENT.ensure_supported(UnsupportedPrimitive::new(
             PrimitiveFamily::Surfaces,
             PrimitiveOperation::WebCanvasSurface,
         ))?;
@@ -209,24 +198,6 @@ impl Renderer {
             {
                 return Err(error);
             }
-            let renderer_transaction = backend.begin_gpu_operation(
-                device_identity,
-                GpuOperationStage::RendererCreate,
-                RuntimeOperation::AdapterSelection,
-            )?;
-            let renderer_work = ensure_vello_renderer(
-                backend,
-                self.options,
-                device_identity,
-                RuntimeOperation::AdapterSelection,
-            );
-            let renderer_scope = renderer_transaction
-                .finish(RuntimeOperation::AdapterSelection)
-                .await;
-            backend.observe_device_terminal(device_identity);
-            renderer_scope?;
-            renderer_work?;
-
             let texture_transaction = backend.begin_gpu_operation(
                 device_identity,
                 GpuOperationStage::SurfaceCreate,
@@ -305,7 +276,8 @@ impl Renderer {
         surface.ensure_available()?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
 
-        let transaction = match surface.device_identity() {
+        let frame_start = Instant::now();
+        let mut transaction = match surface.device_identity() {
             Some(device_identity) => Some(
                 self.backend
                     .as_mut()
@@ -319,8 +291,7 @@ impl Renderer {
             None => None,
         };
 
-        let work = (|| -> Result<(Stats, HashSet<ImageId>)> {
-            let frame_start = Instant::now();
+        let work = (|| -> Result<(Stats, HashSet<ImageId>, VelloScene)> {
             let encode_start = Instant::now();
             let mut stats = Stats {
                 encode_time: Duration::ZERO,
@@ -346,20 +317,33 @@ impl Renderer {
             let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
             stats.encode_time = encode_start.elapsed();
 
-            if let Some(backend) = self.backend.as_mut() {
-                let timings =
-                    render_vello_surface(backend, self.options, surface, &vello_scene, parameters)?;
-                stats.render_time = timings.render_time;
-                stats.present_time = timings.present_time;
-            }
-            stats.frame_time = frame_start.elapsed();
-
             if parameters.debug || self.options.debug() {
                 stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
             }
-            Ok((stats, uploaded_images))
+            Ok((stats, uploaded_images, vello_scene))
         })();
 
+        let (mut stats, uploaded_images, vello_scene) = work?;
+        if let (Some(backend), Some(device_identity)) =
+            (self.backend.as_mut(), surface.device_identity())
+        {
+            let transaction = transaction
+                .take()
+                .expect("device-backed surfaces require their render transaction");
+            let timings = render_internal_vello_surface(
+                backend,
+                transaction,
+                surface,
+                &vello_scene,
+                parameters,
+                self.options.antialiasing(),
+            )
+            .await;
+            backend.observe_device_terminal(device_identity);
+            let timings = timings?;
+            stats.render_time = timings.render_time;
+            stats.present_time = timings.present_time;
+        }
         if let (Some(transaction), Some(device_identity)) = (transaction, surface.device_identity())
         {
             let backend = self
@@ -370,7 +354,7 @@ impl Renderer {
             backend.observe_device_terminal(device_identity);
             scope_result?;
         }
-        let (stats, uploaded_images) = work?;
+        stats.frame_time = frame_start.elapsed();
         let mut published = None;
         GpuOperationDraft::new(&mut published, (stats, uploaded_images, parameters)).commit();
         let (stats, uploaded_images, parameters) =
@@ -585,14 +569,6 @@ impl Renderer {
         if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
         {
             backend.signal_loss_for_test(device_identity, reason);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn arm_default_terminal_signal_after_renderer_creation_for_test(&mut self) {
-        if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
-        {
-            backend.arm_terminal_signal_after_renderer_creation_for_test(device_identity);
         }
     }
 
@@ -968,7 +944,7 @@ impl Renderer {
                 "materialized backdrop captures require an available wgpu device context",
             ));
         };
-        let rendered = render_vello_local_scene_to_offscreen_texture(
+        let rendered = render_internal_vello_local_scene_to_offscreen_texture(
             Some(context),
             options,
             &mut cache,
@@ -1087,7 +1063,7 @@ impl Renderer {
                 "resolved layer alpha masks require an available wgpu device context",
             ));
         };
-        let rendered = render_vello_local_scene_to_offscreen_texture(
+        let rendered = render_internal_vello_local_scene_to_offscreen_texture(
             Some(context),
             options,
             &mut cache,
@@ -1135,7 +1111,7 @@ impl Renderer {
         children: Vec<RenderCommand>,
         bounds: command::OffscreenBounds,
         scale: f64,
-    ) -> Result<vello::Scene> {
+    ) -> Result<VelloScene> {
         let source_layer = command::NormalizedLayer {
             clip: layer.clip.clone(),
             transform: Transform::translation(-bounds.rect().x(), -bounds.rect().y())?,
@@ -1163,7 +1139,7 @@ impl Renderer {
         source_commands: Vec<RenderCommand>,
         bounds: command::OffscreenBounds,
         scale: f64,
-    ) -> Result<vello::Scene> {
+    ) -> Result<VelloScene> {
         let source_layer = command::NormalizedLayer {
             clip: None,
             transform: Transform::translation(-bounds.rect().x(), -bounds.rect().y())?,
@@ -1183,7 +1159,7 @@ impl Renderer {
 
     #[must_use]
     pub const fn capabilities(&self) -> Capabilities {
-        Capabilities::VELLO_0_9
+        Capabilities::CURRENT
     }
 }
 

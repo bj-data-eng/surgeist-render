@@ -12,13 +12,20 @@ use std::sync::{
 };
 
 #[cfg(test)]
+use std::cell::RefCell;
+
+#[cfg(test)]
 use super::vello_engine::VelloResourceAllocationSummaryForTest;
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
+}
 
 /// Private ownership stage for a render-owned GPU operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
     SurfaceCreate,
-    RendererCreate,
     Render,
     #[cfg(test)]
     Present,
@@ -28,7 +35,6 @@ impl GpuOperationStage {
     const fn error_code(self) -> BackendErrorCode {
         match self {
             Self::SurfaceCreate => BackendErrorCode::SurfaceCreateFailed,
-            Self::RendererCreate => BackendErrorCode::RendererCreateFailed,
             Self::Render => BackendErrorCode::RenderFailed,
             #[cfg(test)]
             Self::Present => BackendErrorCode::PresentFailed,
@@ -128,13 +134,6 @@ pub(crate) struct GpuOperationTransaction {
 }
 
 #[must_use = "internal Vello command buffers must remain owned by their GPU transaction"]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T6 keeps internal Vello submission and resource commitment transaction-owned before T7 production cutover."
-    )
-)]
 pub(crate) struct InternalVelloPayload<'resources> {
     command_buffer: wgpu::CommandBuffer,
     resources: PendingVelloResourceCommit<'resources>,
@@ -221,6 +220,58 @@ impl InternalVelloSubmissionObservationForTest {
     }
 }
 
+/// Observes the actual transaction-owned internal raster submission for one test scope.
+#[cfg(test)]
+pub(crate) struct ScopedInternalVelloSubmissionObservationForTest {
+    observation: InternalVelloSubmissionObservationForTest,
+    previous: Option<InternalVelloSubmissionObservationForTest>,
+}
+
+#[cfg(test)]
+impl ScopedInternalVelloSubmissionObservationForTest {
+    pub(crate) fn begin() -> Self {
+        let observation = InternalVelloSubmissionObservationForTest::default();
+        let previous = ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST
+            .with(|active| active.replace(Some(observation.clone())));
+        Self {
+            observation,
+            previous,
+        }
+    }
+
+    pub(crate) fn observation_for_test(&self) -> InternalVelloSubmissionObservationForTest {
+        self.observation.clone()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedInternalVelloSubmissionObservationForTest {
+    fn drop(&mut self) {
+        ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_active_internal_vello_submission_for_test(
+    transaction_generation: u64,
+    active_generation: Option<u64>,
+    logical_pass: &DirectVelloLogicalPass,
+    allocation_summary: VelloResourceAllocationSummaryForTest,
+) {
+    ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+        if let Some(observation) = active.borrow().as_ref() {
+            observation.record_payload_submission(
+                transaction_generation,
+                active_generation,
+                logical_pass,
+                allocation_summary,
+            );
+        }
+    });
+}
+
 /// Test-only pause reached after the real queue submission and before transaction completion.
 #[cfg(test)]
 pub(crate) struct AfterInternalVelloSubmitCheckpointForTest {
@@ -248,13 +299,6 @@ pub(crate) struct VelloResourceCommitProof {
 }
 
 impl<'resources> InternalVelloPayload<'resources> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 constructs transaction-owned Vello payloads before T7 production cutover."
-        )
-    )]
     pub(crate) fn new(
         command_buffer: wgpu::CommandBuffer,
         resources: PendingVelloResourceCommit<'resources>,
@@ -365,13 +409,6 @@ impl GpuOperationTransaction {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 is the sole internal Vello submission route before T7 production cutover."
-        )
-    )]
     pub(crate) async fn submit_internal_vello(
         self,
         queue: &wgpu::Queue,
@@ -393,14 +430,23 @@ impl GpuOperationTransaction {
         #[cfg(test)]
         let active_generation = self.lease.active_generation_for_test();
         #[cfg(test)]
+        let allocation_summary = resources.allocation_summary_for_test();
+        #[cfg(test)]
         if let Some(observation) = submission_observation {
             observation.record_payload_submission(
                 self.lease.generation(),
                 active_generation,
                 &logical_pass,
-                resources.allocation_summary_for_test(),
+                allocation_summary.clone(),
             );
         }
+        #[cfg(test)]
+        record_active_internal_vello_submission_for_test(
+            self.lease.generation(),
+            active_generation,
+            &logical_pass,
+            allocation_summary,
+        );
         #[cfg(test)]
         if let Some(checkpoint) = after_submit_checkpoint {
             checkpoint.wait().await;

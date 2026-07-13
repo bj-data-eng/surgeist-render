@@ -202,13 +202,6 @@ pub(crate) struct CommittedVelloResources {
 /// scope-clean committed leases into this collection after submission.
 pub(crate) struct VelloResourceManager {
     retained_resources: Vec<CommittedVelloResources>,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 retains aborted atlas recovery until production internal raster submission uses it."
-        )
-    )]
     pending_atlas_recovery: Option<VelloAtlasOutcome>,
 }
 
@@ -224,13 +217,6 @@ impl VelloResourceManager {
         self.retained_resources.is_empty()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 creates transaction-owned pending resource commits before T7 production cutover."
-        )
-    )]
     pub(crate) fn pending_commit(
         &mut self,
         lease: ScopeResolvedVelloResourceLease,
@@ -242,13 +228,6 @@ impl VelloResourceManager {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 records checked-encoding recovery before T7 production cutover."
-        )
-    )]
     pub(crate) fn record_aborted_resources(&mut self, aborted: AbortedVelloResources) {
         let outcome = aborted.into_atlas_outcome();
         self.pending_atlas_recovery =
@@ -295,13 +274,6 @@ impl VelloResourceManagerObservationForTest {
 
 /// Keeps a scope-clean resource lease uncertain until the owning GPU transaction succeeds.
 #[must_use = "pending Vello resources must be committed by their transaction or aborted on drop"]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T6 keeps scope-clean Vello resources transaction-owned before T7 production cutover."
-    )
-)]
 pub(crate) struct PendingVelloResourceCommit<'manager> {
     manager: &'manager mut VelloResourceManager,
     lease: Option<ScopeResolvedVelloResourceLease>,
@@ -316,13 +288,6 @@ impl PendingVelloResourceCommit<'_> {
             .allocation_summary_for_test()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 commits resources only after transaction scopes and signals resolve."
-        )
-    )]
     pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) {
         if let Some(lease) = self.lease.take() {
             self.manager
@@ -529,13 +494,6 @@ impl ScopeResolvedVelloResourceLease {
         self.lease.into_committed_resources()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 preserves explicit abort after clean-scope resolution for later terminal-signal handling."
-        )
-    )]
     pub(crate) fn abort(self) -> AbortedVelloResources {
         self.lease.abort()
     }
@@ -630,13 +588,6 @@ impl AbortedVelloResources {
 }
 
 impl AbortedVelloResources {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 keeps typed abort-atlas recovery consumable by the later T6 resource manager."
-        )
-    )]
     pub(crate) fn into_atlas_outcome(self) -> VelloAtlasOutcome {
         self.atlas_outcome
     }

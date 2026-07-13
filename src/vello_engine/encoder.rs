@@ -20,13 +20,6 @@ pub(crate) struct ActiveVelloEncodingScope<'a> {
 }
 
 impl<'a> ActiveVelloEncodingScope<'a> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 keeps active checked encoding scopes ready for the later T6 transaction route."
-        )
-    )]
     pub(crate) fn begin(device: &'a wgpu::Device) -> Self {
         Self {
             scope: CheckedWgpuScope::begin(device),
@@ -37,26 +30,12 @@ impl<'a> ActiveVelloEncodingScope<'a> {
         self.scope.device()
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 keeps caller-owned scope resolution ready for the later T6 transaction route."
-        )
-    )]
     pub(crate) async fn finish(self) -> Result<()> {
         self.scope
             .finish("checked internal Vello resource or command encoding failed")
             .await
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 keeps checked-scope lease resolution ready for the later T6 transaction route."
-        )
-    )]
     pub(crate) async fn finish_with_lease(
         self,
         lease: VelloResourceLease,
@@ -79,13 +58,6 @@ pub(crate) struct TransactionTargetIntent {
 }
 
 impl TransactionTargetIntent {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 preserves explicit transaction target intent for the later T6 transaction route."
-        )
-    )]
     pub(crate) const fn new(
         extent: PhysicalSize,
         format: wgpu::TextureFormat,
@@ -108,13 +80,6 @@ pub(crate) struct TransactionEncodingState<'state, 'device> {
 }
 
 impl<'state, 'device> TransactionEncodingState<'state, 'device> {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 exposes checked transaction-owned construction to the later T6 transaction route."
-        )
-    )]
     pub(crate) fn new(
         scope: &'state mut ActiveVelloEncodingScope<'device>,
         queue: &'state wgpu::Queue,
@@ -164,21 +129,7 @@ impl<'state, 'device> TransactionEncodingState<'state, 'device> {
 
 #[derive(Debug)]
 pub(crate) struct VelloEncodingFailure {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 preserves the owned failure for the later T6 transaction route."
-        )
-    )]
     error: Error,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 preserves the typed abort outcome for the later T6 resource manager."
-        )
-    )]
     aborted_resources: AbortedVelloResources,
 }
 
@@ -219,25 +170,11 @@ impl VelloEncodingFailure {
         self.aborted_resources
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 routes checked encoding errors and aborted resources to the device manager."
-        )
-    )]
     pub(crate) fn into_error_and_aborted_resources(self) -> (Error, AbortedVelloResources) {
         (self.error, self.aborted_resources)
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T4 keeps checked private engine construction ready for T7 cutover."
-    )
-)]
 pub(crate) struct VelloEngineState {
     shaders: CheckedShaderSet,
 }
