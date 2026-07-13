@@ -4727,11 +4727,6 @@ fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_e
             .filters()
             .supports_filter_region_outset_planning()
     );
-    assert!(
-        !capabilities
-            .filters()
-            .supports_cpu_reference_blur_fallback()
-    );
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(
         !capabilities
@@ -8449,7 +8444,6 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
     assert!(!offscreen.supports_offscreen_layer_rendering());
     assert!(!offscreen.supports_texture_cache_upload_lifecycle());
     assert!(!offscreen.supports_rect_fullscreen_shader_passes());
-    assert!(!offscreen.supports_cpu_reference_buffers());
     assert!(!offscreen.supports_nested_opacity_planning());
     assert!(!offscreen.supports_mask_execution());
     assert!(!offscreen.supports_filter_execution());
@@ -11190,7 +11184,6 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
     assert!(!capabilities.supports_offscreen_layer_rendering());
     assert!(!capabilities.supports_texture_cache_upload_lifecycle());
     assert!(!capabilities.supports_rect_fullscreen_shader_passes());
-    assert!(!capabilities.supports_cpu_reference_buffers());
     assert!(!capabilities.supports_nested_opacity_planning());
     assert!(!capabilities.supports_mask_execution());
     assert!(!capabilities.supports_filter_execution());
@@ -11297,11 +11290,6 @@ fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() 
             .filters()
             .supports_filter_region_outset_planning()
     );
-    assert!(
-        !capabilities
-            .filters()
-            .supports_cpu_reference_blur_fallback()
-    );
     assert!(!capabilities.shadows().supports_inset_box_shadows());
     assert!(!capabilities.shadows().supports_text_shadows());
     assert!(!capabilities.filters().supports_layer_filters());
@@ -11337,11 +11325,6 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         ),
     ];
     let unsupported_cases = [
-        (
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::CpuReferenceBlurFallback,
-            "CPU/reference blur fallback",
-        ),
         (
             PrimitiveFamily::Shadows,
             PrimitiveOperation::InsetBoxShadow,
@@ -11520,7 +11503,6 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         PrimitiveOperation::OffscreenLayerRendering,
         PrimitiveOperation::TextureCacheUploadLifecycle,
         PrimitiveOperation::RectFullscreenShaderPass,
-        PrimitiveOperation::CpuReferenceBuffer,
         PrimitiveOperation::NestedOpacityPlanning,
         PrimitiveOperation::MaskExecution,
         PrimitiveOperation::FilterExecution,
@@ -16446,12 +16428,30 @@ fn internal_vello_direct_pixels_match_pinned_vello_characterization_cases() {
 #[test]
 fn capabilities_current_report_semantics_without_backend_or_cpu_names() {
     let capabilities = Capabilities::CURRENT;
-    assert!(
-        !capabilities
-            .filters()
-            .supports_cpu_reference_blur_fallback(),
-        "production capability reporting must not claim a CPU fallback"
-    );
+    let capability_source = include_str!("capability.rs");
+    let error_source = include_str!("error.rs");
+
+    for identity in [
+        "supports_cpu_reference_blur_fallback",
+        "cpu_reference_blur_fallback",
+        "supports_cpu_reference_buffers",
+        "cpu_reference_buffers",
+        "CpuReferenceBlurFallback",
+        "CpuReferenceBuffer",
+    ] {
+        assert!(
+            !capability_source.contains(identity) && !error_source.contains(identity),
+            "production capability reporting must not expose the CPU identity {identity}"
+        );
+    }
+
+    for diagnostic_label in ["CPU/reference blur fallback", "CPU reference buffer"] {
+        assert!(
+            !error_source.contains(diagnostic_label),
+            "production diagnostics must not expose the CPU label {diagnostic_label}"
+        );
+    }
+
     assert!(capabilities.paint_sources().supports_solid_rgba());
     assert!(capabilities.paint_sources().supports_gradients());
     assert!(capabilities.paint_sources().supports_image_paint());

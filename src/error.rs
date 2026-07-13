@@ -679,7 +679,6 @@ pub enum PrimitiveOperation {
     OffscreenLayerRendering,
     TextureCacheUploadLifecycle,
     RectFullscreenShaderPass,
-    CpuReferenceBuffer,
     NestedOpacityPlanning,
     MaskExecution,
     FilterExecution,
@@ -689,7 +688,6 @@ pub enum PrimitiveOperation {
     MaterializedBlurFilterExecution,
     MaterializedDropShadowFilterExecution,
     FilterRegionOutsetPlanning,
-    CpuReferenceBlurFallback,
     ColorFilterBlur,
     ColorFilterDropShadow,
     BackdropExecution,
@@ -748,7 +746,6 @@ impl PrimitiveOperation {
             Self::OffscreenLayerRendering => "offscreen layer rendering",
             Self::TextureCacheUploadLifecycle => "texture cache/upload lifecycle",
             Self::RectFullscreenShaderPass => "rect/fullscreen shader pass",
-            Self::CpuReferenceBuffer => "CPU reference buffer",
             Self::NestedOpacityPlanning => "nested opacity planning",
             Self::MaskExecution => "mask execution",
             Self::FilterExecution => "filter execution",
@@ -762,7 +759,6 @@ impl PrimitiveOperation {
                 "materialized drop-shadow filter execution"
             }
             Self::FilterRegionOutsetPlanning => "filter-region/outset planning",
-            Self::CpuReferenceBlurFallback => "CPU/reference blur fallback",
             Self::ColorFilterBlur => "color filter blur",
             Self::ColorFilterDropShadow => "color filter drop-shadow",
             Self::BackdropExecution => "backdrop execution",

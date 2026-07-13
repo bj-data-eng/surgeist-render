@@ -202,7 +202,6 @@ impl Capabilities {
             materialized_blur_filter_execution: true,
             materialized_drop_shadow_filter_execution: true,
             filter_region_outset_planning: true,
-            cpu_reference_blur_fallback: false,
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,
@@ -245,7 +244,6 @@ impl Capabilities {
             offscreen_layer_rendering: false,
             texture_cache_upload_lifecycle: false,
             rect_fullscreen_shader_passes: false,
-            cpu_reference_buffers: false,
             nested_opacity_planning: false,
             mask_execution: false,
             filter_execution: false,
@@ -412,9 +410,6 @@ impl Capabilities {
             (PrimitiveFamily::Filters, PrimitiveOperation::FilterRegionOutsetPlanning) => {
                 self.filters.supports_filter_region_outset_planning()
             }
-            (PrimitiveFamily::Filters, PrimitiveOperation::CpuReferenceBlurFallback) => {
-                self.filters.supports_cpu_reference_blur_fallback()
-            }
             (
                 PrimitiveFamily::Filters,
                 PrimitiveOperation::ColorFilterBlur | PrimitiveOperation::ColorFilterDropShadow,
@@ -486,9 +481,6 @@ impl Capabilities {
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::RectFullscreenShaderPass) => {
                 self.offscreen_pipeline
                     .supports_rect_fullscreen_shader_passes()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::CpuReferenceBuffer) => {
-                self.offscreen_pipeline.supports_cpu_reference_buffers()
             }
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::NestedOpacityPlanning) => {
                 self.offscreen_pipeline.supports_nested_opacity_planning()
@@ -807,7 +799,6 @@ pub struct FilterCapabilities {
     materialized_blur_filter_execution: bool,
     materialized_drop_shadow_filter_execution: bool,
     filter_region_outset_planning: bool,
-    cpu_reference_blur_fallback: bool,
 }
 
 impl FilterCapabilities {
@@ -844,11 +835,6 @@ impl FilterCapabilities {
     #[must_use]
     pub const fn supports_filter_region_outset_planning(self) -> bool {
         self.filter_region_outset_planning
-    }
-
-    #[must_use]
-    pub const fn supports_cpu_reference_blur_fallback(self) -> bool {
-        self.cpu_reference_blur_fallback
     }
 }
 
@@ -1051,7 +1037,6 @@ pub struct OffscreenPipelineCapabilities {
     offscreen_layer_rendering: bool,
     texture_cache_upload_lifecycle: bool,
     rect_fullscreen_shader_passes: bool,
-    cpu_reference_buffers: bool,
     nested_opacity_planning: bool,
     mask_execution: bool,
     filter_execution: bool,
@@ -1085,11 +1070,6 @@ impl OffscreenPipelineCapabilities {
     #[must_use]
     pub const fn supports_rect_fullscreen_shader_passes(self) -> bool {
         self.rect_fullscreen_shader_passes
-    }
-
-    #[must_use]
-    pub const fn supports_cpu_reference_buffers(self) -> bool {
-        self.cpu_reference_buffers
     }
 
     #[must_use]
