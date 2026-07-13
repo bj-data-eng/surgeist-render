@@ -38,6 +38,8 @@ pub(crate) struct ValidatedGlyphRun<'a> {
     transform: Transform,
     paint: &'a TextPaint,
     representations: Vec<SelectedGlyphRepresentation>,
+    #[cfg(test)]
+    selected_glyph_traces: Vec<SelectedGlyphTrace>,
 }
 
 pub(crate) enum SelectedGlyphRepresentation {
@@ -52,10 +54,31 @@ pub(crate) enum BitmapEncoding {
     PackedMask,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BitmapSourceForTest {
+    Sbix,
+    Cbdt,
+    Ebdt,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SelectedGlyphTrace {
+    Outline,
+    Colr,
+    Bitmap {
+        source: BitmapSourceForTest,
+        ppem: u16,
+    },
+}
+
 struct SelectedBitmap<'a> {
     width: u32,
     height: u32,
     data: SelectedBitmapData<'a>,
+    #[cfg(test)]
+    selection: Option<SelectedBitmapSelection>,
 }
 
 enum SelectedBitmapData<'a> {
@@ -70,6 +93,44 @@ enum SelectedBitmapData<'a> {
         data: &'a [u8],
     },
     Unsupported,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct SelectedBitmapSelection {
+    source: Option<BitmapSourceForTest>,
+    ppem: u16,
+}
+
+#[cfg(test)]
+impl<'a> SelectedBitmap<'a> {
+    fn with_selection(mut self, source: BitmapSourceForTest, ppem: u16) -> Self {
+        self.selection = Some(SelectedBitmapSelection {
+            source: Some(source),
+            ppem,
+        });
+        self
+    }
+
+    fn with_ppem(mut self, ppem: u16) -> Self {
+        self.selection = Some(SelectedBitmapSelection { source: None, ppem });
+        self
+    }
+
+    fn with_source(mut self, source: BitmapSourceForTest) -> Self {
+        if let Some(selection) = &mut self.selection {
+            selection.source = Some(source);
+        }
+        self
+    }
+
+    fn selected_trace(&self) -> Option<SelectedGlyphTrace> {
+        let selection = self.selection?;
+        Some(SelectedGlyphTrace::Bitmap {
+            source: selection.source?,
+            ppem: selection.ppem,
+        })
+    }
 }
 
 impl<'a> ValidatedGlyphRun<'a> {
@@ -96,6 +157,11 @@ impl<'a> ValidatedGlyphRun<'a> {
     pub(crate) fn representations(&self) -> &[SelectedGlyphRepresentation] {
         self.representations.as_slice()
     }
+
+    #[cfg(test)]
+    pub(crate) fn selected_glyph_traces_for_test(&self) -> &[SelectedGlyphTrace] {
+        self.selected_glyph_traces.as_slice()
+    }
 }
 
 pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<ValidatedGlyphRun<'a>> {
@@ -116,6 +182,8 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
         .transpose()?;
     let outlines = font.outline_glyphs();
     let mut representations = Vec::with_capacity(run.glyphs().len());
+    #[cfg(test)]
+    let mut selected_glyph_traces = Vec::with_capacity(run.glyphs().len());
 
     for glyph in run.glyphs() {
         if glyph.id() >= glyph_count {
@@ -130,14 +198,25 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
                 .get(glyph_id)
                 .ok_or_else(|| font_data_error(font_data))?;
             preflight_color_glyph(&color, &outlines, &cpal, run.size(), font_data)?;
+            #[cfg(test)]
+            selected_glyph_traces.push(SelectedGlyphTrace::Colr);
             SelectedGlyphRepresentation::Colr
         } else if let Some(bitmap) =
             select_bitmap(&font, Size::new(run.size()), glyph_id, font_data)?
         {
             preflight_selected_image_head(&font, font_data)?;
-            SelectedGlyphRepresentation::Bitmap(preflight_bitmap(&bitmap, font_data)?)
+            let encoding = preflight_bitmap(&bitmap, font_data)?;
+            #[cfg(test)]
+            selected_glyph_traces.push(
+                bitmap
+                    .selected_trace()
+                    .ok_or_else(|| font_data_error(font_data))?,
+            );
+            SelectedGlyphRepresentation::Bitmap(encoding)
         } else {
             preflight_outline(&outlines, glyph_id, run.size(), font_data)?;
+            #[cfg(test)]
+            selected_glyph_traces.push(SelectedGlyphTrace::Outline);
             SelectedGlyphRepresentation::Outline
         };
         representations.push(representation);
@@ -150,6 +229,8 @@ pub(crate) fn preflight_selected_glyphs<'a>(run: &'a TextRun<'a>) -> Result<Vali
         transform: run.transform(),
         paint: run.paint(),
         representations,
+        #[cfg(test)]
+        selected_glyph_traces,
     })
 }
 
@@ -166,10 +247,21 @@ fn selected_color_glyph<'a>(
             .v0_base_glyph(glyph_id)
             .map_err(|_| font_data_error(font_data))?
             .is_some(),
-        1 => colr
-            .v1_base_glyph(glyph_id)
-            .map_err(|_| font_data_error(font_data))?
-            .is_some(),
+        1 => {
+            let selected_v1 = match colr.base_glyph_list_offset() {
+                Some(offset) if offset.is_null() => false,
+                Some(_) => colr
+                    .v1_base_glyph(glyph_id)
+                    .map_err(|_| font_data_error(font_data))?
+                    .is_some(),
+                None => return Err(font_data_error(font_data)),
+            };
+            selected_v1
+                || colr
+                    .v0_base_glyph(glyph_id)
+                    .map_err(|_| font_data_error(font_data))?
+                    .is_some()
+        }
         _ => return Err(font_data_error(font_data)),
     };
     Ok(selected)
@@ -236,7 +328,7 @@ fn select_bitmap<'a>(
     if bitmap_table_pair_is_present(font, Tag::new(b"CBLC"), Tag::new(b"CBDT"), font_data)? {
         let cblc = font.cblc().map_err(|_| font_data_error(font_data))?;
         let cbdt = font.cbdt().map_err(|_| font_data_error(font_data))?;
-        return select_bdt_bitmap(
+        let bitmap = select_bdt_bitmap(
             cblc.bitmap_sizes(),
             cblc.num_sizes(),
             cblc.offset_data(),
@@ -244,12 +336,15 @@ fn select_bitmap<'a>(
             glyph_id,
             font_data,
             |location| cbdt.data(location),
-        );
+        )?;
+        #[cfg(test)]
+        let bitmap = bitmap.map(|bitmap| bitmap.with_source(BitmapSourceForTest::Cbdt));
+        return Ok(bitmap);
     }
     if bitmap_table_pair_is_present(font, Tag::new(b"EBLC"), Tag::new(b"EBDT"), font_data)? {
         let eblc = font.eblc().map_err(|_| font_data_error(font_data))?;
         let ebdt = font.ebdt().map_err(|_| font_data_error(font_data))?;
-        return select_bdt_bitmap(
+        let bitmap = select_bdt_bitmap(
             eblc.bitmap_sizes(),
             eblc.num_sizes(),
             eblc.offset_data(),
@@ -257,7 +352,10 @@ fn select_bitmap<'a>(
             glyph_id,
             font_data,
             |location| ebdt.data(location),
-        );
+        )?;
+        #[cfg(test)]
+        let bitmap = bitmap.map(|bitmap| bitmap.with_source(BitmapSourceForTest::Ebdt));
+        return Ok(bitmap);
     }
     Ok(None)
 }
@@ -307,6 +405,8 @@ fn select_sbix_bitmap<'a>(
             continue;
         }
         if let Some(bitmap) = select_sbix_glyph(&strike, glyph_id, font_data)? {
+            #[cfg(test)]
+            let bitmap = bitmap.with_selection(BitmapSourceForTest::Sbix, strike.ppem());
             best = Some((strike_size, bitmap));
         }
     }
@@ -329,6 +429,8 @@ fn select_sbix_glyph<'a>(
             width: 0,
             height: 0,
             data: SelectedBitmapData::Unsupported,
+            #[cfg(test)]
+            selection: None,
         }));
     }
     Ok(Some(SelectedBitmap {
@@ -338,6 +440,8 @@ fn select_sbix_glyph<'a>(
             data: glyph.data(),
             expected_dimensions: None,
         },
+        #[cfg(test)]
+        selection: None,
     }))
 }
 
@@ -373,6 +477,8 @@ where
         }
         let data = bitmap_data(&location).map_err(|_| font_data_error(font_data))?;
         let bitmap = selected_bdt_glyph(bitmap_size, data, font_data)?;
+        #[cfg(test)]
+        let bitmap = bitmap.with_ppem(u16::from(bitmap_size.ppem_y()));
         best = Some((strike_size, bitmap));
     }
     Ok(best.map(|(_, bitmap)| bitmap))
@@ -516,15 +622,15 @@ fn selected_bdt_location_for_subtable(
             let (sentinel, glyphs) = glyphs
                 .split_last()
                 .ok_or_else(|| font_data_error(font_data))?;
-            if glyphs
-                .windows(2)
-                .any(|entries| entries[0].glyph_id().to_u32() >= entries[1].glyph_id().to_u32())
-            {
-                return Err(font_data_error(font_data));
-            }
-            let glyph_index =
-                glyphs.binary_search_by(|entry| entry.glyph_id().to_u32().cmp(&glyph_id.to_u32()));
-            let Ok(glyph_index) = glyph_index else {
+            let Some(glyph_index) = selected_sparse_glyph_index(
+                glyphs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| (index, entry.glyph_id().to_u32())),
+                glyph_id,
+                font_data,
+            )?
+            else {
                 return Ok(None);
             };
             let start = usize::from(
@@ -539,6 +645,9 @@ fn selected_bdt_location_for_subtable(
             let end = if let Some(entry) = glyphs.get(next_index) {
                 usize::from(entry.sbit_offset())
             } else {
+                if sentinel.glyph_id().to_u32() != u32::from(u16::MAX) {
+                    return Err(font_data_error(font_data));
+                }
                 usize::from(sentinel.sbit_offset())
             };
             location.format = subtable.image_format();
@@ -552,15 +661,15 @@ fn selected_bdt_location_for_subtable(
             if glyphs.len() != checked_count(subtable.num_glyphs(), 0, font_data)? {
                 return Err(font_data_error(font_data));
             }
-            if glyphs
-                .windows(2)
-                .any(|entries| entries[0].get().to_u32() >= entries[1].get().to_u32())
-            {
-                return Err(font_data_error(font_data));
-            }
-            let glyph_index =
-                glyphs.binary_search_by(|entry| entry.get().to_u32().cmp(&glyph_id.to_u32()));
-            let Ok(glyph_index) = glyph_index else {
+            let Some(glyph_index) = selected_sparse_glyph_index(
+                glyphs
+                    .iter()
+                    .enumerate()
+                    .map(|(index, entry)| (index, entry.get().to_u32())),
+                glyph_id,
+                font_data,
+            )?
+            else {
                 return Ok(None);
             };
             location.format = subtable.image_format();
@@ -623,6 +732,8 @@ fn selected_bdt_glyph<'a>(
         width,
         height,
         data,
+        #[cfg(test)]
+        selection: None,
     })
 }
 
@@ -646,6 +757,20 @@ fn checked_glyph_index(
                 .and_then(|first_glyph_id| glyph_id.checked_sub(first_glyph_id))
         })
         .ok_or_else(|| font_data_error(font_data))
+}
+
+fn selected_sparse_glyph_index(
+    glyphs: impl Iterator<Item = (usize, u32)>,
+    glyph_id: GlyphId,
+    font_data: &FontData,
+) -> Result<Option<usize>> {
+    let mut selected_index = None;
+    for (index, candidate) in glyphs {
+        if candidate == glyph_id.to_u32() && selected_index.replace(index).is_some() {
+            return Err(font_data_error(font_data));
+        }
+    }
+    Ok(selected_index)
 }
 
 fn checked_offset(base: u32, offset: u32, font_data: &FontData) -> Result<usize> {

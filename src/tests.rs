@@ -1,5 +1,8 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
-use super::vello_engine::scene::VelloScene;
+use super::vello_engine::{
+    glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
+    scene::VelloScene,
+};
 use super::{
     backend::*,
     command,
@@ -185,9 +188,27 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
     assert_render_failed_without_font_diagnostic(&color_error);
     assert_no_glyph_encoding(&color_scene);
 
+    let color_v1_font =
+        FontData::try_from_bytes(ahem_colr_v1_font_with_v0_root(valid_cpal()), 0).unwrap();
+    let color_v1_run = text_run_for(color_v1_font, 16.0, Transform::identity(), &color_glyphs);
+    assert_selected_glyph_trace(&color_v1_run, SelectedGlyphTrace::Colr);
+    let mut color_v1_scene = VelloScene::default();
+    let color_v1_error = color_v1_scene
+        .encode_text_run(&color_v1_run)
+        .expect_err("a COLRv1 table with a V0-only selected root must reach COLR omission");
+    assert_render_failed_without_font_diagnostic(&color_v1_error);
+    assert_no_glyph_encoding(&color_v1_scene);
+
     let bitmap_font = FontData::try_from_bytes(ahem_sbix_font(rgba_png()), 0).unwrap();
     let bitmap_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let bitmap_run = text_run_for(bitmap_font, 16.0, Transform::identity(), &bitmap_glyphs);
+    assert_selected_glyph_trace(
+        &bitmap_run,
+        SelectedGlyphTrace::Bitmap {
+            source: BitmapSourceForTest::Sbix,
+            ppem: 16,
+        },
+    );
     let mut bitmap_scene = VelloScene::default();
     let bitmap_error = bitmap_scene
         .encode_text_run(&bitmap_run)
@@ -293,6 +314,7 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
         FontData::try_from_bytes(ahem_sbix_font_without_selected_glyph(rgba_png()), 0)
             .expect("the sbix font without the selected bitmap remains container-readable");
     let no_bitmap_run = text_run_for(no_bitmap_font, 16.0, Transform::identity(), &bitmap_glyphs);
+    assert_selected_glyph_trace(&no_bitmap_run, SelectedGlyphTrace::Outline);
     let mut no_bitmap_scene = VelloScene::default();
     no_bitmap_scene
         .encode_text_run(&no_bitmap_run)
@@ -352,6 +374,7 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
     assert_no_glyph_encoding(&malformed_bitmap_head_scene);
 
     assert_bdt_glyph_preflight_cases(&bitmap_glyphs);
+    assert_bitmap_format_selection_cases(&bitmap_glyphs);
 }
 
 #[test]
@@ -544,6 +567,13 @@ fn text_run_for<'a>(
     .unwrap()
 }
 
+fn assert_selected_glyph_trace(run: &TextRun<'_>, expected: SelectedGlyphTrace) {
+    let validated = preflight_selected_glyphs(run)
+        .expect("the selected glyph fixture must complete preflight before encoding");
+
+    assert_eq!(validated.selected_glyph_traces_for_test(), &[expected]);
+}
+
 fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
     for kind in BdtKind::ALL {
         for index_format in BdtIndexFormat::ALL {
@@ -555,6 +585,7 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
                     BdtGlyphFixture::Present,
                 )],
                 16.0,
+                16,
                 glyphs,
             );
         }
@@ -572,21 +603,19 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
             );
         }
 
-        let exact_or_nearest_larger = [
-            BdtStrikeFixture::new(12, BdtIndexFormat::Format1, BdtGlyphFixture::Missing),
+        let competing_present = [
+            BdtStrikeFixture::new(12, BdtIndexFormat::Format1, BdtGlyphFixture::Present),
             BdtStrikeFixture::new(16, BdtIndexFormat::Format2, BdtGlyphFixture::Present),
-            BdtStrikeFixture::new(20, BdtIndexFormat::Format3, BdtGlyphFixture::Missing),
+            BdtStrikeFixture::new(20, BdtIndexFormat::Format3, BdtGlyphFixture::Present),
         ];
-        let nearest_smaller = [
-            BdtStrikeFixture::new(12, BdtIndexFormat::Format1, BdtGlyphFixture::Missing),
-            BdtStrikeFixture::new(16, BdtIndexFormat::Format2, BdtGlyphFixture::Present),
-        ];
-        for (size, strikes) in [
-            (16.0, exact_or_nearest_larger.as_slice()),
-            (14.0, exact_or_nearest_larger.as_slice()),
-            (18.0, nearest_smaller.as_slice()),
-        ] {
-            assert_bdt_selected_bitmap(kind, strikes, size, glyphs);
+        for (size, expected_ppem) in [(16.0, 16), (14.0, 16), (22.0, 20)] {
+            assert_bdt_selected_bitmap(
+                kind,
+                competing_present.as_slice(),
+                size,
+                expected_ppem,
+                glyphs,
+            );
         }
         assert_bdt_selected_bitmap(
             kind,
@@ -595,21 +624,53 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
                 BdtStrikeFixture::new(20, BdtIndexFormat::Format2, BdtGlyphFixture::Present),
             ],
             16.0,
+            20,
             glyphs,
         );
 
         for index_format in [BdtIndexFormat::Format4, BdtIndexFormat::Format5] {
-            for glyph in [
-                BdtGlyphFixture::SparseUnsorted,
-                BdtGlyphFixture::SparseDuplicate,
-            ] {
-                assert_bdt_sparse_invalid(
-                    kind,
-                    &[BdtStrikeFixture::new(16, index_format, glyph)],
-                    glyphs,
-                );
-            }
+            assert_bdt_sparse_invalid(
+                kind,
+                &[BdtStrikeFixture::new(
+                    16,
+                    index_format,
+                    BdtGlyphFixture::SparseDuplicate,
+                )],
+                glyphs,
+            );
+            assert_bdt_selected_bitmap(
+                kind,
+                &[BdtStrikeFixture::new(
+                    16,
+                    index_format,
+                    BdtGlyphFixture::SparseUnsorted,
+                )],
+                16.0,
+                16,
+                glyphs,
+            );
         }
+
+        assert_bdt_sparse_invalid(
+            kind,
+            &[BdtStrikeFixture::new(
+                16,
+                BdtIndexFormat::Format4,
+                BdtGlyphFixture::SparseMalformedSentinel,
+            )],
+            glyphs,
+        );
+        assert_bdt_selected_bitmap(
+            kind,
+            &[BdtStrikeFixture::new(
+                16,
+                BdtIndexFormat::Format4,
+                BdtGlyphFixture::SparseUnselectedMalformedSentinel,
+            )],
+            16.0,
+            16,
+            glyphs,
+        );
 
         assert_bdt_selected_bitmap(
             kind,
@@ -622,6 +683,7 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
                 BdtStrikeFixture::new(16, BdtIndexFormat::Format1, BdtGlyphFixture::Present),
             ],
             16.0,
+            16,
             glyphs,
         );
     }
@@ -646,11 +708,19 @@ fn assert_bdt_selected_bitmap(
     kind: BdtKind,
     strikes: &[BdtStrikeFixture],
     size: f32,
+    expected_ppem: u16,
     glyphs: &[TextGlyph],
 ) {
     let font_data = FontData::try_from_bytes(ahem_bdt_font(kind, strikes), 0)
         .expect("the BDT fixture must remain readable before selected bitmap lowering");
     let run = text_run_for(font_data, size, Transform::identity(), glyphs);
+    assert_selected_glyph_trace(
+        &run,
+        SelectedGlyphTrace::Bitmap {
+            source: kind.trace_source(),
+            ppem: expected_ppem,
+        },
+    );
     let mut scene = VelloScene::default();
     let error = scene
         .encode_text_run(&run)
@@ -669,6 +739,7 @@ fn assert_bdt_outline_fallback(
     let font_data = FontData::try_from_bytes(ahem_bdt_font(kind, strikes), 0)
         .expect("the BDT fixture must remain readable before selected bitmap lowering");
     let run = text_run_for(font_data, size, Transform::identity(), glyphs);
+    assert_selected_glyph_trace(&run, SelectedGlyphTrace::Outline);
     let mut scene = VelloScene::default();
 
     scene
@@ -719,6 +790,13 @@ fn assert_cbdt_precedes_ebdt(glyphs: &[TextGlyph]) {
     )
     .expect("the combined BDT fixture must remain readable before glyph lowering");
     let run = text_run_for(font_data, 16.0, Transform::identity(), glyphs);
+    assert_selected_glyph_trace(
+        &run,
+        SelectedGlyphTrace::Bitmap {
+            source: BitmapSourceForTest::Cbdt,
+            ppem: 16,
+        },
+    );
     let mut scene = VelloScene::default();
     let error = scene
         .encode_text_run(&run)
@@ -726,6 +804,126 @@ fn assert_cbdt_precedes_ebdt(glyphs: &[TextGlyph]) {
 
     assert_render_failed_without_font_diagnostic(&error);
     assert_no_glyph_encoding(&scene);
+}
+
+fn assert_bitmap_format_selection_cases(glyphs: &[TextGlyph]) {
+    let sbix_competing = [
+        SbixStrikeFixture::new(12, true),
+        SbixStrikeFixture::new(16, true),
+        SbixStrikeFixture::new(20, true),
+    ];
+    let sbix_without_selected = [SbixStrikeFixture::new(16, false)];
+    let cbdt_selected = [BdtStrikeFixture::new(
+        16,
+        BdtIndexFormat::Format1,
+        BdtGlyphFixture::Present,
+    )];
+    let ebdt_selected = [BdtStrikeFixture::new(
+        16,
+        BdtIndexFormat::Format1,
+        BdtGlyphFixture::Present,
+    )];
+    let cases = [
+        BitmapFormatFixture {
+            sbix: Some(sbix_competing.as_slice()),
+            cbdt: Some(cbdt_selected.as_slice()),
+            ebdt: Some(ebdt_selected.as_slice()),
+            size: 14.0,
+            expected: BitmapFormatExpected::Bitmap {
+                source: BitmapSourceForTest::Sbix,
+                ppem: 16,
+            },
+        },
+        BitmapFormatFixture {
+            sbix: Some(sbix_without_selected.as_slice()),
+            cbdt: Some(cbdt_selected.as_slice()),
+            ebdt: Some(ebdt_selected.as_slice()),
+            size: 16.0,
+            expected: BitmapFormatExpected::Outline,
+        },
+        BitmapFormatFixture {
+            sbix: None,
+            cbdt: Some(cbdt_selected.as_slice()),
+            ebdt: None,
+            size: 16.0,
+            expected: BitmapFormatExpected::Bitmap {
+                source: BitmapSourceForTest::Cbdt,
+                ppem: 16,
+            },
+        },
+        BitmapFormatFixture {
+            sbix: None,
+            cbdt: Some(cbdt_selected.as_slice()),
+            ebdt: Some(ebdt_selected.as_slice()),
+            size: 16.0,
+            expected: BitmapFormatExpected::Bitmap {
+                source: BitmapSourceForTest::Cbdt,
+                ppem: 16,
+            },
+        },
+        BitmapFormatFixture {
+            sbix: None,
+            cbdt: None,
+            ebdt: Some(ebdt_selected.as_slice()),
+            size: 16.0,
+            expected: BitmapFormatExpected::Bitmap {
+                source: BitmapSourceForTest::Ebdt,
+                ppem: 16,
+            },
+        },
+    ];
+
+    for case in cases {
+        let font_data =
+            FontData::try_from_bytes(ahem_bitmap_format_font(case.sbix, case.cbdt, case.ebdt), 0)
+                .expect("the bitmap format fixture must remain readable before glyph lowering");
+        let run = text_run_for(font_data, case.size, Transform::identity(), glyphs);
+        assert_selected_glyph_trace(&run, case.expected.trace());
+        let mut scene = VelloScene::default();
+
+        match case.expected {
+            BitmapFormatExpected::Bitmap { .. } => {
+                let error = scene
+                    .encode_text_run(&run)
+                    .expect_err("a selected bitmap must reach the explicit T2 omission boundary");
+                assert_render_failed_without_font_diagnostic(&error);
+                assert_no_glyph_encoding(&scene);
+            }
+            BitmapFormatExpected::Outline => {
+                scene
+                    .encode_text_run(&run)
+                    .expect("the chosen bitmap format without the selected glyph must use outline");
+                assert_outline_glyph_encoding(&scene, glyphs[0].id());
+            }
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct BitmapFormatFixture<'a> {
+    sbix: Option<&'a [SbixStrikeFixture]>,
+    cbdt: Option<&'a [BdtStrikeFixture]>,
+    ebdt: Option<&'a [BdtStrikeFixture]>,
+    size: f32,
+    expected: BitmapFormatExpected,
+}
+
+#[derive(Clone, Copy)]
+enum BitmapFormatExpected {
+    Bitmap {
+        source: BitmapSourceForTest,
+        ppem: u16,
+    },
+    Outline,
+}
+
+impl BitmapFormatExpected {
+    const fn trace(self) -> SelectedGlyphTrace {
+        match self {
+            Self::Bitmap { source, ppem } => SelectedGlyphTrace::Bitmap { source, ppem },
+            Self::Outline => SelectedGlyphTrace::Outline,
+        }
+    }
 }
 
 fn assert_outline_glyph_encoding(scene: &VelloScene, glyph_id: u32) {
@@ -770,6 +968,13 @@ impl BdtKind {
     const fn data_major_version(self) -> u16 {
         self.location_major_version()
     }
+
+    const fn trace_source(self) -> BitmapSourceForTest {
+        match self {
+            Self::Cbdt => BitmapSourceForTest::Cbdt,
+            Self::Ebdt => BitmapSourceForTest::Ebdt,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -809,10 +1014,11 @@ impl BdtIndexFormat {
 enum BdtGlyphFixture {
     Present,
     Empty,
-    Missing,
     SparseMissing,
     SparseUnsorted,
     SparseDuplicate,
+    SparseMalformedSentinel,
+    SparseUnselectedMalformedSentinel,
     UnselectedSparseUnsorted,
 }
 
@@ -840,6 +1046,29 @@ fn ahem_bdt_font(kind: BdtKind, strikes: &[BdtStrikeFixture]) -> Vec<u8> {
         (kind.location_tag(), location),
         (kind.data_tag(), data),
     ])
+}
+
+fn ahem_bitmap_format_font(
+    sbix: Option<&[SbixStrikeFixture]>,
+    cbdt: Option<&[BdtStrikeFixture]>,
+    ebdt: Option<&[BdtStrikeFixture]>,
+) -> Vec<u8> {
+    let mut tables = Vec::new();
+    if let Some(strikes) = sbix {
+        let png = rgba_png();
+        tables.push((*b"sbix", sbix_table(png.as_slice(), strikes)));
+    }
+    if let Some(strikes) = cbdt {
+        let (location, data) = bdt_tables(BdtKind::Cbdt, strikes);
+        tables.push((*b"CBLC", location));
+        tables.push((*b"CBDT", data));
+    }
+    if let Some(strikes) = ebdt {
+        let (location, data) = bdt_tables(BdtKind::Ebdt, strikes);
+        tables.push((*b"EBLC", location));
+        tables.push((*b"EBDT", data));
+    }
+    ahem_with_tables(tables)
 }
 
 fn bdt_tables(kind: BdtKind, strikes: &[BdtStrikeFixture]) -> (Vec<u8>, Vec<u8>) {
@@ -891,9 +1120,7 @@ fn bdt_strike_parts(
 ) -> (u16, u16, Vec<u8>, Vec<u8>) {
     let selected_glyph = u16::try_from(AHEM_GLYPH_X).unwrap();
     let (first_glyph, last_glyph) = match strike.glyph {
-        BdtGlyphFixture::Missing | BdtGlyphFixture::UnselectedSparseUnsorted => {
-            (selected_glyph + 1, selected_glyph + 1)
-        }
+        BdtGlyphFixture::UnselectedSparseUnsorted => (selected_glyph + 1, selected_glyph + 1),
         _ if matches!(
             strike.index_format,
             BdtIndexFormat::Format1 | BdtIndexFormat::Format2 | BdtIndexFormat::Format3
@@ -960,6 +1187,7 @@ fn bdt_image_data(index_format: BdtIndexFormat, glyph: BdtGlyphFixture) -> Vec<u
     let count = match glyph {
         BdtGlyphFixture::SparseUnsorted
         | BdtGlyphFixture::SparseDuplicate
+        | BdtGlyphFixture::SparseUnselectedMalformedSentinel
         | BdtGlyphFixture::UnselectedSparseUnsorted => 3,
         _ => 1,
     };
@@ -1044,6 +1272,34 @@ fn push_bdt_format4_array(
                 image_data_offset + image_data_len / 3 * 2,
             );
             push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
+        }
+        BdtGlyphFixture::SparseMalformedSentinel => {
+            push_be_u32(bytes, 1);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph, image_data_offset);
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 1,
+                image_data_offset + image_data_len,
+            );
+        }
+        BdtGlyphFixture::SparseUnselectedMalformedSentinel => {
+            push_be_u32(bytes, 3);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph, image_data_offset);
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 1,
+                image_data_offset + image_data_len / 3,
+            );
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 2,
+                image_data_offset + image_data_len / 3 * 2,
+            );
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 3,
+                image_data_offset + image_data_len,
+            );
         }
         _ => {
             push_be_u32(bytes, 1);
@@ -1154,6 +1410,27 @@ fn ahem_color_font(cpal: Vec<u8>) -> Vec<u8> {
     ahem_with_tables(vec![(*b"COLR", colr), (*b"CPAL", cpal)])
 }
 
+fn ahem_colr_v1_font_with_v0_root(cpal: Vec<u8>) -> Vec<u8> {
+    let mut colr = Vec::new();
+    push_be_u16(&mut colr, 1);
+    push_be_u16(&mut colr, 1);
+    push_be_u32(&mut colr, 34);
+    push_be_u32(&mut colr, 40);
+    push_be_u16(&mut colr, 1);
+    push_be_u32(&mut colr, 44);
+    for _ in 0..4 {
+        push_be_u32(&mut colr, 0);
+    }
+    push_be_u16(&mut colr, AHEM_GLYPH_X.try_into().unwrap());
+    push_be_u16(&mut colr, 0);
+    push_be_u16(&mut colr, 1);
+    push_be_u16(&mut colr, AHEM_GLYPH_X.try_into().unwrap());
+    push_be_u16(&mut colr, 0);
+    push_be_u32(&mut colr, 0);
+
+    ahem_with_tables(vec![(*b"COLR", colr), (*b"CPAL", cpal)])
+}
+
 fn valid_cpal() -> Vec<u8> {
     let mut cpal = Vec::new();
     push_be_u16(&mut cpal, 0);
@@ -1205,33 +1482,70 @@ fn ahem_sbix_font_with_truncated_selected_record() -> Vec<u8> {
 }
 
 fn ahem_sbix_font_with_selected_bitmap(png: Vec<u8>, selected_bitmap: bool) -> Vec<u8> {
+    ahem_sbix_font_with_strikes(png, &[SbixStrikeFixture::new(16, selected_bitmap)])
+}
+
+#[derive(Clone, Copy)]
+struct SbixStrikeFixture {
+    ppem: u16,
+    selected: bool,
+}
+
+impl SbixStrikeFixture {
+    const fn new(ppem: u16, selected: bool) -> Self {
+        Self { ppem, selected }
+    }
+}
+
+fn ahem_sbix_font_with_strikes(png: Vec<u8>, strikes: &[SbixStrikeFixture]) -> Vec<u8> {
+    ahem_with_tables(vec![(*b"sbix", sbix_table(png.as_slice(), strikes))])
+}
+
+fn sbix_table(png: &[u8], strikes: &[SbixStrikeFixture]) -> Vec<u8> {
+    let mut sbix = Vec::new();
+    push_be_u16(&mut sbix, 1);
+    push_be_u16(&mut sbix, 1);
+    push_be_u32(&mut sbix, strikes.len().try_into().unwrap());
+    let strike_offsets_start = sbix.len();
+    sbix.resize(strike_offsets_start + strikes.len() * 4, 0);
+
+    for (index, strike) in strikes.iter().enumerate() {
+        let strike_offset = u32::try_from(sbix.len()).unwrap();
+        write_be_u32(
+            sbix.as_mut_slice(),
+            strike_offsets_start + index * 4,
+            strike_offset,
+        );
+        sbix.extend_from_slice(sbix_strike(png, *strike).as_slice());
+    }
+
+    sbix
+}
+
+fn sbix_strike(png: &[u8], strike: SbixStrikeFixture) -> Vec<u8> {
     let glyph_count = ahem_num_glyphs();
     let glyph_record_len = 8 + png.len();
     let bitmap_offset = 4 + (glyph_count + 1) * 4;
     let bitmap_end = bitmap_offset + glyph_record_len;
-    let mut sbix = Vec::new();
-    push_be_u16(&mut sbix, 1);
-    push_be_u16(&mut sbix, 1);
-    push_be_u32(&mut sbix, 1);
-    push_be_u32(&mut sbix, 12);
-    push_be_u16(&mut sbix, 16);
-    push_be_u16(&mut sbix, 72);
+    let mut sbix_strike = Vec::new();
+    push_be_u16(&mut sbix_strike, strike.ppem);
+    push_be_u16(&mut sbix_strike, 72);
     for glyph_id in 0..=glyph_count {
         let offset = if glyph_id < AHEM_GLYPH_X as usize
-            || selected_bitmap && glyph_id == AHEM_GLYPH_X as usize
+            || strike.selected && glyph_id == AHEM_GLYPH_X as usize
         {
             bitmap_offset
         } else {
             bitmap_end
         };
-        push_be_u32(&mut sbix, offset.try_into().unwrap());
+        push_be_u32(&mut sbix_strike, offset.try_into().unwrap());
     }
-    push_be_u16(&mut sbix, 0);
-    push_be_u16(&mut sbix, 0);
-    sbix.extend_from_slice(b"png ");
-    sbix.extend_from_slice(&png);
+    push_be_u16(&mut sbix_strike, 0);
+    push_be_u16(&mut sbix_strike, 0);
+    sbix_strike.extend_from_slice(b"png ");
+    sbix_strike.extend_from_slice(png);
 
-    ahem_with_tables(vec![(*b"sbix", sbix)])
+    sbix_strike
 }
 
 fn ahem_num_glyphs() -> usize {
