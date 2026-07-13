@@ -29,13 +29,15 @@ mod recording {
         VelloEncodingFailure, VelloEngineState, encode_recording,
     };
     #[cfg(test)]
-    pub(super) use encoder::{no_atlas_abort_outcome_for_test, no_atlas_commit_outcome_for_test};
-    #[cfg(test)]
     pub(crate) use resources::VelloAtlasOutcome;
     pub(super) use resources::VelloResourceLease;
-    #[cfg(test)]
-    pub(super) use resources::over_limit_buffer_preflight_for_test;
     pub(crate) use resources::{PendingVelloResourceCommit, VelloResourceManager};
+    #[cfg(test)]
+    pub(super) use resources::{
+        ScopeResolvedVelloResourceLease, commit_scope_resolved_for_test,
+        no_atlas_abort_outcome_for_test, no_atlas_commit_outcome_for_test,
+        over_limit_buffer_preflight_for_test,
+    };
 }
 mod raster {
     include!("raster.rs");
@@ -129,6 +131,13 @@ pub(crate) async fn no_atlas_commit_outcome_for_test(
     device: &wgpu::Device,
 ) -> crate::Result<VelloAtlasOutcome> {
     recording::no_atlas_commit_outcome_for_test(device).await
+}
+
+#[cfg(test)]
+pub(crate) fn commit_scope_resolved_for_test(
+    lease: recording::ScopeResolvedVelloResourceLease,
+) -> VelloAtlasOutcome {
+    recording::commit_scope_resolved_for_test(lease)
 }
 
 #[cfg(test)]

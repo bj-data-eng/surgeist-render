@@ -14,9 +14,6 @@ use super::{
 };
 use super::super::shaders::{CheckedShaderSet, CheckedWgpuScope};
 
-#[cfg(test)]
-use super::{RecordingBuilder, resources::VelloAtlasOutcome};
-
 #[must_use = "active internal Vello encoding scopes must be explicitly resolved"]
 pub(crate) struct ActiveVelloEncodingScope<'a> {
     scope: CheckedWgpuScope<'a>,
@@ -364,48 +361,6 @@ fn preflight_indirect_dispatch(
         ));
     }
     Ok(())
-}
-
-#[cfg(test)]
-pub(crate) async fn no_atlas_commit_outcome_for_test(
-    device: &wgpu::Device,
-) -> Result<VelloAtlasOutcome> {
-    let intents = no_atlas_resource_intents_for_test()?;
-    let scope = ActiveVelloEncodingScope::begin(device);
-    let allocation = VelloResourceLease::allocate(&scope, &intents);
-    match allocation {
-        Ok(lease) => match scope.finish_with_lease(lease).await {
-            Ok(lease) => {
-                let committed = lease.commit();
-                Ok(committed.atlas_outcome())
-            }
-            Err(failure) => Err(failure.error),
-        },
-        Err(error) => {
-            scope.finish().await?;
-            Err(error)
-        }
-    }
-}
-
-#[cfg(test)]
-pub(crate) async fn no_atlas_abort_outcome_for_test(
-    device: &wgpu::Device,
-) -> Result<VelloAtlasOutcome> {
-    let intents = no_atlas_resource_intents_for_test()?;
-    let scope = ActiveVelloEncodingScope::begin(device);
-    let allocation = VelloResourceLease::allocate(&scope, &intents);
-    let outcome = allocation.map(|lease| lease.abort().into_atlas_outcome());
-    scope.finish().await?;
-    outcome
-}
-
-#[cfg(test)]
-fn no_atlas_resource_intents_for_test() -> Result<Vec<ResourceIntent>> {
-    let mut recording = RecordingBuilder::default();
-    let _buffer = recording.new_buffer(BufferRole::Scene, 4)?;
-    let (_recording, intents) = recording.finish();
-    Ok(intents)
 }
 
 fn encode_command(

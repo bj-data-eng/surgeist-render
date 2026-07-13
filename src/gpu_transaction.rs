@@ -126,6 +126,11 @@ pub(crate) struct InternalVelloPayload<'resources> {
     resources: PendingVelloResourceCommit<'resources>,
 }
 
+/// Proof that an internal Vello submission has reached its clean terminal boundary.
+pub(crate) struct VelloResourceCommitProof {
+    _private: (),
+}
+
 impl<'resources> InternalVelloPayload<'resources> {
     #[cfg_attr(
         not(test),
@@ -230,7 +235,7 @@ impl GpuOperationTransaction {
         queue.submit([command_buffer]);
         match self.finish(operation).await {
             Ok(()) => {
-                resources.commit();
+                resources.commit(VelloResourceCommitProof { _private: () });
                 Ok(())
             }
             Err(error) => Err(error),

@@ -13681,11 +13681,12 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             };
             let command_buffer = command_encoder.finish();
             drop(command_buffer);
-            let committed = pollster::block_on(scope.finish_with_lease(lease))
-                .expect("the caller must resolve a clean checked encoding scope")
-                .commit();
-            assert_eq!(committed.atlas_outcome(), VelloAtlasOutcome::Retain);
-            drop(committed);
+            let lease = pollster::block_on(scope.finish_with_lease(lease))
+                .expect("the caller must resolve a clean checked encoding scope");
+            assert_eq!(
+                super::vello_engine::commit_scope_resolved_for_test(lease),
+                VelloAtlasOutcome::Retain
+            );
         }
 
         {

@@ -3,13 +3,19 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::{BackendErrorCode, Error, PhysicalSize, Result};
+use crate::{
+    BackendErrorCode, Error, PhysicalSize, Result,
+    gpu_transaction::VelloResourceCommitProof,
+};
 
 use super::encoder::ActiveVelloEncodingScope;
 use super::{
     BufferHandle, BufferIntent, BufferRole, ImageHandle, ImageIntent, ImageRetention,
     RasterImageFormat, ResourceIntent, ResourceReference,
 };
+
+#[cfg(test)]
+use super::RecordingBuilder;
 
 struct AllocatedBuffer {
     buffer: wgpu::Buffer,
@@ -186,7 +192,7 @@ impl PendingVelloResourceCommit<'_> {
             reason = "T6 commits resources only after transaction scopes and signals resolve."
         )
     )]
-    pub(crate) fn commit(mut self) {
+    pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) {
         if let Some(lease) = self.lease.take() {
             self.manager
                 .retained_resources
@@ -374,14 +380,7 @@ impl VelloResourceLease {
 }
 
 impl ScopeResolvedVelloResourceLease {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 preserves the clean-scope pending-to-committed transition for T6."
-        )
-    )]
-    pub(crate) fn commit(self) -> CommittedVelloResources {
+    fn commit(self) -> CommittedVelloResources {
         self.lease.into_committed_resources()
     }
 
@@ -418,6 +417,55 @@ pub(crate) async fn over_limit_buffer_preflight_for_test(device: &wgpu::Device) 
     };
     scope.finish().await?;
     allocation_result
+}
+
+#[cfg(test)]
+pub(crate) fn commit_scope_resolved_for_test(
+    lease: ScopeResolvedVelloResourceLease,
+) -> VelloAtlasOutcome {
+    lease.commit().atlas_outcome()
+}
+
+#[cfg(test)]
+pub(crate) async fn no_atlas_commit_outcome_for_test(
+    device: &wgpu::Device,
+) -> Result<VelloAtlasOutcome> {
+    let intents = no_atlas_resource_intents_for_test()?;
+    let scope = ActiveVelloEncodingScope::begin(device);
+    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    match allocation {
+        Ok(lease) => match scope.finish_with_lease(lease).await {
+            Ok(lease) => {
+                let committed = lease.commit();
+                Ok(committed.atlas_outcome())
+            }
+            Err(failure) => Err(failure.into_error_and_aborted_resources().0),
+        },
+        Err(error) => {
+            scope.finish().await?;
+            Err(error)
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn no_atlas_abort_outcome_for_test(
+    device: &wgpu::Device,
+) -> Result<VelloAtlasOutcome> {
+    let intents = no_atlas_resource_intents_for_test()?;
+    let scope = ActiveVelloEncodingScope::begin(device);
+    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    let outcome = allocation.map(|lease| lease.abort().into_atlas_outcome());
+    scope.finish().await?;
+    outcome
+}
+
+#[cfg(test)]
+fn no_atlas_resource_intents_for_test() -> Result<Vec<ResourceIntent>> {
+    let mut recording = RecordingBuilder::default();
+    let _buffer = recording.new_buffer(BufferRole::Scene, 4)?;
+    let (_recording, intents) = recording.finish();
+    Ok(intents)
 }
 
 impl AbortedVelloResources {
