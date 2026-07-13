@@ -46,6 +46,373 @@ const AHEM_GLYPH_DESCENT_P: u32 = 82;
 const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
 
 #[test]
+fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {
+    let normal_dependencies =
+        manifest_dependency_records(include_str!("../Cargo.toml"), "dependencies");
+    let expected_normal_dependencies = std::collections::BTreeMap::from([
+        ("bytemuck".to_owned(), "\"=1.25.0\"".to_owned()),
+        ("kurbo".to_owned(), "\"=0.13.1\"".to_owned()),
+        ("log".to_owned(), "\"=0.4.33\"".to_owned()),
+        ("peniko".to_owned(), "\"=0.6.1\"".to_owned()),
+        ("png".to_owned(), "\"=0.18.1\"".to_owned()),
+        (
+            "skrifa".to_owned(),
+            "{ version = \"=0.42.1\", default-features = false, features = [\"autohint_shaping\", \"std\"] }"
+                .to_owned(),
+        ),
+        (
+            "surgeist-window".to_owned(),
+            "{ path = \"../surgeist-window\", version = \"=0.1.0\", optional = true }"
+                .to_owned(),
+        ),
+        ("vello_encoding".to_owned(), "\"=0.9.0\"".to_owned()),
+        (
+            "vello_shaders".to_owned(),
+            "{ version = \"=0.9.0\", default-features = false, features = [\"wgsl\"] }"
+                .to_owned(),
+        ),
+        ("wgpu".to_owned(), "\"=29.0.3\"".to_owned()),
+    ]);
+    assert_eq!(
+        normal_dependencies, expected_normal_dependencies,
+        "the normal dependency records must be the exact S36 set and roles"
+    );
+
+    let dev_dependencies =
+        manifest_dependency_records(include_str!("../Cargo.toml"), "dev-dependencies");
+    let expected_dev_dependencies = std::collections::BTreeMap::from([
+        ("pollster".to_owned(), "\"=0.4.0\"".to_owned()),
+        (
+            "proptest".to_owned(),
+            "{ version = \"=1.11.0\", default-features = false, features = [\"std\"] }".to_owned(),
+        ),
+    ]);
+    assert_eq!(
+        dev_dependencies, expected_dev_dependencies,
+        "the development dependency records must be the exact S36 test set"
+    );
+    assert!(!normal_dependencies.contains_key("vello"));
+    assert!(!normal_dependencies.contains_key("glifo"));
+    assert!(!normal_dependencies.contains_key("pollster"));
+    assert!(dev_dependencies.contains_key("pollster"));
+    assert_eq!(
+        normal_dependencies.get("bytemuck"),
+        Some(&"\"=1.25.0\"".to_owned()),
+        "Surgeist must not request any bytemuck feature"
+    );
+    assert_eq!(
+        normal_dependencies.get("vello_shaders"),
+        Some(
+            &"{ version = \"=0.9.0\", default-features = false, features = [\"wgsl\"] }".to_owned()
+        ),
+        "vello_shaders must have no default or CPU route"
+    );
+
+    for (dependency, source, use_marker) in [
+        (
+            "bytemuck",
+            include_str!("vello_engine/encoder.rs"),
+            "bytemuck::",
+        ),
+        ("kurbo", include_str!("vello_engine/scene.rs"), "kurbo::"),
+        ("log", include_str!("vello_engine/encoder.rs"), "log::"),
+        ("peniko", include_str!("vello_engine/scene.rs"), "peniko::"),
+        ("png", include_str!("vello_engine/glyph.rs"), "png::"),
+        ("skrifa", include_str!("vello_engine/glyph.rs"), "skrifa::"),
+        (
+            "surgeist-window",
+            include_str!("surface.rs"),
+            "surgeist_window::",
+        ),
+        (
+            "vello_encoding",
+            include_str!("vello_engine/raster.rs"),
+            "vello_encoding::",
+        ),
+        (
+            "vello_shaders",
+            include_str!("vello_engine/shaders.rs"),
+            "vello_shaders::",
+        ),
+        ("wgpu", include_str!("backend.rs"), "wgpu::"),
+        ("pollster", include_str!("tests.rs"), "pollster::"),
+        ("proptest", include_str!("tests.rs"), "proptest::"),
+    ] {
+        assert!(
+            source.contains(use_marker),
+            "{dependency} must retain an intended source use"
+        );
+    }
+
+    let notice = include_str!("../NOTICE-VELLO.md");
+    assert!(notice.contains("- Package: `vello` 0.9.0."));
+    assert!(notice.contains(
+        "- Cargo package checksum: `261359dbef879f8110ef7e1c442246c838d33d3d91cb05e0ea9288d432760c9f`."
+    ));
+    assert!(notice.contains("- Source URL: <https://github.com/linebender/vello>."));
+    assert!(notice.contains("- License expression: `Apache-2.0 OR MIT`."));
+
+    let imported_rows = provenance_rows(notice, "## Imported upstream source files", 4);
+    assert_eq!(
+        imported_rows.len(),
+        7,
+        "the imported-source table must have one row for every derived file"
+    );
+    let imported = imported_rows
+        .into_iter()
+        .map(|row| {
+            (
+                row[0].clone(),
+                (row[1].clone(), row[2].clone(), row[3].clone()),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected_imports = std::collections::BTreeMap::from([
+        (
+            "src/vello_engine/scene.rs".to_owned(),
+            (
+                "vello-0.9.0/src/scene.rs".to_owned(),
+                "7c225e73f56629b1b85e8e5cd296428176ec6e59a0813975e2d4123aaddd1718".to_owned(),
+            ),
+        ),
+        (
+            "src/vello_engine/glyph.rs".to_owned(),
+            (
+                "vello-0.9.0/src/scene.rs".to_owned(),
+                "7c225e73f56629b1b85e8e5cd296428176ec6e59a0813975e2d4123aaddd1718".to_owned(),
+            ),
+        ),
+        (
+            "src/vello_engine/raster.rs".to_owned(),
+            (
+                "vello-0.9.0/src/render.rs".to_owned(),
+                "f75a73fae27085c870273b6e670f355455eea61f1d1dde9b102ab9ed2528e7ed".to_owned(),
+            ),
+        ),
+        (
+            "src/vello_engine/recording.rs".to_owned(),
+            (
+                "vello-0.9.0/src/recording.rs".to_owned(),
+                "3c760a7c7610274443efe06c2e9a37eb71471b14a6635d9f65ce92b39de98b3c".to_owned(),
+            ),
+        ),
+        (
+            "src/vello_engine/shaders.rs".to_owned(),
+            (
+                "vello-0.9.0/src/shaders.rs".to_owned(),
+                "c1392afa0ce8d33873e43a26ba79e881adb0a53e2ed92a90201fac5592a0058e".to_owned(),
+            ),
+        ),
+        (
+            "src/vello_engine/encoder.rs".to_owned(),
+            (
+                "vello-0.9.0/src/wgpu_engine.rs".to_owned(),
+                "d2bbb8151f27d7fd4ff82abaa1438e05cb45468dab36034f48e54eefba183e7c".to_owned(),
+            ),
+        ),
+        (
+            "src/vello_engine/resources.rs".to_owned(),
+            (
+                "vello-0.9.0/src/wgpu_engine.rs".to_owned(),
+                "d2bbb8151f27d7fd4ff82abaa1438e05cb45468dab36034f48e54eefba183e7c".to_owned(),
+            ),
+        ),
+    ]);
+    assert_eq!(imported.len(), expected_imports.len());
+    for (local, (upstream, hash)) in expected_imports {
+        let (actual_upstream, actual_hash, adaptations) = imported
+            .get(&local)
+            .unwrap_or_else(|| panic!("missing provenance row for {local}"));
+        assert_eq!(
+            actual_upstream, &upstream,
+            "{local} upstream source changed"
+        );
+        assert_eq!(actual_hash, &hash, "{local} pre-adaptation hash changed");
+        assert!(
+            !adaptations.is_empty(),
+            "{local} must name its material adaptations"
+        );
+    }
+
+    let omitted_rows = provenance_rows(notice, "## Omitted upstream main-crate sources", 2);
+    assert_eq!(
+        omitted_rows.len(),
+        5,
+        "the omitted-source table must have one row for every omitted source"
+    );
+    let omitted = omitted_rows
+        .into_iter()
+        .map(|row| (row[0].clone(), row[1].clone()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let expected_omissions = std::collections::BTreeSet::from([
+        "vello-0.9.0/src/lib.rs".to_owned(),
+        "vello-0.9.0/src/util.rs".to_owned(),
+        "vello-0.9.0/src/debug.rs".to_owned(),
+        "vello-0.9.0/src/debug/renderer.rs".to_owned(),
+        "vello-0.9.0/src/debug/validate.rs".to_owned(),
+    ]);
+    assert_eq!(
+        omitted
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected_omissions,
+        "the omitted-source table must account for every non-imported vello main-crate source"
+    );
+    assert!(
+        omitted.values().all(|rationale| !rationale.is_empty()),
+        "every omitted source must have a rationale"
+    );
+
+    assert!(notice.contains("`src/vello_engine/mod.rs` is Surgeist-owned composition"));
+    assert!(notice.contains("[Apache-2.0 license](LICENSES/Vello-0.9.0-APACHE-2.0.txt)"));
+    assert!(notice.contains("[MIT license](LICENSES/Vello-0.9.0-MIT.txt)"));
+    assert!(include_str!("../LICENSES/Vello-0.9.0-APACHE-2.0.txt").contains("Apache License"));
+    assert!(
+        include_str!("../LICENSES/Vello-0.9.0-APACHE-2.0.txt")
+            .contains("Version 2.0, January 2004")
+    );
+    assert!(
+        include_str!("../LICENSES/Vello-0.9.0-MIT.txt")
+            .contains("Copyright 2020 the Vello Authors")
+    );
+    assert!(
+        include_str!("../LICENSES/Vello-0.9.0-MIT.txt").contains("Permission is hereby granted")
+    );
+
+    let header_2022 =
+        "// Copyright 2022 the Vello Authors\n// SPDX-License-Identifier: Apache-2.0 OR MIT";
+    let header_2023 =
+        "// Copyright 2023 the Vello Authors\n// SPDX-License-Identifier: Apache-2.0 OR MIT";
+    for (local, source, expected_header) in [
+        (
+            "scene.rs",
+            include_str!("vello_engine/scene.rs"),
+            header_2022,
+        ),
+        (
+            "glyph.rs",
+            include_str!("vello_engine/glyph.rs"),
+            header_2022,
+        ),
+        (
+            "raster.rs",
+            include_str!("vello_engine/raster.rs"),
+            header_2022,
+        ),
+        (
+            "recording.rs",
+            include_str!("vello_engine/recording.rs"),
+            header_2022,
+        ),
+        (
+            "shaders.rs",
+            include_str!("vello_engine/shaders.rs"),
+            header_2022,
+        ),
+        (
+            "encoder.rs",
+            include_str!("vello_engine/encoder.rs"),
+            header_2023,
+        ),
+        (
+            "resources.rs",
+            include_str!("vello_engine/resources.rs"),
+            header_2023,
+        ),
+    ] {
+        assert!(
+            source.starts_with(expected_header),
+            "{local} must retain its exact upstream copyright and SPDX header"
+        );
+    }
+    assert!(
+        !include_str!("vello_engine/mod.rs").starts_with("// Copyright"),
+        "the Surgeist-owned composition module must not claim an upstream source header"
+    );
+}
+
+fn manifest_dependency_records(
+    manifest: &str,
+    section: &str,
+) -> std::collections::BTreeMap<String, String> {
+    let mut in_section = false;
+    let mut records = std::collections::BTreeMap::new();
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if let Some(header) = trimmed
+            .strip_prefix('[')
+            .and_then(|line| line.strip_suffix(']'))
+        {
+            in_section = header == section;
+            continue;
+        }
+        if !in_section || trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let (name, value) = trimmed
+            .split_once('=')
+            .unwrap_or_else(|| panic!("invalid {section} record: {trimmed}"));
+        assert!(
+            records
+                .insert(name.trim().to_owned(), value.trim().to_owned())
+                .is_none(),
+            "duplicate {section} dependency key: {}",
+            name.trim()
+        );
+    }
+    records
+}
+
+fn provenance_rows(notice: &str, heading: &str, expected_columns: usize) -> Vec<Vec<String>> {
+    let (_, section) = notice
+        .split_once(heading)
+        .unwrap_or_else(|| panic!("missing notice section {heading}"));
+    let mut table = section
+        .lines()
+        .skip_while(|line| !line.starts_with('|'))
+        .take_while(|line| line.starts_with('|'));
+    let header = table
+        .next()
+        .unwrap_or_else(|| panic!("{heading} must have a table header"));
+    assert_eq!(
+        header.split('|').count() - 2,
+        expected_columns,
+        "unexpected column count in {heading} header"
+    );
+    let separator = table
+        .next()
+        .unwrap_or_else(|| panic!("{heading} must have a table separator"));
+    assert!(
+        separator.contains("---"),
+        "{heading} table header must have a separator"
+    );
+    let rows = table
+        .map(|line| {
+            let cells = line
+                .split('|')
+                .skip(1)
+                .take_while(|cell| !cell.is_empty())
+                .map(|cell| cell.trim().trim_matches('`').to_owned())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                cells.len(),
+                expected_columns,
+                "unexpected column count in {heading}: {line}"
+            );
+            assert!(
+                cells.iter().all(|cell| !cell.is_empty()),
+                "empty cell in {heading}: {line}"
+            );
+            cells
+        })
+        .collect::<Vec<_>>();
+    assert!(!rows.is_empty(), "{heading} must contain rows");
+    rows
+}
+
+#[test]
 fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
     let parameters = RasterParameters::try_new(
         PhysicalSize::new(64, 48),
