@@ -55,10 +55,76 @@ pub(crate) enum VelloPassOperationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelloPassBufferRoleForTest {
+    Scene,
+    Config,
+    InfoBinData,
+    Tile,
+    Segments,
+    PerTileCommandList,
+    PathReduced,
+    PathReduced2,
+    PathReducedScan,
+    PathMonoids,
+    PathBboxes,
+    Bump,
+    Lines,
+    DrawReduced,
+    DrawMonoids,
+    ClipInputs,
+    ClipElements,
+    ClipBics,
+    ClipBboxes,
+    DrawBboxes,
+    BinHeaders,
+    Paths,
+    IndirectCount,
+    SegmentCounts,
+    BlendSpill,
+    MaskLut,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelloPassImageRoleForTest {
+    GradientRamp,
+    ImageAtlas,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VelloPassBindingForTest {
-    Buffer,
-    Image,
+    Buffer(VelloPassBufferRoleForTest),
+    Image(VelloPassImageRoleForTest),
     TargetOutput,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VelloPassIndirectDispatchForTest {
+    count_buffer_role: VelloPassBufferRoleForTest,
+    offset: u64,
+}
+
+#[cfg(test)]
+impl VelloPassIndirectDispatchForTest {
+    pub(in crate::vello_engine) const fn new(
+        count_buffer_role: VelloPassBufferRoleForTest,
+        offset: u64,
+    ) -> Self {
+        Self {
+            count_buffer_role,
+            offset,
+        }
+    }
+
+    pub(crate) const fn count_buffer_role_for_test(&self) -> VelloPassBufferRoleForTest {
+        self.count_buffer_role
+    }
+
+    pub(crate) const fn offset_for_test(&self) -> u64 {
+        self.offset
+    }
 }
 
 #[cfg(test)]
@@ -78,7 +144,7 @@ pub(crate) struct VelloPassDispatchObservation {
     pub(in crate::vello_engine) phase: VelloPassPhaseForTest,
     pub(in crate::vello_engine) operation: VelloPassOperationForTest,
     pub(in crate::vello_engine) bindings: Vec<VelloPassBindingForTest>,
-    pub(in crate::vello_engine) indirect: bool,
+    pub(in crate::vello_engine) indirect: Option<VelloPassIndirectDispatchForTest>,
 }
 
 #[cfg(test)]
@@ -95,7 +161,7 @@ impl VelloPassDispatchObservation {
         &self.bindings
     }
 
-    pub(crate) const fn is_indirect_for_test(&self) -> bool {
+    pub(crate) const fn indirect_for_test(&self) -> Option<VelloPassIndirectDispatchForTest> {
         self.indirect
     }
 }

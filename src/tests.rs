@@ -1,7 +1,8 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::vello_engine::{
     PreparedVelloPassObservation, RasterParameters, VelloPassBindingForTest,
-    VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
+    VelloPassBufferRoleForTest, VelloPassImageRoleForTest, VelloPassOperationForTest,
+    VelloPassPhaseForTest, VelloPassResourceForTest,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
     prepared_vello_pass_observation_for_test,
     scene::{VelloRasterScenario, VelloScene},
@@ -134,6 +135,13 @@ fn assert_prepared_vello_pass_basics(observation: &PreparedVelloPassObservation)
     assert!(observation.has_transient_buffer_for_test());
 }
 
+type ExpectedVelloScheduleEntry = (
+    VelloPassPhaseForTest,
+    VelloPassOperationForTest,
+    Vec<VelloPassBindingForTest>,
+    Option<(VelloPassBufferRoleForTest, u64)>,
+);
+
 fn assert_exact_vello_schedule(
     observation: &PreparedVelloPassObservation,
     scenario: VelloRasterScenario,
@@ -165,29 +173,43 @@ fn assert_exact_vello_schedule(
             bindings.as_slice(),
             "{scenario:?} dispatch {index} must retain its binding layout"
         );
-        assert_eq!(
-            actual.is_indirect_for_test(),
-            indirect,
-            "{scenario:?} dispatch {index} must retain direct or indirect execution"
-        );
+        match (actual.indirect_for_test(), indirect) {
+            (None, None) => {}
+            (Some(actual_indirect), Some((expected_count_buffer, expected_offset))) => {
+                assert_eq!(
+                    actual_indirect.count_buffer_role_for_test(),
+                    expected_count_buffer,
+                    "{scenario:?} dispatch {index} must retain its indirect count-buffer role"
+                );
+                assert_eq!(
+                    actual_indirect.offset_for_test(),
+                    expected_offset,
+                    "{scenario:?} dispatch {index} must retain its indirect byte offset"
+                );
+            }
+            (actual_indirect, expected_indirect) => panic!(
+                "{scenario:?} dispatch {index} must retain direct or indirect execution: \
+                 actual={actual_indirect:?}, expected={expected_indirect:?}"
+            ),
+        }
     }
 }
 
 fn expected_vello_schedule(
     scenario: VelloRasterScenario,
     antialiasing: Antialiasing,
-) -> Vec<(
-    VelloPassPhaseForTest,
-    VelloPassOperationForTest,
-    Vec<VelloPassBindingForTest>,
-    bool,
-)> {
-    let buffers = |count| vec![VelloPassBindingForTest::Buffer; count];
+) -> Vec<ExpectedVelloScheduleEntry> {
+    use VelloPassBufferRoleForTest as BufferRole;
+
     let mut expected = vec![(
         VelloPassPhaseForTest::Coarse,
         VelloPassOperationForTest::PathTagReduce,
-        buffers(3),
-        false,
+        buffer_bindings(&[
+            BufferRole::Config,
+            BufferRole::Scene,
+            BufferRole::PathReduced,
+        ]),
+        None,
     )];
     if matches!(
         scenario,
@@ -197,54 +219,87 @@ fn expected_vello_schedule(
             (
                 VelloPassPhaseForTest::Coarse,
                 VelloPassOperationForTest::PathTagReduce2,
-                buffers(2),
-                false,
+                buffer_bindings(&[BufferRole::PathReduced, BufferRole::PathReduced2]),
+                None,
             ),
             (
                 VelloPassPhaseForTest::Coarse,
                 VelloPassOperationForTest::PathTagScan1,
-                buffers(3),
-                false,
+                buffer_bindings(&[
+                    BufferRole::PathReduced,
+                    BufferRole::PathReduced2,
+                    BufferRole::PathReducedScan,
+                ]),
+                None,
             ),
             (
                 VelloPassPhaseForTest::Coarse,
                 VelloPassOperationForTest::PathTagScanLarge,
-                buffers(4),
-                false,
+                buffer_bindings(&[
+                    BufferRole::Config,
+                    BufferRole::Scene,
+                    BufferRole::PathReducedScan,
+                    BufferRole::PathMonoids,
+                ]),
+                None,
             ),
         ]);
     } else {
         expected.push((
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::PathTagScan,
-            buffers(4),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Scene,
+                BufferRole::PathReduced,
+                BufferRole::PathMonoids,
+            ]),
+            None,
         ));
     }
     expected.extend([
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::BboxClear,
-            buffers(2),
-            false,
+            buffer_bindings(&[BufferRole::Config, BufferRole::PathBboxes]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::Flatten,
-            buffers(6),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Scene,
+                BufferRole::PathMonoids,
+                BufferRole::PathBboxes,
+                BufferRole::Bump,
+                BufferRole::Lines,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::DrawReduce,
-            buffers(3),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Scene,
+                BufferRole::DrawReduced,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::DrawLeaf,
-            buffers(7),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Scene,
+                BufferRole::DrawReduced,
+                BufferRole::PathBboxes,
+                BufferRole::DrawMonoids,
+                BufferRole::InfoBinData,
+                BufferRole::ClipInputs,
+            ]),
+            None,
         ),
     ]);
     if matches!(
@@ -255,14 +310,27 @@ fn expected_vello_schedule(
             (
                 VelloPassPhaseForTest::Coarse,
                 VelloPassOperationForTest::ClipReduce,
-                buffers(4),
-                false,
+                buffer_bindings(&[
+                    BufferRole::ClipInputs,
+                    BufferRole::PathBboxes,
+                    BufferRole::ClipBics,
+                    BufferRole::ClipElements,
+                ]),
+                None,
             ),
             (
                 VelloPassPhaseForTest::Coarse,
                 VelloPassOperationForTest::ClipLeaf,
-                buffers(7),
-                false,
+                buffer_bindings(&[
+                    BufferRole::Config,
+                    BufferRole::ClipInputs,
+                    BufferRole::PathBboxes,
+                    BufferRole::ClipBics,
+                    BufferRole::ClipElements,
+                    BufferRole::DrawMonoids,
+                    BufferRole::ClipBboxes,
+                ]),
+                None,
             ),
         ]);
     }
@@ -270,67 +338,151 @@ fn expected_vello_schedule(
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::Binning,
-            buffers(8),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::DrawMonoids,
+                BufferRole::PathBboxes,
+                BufferRole::ClipBboxes,
+                BufferRole::DrawBboxes,
+                BufferRole::Bump,
+                BufferRole::InfoBinData,
+                BufferRole::BinHeaders,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::TileAlloc,
-            buffers(6),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Scene,
+                BufferRole::DrawBboxes,
+                BufferRole::Bump,
+                BufferRole::Paths,
+                BufferRole::Tile,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::PathCountSetup,
-            buffers(2),
-            false,
+            buffer_bindings(&[BufferRole::Bump, BufferRole::IndirectCount]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::PathCount,
-            buffers(6),
-            true,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Bump,
+                BufferRole::Lines,
+                BufferRole::Paths,
+                BufferRole::Tile,
+                BufferRole::SegmentCounts,
+            ]),
+            Some((BufferRole::IndirectCount, 0)),
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::Backdrop,
-            buffers(4),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Bump,
+                BufferRole::Paths,
+                BufferRole::Tile,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::Coarse,
-            buffers(9),
-            false,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Scene,
+                BufferRole::DrawMonoids,
+                BufferRole::BinHeaders,
+                BufferRole::InfoBinData,
+                BufferRole::Paths,
+                BufferRole::Tile,
+                BufferRole::Bump,
+                BufferRole::PerTileCommandList,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::PathTilingSetup,
-            buffers(3),
-            false,
+            buffer_bindings(&[
+                BufferRole::Bump,
+                BufferRole::IndirectCount,
+                BufferRole::PerTileCommandList,
+            ]),
+            None,
         ),
         (
             VelloPassPhaseForTest::Coarse,
             VelloPassOperationForTest::PathTiling,
-            buffers(6),
-            true,
+            buffer_bindings(&[
+                BufferRole::Bump,
+                BufferRole::SegmentCounts,
+                BufferRole::Lines,
+                BufferRole::Paths,
+                BufferRole::Tile,
+                BufferRole::Segments,
+            ]),
+            Some((BufferRole::IndirectCount, 0)),
         ),
     ]);
     let (operation, mut bindings) = match antialiasing {
-        Antialiasing::Area => (VelloPassOperationForTest::FineArea, buffers(5)),
-        Antialiasing::Msaa8 => (VelloPassOperationForTest::FineMsaa8, buffers(5)),
-        Antialiasing::Msaa16 => (VelloPassOperationForTest::FineMsaa16, buffers(5)),
+        Antialiasing::Area => (
+            VelloPassOperationForTest::FineArea,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Segments,
+                BufferRole::PerTileCommandList,
+                BufferRole::InfoBinData,
+                BufferRole::BlendSpill,
+            ]),
+        ),
+        Antialiasing::Msaa8 => (
+            VelloPassOperationForTest::FineMsaa8,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Segments,
+                BufferRole::PerTileCommandList,
+                BufferRole::InfoBinData,
+                BufferRole::BlendSpill,
+            ]),
+        ),
+        Antialiasing::Msaa16 => (
+            VelloPassOperationForTest::FineMsaa16,
+            buffer_bindings(&[
+                BufferRole::Config,
+                BufferRole::Segments,
+                BufferRole::PerTileCommandList,
+                BufferRole::InfoBinData,
+                BufferRole::BlendSpill,
+            ]),
+        ),
     };
     bindings.extend([
         VelloPassBindingForTest::TargetOutput,
-        VelloPassBindingForTest::Image,
-        VelloPassBindingForTest::Image,
+        VelloPassBindingForTest::Image(VelloPassImageRoleForTest::GradientRamp),
+        VelloPassBindingForTest::Image(VelloPassImageRoleForTest::ImageAtlas),
     ]);
     if !matches!(antialiasing, Antialiasing::Area) {
-        bindings.push(VelloPassBindingForTest::Buffer);
+        bindings.push(VelloPassBindingForTest::Buffer(BufferRole::MaskLut));
     }
-    expected.push((VelloPassPhaseForTest::Fine, operation, bindings, false));
+    expected.push((VelloPassPhaseForTest::Fine, operation, bindings, None));
     expected
+}
+
+fn buffer_bindings(roles: &[VelloPassBufferRoleForTest]) -> Vec<VelloPassBindingForTest> {
+    roles
+        .iter()
+        .copied()
+        .map(VelloPassBindingForTest::Buffer)
+        .collect()
 }
 
 fn assert_branch_resource_lifetimes(
