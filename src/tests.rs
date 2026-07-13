@@ -97,6 +97,14 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
         dev_dependencies, &expected_dev_dependencies,
         "the development dependency records must be the exact S36 test set"
     );
+    assert_eq!(
+        manifest_dependencies.wasm_test_entropy.as_ref(),
+        Some(&std::collections::BTreeMap::from([(
+            "getrandom".to_owned(),
+            WASM_TEST_ENTROPY_DEPENDENCY.to_owned(),
+        )])),
+        "the wasm test-entropy dependency role must be the exact S36 feature unifier"
+    );
     assert!(!normal_dependencies.contains_key("vello"));
     assert!(!normal_dependencies.contains_key("glifo"));
     assert!(!normal_dependencies.contains_key("pollster"));
@@ -200,6 +208,10 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
             "{dependency} must retain an intended test use outside its provenance checker"
         );
     }
+    assert!(
+        !tests_source.contains(&["getrandom", "::"].concat()),
+        "getrandom must remain the exact no-direct-source-import wasm test-entropy exception"
+    );
 
     let notice = include_str!("../NOTICE-VELLO.md");
     assert!(notice.contains("- Package: `vello` 0.9.0."));
@@ -417,6 +429,7 @@ struct ManifestDependencyTable {
 struct ManifestDependencyRecords {
     normal: std::collections::BTreeMap<String, String>,
     dev: std::collections::BTreeMap<String, String>,
+    wasm_test_entropy: Option<std::collections::BTreeMap<String, String>>,
 }
 
 fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
@@ -488,10 +501,12 @@ fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
 
     let mut normal = None;
     let mut dev = None;
+    let mut wasm_test_entropy = None;
     for table in tables {
         let slot = match table.header.as_str() {
             "dependencies" => &mut normal,
             "dev-dependencies" => &mut dev,
+            WASM_TEST_ENTROPY_DEPENDENCY_TABLE => &mut wasm_test_entropy,
             _ => unreachable!("approved dependency tables have a fixed role"),
         };
         assert!(
@@ -513,7 +528,25 @@ fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
         "dependency names must not appear in both normal and development roles: {duplicated_roles:?}"
     );
 
-    ManifestDependencyRecords { normal, dev }
+    if normal.contains_key("getrandom") || dev.contains_key("getrandom") {
+        panic!("getrandom is only permitted in the exact wasm test-entropy dependency role");
+    }
+    if let Some(records) = &wasm_test_entropy {
+        assert_eq!(
+            records,
+            &std::collections::BTreeMap::from([(
+                "getrandom".to_owned(),
+                WASM_TEST_ENTROPY_DEPENDENCY.to_owned(),
+            )]),
+            "the wasm test-entropy dependency role must be exact"
+        );
+    }
+
+    ManifestDependencyRecords {
+        normal,
+        dev,
+        wasm_test_entropy,
+    }
 }
 
 fn manifest_table_header(line: &str) -> Option<(&str, bool)> {
@@ -635,17 +668,112 @@ fn decode_toml_basic_key_unicode_escape(
 }
 
 fn approved_manifest_dependency_table(path: &[String]) -> Option<&'static str> {
-    (path.len() == 1)
-        .then(|| match path[0].as_str() {
+    if path.len() == 1 {
+        return match path[0].as_str() {
             "dependencies" => Some("dependencies"),
             "dev-dependencies" => Some("dev-dependencies"),
             _ => None,
-        })
-        .flatten()
+        };
+    }
+    (path == wasm_test_entropy_dependency_path()).then_some(WASM_TEST_ENTROPY_DEPENDENCY_TABLE)
 }
 
 fn is_dependency_record_path(path: &[String], table: &str) -> bool {
-    path.len() == 2 && path[0] == table
+    match table {
+        "dependencies" | "dev-dependencies" => path.len() == 2 && path[0] == table,
+        WASM_TEST_ENTROPY_DEPENDENCY_TABLE => {
+            let mut expected_path = wasm_test_entropy_dependency_path();
+            expected_path.push("getrandom".to_owned());
+            path == expected_path
+        }
+        _ => false,
+    }
+}
+
+const WASM_TEST_ENTROPY_TARGET: &str =
+    "cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))";
+const WASM_TEST_ENTROPY_DEPENDENCY_TABLE: &str = "wasm-test-entropy";
+const WASM_TEST_ENTROPY_DEPENDENCY: &str =
+    "{ version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }";
+
+fn wasm_test_entropy_dependency_path() -> Vec<String> {
+    vec![
+        "target".to_owned(),
+        WASM_TEST_ENTROPY_TARGET.to_owned(),
+        "dev-dependencies".to_owned(),
+    ]
+}
+
+#[test]
+fn wasm_test_entropy_dependency_is_exact_target_scoped_crates_io_feature_unifier() {
+    let manifest = include_str!("../Cargo.toml");
+    let records = manifest_dependency_records(manifest);
+    assert_eq!(
+        records.wasm_test_entropy,
+        Some(std::collections::BTreeMap::from([(
+            "getrandom".to_owned(),
+            WASM_TEST_ENTROPY_DEPENDENCY.to_owned(),
+        )])),
+        "the exact wasm test-entropy dependency role must be present"
+    );
+
+    for mutation in [
+        ManifestDependencyMutation::append(
+            "duplicate wasm test-entropy dependency table",
+            "\n[target.'cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))'.dev-dependencies]\ngetrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }\n",
+        ),
+        ManifestDependencyMutation::append(
+            "broader wasm target development dependency table",
+            "\n[target.'cfg(target_arch = \"wasm32\")'.dev-dependencies]\ngetrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }\n",
+        ),
+        ManifestDependencyMutation::append(
+            "wasm target normal getrandom dependency",
+            "\n[target.'cfg(all(target_arch = \"wasm32\", target_os = \"unknown\"))'.dependencies]\ngetrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }\n",
+        ),
+    ] {
+        assert_manifest_dependency_roles_rejected(mutation.apply(manifest), mutation.case);
+    }
+
+    for (case, needle, replacement) in [
+        (
+            "top-level normal getrandom dependency",
+            "kurbo = \"=0.13.1\"",
+            "kurbo = \"=0.13.1\"\ngetrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }",
+        ),
+        (
+            "top-level development getrandom dependency",
+            "pollster = \"=0.4.0\"",
+            "pollster = \"=0.4.0\"\ngetrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }",
+        ),
+        (
+            "broader getrandom version",
+            WASM_TEST_ENTROPY_DEPENDENCY,
+            "getrandom = { version = \"0.3.4\", default-features = false, features = [\"wasm_js\"] }",
+        ),
+        (
+            "getrandom source override",
+            WASM_TEST_ENTROPY_DEPENDENCY,
+            "getrandom = { path = \"../getrandom\", version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }",
+        ),
+        (
+            "wasm test-entropy hidden dependency",
+            WASM_TEST_ENTROPY_DEPENDENCY,
+            "getrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\"] }\nhidden-target-dev-dependency = \"=1.0.0\"",
+        ),
+        (
+            "getrandom default feature",
+            WASM_TEST_ENTROPY_DEPENDENCY,
+            "getrandom = { version = \"=0.3.4\", features = [\"wasm_js\"] }",
+        ),
+        (
+            "getrandom broader feature set",
+            WASM_TEST_ENTROPY_DEPENDENCY,
+            "getrandom = { version = \"=0.3.4\", default-features = false, features = [\"wasm_js\", \"std\"] }",
+        ),
+    ] {
+        let mutated_manifest = manifest.replacen(needle, replacement, 1);
+        assert_manifest_dependency_roles_rejected(mutated_manifest, case);
+    }
 }
 
 fn is_cargo_dependency_path(path: &[String]) -> bool {

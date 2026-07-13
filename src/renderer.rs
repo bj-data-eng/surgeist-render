@@ -114,10 +114,10 @@ impl Renderer {
         canvas: WebCanvas,
         options: SurfaceOptions,
     ) -> Result<Surface> {
-        let Some(html_canvas) = canvas.canvas.clone() else {
+        let Some(html_canvas) = canvas.html_canvas() else {
             return Err(Error::new(
                 BackendErrorCode::SurfaceCreateFailed,
-                format!("web canvas surface '{}' has no canvas handle", canvas.id),
+                format!("web canvas surface '{}' has no canvas handle", canvas.id()),
             ));
         };
         let Some(backend) = self.backend.as_mut() else {
@@ -128,7 +128,11 @@ impl Renderer {
         };
         let physical_size = physical_size(options.size, options.scale)?;
         let (surface, device_identity) = backend
-            .create_presented_surface(html_canvas, physical_size, options.present_mode.into())
+            .create_presented_surface(
+                wgpu::SurfaceTarget::Canvas(html_canvas),
+                physical_size,
+                options.present_mode.into(),
+            )
             .await
             .map_err(|source| {
                 Error::new(

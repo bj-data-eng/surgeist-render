@@ -31,3 +31,6 @@ render-window = ["dep:surgeist-window"]
 [dev-dependencies]
 pollster = "=0.4.0"
 proptest = { version = "=1.11.0", default-features = false, features = ["std"] }
+
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+getrandom = { version = "=0.3.4", default-features = false, features = ["wasm_js"] }

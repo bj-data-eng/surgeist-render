@@ -510,6 +510,11 @@ impl WebCanvas {
     pub fn id(&self) -> &str {
         &self.id
     }
+
+    #[cfg(all(feature = "render-web", target_arch = "wasm32"))]
+    pub(crate) fn html_canvas(&self) -> Option<wgpu::web_sys::HtmlCanvasElement> {
+        self.canvas.clone()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
