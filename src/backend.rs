@@ -1547,7 +1547,7 @@ pub(crate) fn offscreen_local_scene_texture_descriptor(
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn render_internal_vello_local_scene_to_offscreen_texture(
+pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
     context: Option<OffscreenRenderGpuContext<'_>>,
     options: Options,
     cache: &mut OffscreenTextureResourceCache,
@@ -1574,19 +1574,22 @@ pub(crate) fn render_internal_vello_local_scene_to_offscreen_texture(
         GpuOperationStage::Render,
         RuntimeOperation::SurfaceRendering,
     )?;
-    let result = pollster::block_on(context.backend.render_internal_vello_to_texture(
-        transaction,
-        InternalVelloRenderRequest {
-            identity: context.device_identity,
-            operation: RuntimeOperation::SurfaceRendering,
-            scene,
-            target: &resource.view,
-            target_extent: resource.target.descriptor().physical_size(),
-            base_color: request.parameters.base_color,
-            antialiasing: options.antialiasing(),
-            target_usage: resource.target.descriptor().wgpu_usage(),
-        },
-    ));
+    let result = context
+        .backend
+        .render_internal_vello_to_texture(
+            transaction,
+            InternalVelloRenderRequest {
+                identity: context.device_identity,
+                operation: RuntimeOperation::SurfaceRendering,
+                scene,
+                target: &resource.view,
+                target_extent: resource.target.descriptor().physical_size(),
+                base_color: request.parameters.base_color,
+                antialiasing: options.antialiasing(),
+                target_usage: resource.target.descriptor().wgpu_usage(),
+            },
+        )
+        .await;
     context
         .backend
         .observe_device_terminal(context.device_identity);

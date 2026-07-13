@@ -19,6 +19,8 @@ use super::{
 };
 use std::{
     collections::HashSet,
+    future::Future,
+    pin::Pin,
     time::{Duration, Instant},
 };
 
@@ -277,59 +279,48 @@ impl Renderer {
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
 
         let frame_start = Instant::now();
-        let mut transaction = match surface.device_identity() {
-            Some(device_identity) => Some(
-                self.backend
-                    .as_mut()
-                    .expect("device-backed surfaces require their validated backend")
-                    .begin_gpu_operation(
-                        device_identity,
-                        GpuOperationStage::Render,
-                        RuntimeOperation::SurfaceRendering,
-                    )?,
-            ),
-            None => None,
+        let encode_start = Instant::now();
+        let mut stats = Stats {
+            encode_time: Duration::ZERO,
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
         };
-
-        let work = (|| -> Result<(Stats, HashSet<ImageId>, VelloScene)> {
-            let encode_start = Instant::now();
-            let mut stats = Stats {
-                encode_time: Duration::ZERO,
-                render_time: Duration::ZERO,
-                present_time: Duration::ZERO,
-                ..Stats::default()
-            };
-            let normalized = scene.normalize(self.capabilities())?;
-            let normalized = RenderCommands::new(self.materialize_resolved_backdrops(
+        let normalized = scene.normalize(self.capabilities())?;
+        let normalized = RenderCommands::new(
+            self.materialize_resolved_backdrops(
                 normalized.commands,
                 surface.scale(),
                 surface.options.format,
                 parameters,
-            )?);
-            let normalized = RenderCommands::new(self.materialize_resolved_layer_masks(
+            )
+            .await?,
+        );
+        let normalized = RenderCommands::new(
+            self.materialize_resolved_layer_masks(
                 normalized.commands,
                 surface.scale(),
                 surface.options.format,
                 parameters,
-            )?);
-            let mut uploaded_images = self.uploaded_images.clone();
-            collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
-            let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
-            stats.encode_time = encode_start.elapsed();
+            )
+            .await?,
+        );
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
+        let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
+        stats.encode_time = encode_start.elapsed();
 
-            if parameters.debug || self.options.debug() {
-                stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
-            }
-            Ok((stats, uploaded_images, vello_scene))
-        })();
-
-        let (mut stats, uploaded_images, vello_scene) = work?;
+        if parameters.debug || self.options.debug() {
+            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
+        }
         if let (Some(backend), Some(device_identity)) =
             (self.backend.as_mut(), surface.device_identity())
         {
-            let transaction = transaction
-                .take()
-                .expect("device-backed surfaces require their render transaction");
+            let transaction = backend.begin_gpu_operation(
+                device_identity,
+                GpuOperationStage::Render,
+                RuntimeOperation::SurfaceRendering,
+            )?;
             let timings = render_internal_vello_surface(
                 backend,
                 transaction,
@@ -343,16 +334,6 @@ impl Renderer {
             let timings = timings?;
             stats.render_time = timings.render_time;
             stats.present_time = timings.present_time;
-        }
-        if let (Some(transaction), Some(device_identity)) = (transaction, surface.device_identity())
-        {
-            let backend = self
-                .backend
-                .as_mut()
-                .expect("device-backed surfaces require their validated backend");
-            let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-            backend.observe_device_terminal(device_identity);
-            scope_result?;
         }
         stats.frame_time = frame_start.elapsed();
         let mut published = None;
@@ -892,20 +873,26 @@ impl Renderer {
         work
     }
 
-    fn materialize_resolved_backdrops(
-        &mut self,
+    fn materialize_resolved_backdrops<'a>(
+        &'a mut self,
         commands: Vec<RenderCommand>,
         scale: f64,
         format: Format,
         parameters: Parameters,
-    ) -> Result<Vec<RenderCommand>> {
-        commands
-            .into_iter()
-            .map(|command| self.materialize_resolved_backdrop(command, scale, format, parameters))
-            .collect()
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RenderCommand>>> + 'a>> {
+        Box::pin(async move {
+            let mut materialized = Vec::with_capacity(commands.len());
+            for command in commands {
+                materialized.push(
+                    self.materialize_resolved_backdrop(command, scale, format, parameters)
+                        .await?,
+                );
+            }
+            Ok(materialized)
+        })
     }
 
-    fn materialize_resolved_backdrop(
+    async fn materialize_resolved_backdrop(
         &mut self,
         command: RenderCommand,
         scale: f64,
@@ -919,19 +906,22 @@ impl Renderer {
         else {
             return Ok(command);
         };
-        let mut children =
-            self.materialize_resolved_backdrops(children, scale, format, parameters)?;
+        let mut children = self
+            .materialize_resolved_backdrops(children, scale, format, parameters)
+            .await?;
         let Some(backdrop) = layer.backdrop.clone() else {
             return Ok(RenderCommand::Layer { layer, children });
         };
 
         reject_backdrop_execution(backdrop.source_commands())?;
-        let source_commands = self.materialize_resolved_layer_masks(
-            backdrop.source_commands().to_vec(),
-            scale,
-            format,
-            parameters,
-        )?;
+        let source_commands = self
+            .materialize_resolved_layer_masks(
+                backdrop.source_commands().to_vec(),
+                scale,
+                format,
+                parameters,
+            )
+            .await?;
         let bounds = backdrop.capture_bounds();
         let physical_size = physical_size(bounds.rect().size(), scale)?;
         let local_scene = self.backdrop_source_scene(&layer, source_commands, bounds, scale)?;
@@ -950,7 +940,8 @@ impl Renderer {
             &mut cache,
             &local_scene,
             request,
-        )?;
+        )
+        .await?;
         let source = {
             let Some((device, queue)) = self.default_wgpu_device_queue() else {
                 return Err(Error::new(
@@ -1001,20 +992,26 @@ impl Renderer {
         Ok(RenderCommand::Layer { layer, children })
     }
 
-    fn materialize_resolved_layer_masks(
-        &mut self,
+    fn materialize_resolved_layer_masks<'a>(
+        &'a mut self,
         commands: Vec<RenderCommand>,
         scale: f64,
         format: Format,
         parameters: Parameters,
-    ) -> Result<Vec<RenderCommand>> {
-        commands
-            .into_iter()
-            .map(|command| self.materialize_resolved_layer_mask(command, scale, format, parameters))
-            .collect()
+    ) -> Pin<Box<dyn Future<Output = Result<Vec<RenderCommand>>> + 'a>> {
+        Box::pin(async move {
+            let mut materialized = Vec::with_capacity(commands.len());
+            for command in commands {
+                materialized.push(
+                    self.materialize_resolved_layer_mask(command, scale, format, parameters)
+                        .await?,
+                );
+            }
+            Ok(materialized)
+        })
     }
 
-    fn materialize_resolved_layer_mask(
+    async fn materialize_resolved_layer_mask(
         &mut self,
         command: RenderCommand,
         scale: f64,
@@ -1024,8 +1021,9 @@ impl Renderer {
         let RenderCommand::Layer { layer, children } = command else {
             return Ok(command);
         };
-        let children =
-            self.materialize_resolved_layer_masks(children, scale, format, parameters)?;
+        let children = self
+            .materialize_resolved_layer_masks(children, scale, format, parameters)
+            .await?;
         if layer.backdrop.is_some() {
             return Err(backdrop_execution_error());
         }
@@ -1069,7 +1067,8 @@ impl Renderer {
             &mut cache,
             &local_scene,
             request,
-        )?;
+        )
+        .await?;
         let source = {
             let Some((device, queue)) = self.default_wgpu_device_queue() else {
                 return Err(Error::new(

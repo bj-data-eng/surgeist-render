@@ -5708,13 +5708,13 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
         &kurbo::Rect::new(0.0, 0.0, 1.0, 1.0),
     );
 
-    let error = render_internal_vello_local_scene_to_offscreen_texture(
+    let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         None,
         Options::default(),
         &mut cache,
         &scene,
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default()),
-    )
+    ))
     .expect_err("contract-only offscreen render should report missing GPU context");
 
     assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
@@ -5740,21 +5740,21 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
     let options = renderer.options();
     let mut cache = OffscreenTextureResourceCache::new();
     let Some(context) = renderer.default_offscreen_render_context() else {
-        let error = render_internal_vello_local_scene_to_offscreen_texture(
+        let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
             None, options, &mut cache, &scene, request,
-        )
+        ))
         .expect_err("no GPU machines should report the explicit diagnostic");
         assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
         return;
     };
 
-    let output = render_internal_vello_local_scene_to_offscreen_texture(
+    let output = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
         &mut cache,
         &scene,
         request,
-    )
+    ))
     .unwrap();
     assert_eq!(output.target().bounds(), bounds);
     assert_eq!(output.target().resource_id(), 1);
@@ -5803,13 +5803,13 @@ fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Bgra8, Parameters::default());
 
-    let error = render_internal_vello_local_scene_to_offscreen_texture(
+    let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         None,
         Options::default(),
         &mut cache,
         &scene,
         request,
-    )
+    ))
     .expect_err("Bgra8 should be rejected before GPU context allocation");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
@@ -5912,33 +5912,33 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
     let options = renderer.options();
     let mut cache = OffscreenTextureResourceCache::new();
     let Some(context) = renderer.default_offscreen_render_context() else {
-        let error = render_internal_vello_local_scene_to_offscreen_texture(
+        let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
             None, options, &mut cache, &scene, request,
-        )
+        ))
         .expect_err("no GPU machines should report the explicit diagnostic");
         assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
         return;
     };
-    let first = render_internal_vello_local_scene_to_offscreen_texture(
+    let first = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
         &mut cache,
         &scene,
         request,
-    )
+    ))
     .unwrap();
     let first_resource_id = first.target().resource_id();
     let first_descriptor = first.target().descriptor();
     first.release(&mut cache).unwrap();
 
     let context = renderer.default_offscreen_render_context().unwrap();
-    let second = render_internal_vello_local_scene_to_offscreen_texture(
+    let second = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
         &mut cache,
         &scene,
         request,
-    )
+    ))
     .unwrap();
 
     assert_eq!(second.target().descriptor(), first_descriptor);
@@ -16491,8 +16491,14 @@ fn render_path_submits_without_map_or_cpu_wait() {
         "the observed submission must carry the internal raster resource lease"
     );
 
+    let backend_source = include_str!("backend.rs");
     let renderer_source = include_str!("renderer.rs");
     let engine_source = include_str!("vello_engine/encoder.rs");
+    assert!(
+        !backend_source.contains("pollster::block_on")
+            && !renderer_source.contains("pollster::block_on"),
+        "production render modules must not block an async host with pollster"
+    );
     assert!(
         !renderer_source.contains("render_vello_surface"),
         "Renderer::render must route production raster work through the transaction-owned internal pass"
@@ -16504,6 +16510,51 @@ fn render_path_submits_without_map_or_cpu_wait() {
             && !engine_source.contains(".poll("),
         "production raster encoding must not map, poll, or wait on the CPU"
     );
+}
+
+#[test]
+fn materialized_mask_render_preserves_final_transaction_generation() {
+    let submission_scope =
+        gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("materialized-mask transaction coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0))
+        .expect("materialized-mask transaction coverage requires a headless surface");
+    let mask = ImageBuffer {
+        size: PhysicalSize::new(2, 1),
+        rgba: vec![255, 255, 255, 255, 0, 0, 0, 128],
+    };
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_resolved_alpha_mask(mask).unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
+        },
+    );
+
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect("materialized masks must render through the production path");
+    let output = renderer.read_headless(&surface).unwrap();
+    let submission = submission_scope.observation_for_test();
+
+    assert_eq!(
+        submission.queue_submission_count_for_test(),
+        2,
+        "the real materialized-mask path must submit its offscreen raster before the final surface raster"
+    );
+    assert_eq!(
+        submission.active_generation_for_test(),
+        submission.transaction_generation_for_test(),
+        "the final surface submission must retain its own active DeviceSignal generation after materialization"
+    );
+    assert!(
+        submission
+            .transaction_generation_for_test()
+            .is_some_and(|generation| generation != 0),
+        "the final surface submission must retain a nonzero transaction generation"
+    );
+    assert!(pixel_alpha(&output, 0, 0) > 200);
+    assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
 }
 
 fn pinned_vello_characterization_scene() -> Scene {
