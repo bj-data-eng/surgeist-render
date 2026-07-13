@@ -1,6 +1,55 @@
 pub(crate) mod glyph;
-mod raster;
-mod recording;
+mod shaders;
+mod recording {
+    include!("recording.rs");
+
+    mod resources {
+        include!("resources.rs");
+    }
+
+    mod encoder {
+        include!("encoder.rs");
+    }
+
+    pub(crate) use encoder::{TransactionEncodingState, VelloEngineState, encode_recording};
+    pub(super) use resources::VelloResourceLease;
+}
+mod raster {
+    include!("raster.rs");
+
+    impl PreparedVelloPass {
+        #[cfg_attr(
+            not(test),
+            expect(
+                dead_code,
+                reason = "C03 T4 keeps private checked encoding ready for the later T7 cutover."
+            )
+        )]
+        pub(crate) fn encode_into(
+            &self,
+            engine: &super::recording::VelloEngineState,
+            state: &mut super::recording::TransactionEncodingState<'_>,
+        ) -> Result<super::recording::VelloResourceLease> {
+            if self.target_intent.extent != state.target_extent()
+                || self.target_intent.format != RasterImageFormat::Rgba8Unorm
+                || self.target_intent.access != RasterTargetAccess::StorageWrite
+                || state.target_format() != wgpu::TextureFormat::Rgba8Unorm
+            {
+                return Err(Error::new(
+                    crate::BackendErrorCode::RenderFailed,
+                    "internal Vello encoding target does not match the prepared raster intent",
+                ));
+            }
+
+            super::recording::encode_recording(
+                engine,
+                &self.recording,
+                &self.resource_intents,
+                state,
+            )
+        }
+    }
+}
 pub(crate) mod scene;
 
 #[cfg_attr(
@@ -11,6 +60,20 @@ pub(crate) mod scene;
     )
 )]
 pub(crate) use raster::{PreparedVelloPass, RasterParameters};
+
+#[cfg_attr(
+    not(test),
+    expect(
+        unused_imports,
+        reason = "C03 T4 keeps transaction-borrowed encoding state internal until the T7 cutover."
+    )
+)]
+pub(crate) use recording::{TransactionEncodingState, VelloEngineState};
+
+#[cfg(test)]
+pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> crate::Result<()> {
+    shaders::checked_shader_validation_for_test(device).await
+}
 
 #[cfg(test)]
 pub(crate) fn prepared_vello_pass_observation_for_test(

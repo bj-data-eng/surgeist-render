@@ -1,8 +1,8 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::vello_engine::{
-    PreparedVelloPassObservation, RasterParameters, VelloPassBindingForTest,
-    VelloPassBufferRoleForTest, VelloPassImageRoleForTest, VelloPassOperationForTest,
-    VelloPassPhaseForTest, VelloPassResourceForTest,
+    PreparedVelloPassObservation, RasterParameters, TransactionEncodingState, VelloEngineState,
+    VelloPassBindingForTest, VelloPassBufferRoleForTest, VelloPassImageRoleForTest,
+    VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
     prepared_vello_pass_observation_for_test,
     scene::{VelloRasterScenario, VelloScene},
@@ -13583,6 +13583,113 @@ fn real_gpu_error_scope_captures_deliberate_validation_error() {
         .expect("real GPU error-scope coverage requires a host adapter");
     let error = result.expect_err("the deliberate invalid texture must be captured by the scope");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[test]
+fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let validation_result = {
+        let (device, _) = renderer
+            .default_wgpu_device_queue()
+            .expect("checked internal Vello shader coverage requires a host adapter");
+        pollster::block_on(super::vello_engine::checked_shader_validation_for_test(
+            device,
+        ))
+    };
+
+    let error = validation_result
+        .expect_err("invalid internal Vello WGSL must fail through a checked scope");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+
+    {
+        let (device, queue) = renderer
+            .default_wgpu_device_queue()
+            .expect("checked internal Vello encoding coverage requires a host adapter");
+        let engine = pollster::block_on(VelloEngineState::new_checked(device))
+            .expect("pinned internal Vello shaders must create through checked scopes");
+        let target_extent = PhysicalSize::new(64, 48);
+        let _target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("T4 checked internal Vello target"),
+            size: wgpu::Extent3d {
+                width: target_extent.width(),
+                height: target_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = _target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T4 transaction-owned command encoding"),
+        });
+        let area_parameters =
+            RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+                .expect("a non-empty internal Vello target must prepare");
+        let area_pass = VelloScene::prepare_raster_scenario_for_test(
+            VelloRasterScenario::Base,
+            area_parameters,
+        )
+        .expect("the base scene must prepare for internal checked encoding");
+        let aborted = {
+            let mut state = TransactionEncodingState::new(
+                device,
+                queue,
+                &mut command_encoder,
+                &target_view,
+                target_extent,
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            area_pass
+                .encode_into(&engine, &mut state)
+                .expect("a prepared area pass must encode into transaction-owned state")
+                .abort()
+        };
+        assert!(aborted.discarded_resource_count_for_test() > 0);
+
+        let msaa8_pass = VelloScene::prepare_raster_scenario_for_test(
+            VelloRasterScenario::Base,
+            area_parameters.with_antialiasing(Antialiasing::Msaa8),
+        )
+        .expect("the MSAA8 scene must prepare for internal checked encoding");
+        let committed = {
+            let mut state = TransactionEncodingState::new(
+                device,
+                queue,
+                &mut command_encoder,
+                &target_view,
+                target_extent,
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            msaa8_pass
+                .encode_into(&engine, &mut state)
+                .expect("an MSAA8 pass must encode into transaction-owned state")
+                .commit()
+        };
+        drop(committed);
+
+        let mismatch = {
+            let mut state = TransactionEncodingState::new(
+                device,
+                queue,
+                &mut command_encoder,
+                &target_view,
+                PhysicalSize::new(63, 48),
+                wgpu::TextureFormat::Rgba8Unorm,
+            );
+            area_pass.encode_into(&engine, &mut state)
+        }
+        .err()
+        .expect("a mismatched transaction target must fail before encoding");
+        assert_eq!(mismatch.code(), ErrorCode::RenderFailed);
+    }
+
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 

@@ -12,8 +12,10 @@ name = "surgeist_render"
 path = "src/lib.rs"
 
 [dependencies]
+bytemuck = "=1.25.0"
 glifo = "=0.1.1"
 kurbo = "=0.13.1"
+log = "=0.4.33"
 peniko = "=0.6.1"
 pollster = "=0.4.0"
 png = "=0.18.1"
@@ -21,6 +23,7 @@ skrifa = { version = "=0.42.1", default-features = false, features = ["autohint_
 surgeist-window = { path = "../surgeist-window", version = "=0.1.0", optional = true }
 vello = "=0.9.0"
 vello_encoding = "=0.9.0"
+vello_shaders = { version = "=0.9.0", default-features = false, features = ["wgsl"] }
 wgpu = "=29.0.3"
 
 [features]

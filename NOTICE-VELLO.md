@@ -33,6 +33,21 @@ CPU/debug/map/poll/submission paths. It introduces no WGPU resource or
 submission authority. The private production boundary remains unused until the
 later T7 cutover.
 
+## T4 checked WGPU encoder and resource leases
+
+| Local files | Upstream source | Pre-adaptation SHA-256 | Material adaptation |
+| --- | --- | --- | --- |
+| `src/vello_engine/shaders.rs` | `vello-0.9.0/src/shaders.rs` | `c1392afa0ce8d33873e43a26ba79e881adb0a53e2ed92a90201fac5592a0058e` | Retains the pinned shader-selection schedule and WGSL binding metadata, but creates every module and compute pipeline through checked WGPU scopes. It uses the external WGSL-only `vello_shaders 0.9.0` metadata rather than copying generated shader sources. |
+| `src/vello_engine/encoder.rs`, `src/vello_engine/resources.rs` | `vello-0.9.0/src/wgpu_engine.rs` | `d2bbb8151f27d7fd4ff82abaa1438e05cb45468dab36034f48e54eefba183e7c` | Retains only symbolic-recording realization, upload, bind-group, and compute-pass concepts. It accepts transaction-borrowed device, queue, command encoder, and target state; returns an explicit pending resource lease with consuming commit/abort transitions; and maps malformed private recordings to `RenderFailed`. |
+
+The T4 import retains the upstream SPDX and copyright headers in each derived
+source file. It omits the public Vello engine and renderer APIs, resource pools,
+pipeline caches, parallel initialization, CPU execution, hot reload, image
+overrides/registration, debug layers, profiler integration, downloads, mapping,
+polling, surface helpers, and submission ownership. Checked shader construction
+is the only shader path; command encoding remains owned by the caller's active
+transaction and T4 does not route a lease into transaction publication.
+
 ## License artifacts
 
 `LICENSES/Vello-0.9.0-APACHE-2.0.txt` and
