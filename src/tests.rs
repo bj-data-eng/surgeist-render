@@ -551,13 +551,63 @@ fn manifest_path_components(path: &str) -> Vec<String> {
 fn manifest_path_component(component: &str) -> String {
     let component = component.trim();
     assert!(!component.is_empty(), "empty manifest path component");
-    let unquoted = match (component.as_bytes().first(), component.as_bytes().last()) {
-        (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) if component.len() >= 2 => {
-            &component[1..component.len() - 1]
+    match (component.as_bytes().first(), component.as_bytes().last()) {
+        (Some(b'\''), Some(b'\'')) if component.len() >= 2 => {
+            component[1..component.len() - 1].to_owned()
         }
-        _ => component,
-    };
-    unquoted.to_owned()
+        (Some(b'"'), Some(b'"')) if component.len() >= 2 => {
+            decode_toml_basic_key(&component[1..component.len() - 1])
+        }
+        _ => component.to_owned(),
+    }
+}
+
+fn decode_toml_basic_key(key: &str) -> String {
+    let mut decoded = String::with_capacity(key.len());
+    let mut characters = key.chars();
+
+    while let Some(character) = characters.next() {
+        let decoded_character = match character {
+            '\\' => match characters
+                .next()
+                .unwrap_or_else(|| panic!("unterminated TOML basic-key escape: {key}"))
+            {
+                'b' => '\u{8}',
+                't' => '\t',
+                'n' => '\n',
+                'f' => '\u{c}',
+                'r' => '\r',
+                '"' => '"',
+                '\\' => '\\',
+                'u' => decode_toml_basic_key_unicode_escape(&mut characters, 4, key),
+                'U' => decode_toml_basic_key_unicode_escape(&mut characters, 8, key),
+                escape => panic!("unsupported TOML basic-key escape \\{escape} in {key}"),
+            },
+            character => character,
+        };
+        decoded.push(decoded_character);
+    }
+
+    decoded
+}
+
+fn decode_toml_basic_key_unicode_escape(
+    characters: &mut std::str::Chars<'_>,
+    digits: usize,
+    key: &str,
+) -> char {
+    let mut value = 0;
+    for _ in 0..digits {
+        let digit = characters
+            .next()
+            .unwrap_or_else(|| panic!("truncated TOML basic-key Unicode escape in {key}"));
+        value = value * 16
+            + digit
+                .to_digit(16)
+                .unwrap_or_else(|| panic!("invalid TOML basic-key Unicode escape digit {digit:?}"));
+    }
+    char::from_u32(value)
+        .unwrap_or_else(|| panic!("invalid TOML basic-key Unicode scalar value: {value:#x}"))
 }
 
 fn approved_manifest_dependency_table(path: &[String]) -> Option<&'static str> {
@@ -615,6 +665,10 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
             "\ndependencies.hidden-root-dependency = \"=1.0.0\"\n",
         ),
         ManifestDependencyMutation::prepend_root(
+            "root escaped basic-key normal dependency",
+            "\n\"\\u0064ependencies\".hidden-root-escaped-dependency = \"=1.0.0\"\n",
+        ),
+        ManifestDependencyMutation::prepend_root(
             "root dotted build dependency",
             "\nbuild-dependencies.hidden-root-build-dependency = \"=1.0.0\"\n",
         ),
@@ -649,6 +703,10 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
         ManifestDependencyMutation::append(
             "target normal dependency table",
             "\n[target.'cfg(unix)'.dependencies]\nhidden-target-dependency = \"=1.0.0\"\n",
+        ),
+        ManifestDependencyMutation::append(
+            "target escaped basic-key normal dependency table",
+            "\n[target.'cfg(unix)'.\"\\u0064ependencies\"]\nhidden-target-escaped-dependency = \"=1.0.0\"\n",
         ),
         ManifestDependencyMutation::append(
             "target development dependency table",
