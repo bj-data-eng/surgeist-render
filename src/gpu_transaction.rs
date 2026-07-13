@@ -1,6 +1,7 @@
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
+    vello_engine::PendingVelloResourceCommit,
 };
 use std::sync::Arc;
 
@@ -112,6 +113,38 @@ pub(crate) struct GpuOperationTransaction {
     stage: GpuOperationStage,
 }
 
+#[must_use = "internal Vello command buffers must remain owned by their GPU transaction"]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T6 keeps internal Vello submission and resource commitment transaction-owned before T7 production cutover."
+    )
+)]
+pub(crate) struct InternalVelloPayload<'resources> {
+    command_buffer: wgpu::CommandBuffer,
+    resources: PendingVelloResourceCommit<'resources>,
+}
+
+impl<'resources> InternalVelloPayload<'resources> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 constructs transaction-owned Vello payloads before T7 production cutover."
+        )
+    )]
+    pub(crate) fn new(
+        command_buffer: wgpu::CommandBuffer,
+        resources: PendingVelloResourceCommit<'resources>,
+    ) -> Self {
+        Self {
+            command_buffer,
+            resources,
+        }
+    }
+}
+
 impl GpuOperationTransaction {
     pub(crate) fn begin(
         device: &wgpu::Device,
@@ -175,6 +208,33 @@ impl GpuOperationTransaction {
             return Err(classify_captured_error(self.stage, error));
         }
         Ok(())
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 is the sole internal Vello submission route before T7 production cutover."
+        )
+    )]
+    pub(crate) async fn submit_internal_vello(
+        self,
+        queue: &wgpu::Queue,
+        payload: InternalVelloPayload<'_>,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        let InternalVelloPayload {
+            command_buffer,
+            resources,
+        } = payload;
+        queue.submit([command_buffer]);
+        match self.finish(operation).await {
+            Ok(()) => {
+                resources.commit();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
     }
 }
 

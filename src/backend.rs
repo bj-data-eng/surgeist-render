@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::gpu_transaction::InternalVelloPayload;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -9,6 +11,10 @@ use super::surface::PresentedLifecycle;
 ))]
 use super::surface::PresentedSurface;
 use super::surface::{HeadlessResources, SurfaceBackend};
+#[cfg(test)]
+use super::vello_engine::{
+    ActiveVelloEncodingScope, PreparedVelloPass, TransactionEncodingState, TransactionTargetIntent,
+};
 use super::vello_engine::{VelloEngineState, VelloResourceManager};
 use super::*;
 use super::{
@@ -823,6 +829,101 @@ impl Backend {
             state.next_operation_generation,
             stage,
         ))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn submit_prepared_vello_pass_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        prepared: &PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<()> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before internal Vello submission",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before internal Vello submission",
+            ));
+        }
+        let ready = state.ready_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before internal Vello encoding",
+            )
+        })?;
+        let ReadyDeviceState {
+            device,
+            queue,
+            engine,
+            resources,
+            ..
+        } = ready;
+        let target_usage = wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("T6 transaction-owned internal Vello target"),
+            size: wgpu::Extent3d {
+                width: target_extent.width(),
+                height: target_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: target_usage,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T6 transaction-owned internal Vello encoder"),
+        });
+        let mut scope = ActiveVelloEncodingScope::begin(device);
+        let lease = {
+            let mut encoding = TransactionEncodingState::new(
+                &mut scope,
+                queue,
+                &mut command_encoder,
+                &target_view,
+                TransactionTargetIntent::new(
+                    target_extent,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    target_usage,
+                ),
+            );
+            match prepared.encode_into(engine, &mut encoding) {
+                Ok(lease) => lease,
+                Err(failure) => {
+                    let (error, aborted) = failure.into_error_and_aborted_resources();
+                    resources.record_aborted_resources(aborted);
+                    return Err(error);
+                }
+            }
+        };
+        let lease = match scope.finish_with_lease(lease).await {
+            Ok(lease) => lease,
+            Err(failure) => {
+                let (error, aborted) = failure.into_error_and_aborted_resources();
+                resources.record_aborted_resources(aborted);
+                return Err(error);
+            }
+        };
+        let payload =
+            InternalVelloPayload::new(command_encoder.finish(), resources.pending_commit(lease));
+        transaction
+            .submit_internal_vello(queue, payload, RuntimeOperation::SurfaceRendering)
+            .await
     }
 
     pub(crate) fn has_device_slot(&mut self, identity: DeviceSlotIdentity) -> bool {

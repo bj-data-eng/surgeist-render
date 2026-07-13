@@ -108,12 +108,21 @@ pub(crate) struct CommittedVelloResources {
 /// scope-clean committed leases into this collection after submission.
 pub(crate) struct VelloResourceManager {
     retained_resources: Vec<CommittedVelloResources>,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 retains aborted atlas recovery until production internal raster submission uses it."
+        )
+    )]
+    recovery_outcomes: Vec<VelloAtlasOutcome>,
 }
 
 impl VelloResourceManager {
     pub(crate) const fn new() -> Self {
         Self {
             retained_resources: Vec::new(),
+            recovery_outcomes: Vec::new(),
         }
     }
 
@@ -121,9 +130,76 @@ impl VelloResourceManager {
         self.retained_resources.is_empty()
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 creates transaction-owned pending resource commits before T7 production cutover."
+        )
+    )]
+    pub(crate) fn pending_commit(
+        &mut self,
+        lease: ScopeResolvedVelloResourceLease,
+    ) -> PendingVelloResourceCommit<'_> {
+        PendingVelloResourceCommit {
+            manager: self,
+            lease: Some(lease),
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 records checked-encoding recovery before T7 production cutover."
+        )
+    )]
+    pub(crate) fn record_aborted_resources(&mut self, aborted: AbortedVelloResources) {
+        self.recovery_outcomes.push(aborted.into_atlas_outcome());
+    }
+
     #[cfg(test)]
     pub(crate) fn is_empty_for_test(&self) -> bool {
         self.is_empty()
+    }
+}
+
+/// Keeps a scope-clean resource lease uncertain until the owning GPU transaction succeeds.
+#[must_use = "pending Vello resources must be committed by their transaction or aborted on drop"]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T6 keeps scope-clean Vello resources transaction-owned before T7 production cutover."
+    )
+)]
+pub(crate) struct PendingVelloResourceCommit<'manager> {
+    manager: &'manager mut VelloResourceManager,
+    lease: Option<ScopeResolvedVelloResourceLease>,
+}
+
+impl PendingVelloResourceCommit<'_> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 commits resources only after transaction scopes and signals resolve."
+        )
+    )]
+    pub(crate) fn commit(mut self) {
+        if let Some(lease) = self.lease.take() {
+            self.manager
+                .retained_resources
+                .push(lease.commit());
+        }
+    }
+}
+
+impl Drop for PendingVelloResourceCommit<'_> {
+    fn drop(&mut self) {
+        if let Some(lease) = self.lease.take() {
+            self.manager.record_aborted_resources(lease.abort());
+        }
     }
 }
 

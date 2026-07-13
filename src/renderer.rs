@@ -743,6 +743,29 @@ impl Renderer {
     }
 
     #[cfg(test)]
+    pub(crate) async fn submit_prepared_vello_pass_for_test(
+        &mut self,
+        prepared: &super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<()> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "T6 transaction coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "T6 transaction coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .submit_prepared_vello_pass_for_test(device_identity, prepared, target_extent)
+            .await
+    }
+
+    #[cfg(test)]
     pub(crate) fn default_device_active_operation_generation_for_test(&mut self) -> Option<u64> {
         let device_identity = self.default_device?;
         self.backend

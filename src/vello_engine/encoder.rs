@@ -221,6 +221,17 @@ impl VelloEncodingFailure {
     pub(crate) fn into_aborted_resources(self) -> AbortedVelloResources {
         self.aborted_resources
     }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 routes checked encoding errors and aborted resources to the device manager."
+        )
+    )]
+    pub(crate) fn into_error_and_aborted_resources(self) -> (Error, AbortedVelloResources) {
+        (self.error, self.aborted_resources)
+    }
 }
 
 #[cfg_attr(

@@ -14084,6 +14084,38 @@ fn terminal_device_cleanup_drops_internal_engine_resources() {
     );
 }
 
+#[test]
+fn encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("T6 transaction coverage requires a real selected WGPU device");
+    let target_extent = PhysicalSize::new(64, 48);
+    let prepared = VelloScene::prepare_raster_scenario_for_test(
+        VelloRasterScenario::Base,
+        RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect("a non-empty direct Vello target must prepare"),
+    )
+    .expect("the base direct scene must prepare without WGPU submission authority");
+
+    assert!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("T6 transaction coverage requires the owned per-device Vello state")
+            .internal_resources_empty_for_test(),
+        "the actual per-device manager must begin empty before the transaction owns the lease"
+    );
+
+    pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
+        .expect("the transaction must submit and finish the checked internal Vello pass cleanly");
+
+    assert!(
+        !renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the selected device must remain ready after clean scopes")
+            .internal_resources_empty_for_test(),
+        "a checked Vello lease must be submitted and explicitly adopted by the per-device manager"
+    );
+}
+
 fn assert_ready_device_state_exposes_owned_wgpu_handles(ready: &ReadyDeviceStateBorrowForTest<'_>) {
     let adapter = ready.adapter_for_test();
     let device = ready.device_for_test();

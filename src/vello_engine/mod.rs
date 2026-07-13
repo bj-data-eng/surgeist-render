@@ -33,9 +33,9 @@ mod recording {
     #[cfg(test)]
     pub(crate) use resources::VelloAtlasOutcome;
     pub(super) use resources::VelloResourceLease;
-    pub(crate) use resources::VelloResourceManager;
     #[cfg(test)]
     pub(super) use resources::over_limit_buffer_preflight_for_test;
+    pub(crate) use resources::{PendingVelloResourceCommit, VelloResourceManager};
 }
 mod raster {
     include!("raster.rs");
@@ -100,8 +100,8 @@ pub(crate) use raster::{PreparedVelloPass, RasterParameters};
     )
 )]
 pub(crate) use recording::{
-    ActiveVelloEncodingScope, TransactionEncodingState, TransactionTargetIntent, VelloEngineState,
-    VelloResourceManager,
+    ActiveVelloEncodingScope, PendingVelloResourceCommit, TransactionEncodingState,
+    TransactionTargetIntent, VelloEngineState, VelloResourceManager,
 };
 
 #[cfg(test)]
