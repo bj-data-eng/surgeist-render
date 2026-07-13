@@ -1,6 +1,8 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::vello_engine::{
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
+    raster::{RasterParameters, RasterRecorder},
+    recording::{FineRasterVariant, RasterKernel, RasterPhase},
     scene::VelloScene,
 };
 use super::{
@@ -39,6 +41,112 @@ const AHEM_FONT_ID: u64 = 9001;
 const AHEM_GLYPH_X: u32 = 58;
 const AHEM_GLYPH_DESCENT_P: u32 = 82;
 const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
+
+#[test]
+fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
+    let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0)
+        .expect("the Ahem fixture must pass selected-glyph preflight");
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 3.0, 19.0, 8.0).unwrap()];
+    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
+    let mut scene = VelloScene::default();
+    scene
+        .encode_text_run(&run)
+        .expect("the validated Ahem glyph must encode into the private scene");
+
+    let parameters = RasterParameters::try_new(
+        PhysicalSize::new(64, 48),
+        peniko::Color::BLACK,
+        Antialiasing::Area,
+    )
+    .expect("a non-empty target must prepare");
+    let mut recorder = RasterRecorder::default();
+
+    for (antialiasing, expected_fine) in [
+        (Antialiasing::Area, FineRasterVariant::Area),
+        (Antialiasing::Msaa8, FineRasterVariant::Msaa8),
+        (Antialiasing::Msaa16, FineRasterVariant::Msaa16),
+    ] {
+        let prepared = recorder
+            .prepare(
+                scene.encoding_for_test(),
+                parameters.with_antialiasing(antialiasing),
+            )
+            .expect("recording preparation must not require a runtime resource");
+        let target = prepared.target_intent_for_test();
+        assert_eq!(target.extent_for_test(), PhysicalSize::new(64, 48));
+        assert!(target.is_rgba8_storage_for_test());
+
+        let recording = prepared.recording_for_test();
+        assert!(recording.final_dispatch_targets_output_for_test());
+        assert!(recording.is_self_consistent_for_test(prepared.resource_intents_for_test()));
+        let dispatches = recording.dispatches_for_test();
+        let first_fine = dispatches
+            .iter()
+            .position(|dispatch| dispatch.phase_for_test() == RasterPhase::Fine)
+            .expect("the prepared recording must contain a fine raster phase");
+        assert!(
+            dispatches[..first_fine]
+                .iter()
+                .all(|dispatch| dispatch.phase_for_test() == RasterPhase::Coarse)
+        );
+        assert!(
+            dispatches[first_fine..]
+                .iter()
+                .all(|dispatch| dispatch.phase_for_test() == RasterPhase::Fine)
+        );
+        assert!(
+            dispatches[..first_fine]
+                .iter()
+                .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::Coarse)
+        );
+        assert!(
+            dispatches[..first_fine]
+                .iter()
+                .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::PathTiling)
+        );
+        assert_eq!(
+            dispatches
+                .last()
+                .expect("the fine phase must end in one selected raster variant")
+                .fine_variant_for_test(),
+            Some(expected_fine)
+        );
+        assert!(
+            prepared
+                .resource_intents_for_test()
+                .iter()
+                .any(|intent| intent.is_persistent_image_atlas_for_test())
+        );
+        assert!(
+            prepared
+                .resource_intents_for_test()
+                .iter()
+                .any(|intent| intent.is_transient_buffer_for_test())
+        );
+    }
+
+    let empty_prepared = RasterRecorder::default()
+        .prepare(&vello_encoding::Encoding::new(), parameters)
+        .expect("an empty Vello encoding must still produce a typed raster schedule");
+    assert!(
+        empty_prepared
+            .recording_for_test()
+            .dispatches_for_test()
+            .iter()
+            .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::FineArea)
+    );
+
+    let zero_width = RasterParameters::try_new(
+        PhysicalSize::new(0, 48),
+        peniko::Color::BLACK,
+        Antialiasing::Area,
+    )
+    .expect_err("a zero-width raster target must be rejected before recording");
+    let diagnostic = zero_width
+        .invalid_value_diagnostic()
+        .expect("an invalid target must retain an invalid-value diagnostic");
+    assert_eq!(diagnostic.field(), "raster target width");
+}
 
 #[test]
 fn font_data_try_from_bytes_api_shape() {
