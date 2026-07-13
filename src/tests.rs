@@ -15258,6 +15258,80 @@ fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
 }
 
 #[test]
+fn repeated_direct_renders_keep_internal_vello_retention_bounded() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("retention coverage requires a real selected WGPU device");
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("retention coverage requires a real headless surface");
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+
+    let mut observations = Vec::new();
+    for _ in 0..4 {
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+            .expect("each production direct raster render must succeed");
+        observations.push(
+            renderer
+                .default_ready_device_state_borrow_for_test()
+                .expect("the selected device must remain ready after direct rendering")
+                .internal_resource_manager_observation_for_test(),
+        );
+    }
+
+    let retained_counts = observations
+        .iter()
+        .map(|observation| observation.retained_count_for_test())
+        .collect::<Vec<_>>();
+    let retained_byte_lengths = observations
+        .iter()
+        .map(|observation| observation.retained_byte_len_for_test())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        retained_counts,
+        vec![1; observations.len()],
+        "equal direct production frames must retain one current allocation; observed retained counts {retained_counts:?}, bytes {retained_byte_lengths:?}"
+    );
+    assert!(
+        retained_byte_lengths
+            .windows(2)
+            .all(|pair| pair[0] == pair[1]),
+        "equal direct production frames must not increase retained bytes; observed retained counts {retained_counts:?}, bytes {retained_byte_lengths:?}"
+    );
+
+    for observation in observations {
+        assert_eq!(
+            observation.retained_atlas_count_for_test(),
+            1,
+            "each clean direct frame must retain exactly one current persistent atlas"
+        );
+        assert!(
+            observation.retained_atlas_byte_len_for_test() > 0,
+            "the retained atlas must report only its known Rgba8Unorm byte length"
+        );
+        assert_eq!(
+            observation.committed_transient_buffer_count_for_test(),
+            0,
+            "clean commits must discard every transient buffer"
+        );
+        assert_eq!(
+            observation.committed_transient_buffer_byte_len_for_test(),
+            0,
+            "clean commits must discard transient buffer bytes"
+        );
+        assert_eq!(
+            observation.committed_transient_image_count_for_test(),
+            0,
+            "clean commits must discard every transient image"
+        );
+        assert_eq!(
+            observation.committed_transient_image_byte_len_for_test(),
+            0,
+            "clean commits must discard transient image bytes"
+        );
+    }
+}
+
+#[test]
 fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("T6 cancellation coverage requires a real selected WGPU device");
@@ -15276,13 +15350,32 @@ fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
     assert_eq!(initial.retained_count_for_test(), 0);
     assert_eq!(initial.recovery_outcome_for_test(), None);
 
+    pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
+        .expect("the first clean pass must retain its current persistent atlas");
+    let prior_clean = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the selected device must remain ready after the first clean pass")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(prior_clean.retained_count_for_test(), 1);
+    assert_eq!(prior_clean.retained_atlas_count_for_test(), 1);
+    assert!(prior_clean.retained_atlas_byte_len_for_test() > 0);
+
     let canceled = pollster::block_on(
         renderer.cancel_prepared_vello_pass_after_submit_for_test(&prepared, target_extent),
     )
     .expect(
         "the cancellation adapter must encode, submit, reach its post-submit checkpoint, and drop locally",
     );
-    assert_eq!(canceled.retained_count_for_test(), 0);
+    assert_eq!(
+        canceled.retained_count_for_test(),
+        prior_clean.retained_count_for_test(),
+        "a canceled new lease must preserve the prior clean retained atlas"
+    );
+    assert_eq!(
+        canceled.retained_atlas_byte_len_for_test(),
+        prior_clean.retained_atlas_byte_len_for_test(),
+        "a canceled new lease must not replace or drop the prior clean atlas"
+    );
     assert_eq!(
         canceled.recovery_outcome_for_test(),
         Some(VelloAtlasOutcome::Recreate),
@@ -15296,6 +15389,12 @@ fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
         .expect("the selected device must remain ready after recovery")
         .internal_resource_manager_observation_for_test();
     assert_eq!(recovered.retained_count_for_test(), 1);
+    assert_eq!(recovered.retained_atlas_count_for_test(), 1);
+    assert_eq!(
+        recovered.retained_atlas_byte_len_for_test(),
+        prior_clean.retained_atlas_byte_len_for_test(),
+        "the later clean transaction must replace the atlas without increasing retention"
+    );
     assert_eq!(
         recovered.recovery_outcome_for_test(),
         None,

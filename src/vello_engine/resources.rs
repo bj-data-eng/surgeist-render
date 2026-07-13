@@ -26,11 +26,20 @@ struct AllocatedImage {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     extent: PhysicalSize,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 retains the atlas handle, while byte accounting is private test evidence."
+        )
+    )]
+    byte_len: u64,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum VelloAtlasOutcome {
     NoAtlas,
+    #[cfg(test)]
     Retain,
     MarkDirty,
     Recreate,
@@ -46,10 +55,16 @@ impl VelloAtlasOutcome {
                 Some(Self::Recreate)
             }
             (Some(Self::MarkDirty), _) => Some(Self::MarkDirty),
+            #[cfg(test)]
             (Some(Self::NoAtlas | Self::Retain) | None, Self::MarkDirty | Self::Recreate) => {
                 Some(latest)
             }
+            #[cfg(not(test))]
+            (Some(Self::NoAtlas) | None, Self::MarkDirty | Self::Recreate) => Some(latest),
+            #[cfg(test)]
             (Some(Self::NoAtlas | Self::Retain) | None, Self::NoAtlas | Self::Retain) => None,
+            #[cfg(not(test))]
+            (Some(Self::NoAtlas) | None, Self::NoAtlas) => None,
         }
     }
 }
@@ -57,12 +72,12 @@ impl VelloAtlasOutcome {
 #[derive(Clone, Copy)]
 enum PendingPersistentAtlas {
     NoAtlas,
-    NewlyAllocated,
+    NewlyAllocated(ImageHandle),
     #[expect(
         dead_code,
         reason = "C03 T4 records the reusable-atlas provenance that T6 will obtain from its resource manager."
     )]
-    Reused,
+    Reused(ImageHandle),
 }
 
 impl PendingPersistentAtlas {
@@ -70,10 +85,18 @@ impl PendingPersistentAtlas {
         !matches!(self, Self::NoAtlas)
     }
 
+    const fn resource(self) -> Option<ImageHandle> {
+        match self {
+            Self::NoAtlas => None,
+            Self::NewlyAllocated(resource) | Self::Reused(resource) => Some(resource),
+        }
+    }
+
+    #[cfg(test)]
     const fn commit_outcome(self) -> VelloAtlasOutcome {
         match self {
             Self::NoAtlas => VelloAtlasOutcome::NoAtlas,
-            Self::NewlyAllocated | Self::Reused => VelloAtlasOutcome::Retain,
+            Self::NewlyAllocated(_) | Self::Reused(_) => VelloAtlasOutcome::Retain,
         }
     }
 
@@ -82,8 +105,8 @@ impl PendingPersistentAtlas {
             Self::NoAtlas => VelloAtlasOutcome::NoAtlas,
             // T4 only creates a fresh atlas; it never borrows a reusable one that could be
             // marked dirty. An aborted fresh allocation must therefore be recreated.
-            Self::NewlyAllocated => VelloAtlasOutcome::Recreate,
-            Self::Reused => VelloAtlasOutcome::MarkDirty,
+            Self::NewlyAllocated(_) => VelloAtlasOutcome::Recreate,
+            Self::Reused(_) => VelloAtlasOutcome::MarkDirty,
         }
     }
 }
@@ -177,44 +200,31 @@ pub(crate) struct ScopeResolvedVelloResourceLease {
 }
 
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T4 models the committed internal resource state for T6 transaction routing."
-    )
-)]
 pub(crate) struct CommittedVelloResources {
-    #[cfg_attr(
-        test,
-        expect(
-            dead_code,
-            reason = "C03 T4 retains committed lease ownership for later T6 transaction routing."
-        )
-    )]
-    pending: PendingVelloResources,
+    persistent_image_atlas: Option<AllocatedImage>,
+    #[cfg(test)]
     atlas_outcome: VelloAtlasOutcome,
 }
 
 /// Per-device owner for retained internal raster resources.
 ///
-/// T5 establishes the owner and its terminal drop boundary. T6 will adopt
-/// scope-clean committed leases into this collection after submission.
+/// A clean transaction retains only its current persistent image atlas. Every
+/// transient allocation belongs to the lease and drops at commit.
 pub(crate) struct VelloResourceManager {
-    retained_resources: Vec<CommittedVelloResources>,
+    retained_atlas: Option<AllocatedImage>,
     pending_atlas_recovery: Option<VelloAtlasOutcome>,
 }
 
 impl VelloResourceManager {
     pub(crate) const fn new() -> Self {
         Self {
-            retained_resources: Vec::new(),
+            retained_atlas: None,
             pending_atlas_recovery: None,
         }
     }
 
     pub(crate) fn is_empty(&self) -> bool {
-        self.retained_resources.is_empty()
+        self.retained_atlas.is_none()
     }
 
     pub(crate) fn pending_commit(
@@ -248,7 +258,17 @@ impl VelloResourceManager {
     #[cfg(test)]
     pub(crate) fn observation_for_test(&self) -> VelloResourceManagerObservationForTest {
         VelloResourceManagerObservationForTest {
-            retained_count: self.retained_resources.len(),
+            retained_count: usize::from(self.retained_atlas.is_some()),
+            retained_atlas_count: usize::from(self.retained_atlas.is_some()),
+            retained_byte_len: self.retained_atlas.as_ref().map_or(0, |atlas| atlas.byte_len),
+            retained_atlas_byte_len: self
+                .retained_atlas
+                .as_ref()
+                .map_or(0, |atlas| atlas.byte_len),
+            committed_transient_buffer_count: 0,
+            committed_transient_buffer_byte_len: 0,
+            committed_transient_image_count: 0,
+            committed_transient_image_byte_len: 0,
             recovery_outcome: self.pending_atlas_recovery,
         }
     }
@@ -258,6 +278,13 @@ impl VelloResourceManager {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct VelloResourceManagerObservationForTest {
     retained_count: usize,
+    retained_atlas_count: usize,
+    retained_byte_len: u64,
+    retained_atlas_byte_len: u64,
+    committed_transient_buffer_count: usize,
+    committed_transient_buffer_byte_len: u64,
+    committed_transient_image_count: usize,
+    committed_transient_image_byte_len: u64,
     recovery_outcome: Option<VelloAtlasOutcome>,
 }
 
@@ -265,6 +292,34 @@ pub(crate) struct VelloResourceManagerObservationForTest {
 impl VelloResourceManagerObservationForTest {
     pub(crate) const fn retained_count_for_test(&self) -> usize {
         self.retained_count
+    }
+
+    pub(crate) const fn retained_atlas_count_for_test(&self) -> usize {
+        self.retained_atlas_count
+    }
+
+    pub(crate) const fn retained_byte_len_for_test(&self) -> u64 {
+        self.retained_byte_len
+    }
+
+    pub(crate) const fn retained_atlas_byte_len_for_test(&self) -> u64 {
+        self.retained_atlas_byte_len
+    }
+
+    pub(crate) const fn committed_transient_buffer_count_for_test(&self) -> usize {
+        self.committed_transient_buffer_count
+    }
+
+    pub(crate) const fn committed_transient_buffer_byte_len_for_test(&self) -> u64 {
+        self.committed_transient_buffer_byte_len
+    }
+
+    pub(crate) const fn committed_transient_image_count_for_test(&self) -> usize {
+        self.committed_transient_image_count
+    }
+
+    pub(crate) const fn committed_transient_image_byte_len_for_test(&self) -> u64 {
+        self.committed_transient_image_byte_len
     }
 
     pub(crate) const fn recovery_outcome_for_test(&self) -> Option<VelloAtlasOutcome> {
@@ -290,9 +345,7 @@ impl PendingVelloResourceCommit<'_> {
 
     pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) {
         if let Some(lease) = self.lease.take() {
-            self.manager
-                .retained_resources
-                .push(lease.commit());
+            self.manager.retained_atlas = lease.commit().into_persistent_image_atlas();
         }
     }
 }
@@ -442,9 +495,19 @@ impl VelloResourceLease {
     }
 
     fn into_committed_resources(self) -> CommittedVelloResources {
-        let atlas_outcome = self.pending.persistent_image_atlas.commit_outcome();
+        let PendingVelloResources {
+            mut images,
+            persistent_image_atlas,
+            ..
+        } = self.pending;
+        #[cfg(test)]
+        let atlas_outcome = persistent_image_atlas.commit_outcome();
+        let persistent_image_atlas = persistent_image_atlas
+            .resource()
+            .and_then(|resource| images.remove(&resource));
         CommittedVelloResources {
-            pending: self.pending,
+            persistent_image_atlas,
+            #[cfg(test)]
             atlas_outcome,
         }
     }
@@ -594,15 +657,13 @@ impl AbortedVelloResources {
 }
 
 impl CommittedVelloResources {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 keeps typed committed-atlas retention consumable by the later T6 resource manager."
-        )
-    )]
+    #[cfg(test)]
     pub(crate) const fn atlas_outcome(&self) -> VelloAtlasOutcome {
         self.atlas_outcome
+    }
+
+    fn into_persistent_image_atlas(self) -> Option<AllocatedImage> {
+        self.persistent_image_atlas
     }
 }
 
@@ -744,6 +805,7 @@ fn allocate_image(
         ));
     }
 
+    let byte_len = image_byte_len(intent.extent, intent.format)?;
     let format = texture_format(intent.format);
     let texture = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("Surgeist internal Vello image"),
@@ -771,7 +833,7 @@ fn allocate_image(
         array_layer_count: None,
     });
     if intent.retention == ImageRetention::PersistentImageAtlas {
-        pending.persistent_image_atlas = PendingPersistentAtlas::NewlyAllocated;
+        pending.persistent_image_atlas = PendingPersistentAtlas::NewlyAllocated(intent.resource);
     }
     pending.images.insert(
         intent.resource,
@@ -779,9 +841,20 @@ fn allocate_image(
             texture,
             view,
             extent: intent.extent,
+            byte_len,
         },
     );
     Ok(())
+}
+
+fn image_byte_len(extent: PhysicalSize, format: RasterImageFormat) -> Result<u64> {
+    let bytes_per_pixel = match format {
+        RasterImageFormat::Rgba8Unorm => 4_u64,
+    };
+    u64::from(extent.width())
+        .checked_mul(u64::from(extent.height()))
+        .and_then(|pixels| pixels.checked_mul(bytes_per_pixel))
+        .ok_or_else(|| render_failed("internal Vello image byte length overflows the GPU address space"))
 }
 
 const fn texture_format(format: RasterImageFormat) -> wgpu::TextureFormat {
