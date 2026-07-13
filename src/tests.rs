@@ -50,7 +50,10 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     let normal_dependencies =
         manifest_dependency_records(include_str!("../Cargo.toml"), "dependencies");
     let expected_normal_dependencies = std::collections::BTreeMap::from([
-        ("bytemuck".to_owned(), "\"=1.25.0\"".to_owned()),
+        (
+            "bytemuck".to_owned(),
+            "{ version = \"=1.25.0\", default-features = false }".to_owned(),
+        ),
         ("kurbo".to_owned(), "\"=0.13.1\"".to_owned()),
         ("log".to_owned(), "\"=0.4.33\"".to_owned()),
         ("peniko".to_owned(), "\"=0.6.1\"".to_owned()),
@@ -97,7 +100,7 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     assert!(dev_dependencies.contains_key("pollster"));
     assert_eq!(
         normal_dependencies.get("bytemuck"),
-        Some(&"\"=1.25.0\"".to_owned()),
+        Some(&"{ version = \"=1.25.0\", default-features = false }".to_owned()),
         "Surgeist must not request any bytemuck feature"
     );
     assert_eq!(
