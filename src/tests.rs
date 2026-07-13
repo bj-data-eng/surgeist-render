@@ -27,9 +27,13 @@ use super::{
     },
 };
 use std::{
+    fs,
     future::{Future, pending},
     panic::{AssertUnwindSafe, catch_unwind},
+    path::PathBuf,
+    process::Command,
     sync::Arc,
+    sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
     time::Duration,
 };
@@ -320,18 +324,7 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     assert!(notice.contains("`src/vello_engine/mod.rs` is Surgeist-owned composition"));
     assert!(notice.contains("[Apache-2.0 license](LICENSES/Vello-0.9.0-APACHE-2.0.txt)"));
     assert!(notice.contains("[MIT license](LICENSES/Vello-0.9.0-MIT.txt)"));
-    assert!(include_str!("../LICENSES/Vello-0.9.0-APACHE-2.0.txt").contains("Apache License"));
-    assert!(
-        include_str!("../LICENSES/Vello-0.9.0-APACHE-2.0.txt")
-            .contains("Version 2.0, January 2004")
-    );
-    assert!(
-        include_str!("../LICENSES/Vello-0.9.0-MIT.txt")
-            .contains("Copyright 2020 the Vello Authors")
-    );
-    assert!(
-        include_str!("../LICENSES/Vello-0.9.0-MIT.txt").contains("Permission is hereby granted")
-    );
+    assert_pinned_vello_license_artifacts();
 
     let header_2022 =
         "// Copyright 2022 the Vello Authors\n// SPDX-License-Identifier: Apache-2.0 OR MIT";
@@ -382,6 +375,37 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     assert!(
         !include_str!("vello_engine/mod.rs").starts_with("// Copyright"),
         "the Surgeist-owned composition module must not claim an upstream source header"
+    );
+}
+
+#[test]
+fn pinned_vello_license_artifacts_reject_appended_bytes() {
+    for (name, license, expected_digest) in pinned_vello_license_artifacts() {
+        assert_license_sha256(license, expected_digest, name);
+
+        let mut appended = license.to_vec();
+        appended.push(b'x');
+        assert_ne!(
+            sha256_hex(&appended),
+            expected_digest,
+            "the exact {name} license predicate must reject an appended byte"
+        );
+
+        let mut changed = license.to_vec();
+        changed[0] ^= 1;
+        assert_ne!(
+            sha256_hex(&changed),
+            expected_digest,
+            "the exact {name} license predicate must reject a changed byte"
+        );
+    }
+}
+
+#[test]
+fn sha256_matches_canonical_abc_vector() {
+    assert_eq!(
+        sha256_hex(b"abc"),
+        "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
 
@@ -664,9 +688,9 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
             "root dotted normal dependency",
             "\ndependencies.hidden-root-dependency = \"=1.0.0\"\n",
         ),
-        ManifestDependencyMutation::prepend_root(
-            "root escaped basic-key normal dependency",
-            "\n\"\\u0064ependencies\".hidden-root-escaped-dependency = \"=1.0.0\"\n",
+        ManifestDependencyMutation::append(
+            ROOT_ESCAPED_BUILD_DEPENDENCY_TABLE_CASE,
+            ROOT_ESCAPED_BUILD_DEPENDENCY_TABLE,
         ),
         ManifestDependencyMutation::prepend_root(
             "root dotted build dependency",
@@ -705,8 +729,8 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
             "\n[target.'cfg(unix)'.dependencies]\nhidden-target-dependency = \"=1.0.0\"\n",
         ),
         ManifestDependencyMutation::append(
-            "target escaped basic-key normal dependency table",
-            "\n[target.'cfg(unix)'.\"\\u0064ependencies\"]\nhidden-target-escaped-dependency = \"=1.0.0\"\n",
+            TARGET_ESCAPED_BUILD_DEPENDENCY_TABLE_CASE,
+            TARGET_ESCAPED_BUILD_DEPENDENCY_TABLE,
         ),
         ManifestDependencyMutation::append(
             "target development dependency table",
@@ -821,6 +845,103 @@ impl ManifestDependencyMutation {
     }
 }
 
+#[test]
+fn escaped_dependency_role_fixtures_are_valid_cargo_manifests_before_the_role_guard_rejects_them() {
+    for mutation in [
+        ManifestDependencyMutation::append(
+            ROOT_ESCAPED_BUILD_DEPENDENCY_TABLE_CASE,
+            ROOT_ESCAPED_BUILD_DEPENDENCY_TABLE,
+        ),
+        ManifestDependencyMutation::append(
+            TARGET_ESCAPED_BUILD_DEPENDENCY_TABLE_CASE,
+            TARGET_ESCAPED_BUILD_DEPENDENCY_TABLE,
+        ),
+    ] {
+        let fixture = mutation.apply(CARGO_MANIFEST_FIXTURE);
+        assert_cargo_manifest_is_accepted(&fixture, mutation.case);
+        assert_manifest_dependency_roles_rejected(fixture, mutation.case);
+    }
+}
+
+const CARGO_MANIFEST_FIXTURE: &str = "[package]\nname = \"surgeist-render-provenance-fixture\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[dependencies]\nkurbo = \"=0.13.1\"\n\n[dev-dependencies]\npollster = \"=0.4.0\"\n";
+const ROOT_ESCAPED_BUILD_DEPENDENCY_TABLE_CASE: &str =
+    "root escaped basic-key build dependency table";
+const ROOT_ESCAPED_BUILD_DEPENDENCY_TABLE: &str =
+    "\n[\"build-\\u0064ependencies\"]\nkurbo = \"=0.13.1\"\n";
+const TARGET_ESCAPED_BUILD_DEPENDENCY_TABLE_CASE: &str =
+    "target escaped basic-key build dependency table";
+const TARGET_ESCAPED_BUILD_DEPENDENCY_TABLE: &str =
+    "\n[target.'cfg(unix)'.\"build-\\u0064ependencies\"]\nkurbo = \"=0.13.1\"\n";
+
+static NEXT_CARGO_MANIFEST_FIXTURE_ID: AtomicUsize = AtomicUsize::new(0);
+
+struct TemporaryCargoManifest {
+    directory: PathBuf,
+}
+
+impl TemporaryCargoManifest {
+    fn new(manifest: &str) -> Self {
+        for _ in 0..1_000 {
+            let id = NEXT_CARGO_MANIFEST_FIXTURE_ID.fetch_add(1, Ordering::Relaxed);
+            let directory = std::env::temp_dir().join(format!(
+                "surgeist-render-cargo-manifest-fixture-{}-{id}",
+                std::process::id()
+            ));
+            match fs::create_dir(&directory) {
+                Ok(()) => {
+                    fs::write(directory.join("Cargo.toml"), manifest)
+                        .expect("the Cargo manifest fixture must be writable");
+                    fs::create_dir(directory.join("src"))
+                        .expect("the Cargo manifest fixture source directory must be writable");
+                    fs::write(directory.join("src/lib.rs"), "pub fn fixture() {}\n")
+                        .expect("the Cargo manifest fixture source must be writable");
+                    return Self { directory };
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(error) => panic!("cannot create Cargo manifest fixture directory: {error}"),
+            }
+        }
+        panic!("cannot allocate a unique Cargo manifest fixture directory");
+    }
+
+    fn manifest_path(&self) -> PathBuf {
+        self.directory.join("Cargo.toml")
+    }
+}
+
+impl Drop for TemporaryCargoManifest {
+    fn drop(&mut self) {
+        fs::remove_dir_all(&self.directory).unwrap_or_else(|error| {
+            panic!("cannot remove Cargo manifest fixture directory: {error}")
+        });
+    }
+}
+
+fn assert_cargo_manifest_is_accepted(manifest: &str, fixture: &str) {
+    let temporary_manifest = TemporaryCargoManifest::new(manifest);
+    let output = Command::new(std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into()))
+        .args([
+            "metadata",
+            "--offline",
+            "--format-version=1",
+            "--manifest-path",
+        ])
+        .arg(temporary_manifest.manifest_path())
+        .env("CARGO_NET_OFFLINE", "true")
+        .env(
+            "CARGO_TARGET_DIR",
+            temporary_manifest.directory.join("target"),
+        )
+        .output()
+        .expect("the already-installed Cargo parser must run");
+    assert!(
+        output.status.success(),
+        "Cargo must accept the {fixture} fixture before the finite role guard rejects it:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 fn assert_root_manifest_mutation_precedes_first_table(manifest: &str, addition: &str, case: &str) {
     let mutation_offset = manifest
         .find(addition.trim())
@@ -901,6 +1022,128 @@ fn provenance_rows(notice: &str, heading: &str, expected_columns: usize) -> Vec<
         .collect::<Vec<_>>();
     assert!(!rows.is_empty(), "{heading} must contain rows");
     rows
+}
+
+const VELLO_APACHE_LICENSE_SHA256: &str =
+    "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9";
+const VELLO_MIT_LICENSE_SHA256: &str =
+    "adf157330f722fe7cfd5964a2a6974eff851b718228c6735724a11706e6f4dec";
+
+fn pinned_vello_license_artifacts() -> [(&'static str, &'static [u8], &'static str); 2] {
+    [
+        (
+            "Apache-2.0",
+            include_bytes!("../LICENSES/Vello-0.9.0-APACHE-2.0.txt"),
+            VELLO_APACHE_LICENSE_SHA256,
+        ),
+        (
+            "MIT",
+            include_bytes!("../LICENSES/Vello-0.9.0-MIT.txt"),
+            VELLO_MIT_LICENSE_SHA256,
+        ),
+    ]
+}
+
+fn assert_pinned_vello_license_artifacts() {
+    for (name, license, expected_digest) in pinned_vello_license_artifacts() {
+        assert_license_sha256(license, expected_digest, name);
+    }
+}
+
+fn assert_license_sha256(license: &[u8], expected_digest: &str, name: &str) {
+    assert_eq!(
+        sha256_hex(license),
+        expected_digest,
+        "the tracked {name} Vello license must be byte-identical to the pinned artifact"
+    );
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    sha256(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    const INITIAL_HASH: [u32; 8] = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    const ROUND_CONSTANTS: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+
+    let bit_length = u64::try_from(bytes.len())
+        .expect("SHA-256 input length must fit in u64")
+        .checked_mul(8)
+        .expect("SHA-256 input length must fit in bits");
+    let mut padded = Vec::with_capacity(bytes.len() + 72);
+    padded.extend_from_slice(bytes);
+    padded.push(0x80);
+    padded.resize((padded.len() + 72) / 64 * 64 - 8, 0);
+    padded.extend_from_slice(&bit_length.to_be_bytes());
+
+    let mut hash = INITIAL_HASH;
+    for chunk in padded.chunks_exact(64) {
+        let mut schedule = [0_u32; 64];
+        for (index, word) in schedule[..16].iter_mut().enumerate() {
+            *word = u32::from_be_bytes(chunk[index * 4..index * 4 + 4].try_into().unwrap());
+        }
+        for index in 16..64 {
+            let s0 = schedule[index - 15].rotate_right(7)
+                ^ schedule[index - 15].rotate_right(18)
+                ^ (schedule[index - 15] >> 3);
+            let s1 = schedule[index - 2].rotate_right(17)
+                ^ schedule[index - 2].rotate_right(19)
+                ^ (schedule[index - 2] >> 10);
+            schedule[index] = schedule[index - 16]
+                .wrapping_add(s0)
+                .wrapping_add(schedule[index - 7])
+                .wrapping_add(s1);
+        }
+
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = hash;
+        for (word, constant) in schedule.into_iter().zip(ROUND_CONSTANTS) {
+            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+            let choose = (e & f) ^ (!e & g);
+            let temporary_one = h
+                .wrapping_add(s1)
+                .wrapping_add(choose)
+                .wrapping_add(constant)
+                .wrapping_add(word);
+            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+            let majority = (a & b) ^ (a & c) ^ (b & c);
+            let temporary_two = s0.wrapping_add(majority);
+
+            h = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(temporary_one);
+            d = c;
+            c = b;
+            b = a;
+            a = temporary_one.wrapping_add(temporary_two);
+        }
+        for (state, value) in hash.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+            *state = state.wrapping_add(value);
+        }
+    }
+
+    let mut digest = [0_u8; 32];
+    for (index, value) in hash.into_iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&value.to_be_bytes());
+    }
+    digest
 }
 
 #[test]
