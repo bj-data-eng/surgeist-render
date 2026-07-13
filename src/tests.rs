@@ -1,6 +1,7 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::vello_engine::{
-    PreparedVelloPassObservation, RasterParameters, TransactionEncodingState, VelloEngineState,
+    ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
+    TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
     VelloPassBindingForTest, VelloPassBufferRoleForTest, VelloPassImageRoleForTest,
     VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
@@ -13602,6 +13603,21 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
         .expect_err("invalid internal Vello WGSL must fail through a checked scope");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
 
+    let out_of_memory = super::vello_engine::checked_scope_out_of_memory_for_test();
+    assert_eq!(out_of_memory.code(), ErrorCode::SurfaceOutOfMemory);
+
+    let preflight_error = {
+        let (device, _) = renderer
+            .default_wgpu_device_queue()
+            .expect("checked internal Vello resource coverage requires a host adapter");
+        pollster::block_on(super::vello_engine::over_limit_buffer_preflight_for_test(
+            device,
+        ))
+    }
+    .expect_err("an over-limit internal Vello buffer must fail before WGPU allocation");
+    assert_eq!(preflight_error.code(), ErrorCode::RenderFailed);
+    assert!(preflight_error.message().contains("device limit"));
+
     {
         let (device, queue) = renderer
             .default_wgpu_device_queue()
@@ -13609,7 +13625,10 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
         let engine = pollster::block_on(VelloEngineState::new_checked(device))
             .expect("pinned internal Vello shaders must create through checked scopes");
         let target_extent = PhysicalSize::new(64, 48);
-        let _target = device.create_texture(&wgpu::TextureDescriptor {
+        let target_usage = wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("T4 checked internal Vello target"),
             size: wgpu::Extent3d {
                 width: target_extent.width(),
@@ -13620,15 +13639,10 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::STORAGE_BINDING
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
+            usage: target_usage,
             view_formats: &[],
         });
-        let target_view = _target.create_view(&wgpu::TextureViewDescriptor::default());
-        let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T4 transaction-owned command encoding"),
-        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let area_parameters =
             RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
                 .expect("a non-empty internal Vello target must prepare");
@@ -13637,57 +13651,183 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             area_parameters,
         )
         .expect("the base scene must prepare for internal checked encoding");
-        let aborted = {
-            let mut state = TransactionEncodingState::new(
-                device,
-                queue,
-                &mut command_encoder,
-                &target_view,
-                target_extent,
-                wgpu::TextureFormat::Rgba8Unorm,
-            );
-            area_pass
-                .encode_into(&engine, &mut state)
-                .expect("a prepared area pass must encode into transaction-owned state")
-                .abort()
-        };
-        assert!(aborted.discarded_resource_count_for_test() > 0);
-
         let msaa8_pass = VelloScene::prepare_raster_scenario_for_test(
             VelloRasterScenario::Base,
             area_parameters.with_antialiasing(Antialiasing::Msaa8),
         )
         .expect("the MSAA8 scene must prepare for internal checked encoding");
-        let committed = {
-            let mut state = TransactionEncodingState::new(
-                device,
-                queue,
-                &mut command_encoder,
-                &target_view,
-                target_extent,
-                wgpu::TextureFormat::Rgba8Unorm,
-            );
-            msaa8_pass
-                .encode_into(&engine, &mut state)
-                .expect("an MSAA8 pass must encode into transaction-owned state")
-                .commit()
-        };
-        drop(committed);
 
-        let mismatch = {
-            let mut state = TransactionEncodingState::new(
-                device,
-                queue,
-                &mut command_encoder,
-                &target_view,
-                PhysicalSize::new(63, 48),
-                wgpu::TextureFormat::Rgba8Unorm,
-            );
-            area_pass.encode_into(&engine, &mut state)
+        {
+            let mut command_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("T4 checked internal Vello committed command encoding"),
+                });
+            let mut scope = ActiveVelloEncodingScope::begin(device);
+            let lease = {
+                let mut state = TransactionEncodingState::new(
+                    &mut scope,
+                    queue,
+                    &mut command_encoder,
+                    &target_view,
+                    TransactionTargetIntent::new(
+                        target_extent,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        target_usage,
+                    ),
+                );
+                msaa8_pass
+                    .encode_into(&engine, &mut state)
+                    .expect("an MSAA8 pass must encode through an active checked scope")
+            };
+            let command_buffer = command_encoder.finish();
+            drop(command_buffer);
+            let committed = pollster::block_on(scope.finish_with_lease(lease))
+                .expect("the caller must resolve a clean checked encoding scope")
+                .commit();
+            assert_eq!(committed.atlas_outcome(), VelloAtlasOutcome::Retain);
+            drop(committed);
         }
-        .err()
-        .expect("a mismatched transaction target must fail before encoding");
-        assert_eq!(mismatch.code(), ErrorCode::RenderFailed);
+
+        {
+            let mut command_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("T4 checked internal Vello aborted command encoding"),
+                });
+            let mut scope = ActiveVelloEncodingScope::begin(device);
+            let outcome = {
+                let mut state = TransactionEncodingState::new(
+                    &mut scope,
+                    queue,
+                    &mut command_encoder,
+                    &target_view,
+                    TransactionTargetIntent::new(
+                        target_extent,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        target_usage,
+                    ),
+                );
+                let aborted = area_pass
+                    .encode_into(&engine, &mut state)
+                    .expect("an area pass must encode through an active checked scope")
+                    .abort();
+                assert!(aborted.discarded_resource_count_for_test() > 0);
+                aborted.into_atlas_outcome()
+            };
+            let command_buffer = command_encoder.finish();
+            drop(command_buffer);
+            pollster::block_on(scope.finish())
+                .expect("the caller must resolve an aborted checked encoding scope");
+            assert_eq!(outcome, VelloAtlasOutcome::Recreate);
+        }
+
+        let no_atlas_committed = pollster::block_on(
+            super::vello_engine::no_atlas_commit_outcome_for_test(device),
+        )
+        .expect("a no-atlas lease commit must resolve through checked scopes");
+        assert_eq!(no_atlas_committed, VelloAtlasOutcome::NoAtlas);
+        let no_atlas_aborted =
+            pollster::block_on(super::vello_engine::no_atlas_abort_outcome_for_test(device))
+                .expect("a no-atlas lease abort must resolve through checked scopes");
+        assert_eq!(no_atlas_aborted, VelloAtlasOutcome::NoAtlas);
+
+        let mismatch_failure = {
+            let mut command_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("T4 checked internal Vello mismatched target encoding"),
+                });
+            let mut scope = ActiveVelloEncodingScope::begin(device);
+            let failure = {
+                let mut state = TransactionEncodingState::new(
+                    &mut scope,
+                    queue,
+                    &mut command_encoder,
+                    &target_view,
+                    TransactionTargetIntent::new(
+                        PhysicalSize::new(63, 48),
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        target_usage,
+                    ),
+                );
+                match area_pass.encode_into(&engine, &mut state) {
+                    Ok(lease) => {
+                        let _ = lease.abort();
+                        panic!("a mismatched transaction target must fail before allocation");
+                    }
+                    Err(failure) => failure,
+                }
+            };
+            let command_buffer = command_encoder.finish();
+            drop(command_buffer);
+            pollster::block_on(scope.finish())
+                .expect("a preflight target mismatch must leave checked scopes clean");
+            failure
+        };
+        assert_eq!(mismatch_failure.error().code(), ErrorCode::RenderFailed);
+        assert_eq!(
+            mismatch_failure
+                .into_aborted_resources()
+                .into_atlas_outcome(),
+            VelloAtlasOutcome::NoAtlas
+        );
+
+        let invalid_target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("T4 checked internal Vello invalid storage target"),
+            size: wgpu::Extent3d {
+                width: target_extent.width(),
+                height: target_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let invalid_target_view =
+            invalid_target.create_view(&wgpu::TextureViewDescriptor::default());
+        let invalid_target_failure = {
+            let mut command_encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("T4 checked internal Vello invalid target encoding"),
+                });
+            let mut scope = ActiveVelloEncodingScope::begin(device);
+            let lease = {
+                let mut state = TransactionEncodingState::new(
+                    &mut scope,
+                    queue,
+                    &mut command_encoder,
+                    &invalid_target_view,
+                    TransactionTargetIntent::new(
+                        target_extent,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        target_usage,
+                    ),
+                );
+                area_pass
+                    .encode_into(&engine, &mut state)
+                    .expect("the active scope must own actual target-view validation")
+            };
+            let command_buffer = command_encoder.finish();
+            drop(command_buffer);
+            match pollster::block_on(scope.finish_with_lease(lease)) {
+                Ok(lease) => {
+                    let _ = lease.abort();
+                    panic!("an invalid target view must be captured by the active checked scope");
+                }
+                Err(failure) => failure,
+            }
+        };
+        assert_eq!(
+            invalid_target_failure.error().code(),
+            ErrorCode::RenderFailed
+        );
+        assert_eq!(
+            invalid_target_failure
+                .into_aborted_resources()
+                .into_atlas_outcome(),
+            VelloAtlasOutcome::Recreate
+        );
     }
 
     assert!(renderer.default_device_has_no_terminal_signal_for_test());

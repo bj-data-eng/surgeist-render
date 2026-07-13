@@ -5,54 +5,221 @@ use peniko::ImageFormat;
 
 use crate::{BackendErrorCode, Error, PhysicalSize, Result};
 
-use super::resources::VelloResourceLease;
-use super::{
-    DispatchIntent, FineRasterVariant, RasterCommand, RasterKernel, RasterPhase, Recording,
-    ResourceBinding, ResourceIntent,
+use super::resources::{
+    AbortedVelloResources, ScopeResolvedVelloResourceLease, VelloResourceLease,
 };
-use super::super::shaders::CheckedShaderSet;
+use super::{
+    BufferRole, DispatchIntent, FineRasterVariant, RasterCommand, RasterKernel, RasterPhase,
+    Recording, ResourceBinding, ResourceIntent,
+};
+use super::super::shaders::{CheckedShaderSet, CheckedWgpuScope};
 
-pub(crate) struct TransactionEncodingState<'a> {
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
-    command_encoder: &'a mut wgpu::CommandEncoder,
-    target_view: &'a wgpu::TextureView,
-    target_extent: PhysicalSize,
-    target_format: wgpu::TextureFormat,
+#[cfg(test)]
+use super::{RecordingBuilder, resources::VelloAtlasOutcome};
+
+#[must_use = "active internal Vello encoding scopes must be explicitly resolved"]
+pub(crate) struct ActiveVelloEncodingScope<'a> {
+    scope: CheckedWgpuScope<'a>,
 }
 
-impl<'a> TransactionEncodingState<'a> {
+impl<'a> ActiveVelloEncodingScope<'a> {
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "C03 T4 exposes transaction-owned construction to the later T7 cutover."
+            reason = "C03 T4 keeps active checked encoding scopes ready for the later T6 transaction route."
+        )
+    )]
+    pub(crate) fn begin(device: &'a wgpu::Device) -> Self {
+        Self {
+            scope: CheckedWgpuScope::begin(device),
+        }
+    }
+
+    pub(super) fn device(&self) -> &wgpu::Device {
+        self.scope.device()
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 keeps caller-owned scope resolution ready for the later T6 transaction route."
+        )
+    )]
+    pub(crate) async fn finish(self) -> Result<()> {
+        self.scope
+            .finish("checked internal Vello resource or command encoding failed")
+            .await
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 keeps checked-scope lease resolution ready for the later T6 transaction route."
+        )
+    )]
+    pub(crate) async fn finish_with_lease(
+        self,
+        lease: VelloResourceLease,
+    ) -> std::result::Result<ScopeResolvedVelloResourceLease, VelloEncodingFailure> {
+        match self.finish().await {
+            Ok(()) => Ok(lease.after_clean_scope()),
+            Err(error) => Err(VelloEncodingFailure::after_encoding(
+                error,
+                lease.abort(),
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TransactionTargetIntent {
+    extent: PhysicalSize,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+}
+
+impl TransactionTargetIntent {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 preserves explicit transaction target intent for the later T6 transaction route."
+        )
+    )]
+    pub(crate) const fn new(
+        extent: PhysicalSize,
+        format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Self {
+        Self {
+            extent,
+            format,
+            usage,
+        }
+    }
+}
+
+pub(crate) struct TransactionEncodingState<'state, 'device> {
+    scope: &'state mut ActiveVelloEncodingScope<'device>,
+    queue: &'state wgpu::Queue,
+    command_encoder: &'state mut wgpu::CommandEncoder,
+    target_view: &'state wgpu::TextureView,
+    target: TransactionTargetIntent,
+}
+
+impl<'state, 'device> TransactionEncodingState<'state, 'device> {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 exposes checked transaction-owned construction to the later T6 transaction route."
         )
     )]
     pub(crate) fn new(
-        device: &'a wgpu::Device,
-        queue: &'a wgpu::Queue,
-        command_encoder: &'a mut wgpu::CommandEncoder,
-        target_view: &'a wgpu::TextureView,
-        target_extent: PhysicalSize,
-        target_format: wgpu::TextureFormat,
+        scope: &'state mut ActiveVelloEncodingScope<'device>,
+        queue: &'state wgpu::Queue,
+        command_encoder: &'state mut wgpu::CommandEncoder,
+        target_view: &'state wgpu::TextureView,
+        target: TransactionTargetIntent,
     ) -> Self {
         Self {
-            device,
+            scope,
             queue,
             command_encoder,
             target_view,
-            target_extent,
-            target_format,
+            target,
         }
     }
 
     pub(crate) const fn target_extent(&self) -> PhysicalSize {
-        self.target_extent
+        self.target.extent
     }
 
     pub(crate) const fn target_format(&self) -> wgpu::TextureFormat {
-        self.target_format
+        self.target.format
+    }
+
+    pub(crate) const fn target_usage(&self) -> wgpu::TextureUsages {
+        self.target.usage
+    }
+
+    pub(super) fn device(&self) -> &wgpu::Device {
+        self.scope.device()
+    }
+
+    pub(super) fn active_scope(&self) -> &ActiveVelloEncodingScope<'device> {
+        &*self.scope
+    }
+
+    fn preflight_target_limits(&self) -> Result<()> {
+        let max_extent = self.device().limits().max_texture_dimension_2d;
+        if self.target.extent.width() > max_extent || self.target.extent.height() > max_extent {
+            return Err(render_failed(
+                "internal Vello target extent exceeds the device 2D texture limit",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct VelloEncodingFailure {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 preserves the owned failure for the later T6 transaction route."
+        )
+    )]
+    error: Error,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 preserves the typed abort outcome for the later T6 resource manager."
+        )
+    )]
+    aborted_resources: AbortedVelloResources,
+}
+
+impl VelloEncodingFailure {
+    pub(crate) fn before_resource_allocation(error: Error) -> Self {
+        Self {
+            error,
+            aborted_resources: AbortedVelloResources::without_resources(),
+        }
+    }
+
+    pub(crate) fn after_encoding(error: Error, aborted_resources: AbortedVelloResources) -> Self {
+        Self {
+            error,
+            aborted_resources,
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 keeps typed checked-encoding failures inspectable by the later T6 transaction route."
+        )
+    )]
+    pub(crate) fn error(&self) -> &Error {
+        &self.error
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 keeps the typed abort outcome consumable by the later T6 resource manager."
+        )
+    )]
+    pub(crate) fn into_aborted_resources(self) -> AbortedVelloResources {
+        self.aborted_resources
     }
 }
 
@@ -86,27 +253,154 @@ pub(crate) fn encode_recording(
     engine: &VelloEngineState,
     recording: &Recording,
     resource_intents: &[ResourceIntent],
-    state: &mut TransactionEncodingState<'_>,
-) -> Result<VelloResourceLease> {
+    state: &mut TransactionEncodingState<'_, '_>,
+) -> std::result::Result<VelloResourceLease, VelloEncodingFailure> {
     log::trace!("encoding checked internal Vello raster recording");
-    let mut lease = VelloResourceLease::allocate(state.device, resource_intents)?;
+    preflight_recording(recording, resource_intents, state)
+        .map_err(VelloEncodingFailure::before_resource_allocation)?;
+    let mut lease = VelloResourceLease::allocate(state.active_scope(), resource_intents)
+        .map_err(VelloEncodingFailure::before_resource_allocation)?;
     let result = recording
         .commands
         .iter()
         .try_for_each(|command| encode_command(engine, command, state, &mut lease));
     match result {
         Ok(()) => Ok(lease),
+        Err(error) => Err(VelloEncodingFailure::after_encoding(
+            error,
+            lease.abort(),
+        )),
+    }
+}
+
+fn preflight_recording(
+    recording: &Recording,
+    resource_intents: &[ResourceIntent],
+    state: &TransactionEncodingState<'_, '_>,
+) -> Result<()> {
+    state.preflight_target_limits()?;
+    let limits = state.device().limits();
+    for command in &recording.commands {
+        if let RasterCommand::Dispatch(dispatch) = command {
+            preflight_dispatch(dispatch, resource_intents, &limits)?;
+        }
+    }
+    Ok(())
+}
+
+fn preflight_dispatch(
+    dispatch: &DispatchIntent,
+    resource_intents: &[ResourceIntent],
+    limits: &wgpu::Limits,
+) -> Result<()> {
+    let binding_count = u32::try_from(dispatch.bindings.len()).map_err(|_| {
+        render_failed("internal Vello dispatch binding count does not fit the device limit type")
+    })?;
+    if binding_count > limits.max_bindings_per_bind_group {
+        return Err(render_failed(
+            "internal Vello dispatch exceeds the device bind-group binding limit",
+        ));
+    }
+
+    if let Some(indirect) = &dispatch.indirect {
+        preflight_indirect_dispatch(indirect, resource_intents)?;
+        return Ok(());
+    }
+
+    let (x, y, z) = dispatch.workgroups;
+    let max = limits.max_compute_workgroups_per_dimension;
+    if x > max || y > max || z > max {
+        return Err(render_failed(
+            "internal Vello direct dispatch exceeds the device workgroup-dimension limit",
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_indirect_dispatch(
+    indirect: &super::IndirectDispatch,
+    resource_intents: &[ResourceIntent],
+) -> Result<()> {
+    let alignment = u64::from(std::mem::size_of::<u32>() as u32);
+    if !indirect.offset.is_multiple_of(alignment) {
+        return Err(render_failed(
+            "internal Vello indirect dispatch offset is not aligned",
+        ));
+    }
+    let parameter_bytes = alignment.checked_mul(3).ok_or_else(|| {
+        render_failed("internal Vello indirect dispatch parameter size overflows")
+    })?;
+    let required_end = indirect.offset.checked_add(parameter_bytes).ok_or_else(|| {
+        render_failed("internal Vello indirect dispatch offset overflows")
+    })?;
+    let buffer = resource_intents
+        .iter()
+        .find_map(|intent| match intent {
+            ResourceIntent::Buffer(buffer) if buffer.resource == indirect.buffer => Some(buffer),
+            ResourceIntent::Buffer(_) | ResourceIntent::Image(_) => None,
+        })
+        .ok_or_else(|| {
+            render_failed("internal Vello indirect dispatch references an unknown buffer")
+        })?;
+    if buffer.role == BufferRole::Config {
+        return Err(render_failed(
+            "internal Vello indirect dispatch requires a storage-capable buffer",
+        ));
+    }
+    if required_end > buffer.byte_len {
+        return Err(render_failed(
+            "internal Vello indirect dispatch exceeds its prepared allocation",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) async fn no_atlas_commit_outcome_for_test(
+    device: &wgpu::Device,
+) -> Result<VelloAtlasOutcome> {
+    let intents = no_atlas_resource_intents_for_test()?;
+    let scope = ActiveVelloEncodingScope::begin(device);
+    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    match allocation {
+        Ok(lease) => match scope.finish_with_lease(lease).await {
+            Ok(lease) => {
+                let committed = lease.commit();
+                Ok(committed.atlas_outcome())
+            }
+            Err(failure) => Err(failure.error),
+        },
         Err(error) => {
-            let _aborted = lease.abort();
+            scope.finish().await?;
             Err(error)
         }
     }
 }
 
+#[cfg(test)]
+pub(crate) async fn no_atlas_abort_outcome_for_test(
+    device: &wgpu::Device,
+) -> Result<VelloAtlasOutcome> {
+    let intents = no_atlas_resource_intents_for_test()?;
+    let scope = ActiveVelloEncodingScope::begin(device);
+    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    let outcome = allocation.map(|lease| lease.abort().into_atlas_outcome());
+    scope.finish().await?;
+    outcome
+}
+
+#[cfg(test)]
+fn no_atlas_resource_intents_for_test() -> Result<Vec<ResourceIntent>> {
+    let mut recording = RecordingBuilder::default();
+    let _buffer = recording.new_buffer(BufferRole::Scene, 4)?;
+    let (_recording, intents) = recording.finish();
+    Ok(intents)
+}
+
 fn encode_command(
     engine: &VelloEngineState,
     command: &RasterCommand,
-    state: &mut TransactionEncodingState<'_>,
+    state: &mut TransactionEncodingState<'_, '_>,
     lease: &mut VelloResourceLease,
 ) -> Result<()> {
     match command {
@@ -234,7 +528,7 @@ fn write_rgba8_texture(
 fn encode_dispatch(
     engine: &VelloEngineState,
     dispatch: &DispatchIntent,
-    state: &mut TransactionEncodingState<'_>,
+    state: &mut TransactionEncodingState<'_, '_>,
     lease: &VelloResourceLease,
 ) -> Result<()> {
     if !phase_matches_kernel(dispatch.phase, dispatch.kernel) {
@@ -260,7 +554,7 @@ fn encode_dispatch(
         .zip(pipeline.binding_indices().iter().copied())
         .map(|(binding, index)| binding_entry(binding, index, lease, state.target_view))
         .collect::<Result<Vec<_>>>()?;
-    let bind_group = state.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    let bind_group = state.device().create_bind_group(&wgpu::BindGroupDescriptor {
         label: Some("Surgeist internal Vello dispatch bindings"),
         layout: pipeline.bind_group_layout(),
         entries: &entries,

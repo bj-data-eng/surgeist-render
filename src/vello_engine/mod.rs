@@ -11,8 +11,17 @@ mod recording {
         include!("encoder.rs");
     }
 
-    pub(crate) use encoder::{TransactionEncodingState, VelloEngineState, encode_recording};
+    pub(crate) use encoder::{
+        ActiveVelloEncodingScope, TransactionEncodingState, TransactionTargetIntent,
+        VelloEncodingFailure, VelloEngineState, encode_recording,
+    };
+    #[cfg(test)]
+    pub(super) use encoder::{no_atlas_abort_outcome_for_test, no_atlas_commit_outcome_for_test};
+    #[cfg(test)]
+    pub(crate) use resources::VelloAtlasOutcome;
     pub(super) use resources::VelloResourceLease;
+    #[cfg(test)]
+    pub(super) use resources::over_limit_buffer_preflight_for_test;
 }
 mod raster {
     include!("raster.rs");
@@ -28,17 +37,25 @@ mod raster {
         pub(crate) fn encode_into(
             &self,
             engine: &super::recording::VelloEngineState,
-            state: &mut super::recording::TransactionEncodingState<'_>,
-        ) -> Result<super::recording::VelloResourceLease> {
+            state: &mut super::recording::TransactionEncodingState<'_, '_>,
+        ) -> std::result::Result<
+            super::recording::VelloResourceLease,
+            super::recording::VelloEncodingFailure,
+        > {
             if self.target_intent.extent != state.target_extent()
                 || self.target_intent.format != RasterImageFormat::Rgba8Unorm
                 || self.target_intent.access != RasterTargetAccess::StorageWrite
                 || state.target_format() != wgpu::TextureFormat::Rgba8Unorm
+                || !state
+                    .target_usage()
+                    .contains(wgpu::TextureUsages::STORAGE_BINDING)
             {
-                return Err(Error::new(
-                    crate::BackendErrorCode::RenderFailed,
-                    "internal Vello encoding target does not match the prepared raster intent",
-                ));
+                return Err(
+                    super::recording::VelloEncodingFailure::before_resource_allocation(Error::new(
+                        crate::BackendErrorCode::RenderFailed,
+                        "internal Vello encoding target does not match the prepared raster intent",
+                    )),
+                );
             }
 
             super::recording::encode_recording(
@@ -68,11 +85,42 @@ pub(crate) use raster::{PreparedVelloPass, RasterParameters};
         reason = "C03 T4 keeps transaction-borrowed encoding state internal until the T7 cutover."
     )
 )]
-pub(crate) use recording::{TransactionEncodingState, VelloEngineState};
+pub(crate) use recording::{
+    ActiveVelloEncodingScope, TransactionEncodingState, TransactionTargetIntent, VelloEngineState,
+};
+
+#[cfg(test)]
+pub(crate) use recording::VelloAtlasOutcome;
 
 #[cfg(test)]
 pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> crate::Result<()> {
     shaders::checked_shader_validation_for_test(device).await
+}
+
+#[cfg(test)]
+pub(crate) fn checked_scope_out_of_memory_for_test() -> crate::Error {
+    shaders::checked_scope_out_of_memory_for_test()
+}
+
+#[cfg(test)]
+pub(crate) async fn over_limit_buffer_preflight_for_test(
+    device: &wgpu::Device,
+) -> crate::Result<()> {
+    recording::over_limit_buffer_preflight_for_test(device).await
+}
+
+#[cfg(test)]
+pub(crate) async fn no_atlas_commit_outcome_for_test(
+    device: &wgpu::Device,
+) -> crate::Result<VelloAtlasOutcome> {
+    recording::no_atlas_commit_outcome_for_test(device).await
+}
+
+#[cfg(test)]
+pub(crate) async fn no_atlas_abort_outcome_for_test(
+    device: &wgpu::Device,
+) -> crate::Result<VelloAtlasOutcome> {
+    recording::no_atlas_abort_outcome_for_test(device).await
 }
 
 #[cfg(test)]

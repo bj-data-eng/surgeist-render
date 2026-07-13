@@ -9,6 +9,75 @@ use crate::{BackendErrorCode, Error, Result};
 
 use super::recording::RasterKernel;
 
+#[must_use = "checked WGPU scopes must be explicitly resolved"]
+pub(super) struct CheckedWgpuScope<'a> {
+    device: &'a wgpu::Device,
+    validation: Option<wgpu::ErrorScopeGuard>,
+    out_of_memory: Option<wgpu::ErrorScopeGuard>,
+    internal: Option<wgpu::ErrorScopeGuard>,
+}
+
+impl<'a> CheckedWgpuScope<'a> {
+    pub(super) fn begin(device: &'a wgpu::Device) -> Self {
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let out_of_memory = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        Self {
+            device,
+            validation: Some(validation),
+            out_of_memory: Some(out_of_memory),
+            internal: Some(internal),
+        }
+    }
+
+    pub(super) fn device(&self) -> &wgpu::Device {
+        self.device
+    }
+
+    pub(super) async fn finish(mut self, failure_message: &'static str) -> Result<()> {
+        let validation = match self.validation.take() {
+            Some(scope) => scope,
+            None => {
+                return Err(render_failed(
+                    "internal Vello validation scope was already resolved",
+                ));
+            }
+        };
+        let out_of_memory = match self.out_of_memory.take() {
+            Some(scope) => scope,
+            None => {
+                return Err(render_failed(
+                    "internal Vello out-of-memory scope was already resolved",
+                ));
+            }
+        };
+        let internal = match self.internal.take() {
+            Some(scope) => scope,
+            None => {
+                return Err(render_failed(
+                    "internal Vello internal-error scope was already resolved",
+                ));
+            }
+        };
+
+        let validation_error = validation.pop().await;
+        let memory_error = out_of_memory.pop().await;
+        let internal_error = internal.pop().await;
+        if let Some(source) = validation_error.or(memory_error).or(internal_error) {
+            return Err(classify_checked_wgpu_error(failure_message, source));
+        }
+        Ok(())
+    }
+}
+
+impl Drop for CheckedWgpuScope<'_> {
+    fn drop(&mut self) {
+        drop(self.validation.take());
+        drop(self.out_of_memory.take());
+        drop(self.internal.take());
+    }
+}
+
 pub(super) struct CheckedComputePipeline {
     pipeline: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
@@ -195,22 +264,11 @@ async fn checked_wgpu_build<T>(
     device: &wgpu::Device,
     build: impl FnOnce() -> Result<T>,
 ) -> Result<T> {
-    let internal_scope = device.push_error_scope(wgpu::ErrorFilter::Internal);
-    let memory_scope = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
-    let validation_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let scope = CheckedWgpuScope::begin(device);
     let result = build();
-    let validation_error = validation_scope.pop().await;
-    let memory_error = memory_scope.pop().await;
-    let internal_error = internal_scope.pop().await;
-
-    if let Some(source) = validation_error.or(memory_error).or(internal_error) {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "checked internal Vello shader creation failed",
-        )
-        .with_source(source));
-    }
-
+    scope
+        .finish("checked internal Vello shader creation failed")
+        .await?;
     result
 }
 
@@ -248,6 +306,16 @@ fn render_failed(message: &'static str) -> Error {
     Error::new(BackendErrorCode::RenderFailed, message)
 }
 
+fn classify_checked_wgpu_error(failure_message: &'static str, source: wgpu::Error) -> Error {
+    let code = match &source {
+        wgpu::Error::OutOfMemory { .. } => BackendErrorCode::SurfaceOutOfMemory,
+        wgpu::Error::Validation { .. } | wgpu::Error::Internal { .. } => {
+            BackendErrorCode::RenderFailed
+        }
+    };
+    Error::new(code, failure_message).with_source(source)
+}
+
 #[cfg(test)]
 pub(super) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> Result<()> {
     checked_wgpu_build(device, || {
@@ -258,4 +326,14 @@ pub(super) async fn checked_shader_validation_for_test(device: &wgpu::Device) ->
         Ok(())
     })
     .await
+}
+
+#[cfg(test)]
+pub(super) fn checked_scope_out_of_memory_for_test() -> Error {
+    classify_checked_wgpu_error(
+        "checked internal Vello resource or command encoding failed",
+        wgpu::Error::OutOfMemory {
+            source: Box::new(std::io::Error::other("injected internal Vello OOM")),
+        },
+    )
 }

@@ -5,6 +5,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{BackendErrorCode, Error, PhysicalSize, Result};
 
+use super::encoder::ActiveVelloEncodingScope;
 use super::{
     BufferHandle, BufferIntent, BufferRole, ImageHandle, ImageIntent, ImageRetention,
     RasterImageFormat, ResourceIntent, ResourceReference,
@@ -21,10 +22,52 @@ struct AllocatedImage {
     extent: PhysicalSize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelloAtlasOutcome {
+    NoAtlas,
+    Retain,
+    MarkDirty,
+    Recreate,
+}
+
+#[derive(Clone, Copy)]
+enum PendingPersistentAtlas {
+    NoAtlas,
+    NewlyAllocated,
+    #[expect(
+        dead_code,
+        reason = "C03 T4 records the reusable-atlas provenance that T6 will obtain from its resource manager."
+    )]
+    Reused,
+}
+
+impl PendingPersistentAtlas {
+    const fn is_present(self) -> bool {
+        !matches!(self, Self::NoAtlas)
+    }
+
+    const fn commit_outcome(self) -> VelloAtlasOutcome {
+        match self {
+            Self::NoAtlas => VelloAtlasOutcome::NoAtlas,
+            Self::NewlyAllocated | Self::Reused => VelloAtlasOutcome::Retain,
+        }
+    }
+
+    const fn abort_outcome(self) -> VelloAtlasOutcome {
+        match self {
+            Self::NoAtlas => VelloAtlasOutcome::NoAtlas,
+            // T4 only creates a fresh atlas; it never borrows a reusable one that could be
+            // marked dirty. An aborted fresh allocation must therefore be recreated.
+            Self::NewlyAllocated => VelloAtlasOutcome::Recreate,
+            Self::Reused => VelloAtlasOutcome::MarkDirty,
+        }
+    }
+}
+
 struct PendingVelloResources {
     buffers: HashMap<BufferHandle, AllocatedBuffer>,
     images: HashMap<ImageHandle, AllocatedImage>,
-    persistent_image_atlas: Option<ImageHandle>,
+    persistent_image_atlas: PendingPersistentAtlas,
     released_buffers: HashSet<BufferHandle>,
     released_images: HashSet<ImageHandle>,
 }
@@ -32,6 +75,11 @@ struct PendingVelloResources {
 #[must_use]
 pub(crate) struct VelloResourceLease {
     pending: PendingVelloResources,
+}
+
+#[must_use = "scope-clean Vello resource leases must be committed or aborted"]
+pub(crate) struct ScopeResolvedVelloResourceLease {
+    lease: VelloResourceLease,
 }
 
 #[must_use]
@@ -51,6 +99,7 @@ pub(crate) struct CommittedVelloResources {
         )
     )]
     pending: PendingVelloResources,
+    atlas_outcome: VelloAtlasOutcome,
 }
 
 #[must_use]
@@ -60,17 +109,24 @@ pub(crate) struct CommittedVelloResources {
         dead_code,
         reason = "C03 T4 keeps the consumed abort result typed until T6 transaction routing owns it."
     )
-)]
+    )]
+#[derive(Debug)]
 pub(crate) struct AbortedVelloResources {
     discarded_resource_count: usize,
+    atlas_outcome: VelloAtlasOutcome,
 }
 
 impl VelloResourceLease {
-    pub(super) fn allocate(device: &wgpu::Device, intents: &[ResourceIntent]) -> Result<Self> {
+    pub(super) fn allocate(
+        scope: &ActiveVelloEncodingScope<'_>,
+        intents: &[ResourceIntent],
+    ) -> Result<Self> {
+        let device = scope.device();
+        preflight_resource_intents(&device.limits(), intents)?;
         let mut pending = PendingVelloResources {
             buffers: HashMap::new(),
             images: HashMap::new(),
-            persistent_image_atlas: None,
+            persistent_image_atlas: PendingPersistentAtlas::NoAtlas,
             released_buffers: HashSet::new(),
             released_images: HashSet::new(),
         };
@@ -168,16 +224,15 @@ impl VelloResourceLease {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T4 preserves the explicit pending-to-committed transition for T6."
-        )
-    )]
-    pub(crate) fn commit(self) -> CommittedVelloResources {
+    pub(super) fn after_clean_scope(self) -> ScopeResolvedVelloResourceLease {
+        ScopeResolvedVelloResourceLease { lease: self }
+    }
+
+    fn into_committed_resources(self) -> CommittedVelloResources {
+        let atlas_outcome = self.pending.persistent_image_atlas.commit_outcome();
         CommittedVelloResources {
             pending: self.pending,
+            atlas_outcome,
         }
     }
 
@@ -187,8 +242,10 @@ impl VelloResourceLease {
             .buffers
             .len()
             .saturating_add(self.pending.images.len());
+        let atlas_outcome = self.pending.persistent_image_atlas.abort_outcome();
         AbortedVelloResources {
             discarded_resource_count,
+            atlas_outcome,
         }
     }
 
@@ -215,11 +272,168 @@ impl VelloResourceLease {
     }
 }
 
+impl ScopeResolvedVelloResourceLease {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 preserves the clean-scope pending-to-committed transition for T6."
+        )
+    )]
+    pub(crate) fn commit(self) -> CommittedVelloResources {
+        self.lease.into_committed_resources()
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 preserves explicit abort after clean-scope resolution for later terminal-signal handling."
+        )
+    )]
+    pub(crate) fn abort(self) -> AbortedVelloResources {
+        self.lease.abort()
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn over_limit_buffer_preflight_for_test(device: &wgpu::Device) -> Result<()> {
+    let requested_size = device
+        .limits()
+        .max_buffer_size
+        .checked_add(1)
+        .ok_or_else(|| render_failed("test device cannot represent an over-limit buffer request"))?;
+    let mut recording = super::RecordingBuilder::default();
+    let _buffer = recording.new_buffer(super::BufferRole::Scene, requested_size)?;
+    let (_recording, intents) = recording.finish();
+    let scope = ActiveVelloEncodingScope::begin(device);
+    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    let allocation_result = match allocation {
+        Ok(lease) => {
+            let _aborted = lease.abort();
+            Ok(())
+        }
+        Err(error) => Err(error),
+    };
+    scope.finish().await?;
+    allocation_result
+}
+
+impl AbortedVelloResources {
+    pub(super) fn without_resources() -> Self {
+        Self {
+            discarded_resource_count: 0,
+            atlas_outcome: VelloAtlasOutcome::NoAtlas,
+        }
+    }
+}
+
 #[cfg(test)]
 impl AbortedVelloResources {
     pub(crate) const fn discarded_resource_count_for_test(&self) -> usize {
         self.discarded_resource_count
     }
+}
+
+impl AbortedVelloResources {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 keeps typed abort-atlas recovery consumable by the later T6 resource manager."
+        )
+    )]
+    pub(crate) fn into_atlas_outcome(self) -> VelloAtlasOutcome {
+        self.atlas_outcome
+    }
+}
+
+impl CommittedVelloResources {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C03 T4 keeps typed committed-atlas retention consumable by the later T6 resource manager."
+        )
+    )]
+    pub(crate) const fn atlas_outcome(&self) -> VelloAtlasOutcome {
+        self.atlas_outcome
+    }
+}
+
+fn preflight_resource_intents(limits: &wgpu::Limits, intents: &[ResourceIntent]) -> Result<()> {
+    // Keep every synchronous intent failure before allocation so an error cannot lose
+    // fresh-atlas provenance from a partially built lease.
+    let mut buffer_handles = HashSet::new();
+    let mut image_handles = HashSet::new();
+    let mut has_persistent_image_atlas = false;
+    for intent in intents {
+        match intent {
+            ResourceIntent::Buffer(buffer) => {
+                preflight_buffer(limits, buffer)?;
+                if !buffer_handles.insert(buffer.resource) {
+                    return Err(render_failed(
+                        "internal Vello resource allocation repeats a buffer identity",
+                    ));
+                }
+            }
+            ResourceIntent::Image(image) => {
+                preflight_image(limits, image)?;
+                if !image_handles.insert(image.resource) {
+                    return Err(render_failed(
+                        "internal Vello resource allocation repeats an image identity",
+                    ));
+                }
+                if image.retention == ImageRetention::PersistentImageAtlas {
+                    if has_persistent_image_atlas {
+                        return Err(render_failed(
+                            "internal Vello resource allocation repeats the persistent image atlas",
+                        ));
+                    }
+                    has_persistent_image_atlas = true;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preflight_buffer(limits: &wgpu::Limits, intent: &BufferIntent) -> Result<()> {
+    if intent.byte_len == 0 {
+        return Err(render_failed(
+            "internal Vello resource allocation received an empty buffer",
+        ));
+    }
+    if intent.byte_len > limits.max_buffer_size {
+        return Err(render_failed(
+            "internal Vello buffer exceeds the device limit before allocation",
+        ));
+    }
+    let binding_limit = match intent.role {
+        BufferRole::Config => limits.max_uniform_buffer_binding_size,
+        _ => limits.max_storage_buffer_binding_size,
+    };
+    if intent.byte_len > binding_limit {
+        return Err(render_failed(
+            "internal Vello buffer exceeds its device binding-class limit before allocation",
+        ));
+    }
+    Ok(())
+}
+
+fn preflight_image(limits: &wgpu::Limits, intent: &ImageIntent) -> Result<()> {
+    if intent.extent.width() == 0 || intent.extent.height() == 0 {
+        return Err(render_failed(
+            "internal Vello resource allocation received an empty image",
+        ));
+    }
+    let max_extent = limits.max_texture_dimension_2d;
+    if intent.extent.width() > max_extent || intent.extent.height() > max_extent {
+        return Err(render_failed(
+            "internal Vello image exceeds the device 2D texture limit before allocation",
+        ));
+    }
+    Ok(())
 }
 
 fn allocate_buffer(
@@ -278,7 +492,7 @@ fn allocate_image(
         ));
     }
     if intent.retention == ImageRetention::PersistentImageAtlas
-        && pending.persistent_image_atlas.is_some()
+        && pending.persistent_image_atlas.is_present()
     {
         return Err(render_failed(
             "internal Vello resource allocation repeats the persistent image atlas",
@@ -312,7 +526,7 @@ fn allocate_image(
         array_layer_count: None,
     });
     if intent.retention == ImageRetention::PersistentImageAtlas {
-        pending.persistent_image_atlas = Some(intent.resource);
+        pending.persistent_image_atlas = PendingPersistentAtlas::NewlyAllocated;
     }
     pending.images.insert(
         intent.resource,
