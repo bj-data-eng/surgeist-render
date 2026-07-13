@@ -112,14 +112,33 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     );
 
     let tests_source = include_str!("tests.rs");
+    let provenance_checker_start_marker = [
+        "#[test]\n",
+        "fn internal_vello_",
+        "provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {\n",
+    ]
+    .concat();
+    let provenance_checker_end_marker = ["\nfn manifest_dependency_", "records("].concat();
+    assert_eq!(
+        tests_source
+            .match_indices(provenance_checker_start_marker.as_str())
+            .count(),
+        1,
+        "the provenance checker start boundary must be unique"
+    );
+    assert_eq!(
+        tests_source
+            .match_indices(provenance_checker_end_marker.as_str())
+            .count(),
+        1,
+        "the provenance checker end boundary must be unique"
+    );
     let (tests_source_before_provenance_checker, provenance_checker_and_after) = tests_source
-        .split_once(
-            "fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {",
-        )
+        .split_once(provenance_checker_start_marker.as_str())
         .expect("the provenance checker must remain identifiable in tests.rs");
     let (provenance_checker_source, tests_source_after_provenance_checker) =
         provenance_checker_and_after
-            .split_once("\nfn manifest_dependency_records(")
+            .split_once(provenance_checker_end_marker.as_str())
             .expect("the provenance checker must remain bounded by its helper");
     let tests_source_outside_provenance_checker = [
         tests_source_before_provenance_checker,
