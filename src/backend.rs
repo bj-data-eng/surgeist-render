@@ -16,8 +16,8 @@ use super::surface::PresentedSurface;
 use super::surface::{HeadlessResources, SurfaceBackend};
 #[cfg(test)]
 use super::vello_engine::{
-    ActiveVelloEncodingScope, PreparedVelloPass, TransactionEncodingState, TransactionTargetIntent,
-    VelloResourceManagerObservationForTest,
+    ActiveVelloEncodingScope, EncodedVelloPass, PreparedVelloPass, TransactionEncodingState,
+    TransactionTargetIntent, VelloResourceManagerObservationForTest,
 };
 use super::vello_engine::{VelloEngineState, VelloResourceManager};
 use super::*;
@@ -40,9 +40,54 @@ use std::{
 
 #[cfg(test)]
 use std::{
+    cell::RefCell,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Condvar, Weak},
     task::{Context, Poll, Waker},
 };
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_OFFSCREEN_TEXTURE_ACQUIRE_OBSERVATION_FOR_TEST: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) struct ScopedOffscreenTextureAcquireObservationForTest {
+    count: Arc<AtomicUsize>,
+    previous: Option<Arc<AtomicUsize>>,
+}
+
+#[cfg(test)]
+impl ScopedOffscreenTextureAcquireObservationForTest {
+    pub(crate) fn begin() -> Self {
+        let count = Arc::new(AtomicUsize::new(0));
+        let previous = ACTIVE_OFFSCREEN_TEXTURE_ACQUIRE_OBSERVATION_FOR_TEST
+            .with(|active| active.replace(Some(Arc::clone(&count))));
+        Self { count, previous }
+    }
+
+    pub(crate) fn acquire_count_for_test(&self) -> usize {
+        self.count.load(Ordering::Relaxed)
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedOffscreenTextureAcquireObservationForTest {
+    fn drop(&mut self) {
+        ACTIVE_OFFSCREEN_TEXTURE_ACQUIRE_OBSERVATION_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_offscreen_texture_acquire_for_test() {
+    ACTIVE_OFFSCREEN_TEXTURE_ACQUIRE_OBSERVATION_FOR_TEST.with(|active| {
+        if let Some(count) = active.borrow().as_ref() {
+            count.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+}
 
 pub(crate) struct Backend {
     instance: wgpu::Instance,
@@ -903,7 +948,7 @@ impl Backend {
             label: Some("T6 transaction-owned internal Vello encoder"),
         });
         let mut scope = ActiveVelloEncodingScope::begin(device);
-        let lease = {
+        let encoded: EncodedVelloPass = {
             let mut encoding = TransactionEncodingState::new(
                 &mut scope,
                 queue,
@@ -924,6 +969,7 @@ impl Backend {
                 }
             }
         };
+        let (lease, logical_pass) = encoded.into_resources_and_logical_pass();
         let lease = match scope.finish_with_lease(lease).await {
             Ok(lease) => lease,
             Err(failure) => {
@@ -936,6 +982,7 @@ impl Backend {
         let payload = InternalVelloPayload::observed_for_test(
             command_encoder.finish(),
             resources.pending_commit(lease),
+            logical_pass,
             observation.clone(),
         );
         transaction
@@ -1003,7 +1050,7 @@ impl Backend {
             label: Some("T6 cancellation-owned internal Vello encoder"),
         });
         let mut scope = ActiveVelloEncodingScope::begin(device);
-        let lease = {
+        let encoded: EncodedVelloPass = {
             let mut encoding = TransactionEncodingState::new(
                 &mut scope,
                 queue,
@@ -1024,6 +1071,7 @@ impl Backend {
                 }
             }
         };
+        let (lease, logical_pass) = encoded.into_resources_and_logical_pass();
         let lease = match scope.finish_with_lease(lease).await {
             Ok(lease) => lease,
             Err(failure) => {
@@ -1036,6 +1084,7 @@ impl Backend {
         let payload = InternalVelloPayload::paused_after_submit_for_test(
             command_encoder.finish(),
             resources.pending_commit(lease),
+            logical_pass,
             checkpoint,
         );
         let mut submission = Box::pin(transaction.submit_internal_vello(
@@ -1342,6 +1391,8 @@ impl OffscreenTextureResourceCache {
         bounds: OffscreenBounds,
         descriptor: TextureDescriptor,
     ) -> Result<OffscreenTextureResourceLease> {
+        #[cfg(test)]
+        record_offscreen_texture_acquire_for_test();
         let key = TextureCacheKey::from_descriptor(descriptor);
         let stats_before = self.lifecycle.stats();
         let handle = self.lifecycle.acquire(descriptor)?;

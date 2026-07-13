@@ -13663,7 +13663,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                     label: Some("T4 checked internal Vello committed command encoding"),
                 });
             let mut scope = ActiveVelloEncodingScope::begin(device);
-            let lease = {
+            let (lease, _logical_pass) = {
                 let mut state = TransactionEncodingState::new(
                     &mut scope,
                     queue,
@@ -13678,6 +13678,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                 msaa8_pass
                     .encode_into(&engine, &mut state)
                     .expect("an MSAA8 pass must encode through an active checked scope")
+                    .into_resources_and_logical_pass()
             };
             let command_buffer = command_encoder.finish();
             drop(command_buffer);
@@ -13707,10 +13708,11 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                         target_usage,
                     ),
                 );
-                let aborted = area_pass
+                let (lease, _logical_pass) = area_pass
                     .encode_into(&engine, &mut state)
                     .expect("an area pass must encode through an active checked scope")
-                    .abort();
+                    .into_resources_and_logical_pass();
+                let aborted = lease.abort();
                 assert!(aborted.discarded_resource_count_for_test() > 0);
                 aborted.into_atlas_outcome()
             };
@@ -13750,7 +13752,8 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                     ),
                 );
                 match area_pass.encode_into(&engine, &mut state) {
-                    Ok(lease) => {
+                    Ok(encoded) => {
+                        let (lease, _logical_pass) = encoded.into_resources_and_logical_pass();
                         let _ = lease.abort();
                         panic!("a mismatched transaction target must fail before allocation");
                     }
@@ -13793,7 +13796,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                     label: Some("T4 checked internal Vello invalid target encoding"),
                 });
             let mut scope = ActiveVelloEncodingScope::begin(device);
-            let lease = {
+            let (lease, _logical_pass) = {
                 let mut state = TransactionEncodingState::new(
                     &mut scope,
                     queue,
@@ -13808,6 +13811,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                 area_pass
                     .encode_into(&engine, &mut state)
                     .expect("the active scope must own actual target-view validation")
+                    .into_resources_and_logical_pass()
             };
             let command_buffer = command_encoder.finish();
             drop(command_buffer);
@@ -14143,6 +14147,11 @@ fn internal_vello_encoding_shares_the_frame_transaction_submission() {
         1,
         "the one consumed internal payload command buffer must be the direct raster pass"
     );
+    assert_eq!(
+        observation.active_generation_for_test(),
+        observation.transaction_generation_for_test(),
+        "the real queue submission must retain the active DeviceSignal generation for its transaction lease"
+    );
     assert!(
         observation
             .transaction_generation_for_test()
@@ -14172,6 +14181,7 @@ fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
     )
     .expect("the base direct scene must prepare without effect-graph authority");
 
+    let offscreen_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let observation =
         pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
             .expect("the direct scene must submit through its one internal raster payload");
@@ -14191,17 +14201,10 @@ fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
         }),
         "the transaction-owned direct payload must carry actual internal Vello buffer/image allocation roles"
     );
-    let allocation_summary = allocation_summary
-        .expect("the consumed internal payload must retain its closed allocation-role summary");
     assert_eq!(
-        allocation_summary.custom_effect_offscreen_requests_for_test(),
+        offscreen_acquires.acquire_count_for_test(),
         0,
-        "the direct payload must request no custom effect/offscreen resource role"
-    );
-    assert_eq!(
-        allocation_summary.custom_effect_offscreen_allocations_for_test(),
-        0,
-        "the direct payload must allocate no custom effect/offscreen resource role"
+        "the effect-free direct scene must not acquire a shared offscreen/effect texture while its Vello resources allocate"
     );
 }
 

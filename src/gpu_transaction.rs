@@ -1,7 +1,7 @@
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
-    vello_engine::PendingVelloResourceCommit,
+    vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit},
 };
 use std::sync::Arc;
 
@@ -98,6 +98,11 @@ impl GpuOperationLease {
     }
 
     #[cfg(test)]
+    fn active_generation_for_test(&self) -> Option<u64> {
+        self.signal.active_generation_for_test()
+    }
+
+    #[cfg(test)]
     pub(crate) const fn generation_for_test(&self) -> u64 {
         self.generation
     }
@@ -133,6 +138,7 @@ pub(crate) struct GpuOperationTransaction {
 pub(crate) struct InternalVelloPayload<'resources> {
     command_buffer: wgpu::CommandBuffer,
     resources: PendingVelloResourceCommit<'resources>,
+    logical_pass: DirectVelloLogicalPass,
     #[cfg(test)]
     submission_observation: Option<InternalVelloSubmissionObservationForTest>,
     #[cfg(test)]
@@ -151,6 +157,7 @@ pub(crate) struct InternalVelloSubmissionObservationForTest {
 struct InternalVelloSubmissionObservationStateForTest {
     queue_submission_count: usize,
     transaction_generation: Option<u64>,
+    active_generation: Option<u64>,
     payload_raster_pass_count: usize,
     allocation_summary: Option<VelloResourceAllocationSummaryForTest>,
 }
@@ -160,6 +167,8 @@ impl InternalVelloSubmissionObservationForTest {
     fn record_payload_submission(
         &self,
         transaction_generation: u64,
+        active_generation: Option<u64>,
+        logical_pass: &DirectVelloLogicalPass,
         allocation_summary: VelloResourceAllocationSummaryForTest,
     ) {
         let mut state = self
@@ -168,8 +177,8 @@ impl InternalVelloSubmissionObservationForTest {
             .expect("internal Vello submission observation must remain available");
         state.queue_submission_count = state.queue_submission_count.saturating_add(1);
         state.transaction_generation = Some(transaction_generation);
-        // `InternalVelloPayload` owns exactly the command buffer consumed by this transition.
-        state.payload_raster_pass_count = state.payload_raster_pass_count.saturating_add(1);
+        state.active_generation = active_generation;
+        state.payload_raster_pass_count = logical_pass.cardinality_for_test();
         state.allocation_summary = Some(allocation_summary);
     }
 
@@ -185,6 +194,13 @@ impl InternalVelloSubmissionObservationForTest {
             .lock()
             .expect("internal Vello submission observation must remain available")
             .transaction_generation
+    }
+
+    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("internal Vello submission observation must remain available")
+            .active_generation
     }
 
     pub(crate) fn payload_raster_pass_count_for_test(&self) -> usize {
@@ -242,10 +258,12 @@ impl<'resources> InternalVelloPayload<'resources> {
     pub(crate) fn new(
         command_buffer: wgpu::CommandBuffer,
         resources: PendingVelloResourceCommit<'resources>,
+        logical_pass: DirectVelloLogicalPass,
     ) -> Self {
         Self {
             command_buffer,
             resources,
+            logical_pass,
             #[cfg(test)]
             submission_observation: None,
             #[cfg(test)]
@@ -257,9 +275,10 @@ impl<'resources> InternalVelloPayload<'resources> {
     pub(crate) fn observed_for_test(
         command_buffer: wgpu::CommandBuffer,
         resources: PendingVelloResourceCommit<'resources>,
+        logical_pass: DirectVelloLogicalPass,
         submission_observation: InternalVelloSubmissionObservationForTest,
     ) -> Self {
-        let mut payload = Self::new(command_buffer, resources);
+        let mut payload = Self::new(command_buffer, resources, logical_pass);
         payload.submission_observation = Some(submission_observation);
         payload
     }
@@ -268,11 +287,13 @@ impl<'resources> InternalVelloPayload<'resources> {
     pub(crate) fn paused_after_submit_for_test(
         command_buffer: wgpu::CommandBuffer,
         resources: PendingVelloResourceCommit<'resources>,
+        logical_pass: DirectVelloLogicalPass,
         checkpoint: AfterInternalVelloSubmitCheckpointForTest,
     ) -> Self {
         Self {
             command_buffer,
             resources,
+            logical_pass,
             submission_observation: None,
             after_submit_checkpoint: Some(checkpoint),
         }
@@ -360,16 +381,23 @@ impl GpuOperationTransaction {
         let InternalVelloPayload {
             command_buffer,
             resources,
+            logical_pass,
             #[cfg(test)]
             submission_observation,
             #[cfg(test)]
             after_submit_checkpoint,
         } = payload;
         queue.submit([command_buffer]);
+        #[cfg(not(test))]
+        let _ = logical_pass;
+        #[cfg(test)]
+        let active_generation = self.lease.active_generation_for_test();
         #[cfg(test)]
         if let Some(observation) = submission_observation {
             observation.record_payload_submission(
                 self.lease.generation(),
+                active_generation,
+                &logical_pass,
                 resources.allocation_summary_for_test(),
             );
         }

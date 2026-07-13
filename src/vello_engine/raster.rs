@@ -108,6 +108,47 @@ pub(crate) struct PreparedVelloPass {
     resource_intents: Vec<ResourceIntent>,
 }
 
+/// Unforgeable proof that one prepared pass carries one logical direct-Vello pass.
+#[must_use]
+pub(crate) struct DirectVelloLogicalPass {
+    _prepared_pass: (),
+}
+
+impl DirectVelloLogicalPass {
+    #[cfg(test)]
+    pub(crate) const fn cardinality_for_test(&self) -> usize {
+        1
+    }
+}
+
+#[must_use]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T6 carries the private typed direct-Vello pass through transaction submission before T7 production cutover."
+    )
+)]
+pub(crate) struct EncodedVelloPass {
+    resources: super::recording::VelloResourceLease,
+    logical_pass: DirectVelloLogicalPass,
+}
+
+impl EncodedVelloPass {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 consumes the private typed direct-Vello pass only from transaction test coverage before T7 production cutover."
+        )
+    )]
+    pub(crate) fn into_resources_and_logical_pass(
+        self,
+    ) -> (super::recording::VelloResourceLease, DirectVelloLogicalPass) {
+        (self.resources, self.logical_pass)
+    }
+}
+
 #[cfg_attr(
     not(test),
     expect(

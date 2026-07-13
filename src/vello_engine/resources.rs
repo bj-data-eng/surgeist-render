@@ -83,7 +83,6 @@ struct PendingVelloResources {
 pub(crate) enum VelloResourceAllocationRoleForTest {
     InternalVelloRasterBuffer,
     InternalVelloRasterImage,
-    CustomEffectOffscreen,
 }
 
 #[cfg(test)]
@@ -145,19 +144,6 @@ impl VelloResourceAllocationSummaryForTest {
         )
     }
 
-    pub(crate) fn custom_effect_offscreen_requests_for_test(&self) -> usize {
-        Self::role_count(
-            &self.requested_roles,
-            VelloResourceAllocationRoleForTest::CustomEffectOffscreen,
-        )
-    }
-
-    pub(crate) fn custom_effect_offscreen_allocations_for_test(&self) -> usize {
-        Self::role_count(
-            &self.allocated_roles,
-            VelloResourceAllocationRoleForTest::CustomEffectOffscreen,
-        )
-    }
 }
 
 #[must_use]

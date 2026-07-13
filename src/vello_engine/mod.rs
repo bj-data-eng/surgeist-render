@@ -57,10 +57,7 @@ mod raster {
             &self,
             engine: &super::recording::VelloEngineState,
             state: &mut super::recording::TransactionEncodingState<'_, '_>,
-        ) -> std::result::Result<
-            super::recording::VelloResourceLease,
-            super::recording::VelloEncodingFailure,
-        > {
+        ) -> std::result::Result<EncodedVelloPass, super::recording::VelloEncodingFailure> {
             if self.target_intent.extent != state.target_extent()
                 || self.target_intent.format != RasterImageFormat::Rgba8Unorm
                 || self.target_intent.access != RasterTargetAccess::StorageWrite
@@ -83,6 +80,10 @@ mod raster {
                 &self.resource_intents,
                 state,
             )
+            .map(|resources| EncodedVelloPass {
+                resources,
+                logical_pass: DirectVelloLogicalPass { _prepared_pass: () },
+            })
         }
     }
 }
@@ -95,7 +96,9 @@ pub(crate) mod scene;
         reason = "C03 T3 exposes scene-owned prepared passes for T4 checked realization and T7 cutover."
     )
 )]
-pub(crate) use raster::{PreparedVelloPass, RasterParameters};
+pub(crate) use raster::{
+    DirectVelloLogicalPass, EncodedVelloPass, PreparedVelloPass, RasterParameters,
+};
 
 #[cfg_attr(
     not(test),
