@@ -1640,9 +1640,9 @@ pub(crate) async fn render_internal_vello_surface(
                     *physical_size,
                     surface.options.format,
                 )?;
-                *resources = HeadlessResources::Published { texture, view };
+                *resources = HeadlessResources::Ready { texture, view };
             }
-            let HeadlessResources::Published { view, .. } = resources else {
+            let HeadlessResources::Ready { view, .. } = resources else {
                 unreachable!("headless resources must be ready before internal raster encoding");
             };
             let render_start = Instant::now();

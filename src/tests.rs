@@ -3995,7 +3995,7 @@ fn ahem_font(name: &'static str) -> FontRef<'static> {
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-use super::surface::{PresentedLifecycle, ResizeState};
+use super::surface::{PresentedLifecycle, PresentedResumeAction, ResizeState};
 #[test]
 fn scene_encoding_is_deterministic() {
     let mut a = Scene::new();
@@ -15087,6 +15087,43 @@ fn surface_operation_matrix_covers_every_kind_state_and_duplicate_transition() {
 }
 
 #[test]
+fn completed_headless_render_uses_the_private_ready_resource_phase() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("a completed headless render must retain ready resources");
+
+    assert!(matches!(
+        &surface.backend,
+        SurfaceBackend::Headless {
+            resources: HeadlessResources::Ready { .. },
+            ..
+        }
+    ));
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+#[test]
+fn available_presented_resume_keeps_the_installed_attachment_without_recreating() {
+    let action = Surface::presented_resume_action(
+        SurfaceState::Available,
+        PresentedLifecycle::Ready {
+            resizing: ResizeState::Idle,
+        },
+    );
+
+    assert!(
+        matches!(action, PresentedResumeAction::NoOp),
+        "an available presented surface must retain its attachment without WGPU recreation"
+    );
+}
+
+#[test]
 fn zero_size_headless_render_diagnoses_and_read_returns_empty() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
@@ -15271,15 +15308,11 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         &mut stale_surface,
         Attachment::from_web_canvas("incompatible-canvas"),
     ))
-    .expect_err("incompatible resume must fail before stale device validation");
-    assert_eq!(error.code(), ErrorCode::SurfaceCreateFailed);
+    .expect_err("headless resume must reject its backend before attachment or stale validation");
+    assert_eq!(error.code(), ErrorCode::UnsupportedBackend);
     let error = pollster::block_on(owner.resume_surface(&mut stale_surface, Attachment::Headless))
-        .expect_err("stale resume must fail before indexing the device slot");
-    assert_surface_identity_mismatch(
-        error,
-        RuntimeOperation::SurfaceResume,
-        SurfaceIdentityMismatchKind::StaleDeviceGeneration,
-    );
+        .expect_err("headless resume must reject its backend before stale validation");
+    assert_eq!(error.code(), ErrorCode::UnsupportedBackend);
 }
 
 #[test]

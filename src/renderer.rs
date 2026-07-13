@@ -363,28 +363,33 @@ impl Renderer {
         surface: &mut Surface,
         attachment: Attachment,
     ) -> Result<()> {
+        #[cfg(not(any(
+            feature = "render-window",
+            all(feature = "render-web", target_arch = "wasm32")
+        )))]
+        let _ = attachment;
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceResume)?;
-        if surface.attachment.kind() != attachment.kind() {
-            return Err(Error::new(
-                BackendErrorCode::SurfaceCreateFailed,
-                "surface cannot resume with an incompatible attachment",
-            ));
-        }
-        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceResume)?;
-        surface.ensure_available(RuntimeOperation::SurfaceResume)?;
-        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
 
         match &surface.backend {
             #[cfg(any(
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            SurfaceBackend::Presented { .. } => {
-                let mut next = self.create_surface(attachment, surface.options).await?;
-                next.last_parameters = surface.last_parameters;
-                *surface = next;
-                Ok(())
+            SurfaceBackend::Presented { lifecycle, .. } => {
+                let action = Surface::presented_resume_action(surface.state, *lifecycle);
+                self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
+                surface.ensure_attachment_compatible(&attachment)?;
+                match action {
+                    super::surface::PresentedResumeAction::NoOp => Ok(()),
+                    super::surface::PresentedResumeAction::Recreate => {
+                        let mut next = self.create_surface(attachment, surface.options).await?;
+                        next.last_parameters = surface.last_parameters;
+                        *surface = next;
+                        Ok(())
+                    }
+                }
             }
             SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => unreachable!(),
         }
@@ -435,7 +440,7 @@ impl Renderer {
             }
             SurfaceBackend::Headless {
                 device_identity,
-                resources: HeadlessResources::Published { texture, .. },
+                resources: HeadlessResources::Ready { texture, .. },
                 physical_size,
             } => (*device_identity, texture, *physical_size),
             #[cfg(any(

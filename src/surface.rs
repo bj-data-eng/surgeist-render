@@ -86,12 +86,7 @@ impl Surface {
     }
 
     pub fn resume(&mut self, attachment: Attachment) -> Result<()> {
-        if self.attachment.kind() != attachment.kind() {
-            return Err(Error::new(
-                BackendErrorCode::SurfaceCreateFailed,
-                "surface cannot resume with an incompatible attachment",
-            ));
-        }
+        self.ensure_attachment_compatible(&attachment)?;
         #[cfg(any(
             feature = "render-window",
             all(feature = "render-web", target_arch = "wasm32")
@@ -105,6 +100,32 @@ impl Surface {
         self.attachment = attachment;
         self.state = SurfaceState::Available;
         Ok(())
+    }
+
+    pub(crate) fn ensure_attachment_compatible(&self, attachment: &Attachment) -> Result<()> {
+        if self.attachment.kind() == attachment.kind() {
+            return Ok(());
+        }
+        Err(Error::new(
+            BackendErrorCode::SurfaceCreateFailed,
+            "surface cannot resume with an incompatible attachment",
+        ))
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    pub(crate) fn presented_resume_action(
+        state: SurfaceState,
+        lifecycle: PresentedLifecycle,
+    ) -> PresentedResumeAction {
+        if state == SurfaceState::Available && matches!(lifecycle, PresentedLifecycle::Ready { .. })
+        {
+            PresentedResumeAction::NoOp
+        } else {
+            PresentedResumeAction::Recreate
+        }
     }
 
     #[must_use]
@@ -189,7 +210,7 @@ impl Surface {
             SurfaceBackend::Headless { resources, .. } => match resources {
                 HeadlessResources::Empty => SurfaceResourceState::Empty,
                 HeadlessResources::Pending => SurfaceResourceState::PendingAllocation,
-                HeadlessResources::Published { .. } => SurfaceResourceState::Ready,
+                HeadlessResources::Ready { .. } => SurfaceResourceState::Ready,
             },
             #[cfg(any(
                 feature = "render-window",
@@ -355,7 +376,7 @@ impl PresentedSurface {
 pub(crate) enum HeadlessResources {
     Empty,
     Pending,
-    Published {
+    Ready {
         texture: wgpu::Texture,
         view: wgpu::TextureView,
     },
@@ -402,6 +423,16 @@ pub(crate) enum PresentedLifecycle {
         resizing: ResizeState,
     },
     Lost,
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PresentedResumeAction {
+    NoOp,
+    Recreate,
 }
 
 #[cfg(any(
