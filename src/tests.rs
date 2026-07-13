@@ -629,21 +629,22 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
         );
 
         for index_format in [BdtIndexFormat::Format4, BdtIndexFormat::Format5] {
-            assert_bdt_sparse_invalid(
-                kind,
-                &[BdtStrikeFixture::new(
-                    16,
-                    index_format,
-                    BdtGlyphFixture::SparseDuplicate,
-                )],
-                glyphs,
-            );
+            for glyph in [
+                BdtGlyphFixture::SparseDuplicate,
+                BdtGlyphFixture::SparseUnsorted,
+            ] {
+                assert_bdt_sparse_invalid(
+                    kind,
+                    &[BdtStrikeFixture::new(16, index_format, glyph)],
+                    glyphs,
+                );
+            }
             assert_bdt_selected_bitmap(
                 kind,
                 &[BdtStrikeFixture::new(
                     16,
                     index_format,
-                    BdtGlyphFixture::SparseUnsorted,
+                    BdtGlyphFixture::SparseUnrelatedDisorder,
                 )],
                 16.0,
                 16,
@@ -1016,6 +1017,7 @@ enum BdtGlyphFixture {
     Empty,
     SparseMissing,
     SparseUnsorted,
+    SparseUnrelatedDisorder,
     SparseDuplicate,
     SparseMalformedSentinel,
     SparseUnselectedMalformedSentinel,
@@ -1186,6 +1188,7 @@ fn bdt_image_data(index_format: BdtIndexFormat, glyph: BdtGlyphFixture) -> Vec<u
     };
     let count = match glyph {
         BdtGlyphFixture::SparseUnsorted
+        | BdtGlyphFixture::SparseUnrelatedDisorder
         | BdtGlyphFixture::SparseDuplicate
         | BdtGlyphFixture::SparseUnselectedMalformedSentinel
         | BdtGlyphFixture::UnselectedSparseUnsorted => 3,
@@ -1258,6 +1261,21 @@ fn push_bdt_format4_array(
             );
             push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
         }
+        BdtGlyphFixture::SparseUnrelatedDisorder => {
+            push_be_u32(bytes, 3);
+            push_bdt_glyph_offset_pair(bytes, selected_glyph + 1, image_data_offset);
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph,
+                image_data_offset + image_data_len / 3,
+            );
+            push_bdt_glyph_offset_pair(
+                bytes,
+                selected_glyph + 2,
+                image_data_offset + image_data_len / 3 * 2,
+            );
+            push_bdt_glyph_offset_pair(bytes, u16::MAX, image_data_offset + image_data_len);
+        }
         BdtGlyphFixture::SparseDuplicate => {
             push_be_u32(bytes, 3);
             push_bdt_glyph_offset_pair(bytes, selected_glyph, image_data_offset);
@@ -1319,6 +1337,12 @@ fn push_bdt_format5_array(bytes: &mut Vec<u8>, selected_glyph: u16, glyph: BdtGl
             push_be_u32(bytes, 3);
             push_be_u16(bytes, selected_glyph);
             push_be_u16(bytes, selected_glyph - 1);
+            push_be_u16(bytes, selected_glyph + 2);
+        }
+        BdtGlyphFixture::SparseUnrelatedDisorder => {
+            push_be_u32(bytes, 3);
+            push_be_u16(bytes, selected_glyph + 1);
+            push_be_u16(bytes, selected_glyph);
             push_be_u16(bytes, selected_glyph + 2);
         }
         BdtGlyphFixture::SparseDuplicate => {

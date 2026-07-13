@@ -622,14 +622,10 @@ fn selected_bdt_location_for_subtable(
             let (sentinel, glyphs) = glyphs
                 .split_last()
                 .ok_or_else(|| font_data_error(font_data))?;
-            let Some(glyph_index) = selected_sparse_glyph_index(
-                glyphs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| (index, entry.glyph_id().to_u32())),
-                glyph_id,
-                font_data,
-            )?
+            let Some(glyph_index) =
+                selected_sparse_glyph_index(glyphs, glyph_id, font_data, |entry| {
+                    entry.glyph_id().to_u32()
+                })?
             else {
                 return Ok(None);
             };
@@ -661,14 +657,10 @@ fn selected_bdt_location_for_subtable(
             if glyphs.len() != checked_count(subtable.num_glyphs(), 0, font_data)? {
                 return Err(font_data_error(font_data));
             }
-            let Some(glyph_index) = selected_sparse_glyph_index(
-                glyphs
-                    .iter()
-                    .enumerate()
-                    .map(|(index, entry)| (index, entry.get().to_u32())),
-                glyph_id,
-                font_data,
-            )?
+            let Some(glyph_index) =
+                selected_sparse_glyph_index(glyphs, glyph_id, font_data, |entry| {
+                    entry.get().to_u32()
+                })?
             else {
                 return Ok(None);
             };
@@ -759,18 +751,28 @@ fn checked_glyph_index(
         .ok_or_else(|| font_data_error(font_data))
 }
 
-fn selected_sparse_glyph_index(
-    glyphs: impl Iterator<Item = (usize, u32)>,
+fn selected_sparse_glyph_index<T>(
+    glyphs: &[T],
     glyph_id: GlyphId,
     font_data: &FontData,
+    glyph_id_from_entry: impl Fn(&T) -> u32,
 ) -> Result<Option<usize>> {
+    let selected_glyph_id = glyph_id.to_u32();
     let mut selected_index = None;
-    for (index, candidate) in glyphs {
-        if candidate == glyph_id.to_u32() && selected_index.replace(index).is_some() {
+    for (index, entry) in glyphs.iter().enumerate() {
+        if glyph_id_from_entry(entry) == selected_glyph_id
+            && selected_index.replace(index).is_some()
+        {
             return Err(font_data_error(font_data));
         }
     }
-    Ok(selected_index)
+    let Some(selected_index) = selected_index else {
+        return Ok(None);
+    };
+    match glyphs.binary_search_by(|entry| glyph_id_from_entry(entry).cmp(&selected_glyph_id)) {
+        Ok(binary_index) if binary_index == selected_index => Ok(Some(selected_index)),
+        _ => Err(font_data_error(font_data)),
+    }
 }
 
 fn checked_offset(base: u32, offset: u32, font_data: &FontData) -> Result<usize> {
