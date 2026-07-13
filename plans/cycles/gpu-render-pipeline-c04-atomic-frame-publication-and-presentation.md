@@ -1,11 +1,11 @@
 # GPU Render Pipeline C04 Atomic Frame Publication And Presentation
 
 ## Header
-- Cycle: `C04`; owner: `surgeist-render`; status: `in_progress`.
+- Cycle: `C04`; owner: `surgeist-render`; status: `reviewed`.
 - Cycle base and published prerequisite: `cffc37b909d63c5382e6ef3b91653ed2943f3cbf` (C03).
-- Specification: `plans/specs/gpu-render-pipeline.md` at `1e6517e4e33669d97b1f45c0df9c1de78ec4d07e`, normalized SHA-256 `db78f70e03a31430e949ac06de6628ca24a03cd53cf5dec453b43bcf4fbe53be`: S12-S13A, publication/lifecycle portions of S25-S26, applicable S29, and C04-applicable S31-S35 evidence.
-- Sequence: `plans/sequences/gpu-render-pipeline.md` at `b46c9c2afb6f705fdaf928d640b3821a8e29c0c9`, normalized SHA-256 `3dab5afdeb5084026f4863a3f0f4dfa18de47441a2560e1f5cbd1562732d8bdf`, entry `C04 Atomic Frame Publication And Presentation`.
-- Outcome: make headless publication frame-atomic; place presented setup, configuration, acquisition, output submission, and presentation under Surgeist transactions; close the non-readback surface lifecycle and error matrix.
+- Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S12-S13A, publication/lifecycle portions of S25-S26, applicable S29, and C04-applicable S31-S37 evidence.
+- Sequence: `plans/sequences/gpu-render-pipeline.md` at `c1a203393b2549603c0a0d5698099f55018abe2e`, normalized SHA-256 `70b345be31ac5bf4fcae72e2d3c5901c8e04ad0b2c26080851bd2c50d7150cde`, entry `C04 Atomic Frame Publication And Presentation`.
+- Outcome: make headless publication frame-atomic; place presented setup, configuration, acquisition, output submission, and presentation under Surgeist transactions; close the non-readback surface lifecycle/error matrix and exact wasm test build.
 
 ## Boundary
 - C03 supplies the private internal Vello engine, device owner, raster leases, and transaction-owned raster submission. C04 changes surface/frame ownership around that engine; it does not reopen raster provenance, glyph lowering, scheduling, or retained-atlas policy.
@@ -13,14 +13,14 @@
 - A presented frame renders into a Surgeist-owned intermediate. Configuration and output work use real stage-specific transaction scopes; the output transaction owns any acquired `wgpu::SurfaceTexture`, submits the blit, calls `present`, awaits scopes/signals, and only then permits public frame commit. An attempted present is not rolled back when the final scope/signal check fails.
 - Surface identity, kind, generation, suspension, private lifecycle, and runtime capability are checked in the S26 order before scene planning or WGPU work. State fields are mutated only by private transitions; failure and cancellation publish no draft stats, parameters, pixels, or lifecycle success.
 - C04 may change only readback preflight: zero-size returns a validated empty image, nonzero without publication is typed `Uninitialized`, and a published texture reaches the existing synchronous helper. C05 owns the async copy/map/poll state machine and `ReadbackFailed`; the temporary helper is neither redesigned nor counted as C04 evidence.
-- C04 excludes C05 readback execution, C06+ graph/effect/resource-budget work, C14 browser/window smoke and docs, root integration, new dependencies, compatibility shims, CPU fallback, and acquisition. Owned Rust remains free of `unsafe`.
+- C04 excludes C05 readback execution, C06+ graph/effect/resource-budget work, C14 browser/window smoke and docs, root integration, dependencies beyond S36's authorized target-only `getrandom` role, compatibility shims, CPU fallback, and acquisition. Owned Rust remains free of `unsafe`.
 
 ## Impacts
 | Area | C04 record |
 | --- | --- |
 | Public API | Breaking/corrective: add `SurfaceResourceState::Empty`; remove legacy `ErrorCode::{AdapterUnavailable, SurfaceLost, SurfaceUnavailable}` in favor of exact runtime diagnostics; retain synchronous `read_headless` until C05. |
-| Dependencies/features | Unchanged exact C03 manifest; default, `render-window`, `render-web`, and combined native feature states remain supported. |
-| Artifacts/docs/MSRV | No generated or license artifact delta; docs/examples remain C14-owned; Rust 1.97 and Rust 2024 remain required. |
+| Dependencies/features | Add only S36's provenance-verified `getrandom = 0.3.4` target-specific dev role with `default-features = false` and `wasm_js`; production/native roles and the four native feature states remain unchanged. |
+| Artifacts/docs/MSRV | No generated or license artifact delta; S36 records dependency provenance; docs/examples remain C14-owned; Rust 1.97 and Rust 2024 remain required. |
 | Root/handoff | No root edit. A published C04 candidate hands stable publication/lifecycle semantics to C05. |
 
 ## Tasks
@@ -60,6 +60,7 @@ assert_no_owned_unsafe() {
 
 **C04-CHECK (run verbatim after every task)**
 ```sh
+set -euo pipefail
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
@@ -70,16 +71,25 @@ CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-web
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-web -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
-CARGO_NET_OFFLINE=true rustc +stable --version
+stable_version="$(CARGO_NET_OFFLINE=true rustc +stable --version)"
+printf '%s\n' "$stable_version"
+case "$stable_version" in
+  "rustc 1.97."*) ;;
+  *) printf 'expected Rust 1.97.x, found %s\n' "$stable_version" >&2; exit 1 ;;
+esac
 CARGO_NET_OFFLINE=true cargo +stable check -p surgeist-render --all-targets
 CARGO_NET_OFFLINE=true cargo +stable check -p surgeist-render --all-targets --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
+wasm_getrandom_tree="$(CARGO_NET_OFFLINE=true cargo tree -p surgeist-render --target wasm32-unknown-unknown --features render-web -e features -i getrandom@0.3.4)" || exit $?
+test "$(printf '%s\n' "$wasm_getrandom_tree" | awk '/getrandom feature "wasm_js"/ { count += 1 } END { print count + 0 }')" -eq 1
+native_getrandom_tree="$(CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i getrandom@0.3.4)" || exit $?
+test "$(printf '%s\n' "$native_getrandom_tree" | awk '/getrandom feature "wasm_js"/ { count += 1 } END { print count + 0 }')" -eq 0
 test -z "$(git ls-files -- Cargo.lock)"
 assert_no_owned_unsafe
 ```
 `rustc +stable --version` must report Rust `1.97.x`. `assert_no_owned_unsafe` converts only ripgrep's no-match status to success and rejects matches or command failures.
 
-T1 uses its authoritative wasm compile failure as RED/GREEN evidence. For the remaining matrix, invoke `run_exact_test name` for `default` and `run_exact_test name profile` otherwise.
+T1 uses its two authoritative wasm compile failures plus its named manifest guard as RED/GREEN evidence. For the remaining matrix, invoke `run_exact_test name` for `default` and `run_exact_test name profile` otherwise.
 | Owner | Profile | Exact `src/tests.rs` names |
 | --- | --- | --- |
 | T2 | `default` | `surface_operation_matrix_covers_every_kind_state_and_duplicate_transition`; `zero_size_headless_render_diagnoses_and_read_returns_empty`; `nonzero_headless_read_before_publication_reports_uninitialized_without_map`; `headless_bgra8_remains_a_surface_create_diagnostic`; `foreign_and_stale_surfaces_fail_before_device_slot_access` |
@@ -90,11 +100,11 @@ T1 uses its authoritative wasm compile failure as RED/GREEN evidence. For the re
 | T7 | `render-window` | `surface_loss_can_resume_but_device_loss_requires_a_new_renderer`; `resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent` |
 | T7 | `default` | `uncaptured_gpu_error_faults_only_its_device_generation`; `device_loss_is_terminal_idempotent_and_releases_device_resources`; `terminal_default_device_rejects_headless_without_disabling_ready_slots`; `destroyed_device_callback_reports_terminal_loss_without_stale_resource_use` |
 
-**T1. Restore the wasm WebCanvas ownership boundary**
-- Area/outcome: wasm-gated `src/{surface.rs,renderer.rs}`; add one crate-private `WebCanvas::html_canvas` clone accessor and make the renderer use it plus public `id()`, without exposing fields or changing native diagnostics.
-- RED/acceptance: `CARGO_NET_OFFLINE=true cargo +stable check -p surgeist-render --lib --target wasm32-unknown-unknown --features render-web` fails at C03 with `E0616` for direct access to private `canvas` and `id`. The same command must pass after both accesses cross their owning methods; no new public API, target branch, dependency, or browser execution claim is permitted.
-- Commands: run the exact wasm compile command for RED and GREEN; then `C04-CHECK`.
-- Depends: none. Commit: `Restore wasm WebCanvas ownership`.
+**T1. Restore the exact wasm source and test dependency boundaries**
+- Area/outcome: wasm-gated `src/{surface.rs,renderer.rs}`, `Cargo.toml`, and manifest tests in `src/tests.rs`; add one crate-private `WebCanvas::html_canvas` clone accessor, make the renderer use it plus public `id()`, and permit only S36's exact target-specific dev feature unifier.
+- RED/acceptance: `CARGO_NET_OFFLINE=true cargo +stable check -p surgeist-render --lib --target wasm32-unknown-unknown --features render-web` fails at C03 with `E0616` for private `canvas`/`id`; after that source correction, the full `--lib --tests` gate fails because `proptest -> rand -> getrandom 0.3.4` lacks `wasm_js`. Pass requires both commands green, exact test `wasm_test_entropy_dependency_is_exact_target_scoped_crates_io_feature_unifier` green, the manifest guard accepting only `[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies] getrandom = { version = "=0.3.4", default-features = false, features = ["wasm_js"] }`, and all broader target/source/role mutations rejected. No public API, native `wasm_js`, production dependency, browser execution claim, or additional package role is permitted.
+- Commands: run the exact `--lib` command for source RED/GREEN; run the exact full wasm command for dependency RED/GREEN; `run_exact_test wasm_test_entropy_dependency_is_exact_target_scoped_crates_io_feature_unifier`; then `C04-CHECK`.
+- Depends: none. Commit: `Restore exact wasm build boundaries`.
 
 **T2. Model exact surface states and operation preflight**
 - Area/outcome: `src/{surface.rs,renderer.rs,error.rs,lib.rs}` and focused tests; add public `Empty`, private headless empty/pending/published phases, deferred headless allocation, exact resize/suspend/resume projections, and S26 operation ordering. Remove the three superseded public/backend error codes and route public conditions through validated S13 diagnostics without changing actual readback execution.
@@ -134,6 +144,6 @@ T1 uses its authoritative wasm compile failure as RED/GREEN evidence. For the re
 
 ## Completion
 - Require all seven ordered task ranges and clean task reviews. Headless frames expose only clean publications; presented configuration and output are transaction-owned; cancellation/failure retains prior public state; surface and device terminality are distinct; no C05 or later-cycle behavior enters the range.
-- Run `C04-CHECK`, every matrix name through `run_exact_test` with its recorded profile, and require a clean worktree. Final guards are: `rg -n '^vello\s*=|^glifo\s*=' Cargo.toml`; `rg -n '\bvello::' src --glob '*.rs'`; `rg -n 'create_shader_module_trusted|queue\.submit|map_async|\.poll\(|use_cpu|CpuShader' src/vello_engine`; `rg -n 'queue\.submit' src/shader.rs src/renderer.rs`; each exits `1` clean. Require exactly one `queue.submit` in `src/backend.rs`, lexically inside `read_texture_rgba`, and every other submit in `src/gpu_transaction.rs`.
+- Run `C04-CHECK`, every matrix name through `run_exact_test` with its recorded profile, and require a clean worktree. Final guards are: `rg -n '^vello\s*=|^glifo\s*=' Cargo.toml`; `rg -n '\bvello::' src --glob '*.rs'`; `rg -n 'create_shader_module_trusted|queue\.submit|map_async|\.poll\(|use_cpu|CpuShader' src/vello_engine`; `rg -n 'queue\.submit' src/shader.rs src/renderer.rs`; each exits `1` clean. Require exactly one `queue.submit` in `src/backend.rs`, lexically inside `read_texture_rgba`, every other submit in `src/gpu_transaction.rs`, and the exact S36 target-only dependency role proven by T1's guard/tree evidence.
 - After cycle acceptance, follow `$surgeist-agent`'s canonical implementation-cycle and automated landing/publication gates, then its crate-candidate handoff contract for C05.
 - Block only for unowned worktree conflict, reviewed-packet contradiction, unavailable required native GPU evidence, missing Rust 1.97/already-authorized tooling, or unavailable already-authorized `wasm32-unknown-unknown` standard-library support. No substitute target or browser claim is allowed.
