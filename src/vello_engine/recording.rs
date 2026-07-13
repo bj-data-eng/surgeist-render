@@ -9,6 +9,12 @@ use vello_encoding::ConfigUniform;
 
 use crate::{BackendErrorCode, Error, PhysicalSize, Result};
 
+#[cfg(test)]
+use super::{
+    VelloPassBindingForTest, VelloPassDispatchObservation, VelloPassOperationForTest,
+    VelloPassPhaseForTest, VelloPassResourceForTest, VelloPassResourceLifetimeObservation,
+};
+
 /// A symbolic resource identity within one prepared Vello pass.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ResourceId(u64);
@@ -669,6 +675,8 @@ pub(super) struct BufferIntent {
     resource: BufferHandle,
     role: BufferRole,
     byte_len: u64,
+    #[cfg(test)]
+    allocation_command_index: usize,
 }
 
 #[cfg_attr(
@@ -919,6 +927,8 @@ impl RecordingBuilder {
                 resource: buffer,
                 role,
                 byte_len,
+                #[cfg(test)]
+                allocation_command_index: self.commands.len(),
             }));
         Ok(buffer)
     }
@@ -1007,74 +1017,103 @@ impl DispatchIntent {
 
 #[cfg(test)]
 impl Recording {
-    pub(super) fn has_fixed_schedule_for_test(&self, expected_fine: FineRasterVariant) -> bool {
+    pub(super) fn schedule_observations_for_test(
+        &self,
+        intents: &[ResourceIntent],
+    ) -> (
+        Vec<VelloPassDispatchObservation>,
+        Vec<(
+            VelloPassResourceForTest,
+            VelloPassResourceLifetimeObservation,
+        )>,
+    ) {
         let dispatches = self
             .commands
             .iter()
             .filter_map(|command| match command {
-                RasterCommand::Dispatch(dispatch) => Some(dispatch),
+                RasterCommand::Dispatch(dispatch) => Some(dispatch_observation_for_test(dispatch)),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        let expected_coarse = [
-            (RasterKernel::PathTagReduce, 3),
-            (RasterKernel::PathTagScan, 4),
-            (RasterKernel::BboxClear, 2),
-            (RasterKernel::Flatten, 6),
-            (RasterKernel::DrawReduce, 3),
-            (RasterKernel::DrawLeaf, 7),
-            (RasterKernel::Binning, 8),
-            (RasterKernel::TileAlloc, 6),
-            (RasterKernel::PathCountSetup, 2),
-            (RasterKernel::PathCount, 6),
-            (RasterKernel::Backdrop, 4),
-            (RasterKernel::Coarse, 9),
-            (RasterKernel::PathTilingSetup, 3),
-            (RasterKernel::PathTiling, 6),
-        ];
-        if dispatches.len() != expected_coarse.len() + 1 {
-            return false;
-        }
-        if dispatches[..expected_coarse.len()]
+            .collect();
+        let lifetimes = [
+            (
+                VelloPassResourceForTest::LargePathReduced2,
+                BufferRole::PathReduced2,
+            ),
+            (
+                VelloPassResourceForTest::LargePathReducedScan,
+                BufferRole::PathReducedScan,
+            ),
+            (VelloPassResourceForTest::ClipInputs, BufferRole::ClipInputs),
+            (
+                VelloPassResourceForTest::ClipElements,
+                BufferRole::ClipElements,
+            ),
+            (VelloPassResourceForTest::ClipBics, BufferRole::ClipBics),
+            (VelloPassResourceForTest::ClipBboxes, BufferRole::ClipBboxes),
+        ]
+        .into_iter()
+        .filter_map(|(observed_resource, role)| {
+            let (resource, allocation_command_index) = buffer_for_role_for_test(intents, role)?;
+            Some((
+                observed_resource,
+                self.resource_lifetime_for_test(buffer_id(resource), allocation_command_index),
+            ))
+        })
+        .collect();
+        (dispatches, lifetimes)
+    }
+
+    fn resource_lifetime_for_test(
+        &self,
+        resource: ResourceId,
+        allocation_command_index: usize,
+    ) -> VelloPassResourceLifetimeObservation {
+        let allocation_after = self.previous_dispatch_for_test(allocation_command_index);
+        let (first_use, last_use) = self
+            .commands
             .iter()
-            .zip(expected_coarse)
-            .any(|(dispatch, (kernel, binding_count))| {
-                dispatch.phase != RasterPhase::Coarse
-                    || dispatch.kernel != kernel
-                    || dispatch.bindings.len() != binding_count
-                    || !dispatch
-                        .bindings
-                        .iter()
-                        .all(|binding| matches!(binding, ResourceBinding::Buffer(_)))
+            .filter_map(|command| match command {
+                RasterCommand::Dispatch(dispatch)
+                    if dispatch_references_resource_for_test(dispatch, resource) =>
+                {
+                    Some(operation_for_test(dispatch.kernel))
+                }
+                _ => None,
             })
-        {
-            return false;
+            .fold((None, None), |(first, _), operation| {
+                (first.or(Some(operation)), Some(operation))
+            });
+        let release_after = self
+            .commands
+            .iter()
+            .position(|command| {
+                matches!(
+                    command,
+                    RasterCommand::Release(reference)
+                        if resource_reference_id(*reference) == resource
+                )
+            })
+            .and_then(|index| self.previous_dispatch_for_test(index));
+        VelloPassResourceLifetimeObservation {
+            allocation_after,
+            first_use,
+            last_use,
+            release_after,
         }
-        let Some(final_dispatch) = dispatches.last() else {
-            return false;
-        };
-        let expected_kernel = match expected_fine {
-            FineRasterVariant::Area => RasterKernel::FineArea,
-            FineRasterVariant::Msaa8 => RasterKernel::FineMsaa8,
-            FineRasterVariant::Msaa16 => RasterKernel::FineMsaa16,
-        };
-        if final_dispatch.phase != RasterPhase::Fine || final_dispatch.kernel != expected_kernel {
-            return false;
-        }
-        let mut bindings = final_dispatch.bindings.iter();
-        if !(0..5).all(|_| matches!(bindings.next(), Some(ResourceBinding::Buffer(_))))
-            || !matches!(bindings.next(), Some(ResourceBinding::TargetOutput))
-            || !matches!(bindings.next(), Some(ResourceBinding::Image(_)))
-            || !matches!(bindings.next(), Some(ResourceBinding::Image(_)))
-        {
-            return false;
-        }
-        if !matches!(expected_fine, FineRasterVariant::Area)
-            && !matches!(bindings.next(), Some(ResourceBinding::Buffer(_)))
-        {
-            return false;
-        }
-        bindings.next().is_none()
+    }
+
+    fn previous_dispatch_for_test(
+        &self,
+        command_index: usize,
+    ) -> Option<VelloPassOperationForTest> {
+        self.commands[..command_index]
+            .iter()
+            .rev()
+            .find_map(|command| match command {
+                RasterCommand::Dispatch(dispatch) => Some(operation_for_test(dispatch.kernel)),
+                _ => None,
+            })
     }
 
     pub(super) fn is_self_consistent_for_test(&self, intents: &[ResourceIntent]) -> bool {
@@ -1086,6 +1125,7 @@ impl Recording {
                     resource,
                     role,
                     byte_len,
+                    ..
                 }) => {
                     if *byte_len == 0 {
                         return false;
@@ -1203,6 +1243,89 @@ impl Recording {
             })
             == Some(true)
     }
+}
+
+#[cfg(test)]
+fn dispatch_observation_for_test(dispatch: &DispatchIntent) -> VelloPassDispatchObservation {
+    VelloPassDispatchObservation {
+        phase: phase_for_test(dispatch.phase),
+        operation: operation_for_test(dispatch.kernel),
+        bindings: dispatch.bindings.iter().map(binding_for_test).collect(),
+        indirect: dispatch.indirect.is_some(),
+    }
+}
+
+#[cfg(test)]
+const fn phase_for_test(phase: RasterPhase) -> VelloPassPhaseForTest {
+    match phase {
+        RasterPhase::Coarse => VelloPassPhaseForTest::Coarse,
+        RasterPhase::Fine => VelloPassPhaseForTest::Fine,
+    }
+}
+
+#[cfg(test)]
+const fn operation_for_test(kernel: RasterKernel) -> VelloPassOperationForTest {
+    match kernel {
+        RasterKernel::PathTagReduce => VelloPassOperationForTest::PathTagReduce,
+        RasterKernel::PathTagReduce2 => VelloPassOperationForTest::PathTagReduce2,
+        RasterKernel::PathTagScan1 => VelloPassOperationForTest::PathTagScan1,
+        RasterKernel::PathTagScan => VelloPassOperationForTest::PathTagScan,
+        RasterKernel::PathTagScanLarge => VelloPassOperationForTest::PathTagScanLarge,
+        RasterKernel::BboxClear => VelloPassOperationForTest::BboxClear,
+        RasterKernel::Flatten => VelloPassOperationForTest::Flatten,
+        RasterKernel::DrawReduce => VelloPassOperationForTest::DrawReduce,
+        RasterKernel::DrawLeaf => VelloPassOperationForTest::DrawLeaf,
+        RasterKernel::ClipReduce => VelloPassOperationForTest::ClipReduce,
+        RasterKernel::ClipLeaf => VelloPassOperationForTest::ClipLeaf,
+        RasterKernel::Binning => VelloPassOperationForTest::Binning,
+        RasterKernel::TileAlloc => VelloPassOperationForTest::TileAlloc,
+        RasterKernel::PathCountSetup => VelloPassOperationForTest::PathCountSetup,
+        RasterKernel::PathCount => VelloPassOperationForTest::PathCount,
+        RasterKernel::Backdrop => VelloPassOperationForTest::Backdrop,
+        RasterKernel::Coarse => VelloPassOperationForTest::Coarse,
+        RasterKernel::PathTilingSetup => VelloPassOperationForTest::PathTilingSetup,
+        RasterKernel::PathTiling => VelloPassOperationForTest::PathTiling,
+        RasterKernel::FineArea => VelloPassOperationForTest::FineArea,
+        RasterKernel::FineMsaa8 => VelloPassOperationForTest::FineMsaa8,
+        RasterKernel::FineMsaa16 => VelloPassOperationForTest::FineMsaa16,
+    }
+}
+
+#[cfg(test)]
+const fn binding_for_test(binding: &ResourceBinding) -> VelloPassBindingForTest {
+    match binding {
+        ResourceBinding::Buffer(_) => VelloPassBindingForTest::Buffer,
+        ResourceBinding::Image(_) => VelloPassBindingForTest::Image,
+        ResourceBinding::TargetOutput => VelloPassBindingForTest::TargetOutput,
+    }
+}
+
+#[cfg(test)]
+fn buffer_for_role_for_test(
+    intents: &[ResourceIntent],
+    expected_role: BufferRole,
+) -> Option<(BufferHandle, usize)> {
+    intents.iter().find_map(|intent| match intent {
+        ResourceIntent::Buffer(BufferIntent {
+            resource,
+            role,
+            allocation_command_index,
+            ..
+        }) if *role == expected_role => Some((*resource, *allocation_command_index)),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+fn dispatch_references_resource_for_test(dispatch: &DispatchIntent, resource: ResourceId) -> bool {
+    dispatch.bindings.iter().any(|binding| match binding {
+        ResourceBinding::Buffer(buffer) => buffer_id(*buffer) == resource,
+        ResourceBinding::Image(image) => image_id(*image) == resource,
+        ResourceBinding::TargetOutput => false,
+    }) || dispatch
+        .indirect
+        .as_ref()
+        .is_some_and(|indirect| buffer_id(indirect.buffer) == resource)
 }
 
 #[cfg(test)]

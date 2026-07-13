@@ -1,9 +1,10 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::vello_engine::{
-    RasterParameters, RasterRecorder,
+    PreparedVelloPassObservation, RasterParameters, VelloPassBindingForTest,
+    VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
     prepared_vello_pass_observation_for_test,
-    scene::VelloScene,
+    scene::{VelloRasterScenario, VelloScene},
 };
 use super::{
     backend::*,
@@ -44,6 +45,32 @@ const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
 
 #[test]
 fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
+    let parameters = RasterParameters::try_new(
+        PhysicalSize::new(64, 48),
+        peniko::Color::BLACK,
+        Antialiasing::Area,
+    )
+    .expect("a non-empty target must prepare");
+
+    for (scenario, antialiasing) in [
+        (VelloRasterScenario::Base, Antialiasing::Area),
+        (VelloRasterScenario::Base, Antialiasing::Msaa8),
+        (VelloRasterScenario::Base, Antialiasing::Msaa16),
+        (VelloRasterScenario::LargePath, Antialiasing::Area),
+        (VelloRasterScenario::Clip, Antialiasing::Area),
+        (VelloRasterScenario::LargePathAndClip, Antialiasing::Area),
+    ] {
+        let prepared = VelloScene::prepare_raster_scenario_for_test(
+            scenario,
+            parameters.with_antialiasing(antialiasing),
+        )
+        .expect("recording preparation must not require a runtime resource");
+        let observation = prepared_vello_pass_observation_for_test(&prepared);
+        assert_prepared_vello_pass_basics(&observation);
+        assert_exact_vello_schedule(&observation, scenario, antialiasing);
+        assert_branch_resource_lifetimes(&observation, scenario);
+    }
+
     let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0)
         .expect("the Ahem fixture must pass selected-glyph preflight");
     let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 3.0, 19.0, 8.0).unwrap()];
@@ -52,49 +79,13 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
     scene
         .encode_text_run(&run)
         .expect("the validated Ahem glyph must encode into the private scene");
-
-    let parameters = RasterParameters::try_new(
-        PhysicalSize::new(64, 48),
-        peniko::Color::BLACK,
-        Antialiasing::Area,
-    )
-    .expect("a non-empty target must prepare");
-    let mut recorder = RasterRecorder::default();
-
-    for antialiasing in [
-        Antialiasing::Area,
-        Antialiasing::Msaa8,
-        Antialiasing::Msaa16,
-    ] {
-        let prepared = recorder
-            .prepare(
-                scene.encoding_for_test(),
-                parameters.with_antialiasing(antialiasing),
-            )
-            .expect("recording preparation must not require a runtime resource");
-        let observation = prepared_vello_pass_observation_for_test(&prepared);
-        assert_eq!(
-            observation.target_extent_for_test(),
-            PhysicalSize::new(64, 48)
-        );
-        assert!(observation.is_rgba8_storage_for_test());
-        assert!(observation.final_dispatch_targets_output_for_test());
-        assert!(observation.is_self_consistent_for_test());
-        let has_fixed_schedule = match antialiasing {
-            Antialiasing::Area => observation.has_area_schedule_for_test(),
-            Antialiasing::Msaa8 => observation.has_msaa8_schedule_for_test(),
-            Antialiasing::Msaa16 => observation.has_msaa16_schedule_for_test(),
-        };
-        assert!(has_fixed_schedule);
-        assert!(observation.has_persistent_image_atlas_for_test());
-        assert!(observation.has_transient_buffer_for_test());
-    }
-
-    let empty_prepared = RasterRecorder::default()
-        .prepare(&vello_encoding::Encoding::new(), parameters)
-        .expect("an empty Vello encoding must still produce a typed raster schedule");
-    let empty_observation = prepared_vello_pass_observation_for_test(&empty_prepared);
-    assert!(empty_observation.has_area_schedule_for_test());
+    let prepared = scene
+        .prepare_raster(parameters)
+        .expect("only the validated private scene may prepare a Vello pass");
+    let observation = prepared_vello_pass_observation_for_test(&prepared);
+    assert_prepared_vello_pass_basics(&observation);
+    assert_exact_vello_schedule(&observation, VelloRasterScenario::Base, Antialiasing::Area);
+    assert_branch_resource_lifetimes(&observation, VelloRasterScenario::Base);
 
     let zero_width = RasterParameters::try_new(
         PhysicalSize::new(0, 48),
@@ -129,6 +120,340 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
         assert_eq!(diagnostic.field(), field);
         assert_eq!(diagnostic.value(), (u32::MAX - 14).to_string());
     }
+}
+
+fn assert_prepared_vello_pass_basics(observation: &PreparedVelloPassObservation) {
+    assert_eq!(
+        observation.target_extent_for_test(),
+        PhysicalSize::new(64, 48)
+    );
+    assert!(observation.is_rgba8_storage_for_test());
+    assert!(observation.final_dispatch_targets_output_for_test());
+    assert!(observation.is_self_consistent_for_test());
+    assert!(observation.has_persistent_image_atlas_for_test());
+    assert!(observation.has_transient_buffer_for_test());
+}
+
+fn assert_exact_vello_schedule(
+    observation: &PreparedVelloPassObservation,
+    scenario: VelloRasterScenario,
+    antialiasing: Antialiasing,
+) {
+    let expected = expected_vello_schedule(scenario, antialiasing);
+    let actual = observation.dispatches_for_test();
+    assert_eq!(
+        actual.len(),
+        expected.len(),
+        "{scenario:?} must select the complete pinned Vello schedule"
+    );
+
+    for (index, (actual, (phase, operation, bindings, indirect))) in
+        actual.iter().zip(expected).enumerate()
+    {
+        assert_eq!(
+            actual.phase_for_test(),
+            phase,
+            "{scenario:?} dispatch {index} must retain its phase"
+        );
+        assert_eq!(
+            actual.operation_for_test(),
+            operation,
+            "{scenario:?} dispatch {index} must retain pinned operation order"
+        );
+        assert_eq!(
+            actual.bindings_for_test(),
+            bindings.as_slice(),
+            "{scenario:?} dispatch {index} must retain its binding layout"
+        );
+        assert_eq!(
+            actual.is_indirect_for_test(),
+            indirect,
+            "{scenario:?} dispatch {index} must retain direct or indirect execution"
+        );
+    }
+}
+
+fn expected_vello_schedule(
+    scenario: VelloRasterScenario,
+    antialiasing: Antialiasing,
+) -> Vec<(
+    VelloPassPhaseForTest,
+    VelloPassOperationForTest,
+    Vec<VelloPassBindingForTest>,
+    bool,
+)> {
+    let buffers = |count| vec![VelloPassBindingForTest::Buffer; count];
+    let mut expected = vec![(
+        VelloPassPhaseForTest::Coarse,
+        VelloPassOperationForTest::PathTagReduce,
+        buffers(3),
+        false,
+    )];
+    if matches!(
+        scenario,
+        VelloRasterScenario::LargePath | VelloRasterScenario::LargePathAndClip
+    ) {
+        expected.extend([
+            (
+                VelloPassPhaseForTest::Coarse,
+                VelloPassOperationForTest::PathTagReduce2,
+                buffers(2),
+                false,
+            ),
+            (
+                VelloPassPhaseForTest::Coarse,
+                VelloPassOperationForTest::PathTagScan1,
+                buffers(3),
+                false,
+            ),
+            (
+                VelloPassPhaseForTest::Coarse,
+                VelloPassOperationForTest::PathTagScanLarge,
+                buffers(4),
+                false,
+            ),
+        ]);
+    } else {
+        expected.push((
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::PathTagScan,
+            buffers(4),
+            false,
+        ));
+    }
+    expected.extend([
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::BboxClear,
+            buffers(2),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::Flatten,
+            buffers(6),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::DrawReduce,
+            buffers(3),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::DrawLeaf,
+            buffers(7),
+            false,
+        ),
+    ]);
+    if matches!(
+        scenario,
+        VelloRasterScenario::Clip | VelloRasterScenario::LargePathAndClip
+    ) {
+        expected.extend([
+            (
+                VelloPassPhaseForTest::Coarse,
+                VelloPassOperationForTest::ClipReduce,
+                buffers(4),
+                false,
+            ),
+            (
+                VelloPassPhaseForTest::Coarse,
+                VelloPassOperationForTest::ClipLeaf,
+                buffers(7),
+                false,
+            ),
+        ]);
+    }
+    expected.extend([
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::Binning,
+            buffers(8),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::TileAlloc,
+            buffers(6),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::PathCountSetup,
+            buffers(2),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::PathCount,
+            buffers(6),
+            true,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::Backdrop,
+            buffers(4),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::Coarse,
+            buffers(9),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::PathTilingSetup,
+            buffers(3),
+            false,
+        ),
+        (
+            VelloPassPhaseForTest::Coarse,
+            VelloPassOperationForTest::PathTiling,
+            buffers(6),
+            true,
+        ),
+    ]);
+    let (operation, mut bindings) = match antialiasing {
+        Antialiasing::Area => (VelloPassOperationForTest::FineArea, buffers(5)),
+        Antialiasing::Msaa8 => (VelloPassOperationForTest::FineMsaa8, buffers(5)),
+        Antialiasing::Msaa16 => (VelloPassOperationForTest::FineMsaa16, buffers(5)),
+    };
+    bindings.extend([
+        VelloPassBindingForTest::TargetOutput,
+        VelloPassBindingForTest::Image,
+        VelloPassBindingForTest::Image,
+    ]);
+    if !matches!(antialiasing, Antialiasing::Area) {
+        bindings.push(VelloPassBindingForTest::Buffer);
+    }
+    expected.push((VelloPassPhaseForTest::Fine, operation, bindings, false));
+    expected
+}
+
+fn assert_branch_resource_lifetimes(
+    observation: &PreparedVelloPassObservation,
+    scenario: VelloRasterScenario,
+) {
+    let has_large_path = matches!(
+        scenario,
+        VelloRasterScenario::LargePath | VelloRasterScenario::LargePathAndClip
+    );
+    let has_clip = matches!(
+        scenario,
+        VelloRasterScenario::Clip | VelloRasterScenario::LargePathAndClip
+    );
+
+    if has_large_path {
+        assert_resource_lifetime(
+            observation,
+            VelloPassResourceForTest::LargePathReduced2,
+            Some(VelloPassOperationForTest::PathTagReduce),
+            Some(VelloPassOperationForTest::PathTagReduce2),
+            Some(VelloPassOperationForTest::PathTagScan1),
+            Some(VelloPassOperationForTest::PathTagScanLarge),
+        );
+        assert_resource_lifetime(
+            observation,
+            VelloPassResourceForTest::LargePathReducedScan,
+            Some(VelloPassOperationForTest::PathTagReduce2),
+            Some(VelloPassOperationForTest::PathTagScan1),
+            Some(VelloPassOperationForTest::PathTagScanLarge),
+            Some(VelloPassOperationForTest::PathTagScanLarge),
+        );
+    } else {
+        assert!(
+            observation
+                .resource_lifetime_for_test(VelloPassResourceForTest::LargePathReduced2)
+                .is_none()
+        );
+        assert!(
+            observation
+                .resource_lifetime_for_test(VelloPassResourceForTest::LargePathReducedScan)
+                .is_none()
+        );
+    }
+
+    let clip_release = if has_clip {
+        VelloPassOperationForTest::ClipLeaf
+    } else {
+        VelloPassOperationForTest::DrawLeaf
+    };
+    assert_resource_lifetime(
+        observation,
+        VelloPassResourceForTest::ClipInputs,
+        Some(VelloPassOperationForTest::DrawReduce),
+        Some(VelloPassOperationForTest::DrawLeaf),
+        Some(clip_release),
+        Some(clip_release),
+    );
+    assert_resource_lifetime(
+        observation,
+        VelloPassResourceForTest::ClipElements,
+        Some(VelloPassOperationForTest::DrawLeaf),
+        has_clip.then_some(VelloPassOperationForTest::ClipReduce),
+        has_clip.then_some(clip_release),
+        Some(clip_release),
+    );
+    assert_resource_lifetime(
+        observation,
+        VelloPassResourceForTest::ClipBics,
+        Some(VelloPassOperationForTest::DrawLeaf),
+        has_clip.then_some(VelloPassOperationForTest::ClipReduce),
+        has_clip.then_some(clip_release),
+        Some(clip_release),
+    );
+    assert_resource_lifetime(
+        observation,
+        VelloPassResourceForTest::ClipBboxes,
+        Some(if has_clip {
+            VelloPassOperationForTest::ClipReduce
+        } else {
+            VelloPassOperationForTest::DrawLeaf
+        }),
+        Some(if has_clip {
+            VelloPassOperationForTest::ClipLeaf
+        } else {
+            VelloPassOperationForTest::Binning
+        }),
+        Some(VelloPassOperationForTest::Binning),
+        Some(VelloPassOperationForTest::Binning),
+    );
+}
+
+fn assert_resource_lifetime(
+    observation: &PreparedVelloPassObservation,
+    resource: VelloPassResourceForTest,
+    allocation_after: Option<VelloPassOperationForTest>,
+    first_use: Option<VelloPassOperationForTest>,
+    last_use: Option<VelloPassOperationForTest>,
+    release_after: Option<VelloPassOperationForTest>,
+) {
+    let lifetime = observation
+        .resource_lifetime_for_test(resource)
+        .expect("the pinned schedule must retain its branch buffer intent");
+    assert_eq!(
+        lifetime.allocated_after_for_test(),
+        allocation_after,
+        "{resource:?} allocation must remain in its pinned lifetime"
+    );
+    assert_eq!(
+        lifetime.first_use_for_test(),
+        first_use,
+        "{resource:?} first use must remain in its pinned lifetime"
+    );
+    assert_eq!(
+        lifetime.last_use_for_test(),
+        last_use,
+        "{resource:?} last use must remain in its pinned lifetime"
+    );
+    assert_eq!(
+        lifetime.released_after_for_test(),
+        release_after,
+        "{resource:?} release must remain in its pinned lifetime"
+    );
 }
 
 #[test]
@@ -224,47 +549,36 @@ fn selected_glyph_preflight_validates_exact_outline_draw_settings() {
         .encode_text_run(&run)
         .expect("a valid outline must reach Encoding");
 
-    let encoding = scene.encoding_for_test();
-    assert_eq!(encoding.resources.glyph_runs.len(), 1);
-    assert_eq!(encoding.resources.glyphs.len(), 1);
-    assert_eq!(encoding.resources.patches.len(), 1);
-    assert!(encoding.resources.normalized_coords.is_empty());
+    let observation = scene.observation_for_test();
+    assert_eq!(observation.glyph_run_count_for_test(), 1);
+    assert_eq!(observation.glyph_count_for_test(), 1);
+    assert_eq!(observation.patch_count_for_test(), 1);
+    assert_eq!(observation.normalized_coordinate_count_for_test(), 0);
 
-    let glyph_run = encoding
-        .resources
-        .glyph_runs
-        .first()
-        .expect("Encoding must retain the glyph-run facts");
-    assert_eq!(glyph_run.font.index, 0);
-    assert_eq!(glyph_run.font.data.as_ref(), AHEM_FONT_BYTES);
+    let glyph_run = observation
+        .first_glyph_run_for_test()
+        .expect("the private scene must retain the glyph-run facts");
+    assert_eq!(glyph_run.font_collection_index_for_test(), 0);
+    assert!(glyph_run.font_data_matches_for_test(AHEM_FONT_BYTES));
     assert_eq!(
-        glyph_run.transform,
-        vello_encoding::Transform {
-            matrix: [1.25, 0.0, 0.0, 1.25],
-            translation: [2.0, -3.0],
-        }
+        glyph_run.transform_components_for_test(),
+        [1.25, 0.0, 0.0, 1.25, 2.0, -3.0]
     );
-    assert_eq!(glyph_run.glyph_transform, None);
-    assert_eq!(glyph_run.brush_transform, None);
-    assert_eq!(glyph_run.font_size, 19.5);
-    assert_eq!(glyph_run.font_embolden.amount.xx, 0.0);
-    assert_eq!(glyph_run.font_embolden.amount.yy, 0.0);
-    assert!(!glyph_run.hint);
-    assert_eq!(glyph_run.normalized_coords, 0..0);
-    assert_eq!(glyph_run.glyphs, 0..1);
-    assert!(matches!(
-        glyph_run.style,
-        peniko::Style::Fill(peniko::Fill::NonZero)
-    ));
+    assert!(!glyph_run.has_glyph_transform_for_test());
+    assert!(!glyph_run.has_brush_transform_for_test());
+    assert_eq!(glyph_run.font_size_for_test(), 19.5);
+    assert_eq!(glyph_run.embolden_amount_for_test(), [0.0, 0.0]);
+    assert!(!glyph_run.uses_hinting_for_test());
+    assert_eq!(glyph_run.normalized_coordinate_range_for_test(), 0..0);
+    assert_eq!(glyph_run.glyph_range_for_test(), 0..1);
+    assert!(glyph_run.uses_nonzero_fill_for_test());
 
-    let glyph = encoding
-        .resources
-        .glyphs
-        .first()
-        .expect("Encoding must retain the selected glyph");
-    assert_eq!(glyph.id, AHEM_GLYPH_X);
-    assert_eq!(glyph.x, 3.0);
-    assert_eq!(glyph.y, 19.0);
+    let glyph = observation
+        .first_glyph_for_test()
+        .expect("the private scene must retain the selected glyph");
+    assert_eq!(glyph.id_for_test(), AHEM_GLYPH_X);
+    assert_eq!(glyph.x_for_test(), 3.0);
+    assert_eq!(glyph.y_for_test(), 19.0);
 }
 
 #[test]
@@ -410,9 +724,9 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
     no_bitmap_scene
         .encode_text_run(&no_bitmap_run)
         .expect("a valid bitmap strike without the selected glyph must use the outline");
-    let no_bitmap_encoding = no_bitmap_scene.encoding_for_test();
-    assert_eq!(no_bitmap_encoding.resources.glyph_runs.len(), 1);
-    assert_eq!(no_bitmap_encoding.resources.glyphs.len(), 1);
+    let no_bitmap_observation = no_bitmap_scene.observation_for_test();
+    assert_eq!(no_bitmap_observation.glyph_run_count_for_test(), 1);
+    assert_eq!(no_bitmap_observation.glyph_count_for_test(), 1);
 
     let malformed_colr_head_bytes = ahem_color_font(valid_cpal());
     let malformed_colr_head_font = FontData::try_from_bytes(
@@ -502,10 +816,16 @@ fn external_glyph_resolver_omission_branches_are_blocked_by_preflight() {
     scene
         .encode_text_run(&run)
         .expect("a selected outline must reach Encoding without resolver omission");
-    let encoding = scene.encoding_for_test();
-    assert_eq!(encoding.resources.glyph_runs.len(), 1);
-    assert_eq!(encoding.resources.glyphs.len(), 1);
-    assert_eq!(encoding.resources.glyphs[0].id, AHEM_GLYPH_X);
+    let observation = scene.observation_for_test();
+    assert_eq!(observation.glyph_run_count_for_test(), 1);
+    assert_eq!(observation.glyph_count_for_test(), 1);
+    assert_eq!(
+        observation
+            .first_glyph_for_test()
+            .expect("the private scene must retain the selected glyph")
+            .id_for_test(),
+        AHEM_GLYPH_X
+    );
 
     let missing_glyphs = [TextGlyph::try_new(u32::MAX, 0.0, 16.0, 8.0).unwrap()];
     let missing_run = text_run_for(
@@ -593,11 +913,11 @@ fn assert_render_failed_without_font_diagnostic(error: &Error) {
 }
 
 fn assert_no_glyph_encoding(scene: &VelloScene) {
-    let encoding = scene.encoding_for_test();
+    let observation = scene.observation_for_test();
 
-    assert!(encoding.resources.glyph_runs.is_empty());
-    assert!(encoding.resources.glyphs.is_empty());
-    assert!(encoding.resources.patches.is_empty());
+    assert_eq!(observation.glyph_run_count_for_test(), 0);
+    assert_eq!(observation.glyph_count_for_test(), 0);
+    assert_eq!(observation.patch_count_for_test(), 0);
 }
 
 fn font_data_value(run: &TextRun<'_>) -> String {
@@ -1019,12 +1339,18 @@ impl BitmapFormatExpected {
 }
 
 fn assert_outline_glyph_encoding(scene: &VelloScene, glyph_id: u32) {
-    let encoding = scene.encoding_for_test();
+    let observation = scene.observation_for_test();
 
-    assert_eq!(encoding.resources.glyph_runs.len(), 1);
-    assert_eq!(encoding.resources.glyphs.len(), 1);
-    assert_eq!(encoding.resources.patches.len(), 1);
-    assert_eq!(encoding.resources.glyphs[0].id, glyph_id);
+    assert_eq!(observation.glyph_run_count_for_test(), 1);
+    assert_eq!(observation.glyph_count_for_test(), 1);
+    assert_eq!(observation.patch_count_for_test(), 1);
+    assert_eq!(
+        observation
+            .first_glyph_for_test()
+            .expect("the private scene must retain the selected glyph")
+            .id_for_test(),
+        glyph_id
+    );
 }
 
 #[derive(Clone, Copy)]

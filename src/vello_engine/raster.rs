@@ -108,86 +108,71 @@ pub(crate) struct PreparedVelloPass {
     resource_intents: Vec<ResourceIntent>,
 }
 
-/// The private Vello algorithm owner for resolving and recording one pass.
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "C03 T3 recorder remains private until T7 production Vello cutover."
+        reason = "C03 T3 scene-owned preparation is retained for T4 checked encoding and T7 cutover."
     )
 )]
-#[derive(Default)]
-pub(crate) struct RasterRecorder {
-    resolver: Resolver,
-}
+pub(super) fn prepare(
+    encoding: &Encoding,
+    parameters: RasterParameters,
+) -> Result<PreparedVelloPass> {
+    let mut resolver = Resolver::default();
+    let mut packed = Vec::new();
+    let (layout, ramps, images) = resolver.resolve(encoding, &mut packed);
+    let config = RenderConfig::new(
+        &layout,
+        parameters.target_extent.width(),
+        parameters.target_extent.height(),
+        &parameters.base_color,
+    );
+    let mut recording = RecordingBuilder::default();
 
-impl RasterRecorder {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 T3 preparation is retained for T4 checked encoding and T7 cutover."
-        )
-    )]
-    pub(crate) fn prepare(
-        &mut self,
-        encoding: &Encoding,
-        parameters: RasterParameters,
-    ) -> Result<PreparedVelloPass> {
-        let mut packed = Vec::new();
-        let (layout, ramps, images) = self.resolver.resolve(encoding, &mut packed);
-        let config = RenderConfig::new(
-            &layout,
-            parameters.target_extent.width(),
-            parameters.target_extent.height(),
-            &parameters.base_color,
-        );
-        let mut recording = RecordingBuilder::default();
-
-        let gradient_image = if ramps.height == 0 {
-            recording.new_transient_image(ImageRole::GradientRamp, PhysicalSize::new(1, 1))?
-        } else {
-            recording.upload_gradient_ramps(
-                PhysicalSize::new(ramps.width, ramps.height),
-                ramps.data.to_vec(),
-            )?
-        };
-        let image_atlas = recording
-            .request_image_atlas(PhysicalSize::new(images.width.max(1), images.height.max(1)))?;
-        for (image, x, y) in images.images {
-            recording.write_image(image_atlas, [*x, *y], image.clone());
-        }
-
-        if packed.is_empty() {
-            packed.resize(size_of::<u32>(), u8::MAX);
-        }
-        let scene = recording.upload_scene(packed)?;
-        let config_buffer = recording.upload_config(config.gpu)?;
-        let fine = record_coarse(
-            &mut recording,
-            CoarseInputs {
-                workgroups: config.workgroup_counts,
-                sizes: config.buffer_sizes,
-                scene,
-                config: config_buffer,
-                gradient_image,
-                image_atlas,
-                antialiasing: parameters.antialiasing,
-            },
-        )?;
-        record_fine(&mut recording, fine)?;
-
-        let (recording, resource_intents) = recording.finish();
-        Ok(PreparedVelloPass {
-            recording,
-            target_intent: RasterTargetIntent {
-                extent: parameters.target_extent,
-                format: RasterImageFormat::Rgba8Unorm,
-                access: RasterTargetAccess::StorageWrite,
-            },
-            resource_intents,
-        })
+    let gradient_image = if ramps.height == 0 {
+        recording.new_transient_image(ImageRole::GradientRamp, PhysicalSize::new(1, 1))?
+    } else {
+        recording.upload_gradient_ramps(
+            PhysicalSize::new(ramps.width, ramps.height),
+            ramps.data.to_vec(),
+        )?
+    };
+    let image_atlas = recording
+        .request_image_atlas(PhysicalSize::new(images.width.max(1), images.height.max(1)))?;
+    for (image, x, y) in images.images {
+        recording.write_image(image_atlas, [*x, *y], image.clone());
     }
+
+    if packed.is_empty() {
+        packed.resize(size_of::<u32>(), u8::MAX);
+    }
+    let scene = recording.upload_scene(packed)?;
+    let config_buffer = recording.upload_config(config.gpu)?;
+    let fine = record_coarse(
+        &mut recording,
+        CoarseInputs {
+            workgroups: config.workgroup_counts,
+            sizes: config.buffer_sizes,
+            scene,
+            config: config_buffer,
+            gradient_image,
+            image_atlas,
+            antialiasing: parameters.antialiasing,
+        },
+    )?;
+    record_fine(&mut recording, fine)?;
+
+    let (recording, resource_intents) = recording.finish();
+    Ok(PreparedVelloPass {
+        recording,
+        target_intent: RasterTargetIntent {
+            extent: parameters.target_extent,
+            format: RasterImageFormat::Rgba8Unorm,
+            access: RasterTargetAccess::StorageWrite,
+        },
+        resource_intents,
+    })
 }
 
 struct FineSchedule {
@@ -612,6 +597,9 @@ fn validate_target_dimension(field: &'static str, value: u32) -> Result<()> {
 #[cfg(test)]
 impl PreparedVelloPass {
     pub(super) fn observation_for_test(&self) -> PreparedVelloPassObservation {
+        let (dispatches, resource_lifetimes) = self
+            .recording
+            .schedule_observations_for_test(&self.resource_intents);
         PreparedVelloPassObservation {
             target_extent: self.target_intent.extent,
             is_rgba8_storage: self.target_intent.is_rgba8_storage_for_test(),
@@ -619,15 +607,6 @@ impl PreparedVelloPass {
             is_self_consistent: self
                 .recording
                 .is_self_consistent_for_test(&self.resource_intents),
-            has_area_schedule: self
-                .recording
-                .has_fixed_schedule_for_test(FineRasterVariant::Area),
-            has_msaa8_schedule: self
-                .recording
-                .has_fixed_schedule_for_test(FineRasterVariant::Msaa8),
-            has_msaa16_schedule: self
-                .recording
-                .has_fixed_schedule_for_test(FineRasterVariant::Msaa16),
             has_persistent_image_atlas: self
                 .resource_intents
                 .iter()
@@ -636,6 +615,8 @@ impl PreparedVelloPass {
                 .resource_intents
                 .iter()
                 .any(ResourceIntent::is_transient_buffer_for_test),
+            dispatches,
+            resource_lifetimes,
         }
     }
 }
