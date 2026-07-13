@@ -78,10 +78,10 @@ This initiative does not:
   host/window policy;
 - vendor or modify `vello_encoding`, `vello_shaders`, or their WGSL raster
   algorithms; they remain pinned external dependencies and safe backend inputs;
-- add a dependency outside the already-present, explicitly authorized S36
-  internalization set, or add a feature, generator, script, CI workflow, or
-  downloaded toolchain without exact user permission; the known web execution
-  blocker in S37 does not itself grant that permission;
+- add a dependency outside the explicitly authorized S36 set, or add a feature,
+  generator, script, CI workflow, or downloaded toolchain without exact user
+  permission; S36 records the separately authorized wasm target and test-only
+  entropy feature unifier, and neither grants broader acquisition permission;
 - add or retain Surgeist-owned `unsafe`.
 
 The absence of a compatibility requirement permits intentional public API
@@ -126,9 +126,11 @@ At initiative base `d59ad253300b68311f4e81a70e2b6ce73c922a4d`:
   be probed on the selected adapter rather than inferred from the backend name.
 
 Baseline evidence is clean for default tests, host `render-web` checking, and
-`render-window` checking. The installed Rust toolchain does not contain the
-`wasm32-unknown-unknown` target; host `render-web` checking is not a substitute
-for the final wasm compile gate.
+`render-window` checking. The `wasm32-unknown-unknown` target is installed under
+explicit user authorization. The production `--lib` WebCanvas build reaches
+render source, while `--lib --tests` additionally resolves
+`proptest -> rand -> getrandom` and therefore requires S36's target-scoped
+browser-entropy feature unifier; host `render-web` checking is not a substitute.
 
 At architecture-revision head
 `9aa1d97c30a75d0bd552d6b07b62d8d87a7bd39b`, unpublished C02 work has already
@@ -2663,10 +2665,45 @@ they do not become direct dependencies. The currently unused direct
 to dev dependencies because only tests and the tracked native smoke example
 drive the async public API synchronously. The other dev dependency remains
 `proptest = 1.11.0` with default features disabled and `std` enabled. Its role
-remains property/model testing; it is never a production pixel engine. Every
-retained direct dependency must have a production, test, or example source use
-and appear once at its intended Cargo role. No image-filter, compute, wasm
-harness, or other dependency is added under the current permission envelope.
+remains property/model testing; it is never a production pixel engine.
+
+The exact `wasm32-unknown-unknown` test graph additionally declares one
+target-specific development feature unifier:
+
+```toml
+[target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dev-dependencies]
+getrandom = { version = "=0.3.4", default-features = false, features = ["wasm_js"] }
+```
+
+This direct role exists only so the already-transitive `getrandom` used by
+`proptest` selects its real Web Crypto backend when Cargo compiles test targets.
+It has no source import, normal dependency role, native feature effect, runtime
+renderer responsibility, or browser-harness claim. `wasm_js` may activate only
+`wasm-bindgen` and `js-sys` in the wasm development graph; those packages are
+already present through the supported WGPU web graph. The compile-only
+`getrandom_backend="unsupported"` alternative is rejected because it makes a
+future browser test binary structurally unrunnable, and removing or weakening
+the property test dependency is rejected because it reduces existing evidence.
+
+Before authorization, provenance was verified from four agreeing sources. Cargo
+resolves `getrandom 0.3.4` from
+`registry+https://github.com/rust-lang/crates.io-index`; the sparse index, live
+crates.io API, generated lock record, and SHA-256 of the cached `.crate` archive
+all report checksum
+`899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd`.
+The unyanked crates.io release names the official
+`https://github.com/rust-random/getrandom` repository, whose `v0.3.4` tag equals
+the package's recorded commit `38e4ad38309a85b56eef4fc759535ccfc322ba9a`.
+The crate is `MIT OR Apache-2.0`, declares Rust 1.63, and is already in the
+dependency tree, so this target-only test role changes neither production MSRV
+nor production license/package inventory.
+
+Every other retained direct dependency must have a production, test, or example
+source use and appear once at its intended Cargo role. The manifest dependency
+guard permits only the exact target development table above and rejects every
+other target, patch, replacement, hidden table, source override, duplicate role,
+or `getrandom` record. No image-filter, compute, wasm harness, or other dependency
+is added under the current permission envelope.
 
 The feature/target support matrix is closed:
 
@@ -2676,7 +2713,7 @@ The feature/target support matrix is closed:
 | Native | `render-web` | Supported: same real headless execution; native `WebCanvas` remains the existing typed platform diagnostic; compile/test/lint with feature |
 | Native | `render-window` | Supported: headless tests plus real presented direct and graph smoke through a live `surgeist-window::Handle` |
 | Native | `render-window,render-web` | Supported additive combination: same native presented/headless behavior and web-platform diagnostic; compile/test/lint and presented smoke |
-| `wasm32-unknown-unknown` | `render-web` | Supported leaf build: WebCanvas adapter/presentation code must compile; real browser execution is root-host integration evidence described below |
+| `wasm32-unknown-unknown` | `render-web` | Supported leaf build: WebCanvas adapter/presentation code and test targets compile with target-only test entropy; real browser execution is root-host integration evidence described below |
 | `wasm32-unknown-unknown` | none | Not a supported production combination; no WebGPU feature contract |
 | `wasm32-unknown-unknown` | `render-window` or both | Not supported; native-window integration is not a wasm contract |
 
@@ -2693,9 +2730,9 @@ handoff must state that wasm compilation passed but browser execution remains
 unverified until root runs a real canvas direct frame and graph frame and
 observes successful presentation/routes. No leaf support claim is inferred from
 host compilation alone. If a future leaf cycle is explicitly expanded to own a
-browser harness, the exact target, compatible wasm binding tool, target-specific
-dependencies, and harness artifact require user permission and a reviewed
-specification revision before acquisition or edits.
+browser harness, the exact target, compatible wasm binding tool, additional
+target-specific dependencies, and harness artifact require user permission and
+a reviewed specification revision before acquisition or edits.
 
 The crate has no declared local MSRV, API generator, snapshot generator, or CI
 workflow. At root HEAD `19590f6d9fa01c0df197c5ef07fb626c5cf18ced`, the
@@ -2755,6 +2792,7 @@ CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e normal --depth 1
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e dev --depth 1
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i bytemuck
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i vello_shaders
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render --target wasm32-unknown-unknown --features render-web -e features -i getrandom@0.3.4
 ```
 
 Default and feature test commands execute the required real headless GPU suite;
@@ -2763,12 +2801,13 @@ native presented evidence. The wasm command is mandatory target compilation;
 host `render-web` checking is not a substitute. Browser presentation is named
 as root follow-up rather than falsely counted as leaf execution.
 
-The current toolchain lacks `wasm32-unknown-unknown`. If it remains absent when
-the wasm gate is reached, all independent evidence may proceed, but the gate
-returns the canonical missing-tooling blocker requesting exact permission for
-`rustup target add wasm32-unknown-unknown`; it does not run that acquisition or
-treat the check as passed. A missing graphical session similarly blocks the
-native presented command without downloading a display/server substitute.
+The `wasm32-unknown-unknown` standard library is currently installed following
+exact user permission. In an environment where it is absent, all independent
+evidence may proceed, but the gate returns the canonical missing-tooling blocker
+requesting exact permission for `rustup target add wasm32-unknown-unknown`; it
+does not run that acquisition or treat the check as passed. A missing graphical
+session similarly blocks the native presented command without downloading a
+display/server substitute.
 
 Before the two `+stable` compatibility commands, `rustc +stable --version` must
 report exactly Rust 1.97.x. If stable has advanced beyond the 1.97 line when the
@@ -2787,8 +2826,10 @@ repository-wide scan must both be clean.
 Final dependency/provenance inspection additionally proves that `Cargo.toml`
 has no `vello` package dependency, `cargo tree` contains direct
 `vello_encoding` and WGSL-only `vello_shaders`, every S36 direct dependency has
-an intended source use, `glifo` is absent, `pollster` is dev-only, and no removed
-Vello helper became direct. The feature tree may contain `bytemuck/derive` only
+an intended source use except the exact target-only `getrandom` feature unifier,
+`glifo` is absent, `pollster` is dev-only, `getrandom/wasm_js` appears only in the
+wasm development graph with the recorded crates.io source, and no removed Vello
+helper became direct. The feature tree may contain `bytemuck/derive` only
 through pinned external crates; the owned-source guard proves no
 `Pod`/`Zeroable` derive or unsafe implementation. Static source inspection
 confirms `src/vello_engine/` has no CPU dispatch, blocking/poll/map, direct
