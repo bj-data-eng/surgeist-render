@@ -47,8 +47,8 @@ const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
 
 #[test]
 fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {
-    let normal_dependencies =
-        manifest_dependency_records(include_str!("../Cargo.toml"), "dependencies");
+    let manifest_dependencies = manifest_dependency_records(include_str!("../Cargo.toml"));
+    let normal_dependencies = &manifest_dependencies.normal;
     let expected_normal_dependencies = std::collections::BTreeMap::from([
         (
             "bytemuck".to_owned(),
@@ -77,12 +77,11 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
         ("wgpu".to_owned(), "\"=29.0.3\"".to_owned()),
     ]);
     assert_eq!(
-        normal_dependencies, expected_normal_dependencies,
+        normal_dependencies, &expected_normal_dependencies,
         "the normal dependency records must be the exact S36 set and roles"
     );
 
-    let dev_dependencies =
-        manifest_dependency_records(include_str!("../Cargo.toml"), "dev-dependencies");
+    let dev_dependencies = &manifest_dependencies.dev;
     let expected_dev_dependencies = std::collections::BTreeMap::from([
         ("pollster".to_owned(), "\"=0.4.0\"".to_owned()),
         (
@@ -91,7 +90,7 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
         ),
     ]);
     assert_eq!(
-        dev_dependencies, expected_dev_dependencies,
+        dev_dependencies, &expected_dev_dependencies,
         "the development dependency records must be the exact S36 test set"
     );
     assert!(!normal_dependencies.contains_key("vello"));
@@ -386,37 +385,175 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     );
 }
 
-fn manifest_dependency_records(
-    manifest: &str,
-    section: &str,
-) -> std::collections::BTreeMap<String, String> {
-    let mut in_section = false;
-    let mut records = std::collections::BTreeMap::new();
+struct ManifestDependencyTable {
+    header: String,
+    array: bool,
+    records: std::collections::BTreeMap<String, String>,
+}
+
+struct ManifestDependencyRecords {
+    normal: std::collections::BTreeMap<String, String>,
+    dev: std::collections::BTreeMap<String, String>,
+}
+
+fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
+    let mut tables = Vec::new();
+    let mut active_table = None;
 
     for line in manifest.lines() {
         let trimmed = line.trim();
-        if let Some(header) = trimmed
-            .strip_prefix('[')
-            .and_then(|line| line.strip_suffix(']'))
-        {
-            in_section = header == section;
+        if let Some((header, array)) = manifest_table_header(trimmed) {
+            active_table = if is_dependency_bearing_manifest_table(header) {
+                tables.push(ManifestDependencyTable {
+                    header: header.to_owned(),
+                    array,
+                    records: std::collections::BTreeMap::new(),
+                });
+                Some(tables.len() - 1)
+            } else {
+                None
+            };
             continue;
         }
-        if !in_section || trimmed.is_empty() || trimmed.starts_with('#') {
+        let Some(table) = active_table else {
+            continue;
+        };
+        if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
         let (name, value) = trimmed
             .split_once('=')
-            .unwrap_or_else(|| panic!("invalid {section} record: {trimmed}"));
+            .unwrap_or_else(|| panic!("invalid dependency record: {trimmed}"));
         assert!(
-            records
+            tables[table]
+                .records
                 .insert(name.trim().to_owned(), value.trim().to_owned())
                 .is_none(),
-            "duplicate {section} dependency key: {}",
+            "duplicate {} dependency key: {}",
+            tables[table].header,
             name.trim()
         );
     }
-    records
+
+    let mut normal = None;
+    let mut dev = None;
+    for table in tables {
+        let slot = match (table.header.as_str(), table.array) {
+            ("dependencies", false) => &mut normal,
+            ("dev-dependencies", false) => &mut dev,
+            _ => panic!(
+                "unapproved dependency-bearing Cargo table: [{}]",
+                table.header
+            ),
+        };
+        assert!(
+            slot.replace(table.records).is_none(),
+            "duplicate approved Cargo dependency table: [{}]",
+            table.header
+        );
+    }
+
+    let normal = normal.expect("missing approved Cargo [dependencies] table");
+    let dev = dev.expect("missing approved Cargo [dev-dependencies] table");
+    let duplicated_roles = normal
+        .keys()
+        .filter(|name| dev.contains_key(*name))
+        .cloned()
+        .collect::<Vec<_>>();
+    assert!(
+        duplicated_roles.is_empty(),
+        "dependency names must not appear in both normal and development roles: {duplicated_roles:?}"
+    );
+
+    ManifestDependencyRecords { normal, dev }
+}
+
+fn manifest_table_header(line: &str) -> Option<(&str, bool)> {
+    let (opening, closing, array) = if line.starts_with("[[") {
+        ("[[", "]]", true)
+    } else if line.starts_with('[') {
+        ("[", "]", false)
+    } else {
+        return None;
+    };
+    let body = &line[opening.len()..];
+    let (header, suffix) = body.split_once(closing)?;
+    let suffix = suffix.trim_start();
+    (suffix.is_empty() || suffix.starts_with('#')).then_some((header, array))
+}
+
+fn is_dependency_bearing_manifest_table(header: &str) -> bool {
+    let mut components = header
+        .split('.')
+        .map(|component| component.trim().trim_matches('\'').trim_matches('"'));
+    components.clone().any(|component| {
+        matches!(
+            component,
+            "dependencies" | "dev-dependencies" | "build-dependencies"
+        )
+    }) || matches!(components.next(), Some("patch" | "replace"))
+}
+
+#[test]
+fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
+    let manifest = include_str!("../Cargo.toml");
+    for (case, addition) in [
+        (
+            "build dependency table",
+            "\n[build-dependencies]\nhidden-build-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "target normal dependency table",
+            "\n[target.'cfg(unix)'.dependencies]\nhidden-target-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "target development dependency table",
+            "\n[target.'cfg(unix)'.dev-dependencies]\nhidden-target-dev-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "target build dependency table",
+            "\n[target.'cfg(unix)'.build-dependencies]\nhidden-target-build-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "workspace dependency table",
+            "\n[workspace.dependencies]\nhidden-workspace-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "dependency subtable",
+            "\n[dependencies.hidden-subtable-dependency]\nversion = \"=1.0.0\"\n",
+        ),
+        (
+            "dependency array table",
+            "\n[[dependencies]]\nhidden-array-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "patch resolution table",
+            "\n[patch.crates-io]\nhidden-patch-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "replace resolution table",
+            "\n[replace]\n\"hidden-replace-dependency:1.0.0\" = { version = \"=1.0.1\" }\n",
+        ),
+    ] {
+        assert_manifest_dependency_roles_rejected([manifest, addition].concat(), case);
+    }
+
+    let duplicate_cross_role = manifest.replacen(
+        "[dependencies]\n",
+        "[dependencies]\npollster = \"=0.4.0\"\n",
+        1,
+    );
+    assert_manifest_dependency_roles_rejected(
+        duplicate_cross_role,
+        "duplicate cross-role dependency",
+    );
+}
+
+fn assert_manifest_dependency_roles_rejected(manifest: String, case: &str) {
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| manifest_dependency_records(&manifest))).is_err(),
+        "the exact S36 dependency-role proof must reject {case}"
+    );
 }
 
 fn provenance_rows(notice: &str, heading: &str, expected_columns: usize) -> Vec<Vec<String>> {
