@@ -4,8 +4,8 @@
 
 - Owning repository: `surgeist-render`.
 - Desired state: `plans/specs/gpu-render-pipeline.md` at commit
-  `1e6517e4e33669d97b1f45c0df9c1de78ec4d07e`, normalized semantic SHA-256
-  `db78f70e03a31430e949ac06de6628ca24a03cd53cf5dec453b43bcf4fbe53be`.
+  `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized semantic SHA-256
+  `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`.
 - Specification review disposition: `CLEAN` for that exact revision.
 - Recovery base: published C01 commit
   `5361e3460278dffb877b9d485a2d12977977c3ef`; the former C02 plan is
@@ -17,7 +17,6 @@
 
 ## C01 Public Contract Foundation
 
-- Status: complete and published at `5361e3460278dffb877b9d485a2d12977977c3ef`.
 - Outcome: establish options, text bounds, runtime/error foundations, GPU-only
   selection, and safe resize behavior without exposing final graph reports.
 - Specification: S07-S08, S10, S12, non-readback S13, safe-resize S26, applicable
@@ -48,9 +47,9 @@
 - Outcome: characterize pinned output, internalize/adapt the Vello 0.9 main crate,
   validate selected glyphs before external encoding, establish raster leases and
   transaction-owned encoding/submission, remove external `vello`, and close
-  provenance plus dependency roles.
+  provenance plus its production dependency roles.
 - Specification: S04-S06A, S07 raster phase, S10A, raster portions of S13A and
-  S16-S17, S25-S26, S28-S29 font/API rows, and applicable S31-S37 evidence.
+  S16-S17, S25-S26, S28-S29 font/API rows, and C03-applicable S31-S37 evidence.
 - Prerequisites: C02.
 - Entry state: async device/transaction ownership is clean, but external Vello
   still owns raster execution and surface/device conveniences.
@@ -62,15 +61,15 @@
 ## C04 Atomic Frame Publication And Presentation
 
 - Outcome: implement headless draft-versus-published ownership, presented
-  setup/configure/acquire/blit/present transactions, cancellation cleanup, and
-  the remaining non-readback lifecycle/error matrix on the internal engine.
+  setup/configure/acquire/blit/present transactions, cancellation cleanup, exact
+  wasm test dependency closure, and the non-readback lifecycle/error matrix.
 - Specification: S12-S13A, publication/lifecycle portions of S25-S26, applicable
-  S29 and S31-S35 evidence.
+  S29 and S31-S37 evidence.
 - Prerequisites: C03.
 - Entry state: all raster work encodes and submits through Surgeist transactions.
 - Exit evidence: failed/canceled headless frames preserve publication, presented
-  state commits only after clean scopes/signals, and no temporary readback path
-  is changed or counted.
+  state commits only after clean scopes/signals, wasm source/test targets compile
+  with the exact test-only entropy role, and temporary readback remains unchanged.
 - Handoff: C05 receives stable surface publication and lifecycle semantics.
 
 ## C05 Surface Readback
