@@ -387,7 +387,6 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
 
 struct ManifestDependencyTable {
     header: String,
-    array: bool,
     records: std::collections::BTreeMap<String, String>,
 }
 
@@ -399,52 +398,77 @@ struct ManifestDependencyRecords {
 fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
     let mut tables = Vec::new();
     let mut active_table = None;
+    let mut active_path = Vec::new();
 
     for line in manifest.lines() {
         let trimmed = line.trim();
         if let Some((header, array)) = manifest_table_header(trimmed) {
-            active_table = if is_dependency_bearing_manifest_table(header) {
-                tables.push(ManifestDependencyTable {
-                    header: header.to_owned(),
-                    array,
-                    records: std::collections::BTreeMap::new(),
-                });
-                Some(tables.len() - 1)
-            } else {
-                None
-            };
+            active_path = manifest_path_components(header);
+            active_table =
+                if let Some(approved_header) = approved_manifest_dependency_table(&active_path) {
+                    assert!(
+                        !array,
+                        "approved Cargo dependency table must not be an array: [{header}]"
+                    );
+                    tables.push(ManifestDependencyTable {
+                        header: approved_header.to_owned(),
+                        records: std::collections::BTreeMap::new(),
+                    });
+                    Some(tables.len() - 1)
+                } else if is_cargo_dependency_path(&active_path) {
+                    panic!("unapproved dependency-bearing Cargo table: [{header}]");
+                } else {
+                    None
+                };
             continue;
         }
-        let Some(table) = active_table else {
-            continue;
-        };
         if trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
         }
-        let (name, value) = trimmed
-            .split_once('=')
-            .unwrap_or_else(|| panic!("invalid dependency record: {trimmed}"));
-        assert!(
-            tables[table]
-                .records
-                .insert(name.trim().to_owned(), value.trim().to_owned())
-                .is_none(),
-            "duplicate {} dependency key: {}",
-            tables[table].header,
-            name.trim()
-        );
+        let Some((lhs, value)) = manifest_assignment(trimmed) else {
+            assert!(
+                active_table.is_none(),
+                "invalid dependency record: {trimmed}"
+            );
+            continue;
+        };
+        let key_path = manifest_path_components(lhs);
+        let full_path = active_path
+            .iter()
+            .chain(&key_path)
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if let Some(table) = active_table {
+            assert!(
+                key_path.len() == 1,
+                "unapproved dotted dependency key: {lhs}"
+            );
+            assert!(
+                is_dependency_record_path(&full_path, tables[table].header.as_str()),
+                "invalid dependency record path: {lhs}"
+            );
+            assert!(
+                tables[table]
+                    .records
+                    .insert(key_path[0].clone(), value.trim().to_owned())
+                    .is_none(),
+                "duplicate {} dependency key: {}",
+                tables[table].header,
+                key_path[0]
+            );
+        } else if is_cargo_dependency_path(&full_path) {
+            panic!("unapproved dependency-bearing Cargo assignment: {lhs}");
+        }
     }
 
     let mut normal = None;
     let mut dev = None;
     for table in tables {
-        let slot = match (table.header.as_str(), table.array) {
-            ("dependencies", false) => &mut normal,
-            ("dev-dependencies", false) => &mut dev,
-            _ => panic!(
-                "unapproved dependency-bearing Cargo table: [{}]",
-                table.header
-            ),
+        let slot = match table.header.as_str() {
+            "dependencies" => &mut normal,
+            "dev-dependencies" => &mut dev,
+            _ => unreachable!("approved dependency tables have a fixed role"),
         };
         assert!(
             slot.replace(table.records).is_none(),
@@ -482,22 +506,118 @@ fn manifest_table_header(line: &str) -> Option<(&str, bool)> {
     (suffix.is_empty() || suffix.starts_with('#')).then_some((header, array))
 }
 
-fn is_dependency_bearing_manifest_table(header: &str) -> bool {
-    let mut components = header
-        .split('.')
-        .map(|component| component.trim().trim_matches('\'').trim_matches('"'));
-    components.clone().any(|component| {
+fn manifest_assignment(line: &str) -> Option<(&str, &str)> {
+    let mut quote = None;
+    let mut escaped = false;
+    for (index, character) in line.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if character == '\\' => escaped = true,
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character == '=' => return Some((&line[..index], &line[index + 1..])),
+            None => {}
+        }
+    }
+    None
+}
+
+fn manifest_path_components(path: &str) -> Vec<String> {
+    let mut components = Vec::new();
+    let mut component_start = 0;
+    let mut quote = None;
+    let mut escaped = false;
+
+    for (index, character) in path.char_indices() {
+        match quote {
+            Some('"') if escaped => escaped = false,
+            Some('"') if character == '\\' => escaped = true,
+            Some(delimiter) if character == delimiter => quote = None,
+            Some(_) => {}
+            None if matches!(character, '\'' | '"') => quote = Some(character),
+            None if character == '.' => {
+                components.push(manifest_path_component(&path[component_start..index]));
+                component_start = index + character.len_utf8();
+            }
+            None => {}
+        }
+    }
+    assert!(quote.is_none(), "unterminated quoted manifest path: {path}");
+    components.push(manifest_path_component(&path[component_start..]));
+    components
+}
+
+fn manifest_path_component(component: &str) -> String {
+    let component = component.trim();
+    assert!(!component.is_empty(), "empty manifest path component");
+    let unquoted = match (component.as_bytes().first(), component.as_bytes().last()) {
+        (Some(b'\''), Some(b'\'')) | (Some(b'"'), Some(b'"')) if component.len() >= 2 => {
+            &component[1..component.len() - 1]
+        }
+        _ => component,
+    };
+    unquoted.to_owned()
+}
+
+fn approved_manifest_dependency_table(path: &[String]) -> Option<&'static str> {
+    (path.len() == 1)
+        .then(|| match path[0].as_str() {
+            "dependencies" => Some("dependencies"),
+            "dev-dependencies" => Some("dev-dependencies"),
+            _ => None,
+        })
+        .flatten()
+}
+
+fn is_dependency_record_path(path: &[String], table: &str) -> bool {
+    path.len() == 2 && path[0] == table
+}
+
+fn is_cargo_dependency_path(path: &[String]) -> bool {
+    let top_level_role = path.first().is_some_and(|component| {
         matches!(
-            component,
-            "dependencies" | "dev-dependencies" | "build-dependencies"
+            component.as_str(),
+            "dependencies" | "dev-dependencies" | "build-dependencies" | "patch" | "replace"
         )
-    }) || matches!(components.next(), Some("patch" | "replace"))
+    });
+    let target_role =
+        path.len() >= 3 && path[0] == "target" && is_dependency_role(path[2].as_str());
+    let workspace_role = path.len() >= 2 && path[0] == "workspace" && path[1] == "dependencies";
+    top_level_role || target_role || workspace_role
+}
+
+fn is_dependency_role(component: &str) -> bool {
+    matches!(
+        component,
+        "dependencies" | "dev-dependencies" | "build-dependencies"
+    )
 }
 
 #[test]
 fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
     let manifest = include_str!("../Cargo.toml");
     for (case, addition) in [
+        (
+            "target dotted normal dependency",
+            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndependencies.hidden-target-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "target dotted development dependency",
+            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndev-dependencies.hidden-target-dev-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "target dotted build dependency",
+            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\nbuild-dependencies.hidden-target-build-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "root dotted normal dependency",
+            "\ndependencies.hidden-root-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "root dotted build dependency",
+            "\nbuild-dependencies.hidden-root-build-dependency = \"=1.0.0\"\n",
+        ),
         (
             "build dependency table",
             "\n[build-dependencies]\nhidden-build-dependency = \"=1.0.0\"\n",
@@ -513,6 +633,18 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
         (
             "target build dependency table",
             "\n[target.'cfg(unix)'.build-dependencies]\nhidden-target-build-dependency = \"=1.0.0\"\n",
+        ),
+        (
+            "target inline normal dependency",
+            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndependencies = { hidden-target-dependency = \"=1.0.0\" }\n",
+        ),
+        (
+            "target inline development dependency",
+            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndev-dependencies = { hidden-target-dev-dependency = \"=1.0.0\" }\n",
+        ),
+        (
+            "target inline build dependency",
+            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\nbuild-dependencies = { hidden-target-build-dependency = \"=1.0.0\" }\n",
         ),
         (
             "workspace dependency table",
@@ -531,8 +663,20 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
             "\n[patch.crates-io]\nhidden-patch-dependency = \"=1.0.0\"\n",
         ),
         (
+            "dotted patch resolution",
+            "\npatch.crates-io.hidden-patch-dependency = \"=1.0.0\"\n",
+        ),
+        (
             "replace resolution table",
             "\n[replace]\n\"hidden-replace-dependency:1.0.0\" = { version = \"=1.0.1\" }\n",
+        ),
+        (
+            "dotted replace resolution",
+            "\nreplace.\"hidden=replace-dependency:1.0.0\" = { version = \"=1.0.1\" }\n",
+        ),
+        (
+            "duplicate approved dependency table",
+            "\n[dependencies]\nhidden-duplicate-table-dependency = \"=1.0.0\"\n",
         ),
     ] {
         assert_manifest_dependency_roles_rejected([manifest, addition].concat(), case);
@@ -547,6 +691,28 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
         duplicate_cross_role,
         "duplicate cross-role dependency",
     );
+
+    let duplicate_key = manifest.replacen(
+        "kurbo = \"=0.13.1\"\n",
+        "kurbo = \"=0.13.1\"\nkurbo = \"=0.13.1\"\n",
+        1,
+    );
+    assert_manifest_dependency_roles_rejected(duplicate_key, "duplicate dependency key");
+}
+
+#[test]
+fn manifest_dependency_roles_ignore_ordinary_metadata_paths() {
+    let manifest = include_str!("../Cargo.toml");
+    let baseline = manifest_dependency_records(manifest);
+    let metadata = [
+        manifest,
+        "\n[package.metadata.dependencies]\nhidden-metadata-dependency = \"=1.0.0\"\n",
+        "\n[package.metadata.patch]\nhidden-metadata-patch = \"=1.0.0\"\n",
+    ]
+    .concat();
+    let records = manifest_dependency_records(&metadata);
+    assert_eq!(records.normal, baseline.normal);
+    assert_eq!(records.dev, baseline.dev);
 }
 
 fn assert_manifest_dependency_roles_rejected(manifest: String, case: &str) {
