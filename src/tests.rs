@@ -111,6 +111,22 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
         "vello_shaders must have no default or CPU route"
     );
 
+    let tests_source = include_str!("tests.rs");
+    let (tests_source_before_provenance_checker, provenance_checker_and_after) = tests_source
+        .split_once(
+            "fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {",
+        )
+        .expect("the provenance checker must remain identifiable in tests.rs");
+    let (provenance_checker_source, tests_source_after_provenance_checker) =
+        provenance_checker_and_after
+            .split_once("\nfn manifest_dependency_records(")
+            .expect("the provenance checker must remain bounded by its helper");
+    let tests_source_outside_provenance_checker = [
+        tests_source_before_provenance_checker,
+        tests_source_after_provenance_checker,
+    ]
+    .concat();
+
     for (dependency, source, use_marker) in [
         (
             "bytemuck",
@@ -138,12 +154,28 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
             "vello_shaders::",
         ),
         ("wgpu", include_str!("backend.rs"), "wgpu::"),
-        ("pollster", include_str!("tests.rs"), "pollster::"),
-        ("proptest", include_str!("tests.rs"), "proptest::"),
     ] {
         assert!(
             source.contains(use_marker),
             "{dependency} must retain an intended source use"
+        );
+    }
+
+    for (dependency, use_marker) in [
+        (
+            "pollster",
+            ["poll", "ster::block_on(Renderer::new(Options::default()))"].concat(),
+        ),
+        ("proptest", ["pro", "ptest::prelude::*;"].concat()),
+        ("proptest", ["prop", "test! {"].concat()),
+    ] {
+        assert!(
+            !provenance_checker_source.contains(&use_marker),
+            "{dependency} use marker must not be supplied by its provenance checker"
+        );
+        assert!(
+            tests_source_outside_provenance_checker.contains(&use_marker),
+            "{dependency} must retain an intended test use outside its provenance checker"
         );
     }
 
