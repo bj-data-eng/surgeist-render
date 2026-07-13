@@ -9,6 +9,19 @@ mod recording {
 
     mod encoder {
         include!("encoder.rs");
+
+        impl VelloEngineState {
+            pub(crate) async fn new_for_device_state(device: &wgpu::Device) -> Result<Self> {
+                Ok(Self {
+                    shaders: CheckedShaderSet::create(device).await?,
+                })
+            }
+
+            #[cfg(test)]
+            pub(crate) fn checked_pipeline_for_test(&self) -> &wgpu::ComputePipeline {
+                self.shaders.pipeline(RasterKernel::FineArea).pipeline()
+            }
+        }
     }
 
     pub(crate) use encoder::{
@@ -20,6 +33,7 @@ mod recording {
     #[cfg(test)]
     pub(crate) use resources::VelloAtlasOutcome;
     pub(super) use resources::VelloResourceLease;
+    pub(crate) use resources::VelloResourceManager;
     #[cfg(test)]
     pub(super) use resources::over_limit_buffer_preflight_for_test;
 }
@@ -87,6 +101,7 @@ pub(crate) use raster::{PreparedVelloPass, RasterParameters};
 )]
 pub(crate) use recording::{
     ActiveVelloEncodingScope, TransactionEncodingState, TransactionTargetIntent, VelloEngineState,
+    VelloResourceManager,
 };
 
 #[cfg(test)]

@@ -32,19 +32,9 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(options: Options) -> Result<Self> {
-        let mut context = vello::util::RenderContext::new();
-        let default_slot = context.device(None).await;
-        let mut backend = default_slot.map(|_| Backend {
-            context,
-            device_states: Vec::new(),
-            #[cfg(test)]
-            terminal_signal_after_renderer_creation: None,
-        });
-        let default_device = match (backend.as_mut(), default_slot) {
-            (Some(backend), Some(slot)) => Some(backend.device_slot_identity(slot)?),
-            (None, None) => None,
-            _ => unreachable!("a selected device always creates a backend"),
-        };
+        let mut backend = Backend::new();
+        let default_device = backend.select_device(None).await?;
+        let backend = default_device.map(|_| backend);
 
         Ok(Self {
             identity: RendererIdentity::new(),
@@ -80,12 +70,10 @@ impl Renderer {
                     ));
                 };
                 let physical_size = physical_size(options.size, options.scale)?;
-                let surface = backend
-                    .context
-                    .create_surface(
+                let (surface, device_identity) = backend
+                    .create_presented_surface(
                         handle.clone(),
-                        physical_size.width(),
-                        physical_size.height(),
+                        physical_size,
                         options.present_mode.into(),
                     )
                     .await
@@ -96,7 +84,6 @@ impl Renderer {
                         )
                         .with_source(source)
                     })?;
-                let device_identity = backend.device_slot_identity(surface.dev_id)?;
                 if let Some(error) =
                     backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
                 {
@@ -143,14 +130,8 @@ impl Renderer {
             ));
         };
         let physical_size = physical_size(options.size, options.scale)?;
-        let surface = backend
-            .context
-            .create_surface(
-                html_canvas,
-                physical_size.width(),
-                physical_size.height(),
-                options.present_mode.into(),
-            )
+        let (surface, device_identity) = backend
+            .create_presented_surface(html_canvas, physical_size, options.present_mode.into())
             .await
             .map_err(|source| {
                 Error::new(
@@ -159,7 +140,6 @@ impl Renderer {
                 )
                 .with_source(source)
             })?;
-        let device_identity = backend.device_slot_identity(surface.dev_id)?;
         if let Some(error) =
             backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
         {
@@ -253,14 +233,9 @@ impl Renderer {
                 RuntimeOperation::AdapterSelection,
             )?;
             let texture_work = (|| -> Result<(wgpu::Texture, wgpu::TextureView)> {
-                let Some(device_handle) = backend.context.devices.get(device_identity.slot())
-                else {
-                    return Err(Error::new(
-                        BackendErrorCode::RendererCreateFailed,
-                        "default Vello device slot disappeared before headless creation",
-                    ));
-                };
-                create_headless_texture(&device_handle.device, physical_size, options.format)
+                let (device, _) =
+                    backend.device_queue(device_identity, RuntimeOperation::AdapterSelection)?;
+                create_headless_texture(device, physical_size, options.format)
             })();
             let scope_result = texture_transaction
                 .finish(RuntimeOperation::AdapterSelection)
@@ -467,18 +442,9 @@ impl Renderer {
                 "no compatible wgpu adapter is available",
             ));
         };
-        let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
-            return Err(Error::new(
-                BackendErrorCode::RenderFailed,
-                "headless Vello device slot disappeared before readback",
-            ));
-        };
-        read_texture_rgba(
-            &device_handle.device,
-            &device_handle.queue,
-            texture,
-            *physical_size,
-        )
+        let (device, queue) =
+            backend.device_queue(*device_identity, RuntimeOperation::SurfaceReadback)?;
+        read_texture_rgba(device, queue, texture, *physical_size)
     }
 
     /// Projects immutable capabilities of the device selected by `surface`.
@@ -532,14 +498,9 @@ impl Renderer {
     pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
         let backend = self.backend.as_mut()?;
         let device_identity = self.default_device?;
-        if backend
-            .terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
-            .is_some()
-        {
-            return None;
-        }
-        let device_handle = backend.context.devices.get(device_identity.slot())?;
-        Some((&device_handle.device, &device_handle.queue))
+        backend
+            .device_queue(device_identity, RuntimeOperation::SurfaceRendering)
+            .ok()
     }
 
     pub(crate) fn default_offscreen_render_context(
@@ -647,6 +608,16 @@ impl Renderer {
     }
 
     #[cfg(test)]
+    pub(crate) fn default_device_state_ownership_observation_for_test(
+        &mut self,
+    ) -> Option<DeviceStateOwnershipObservationForTest> {
+        let device_identity = self.default_device?;
+        self.backend
+            .as_mut()?
+            .device_state_ownership_observation_for_test(device_identity)
+    }
+
+    #[cfg(test)]
     pub(crate) async fn deliberate_validation_error_for_test(&mut self) -> Result<Result<()>> {
         let device_identity = self.default_device.ok_or_else(|| {
             Error::new(
@@ -665,17 +636,8 @@ impl Renderer {
             GpuOperationStage::Render,
             RuntimeOperation::SurfaceRendering,
         )?;
-        let device = &backend
-            .context
-            .devices
-            .get(device_identity.slot())
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "default GPU device disappeared before validation probe",
-                )
-            })?
-            .device;
+        let (device, _) =
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
         let _ = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("Surgeist deliberate scoped validation failure"),
             size: wgpu::Extent3d {
@@ -740,32 +702,14 @@ impl Renderer {
                 bounds,
                 RectShaderPassKind::ClearFill,
             )?;
-            let device_handle = backend
-                .context
-                .devices
-                .get(device_identity.slot())
-                .ok_or_else(|| {
-                    Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "default GPU device disappeared before clear/fill probe",
-                    )
-                })?;
-            let (_source_texture, source_view) = create_texture(
-                &device_handle.device,
-                "Surgeist scoped shader source",
-                source,
-            );
-            let (destination_texture, destination_view) = create_texture(
-                &device_handle.device,
-                "Surgeist scoped shader destination",
-                destination,
-            );
-            let context = RectShaderPassGpuContext::new(
-                &device_handle.device,
-                &device_handle.queue,
-                &source_view,
-                &destination_view,
-            );
+            let (device, queue) =
+                backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+            let (_source_texture, source_view) =
+                create_texture(device, "Surgeist scoped shader source", source);
+            let (destination_texture, destination_view) =
+                create_texture(device, "Surgeist scoped shader destination", destination);
+            let context =
+                RectShaderPassGpuContext::new(device, queue, &source_view, &destination_view);
             (
                 encode_clear_fill_pass(
                     RectShaderPassExecution::gpu(context, transaction),
@@ -778,22 +722,9 @@ impl Renderer {
         };
         backend.observe_device_terminal(device_identity);
         result?;
-        let device_handle = backend
-            .context
-            .devices
-            .get(device_identity.slot())
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "default GPU device disappeared before clear/fill probe readback",
-                )
-            })?;
-        read_texture_rgba(
-            &device_handle.device,
-            &device_handle.queue,
-            &destination_texture,
-            PhysicalSize::new(2, 2),
-        )
+        let (device, queue) =
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceReadback)?;
+        read_texture_rgba(device, queue, &destination_texture, PhysicalSize::new(2, 2))
     }
 
     #[cfg(test)]
@@ -847,12 +778,7 @@ impl Renderer {
         let Some(backend) = self.backend.as_mut() else {
             return false;
         };
-        let Some(device_handle) = backend.context.devices.get(device_identity.slot()) else {
-            return false;
-        };
-        device_handle.device.destroy();
-        let _ = device_handle.device.poll(wgpu::PollType::Poll);
-        true
+        backend.destroy_device_for_test(device_identity)
     }
 
     #[cfg(test)]
@@ -867,23 +793,13 @@ impl Renderer {
 
     #[cfg(test)]
     pub(crate) async fn add_donor_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
-        let mut donor_context = vello::util::RenderContext::new();
-        let donor_slot = donor_context.device(None).await.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
-                "the donor render context could not acquire a compatible wgpu device",
-            )
-        })?;
-        let donor_device = donor_context.devices.swap_remove(donor_slot);
         let backend = self.backend.as_mut().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::AdapterUnavailable,
                 "the renderer has no backend to receive a donor wgpu device",
             )
         })?;
-        let slot = backend.context.devices.len();
-        backend.context.devices.push(donor_device);
-        backend.device_slot_identity(slot)
+        backend.add_device_slot_for_test().await
     }
 
     #[cfg(test)]
@@ -903,39 +819,26 @@ impl Renderer {
             RuntimeOperation::SurfaceRendering,
         )?;
         let work = (|| -> Result<()> {
-            let device_handle = backend
-                .context
-                .devices
-                .get(device_identity.slot())
-                .ok_or_else(|| {
-                    Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "the ready test device slot disappeared before WGPU submission",
-                    )
-                })?;
-            let texture = device_handle
-                .device
-                .create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Surgeist second-slot terminal test target"),
-                    size: wgpu::Extent3d {
-                        width: 1,
-                        height: 1,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    view_formats: &[],
-                });
+            let (device, queue) =
+                backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Surgeist second-slot terminal test target"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            let mut encoder =
-                device_handle
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Surgeist second-slot terminal test encoder"),
-                    });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Surgeist second-slot terminal test encoder"),
+            });
             {
                 let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("Surgeist second-slot terminal test pass"),
@@ -954,7 +857,7 @@ impl Renderer {
                     multiview_mask: None,
                 });
             }
-            device_handle.queue.submit([encoder.finish()]);
+            queue.submit([encoder.finish()]);
             Ok(())
         })();
         let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;

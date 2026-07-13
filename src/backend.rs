@@ -3,7 +3,13 @@
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::PresentedLifecycle;
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::PresentedSurface;
 use super::surface::{HeadlessResources, SurfaceBackend};
+use super::vello_engine::{VelloEngineState, VelloResourceManager};
 use super::*;
 use super::{
     command::OffscreenBounds,
@@ -26,48 +32,178 @@ use std::{
 use std::sync::Condvar;
 
 pub(crate) struct Backend {
-    pub(crate) context: vello::util::RenderContext,
-    pub(crate) device_states: Vec<DeviceState>,
+    instance: wgpu::Instance,
+    device_states: Vec<DeviceState>,
     #[cfg(test)]
     pub(crate) terminal_signal_after_renderer_creation: Option<DeviceSlotIdentity>,
 }
 
 pub(crate) struct DeviceState {
     generation: u64,
-    renderer: Option<vello::Renderer>,
+    lifecycle: DeviceLifecycle,
     capabilities: DeviceCapabilities,
     signal: Arc<DeviceSignal>,
-    terminal: Option<Arc<DeviceTerminalSignal>>,
     next_operation_generation: u64,
 }
 
+struct ReadyDeviceState {
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 establishes the per-device checked engine owner that T6 will encode through."
+        )
+    )]
+    engine: VelloEngineState,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 establishes the per-device resource owner that T6 will adopt leases into."
+        )
+    )]
+    resources: VelloResourceManager,
+    renderer: Option<vello::Renderer>,
+}
+
+enum DeviceLifecycle {
+    Ready(Box<ReadyDeviceState>),
+    Terminal(Arc<DeviceTerminalSignal>),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DeviceResourceOwnershipForTest {
+    Absent,
+    Ready,
+    Released,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DeviceStateOwnershipObservationForTest {
+    selected_wgpu_handles: DeviceResourceOwnershipForTest,
+    private_engine: DeviceResourceOwnershipForTest,
+    internal_resources: DeviceResourceOwnershipForTest,
+    external_renderer: DeviceResourceOwnershipForTest,
+    internal_resources_empty: Option<bool>,
+}
+
+#[cfg(test)]
+impl DeviceStateOwnershipObservationForTest {
+    pub(crate) const fn selected_wgpu_handles_for_test(self) -> DeviceResourceOwnershipForTest {
+        self.selected_wgpu_handles
+    }
+
+    pub(crate) const fn private_engine_for_test(self) -> DeviceResourceOwnershipForTest {
+        self.private_engine
+    }
+
+    pub(crate) const fn internal_resources_for_test(self) -> DeviceResourceOwnershipForTest {
+        self.internal_resources
+    }
+
+    pub(crate) const fn external_renderer_for_test(self) -> DeviceResourceOwnershipForTest {
+        self.external_renderer
+    }
+
+    pub(crate) const fn internal_resources_empty_for_test(self) -> Option<bool> {
+        self.internal_resources_empty
+    }
+}
+
 impl DeviceState {
-    fn new(device_handle: &vello::util::DeviceHandle) -> Self {
+    async fn new(adapter: wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Result<Self> {
         let signal = Arc::new(DeviceSignal::new());
-        register_device_callbacks(&device_handle.device, Arc::clone(&signal));
-        Self {
+        register_device_callbacks(&device, Arc::clone(&signal));
+        let capabilities = DeviceCapabilities::from_device(&adapter, &device);
+        let engine = VelloEngineState::new_for_device_state(&device)
+            .await
+            .map_err(|source| {
+                Error::new(
+                    BackendErrorCode::RendererCreateFailed,
+                    "failed to create the checked internal Vello engine",
+                )
+                .with_source(source)
+            })?;
+        let resources = VelloResourceManager::new();
+        debug_assert!(resources.is_empty());
+        Ok(Self {
             generation: 0,
-            renderer: None,
-            capabilities: DeviceCapabilities::from_device(device_handle),
+            lifecycle: DeviceLifecycle::Ready(Box::new(ReadyDeviceState {
+                adapter,
+                device,
+                queue,
+                engine,
+                resources,
+                renderer: None,
+            })),
+            capabilities,
             signal,
-            terminal: None,
             next_operation_generation: 0,
-        }
+        })
     }
 
     fn observe_terminal(&mut self) {
         let Some(terminal) = self.signal.first_terminal() else {
             return;
         };
-        if self.terminal.is_none() {
-            self.terminal = Some(terminal);
-            self.renderer.take();
+        if matches!(&self.lifecycle, DeviceLifecycle::Ready(_)) {
+            self.lifecycle = DeviceLifecycle::Terminal(terminal);
         }
     }
 
     fn terminal(&mut self) -> Option<&DeviceTerminalSignal> {
         self.observe_terminal();
-        self.terminal.as_deref()
+        match &self.lifecycle {
+            DeviceLifecycle::Ready(_) => None,
+            DeviceLifecycle::Terminal(terminal) => Some(terminal.as_ref()),
+        }
+    }
+
+    fn ready(&self) -> Option<&ReadyDeviceState> {
+        match &self.lifecycle {
+            DeviceLifecycle::Ready(ready) => Some(ready),
+            DeviceLifecycle::Terminal(_) => None,
+        }
+    }
+
+    fn ready_mut(&mut self) -> Option<&mut ReadyDeviceState> {
+        match &mut self.lifecycle {
+            DeviceLifecycle::Ready(ready) => Some(ready),
+            DeviceLifecycle::Terminal(_) => None,
+        }
+    }
+
+    #[cfg(test)]
+    fn ownership_observation_for_test(&mut self) -> DeviceStateOwnershipObservationForTest {
+        self.observe_terminal();
+        match &self.lifecycle {
+            DeviceLifecycle::Ready(ready) => {
+                let _checked_pipeline = ready.engine.checked_pipeline_for_test();
+                DeviceStateOwnershipObservationForTest {
+                    selected_wgpu_handles: DeviceResourceOwnershipForTest::Ready,
+                    private_engine: DeviceResourceOwnershipForTest::Ready,
+                    internal_resources: DeviceResourceOwnershipForTest::Ready,
+                    external_renderer: if ready.renderer.is_some() {
+                        DeviceResourceOwnershipForTest::Ready
+                    } else {
+                        DeviceResourceOwnershipForTest::Absent
+                    },
+                    internal_resources_empty: Some(ready.resources.is_empty_for_test()),
+                }
+            }
+            DeviceLifecycle::Terminal(_) => DeviceStateOwnershipObservationForTest {
+                selected_wgpu_handles: DeviceResourceOwnershipForTest::Released,
+                private_engine: DeviceResourceOwnershipForTest::Released,
+                internal_resources: DeviceResourceOwnershipForTest::Released,
+                external_renderer: DeviceResourceOwnershipForTest::Released,
+                internal_resources_empty: None,
+            },
+        }
     }
 }
 
@@ -79,19 +215,15 @@ pub(crate) struct DeviceCapabilities {
 }
 
 impl DeviceCapabilities {
-    fn from_device(device_handle: &vello::util::DeviceHandle) -> Self {
+    fn from_device(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Self {
         Self {
             high_precision: supports_effect_texture_format(
-                device_handle
-                    .adapter()
-                    .get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
+                adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
             ),
             reduced_precision: supports_effect_texture_format(
-                device_handle
-                    .adapter()
-                    .get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm),
+                adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm),
             ),
-            max_texture_dimension_2d: device_handle.device.limits().max_texture_dimension_2d,
+            max_texture_dimension_2d: device.limits().max_texture_dimension_2d,
         }
     }
 
@@ -392,24 +524,242 @@ impl DeviceSlotIdentity {
 }
 
 impl Backend {
-    fn ensure_device_states(&mut self) {
-        let known_slots = self.device_states.len();
-        self.device_states.extend(
-            self.context.devices[known_slots..]
-                .iter()
-                .map(DeviceState::new),
-        );
+    pub(crate) fn new() -> Self {
+        let backends = wgpu::Backends::from_env().unwrap_or_default();
+        let flags = wgpu::InstanceFlags::from_build_config().with_env();
+        let memory_budget_thresholds = wgpu::MemoryBudgetThresholds::default();
+        let backend_options = wgpu::BackendOptions::from_env_or_default();
+        Self {
+            instance: wgpu::Instance::new(wgpu::InstanceDescriptor {
+                display: None,
+                backends,
+                flags,
+                memory_budget_thresholds,
+                backend_options,
+            }),
+            device_states: Vec::new(),
+            #[cfg(test)]
+            terminal_signal_after_renderer_creation: None,
+        }
     }
 
-    pub(crate) fn device_slot_identity(&mut self, slot: usize) -> Result<DeviceSlotIdentity> {
-        self.ensure_device_states();
-        let Some(state) = self.device_states.get(slot) else {
-            return Err(Error::new(
-                BackendErrorCode::RendererCreateFailed,
-                "Vello selected an unavailable device slot",
-            ));
+    pub(crate) async fn select_device(
+        &mut self,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Option<DeviceSlotIdentity>> {
+        let existing = if let Some(surface) = compatible_surface {
+            self.device_states
+                .iter()
+                .enumerate()
+                .find_map(|(slot, state)| {
+                    state
+                        .ready()
+                        .filter(|ready| ready.adapter.is_surface_supported(surface))
+                        .map(|_| DeviceSlotIdentity::new(slot, state.generation))
+                })
+        } else {
+            self.device_states
+                .first()
+                .map(|state| DeviceSlotIdentity::new(0, state.generation))
         };
-        Ok(DeviceSlotIdentity::new(slot, state.generation))
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        self.new_device(compatible_surface).await
+    }
+
+    async fn new_device(
+        &mut self,
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Option<DeviceSlotIdentity>> {
+        let adapter = match wgpu::util::initialize_adapter_from_env_or_default(
+            &self.instance,
+            compatible_surface,
+        )
+        .await
+        {
+            Ok(adapter) => adapter,
+            Err(_) => return Ok(None),
+        };
+        let supported_features = adapter.features();
+        let requested_features = wgpu::Features::CLEAR_TEXTURE | wgpu::Features::PIPELINE_CACHE;
+        let (device, queue) = match adapter
+            .request_device(&wgpu::DeviceDescriptor {
+                label: None,
+                required_features: supported_features & requested_features,
+                required_limits: wgpu::Limits::default(),
+                ..Default::default()
+            })
+            .await
+        {
+            Ok(device) => device,
+            Err(_) => return Ok(None),
+        };
+        let state = DeviceState::new(adapter, device, queue).await?;
+        let slot = self.device_states.len();
+        let generation = state.generation;
+        self.device_states.push(state);
+        Ok(Some(DeviceSlotIdentity::new(slot, generation)))
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    pub(crate) async fn create_presented_surface(
+        &mut self,
+        target: impl Into<wgpu::SurfaceTarget<'static>>,
+        physical_size: PhysicalSize,
+        present_mode: wgpu::PresentMode,
+    ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
+        let surface = self
+            .instance
+            .create_surface(target.into())
+            .map_err(|source| {
+                Error::new(
+                    BackendErrorCode::SurfaceCreateFailed,
+                    "failed to create a WGPU presentation surface",
+                )
+                .with_source(source)
+            })?;
+        let identity = self.select_device(Some(&surface)).await?.ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::SurfaceCreateFailed,
+                "no compatible WGPU adapter is available for the presentation surface",
+            )
+        })?;
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::AdapterSelection,
+            BackendErrorCode::SurfaceCreateFailed,
+            "the selected presentation device is unavailable",
+        )?;
+        let presented = PresentedSurface::new(
+            surface,
+            &ready.adapter,
+            &ready.device,
+            physical_size,
+            present_mode,
+        )?;
+        Ok((presented, identity))
+    }
+
+    fn ready_state_mut(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
+        error_code: BackendErrorCode,
+        unavailable_message: &'static str,
+    ) -> Result<&mut ReadyDeviceState> {
+        let state = self
+            .device_states
+            .get_mut(identity.slot())
+            .ok_or_else(|| Error::new(error_code, unavailable_message))?;
+        if state.generation != identity.generation {
+            return Err(Error::new(error_code, unavailable_message));
+        }
+        if let Some(terminal) = state.terminal() {
+            return Err(terminal.error(operation));
+        }
+        state
+            .ready_mut()
+            .ok_or_else(|| Error::new(error_code, unavailable_message))
+    }
+
+    pub(crate) fn device_queue(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
+    ) -> Result<(&wgpu::Device, &wgpu::Queue)> {
+        let ready = self.ready_state_mut(
+            identity,
+            operation,
+            BackendErrorCode::RenderFailed,
+            "GPU device resources are unavailable",
+        )?;
+        Ok((&ready.device, &ready.queue))
+    }
+
+    fn create_headless_surface_texture(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        physical_size: PhysicalSize,
+        format: Format,
+    ) -> Result<(wgpu::Texture, wgpu::TextureView)> {
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "headless Vello device resources are unavailable before allocation",
+        )?;
+        create_headless_texture(&ready.device, physical_size, format)
+    }
+
+    fn render_vello_to_texture(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
+        scene: &vello::Scene,
+        target: &wgpu::TextureView,
+        parameters: &vello::RenderParams,
+    ) -> Result<()> {
+        let ready = self.ready_state_mut(
+            identity,
+            operation,
+            BackendErrorCode::RenderFailed,
+            "Vello device resources are unavailable before rendering",
+        )?;
+        let renderer = ready.renderer.as_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "Vello renderer disappeared before rendering",
+            )
+        })?;
+        renderer
+            .render_to_texture(&ready.device, &ready.queue, scene, target, parameters)
+            .map_err(|source| {
+                Error::new(vello_error_code(&source), vello_error_message(&source))
+                    .with_source(source)
+            })
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn resize_presented_surface(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        surface: &mut PresentedSurface,
+        physical_size: PhysicalSize,
+    ) -> Result<()> {
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "presented Vello device resources are unavailable before resize",
+        )?;
+        surface.resize(&ready.device, physical_size);
+        Ok(())
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn configure_presented_surface(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        surface: &PresentedSurface,
+    ) -> Result<()> {
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "presented Vello device resources are unavailable before configuration",
+        )?;
+        surface.configure(&ready.device);
+        Ok(())
     }
 
     pub(crate) fn begin_gpu_operation(
@@ -418,10 +768,6 @@ impl Backend {
         stage: GpuOperationStage,
         operation: RuntimeOperation,
     ) -> Result<GpuOperationTransaction> {
-        self.ensure_device_states();
-        if let Some(error) = self.terminal_error(identity, operation) {
-            return Err(error);
-        }
         let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
@@ -434,6 +780,9 @@ impl Backend {
                 "GPU device generation changed before transaction setup",
             ));
         }
+        if let Some(terminal) = state.terminal() {
+            return Err(terminal.error(operation));
+        }
         state.next_operation_generation = state
             .next_operation_generation
             .checked_add(1)
@@ -445,14 +794,14 @@ impl Backend {
                 )
             })?;
         let signal = Arc::clone(&state.signal);
-        let device = self.context.devices.get(identity.slot()).ok_or_else(|| {
+        let ready = state.ready().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
                 "GPU device slot disappeared before transaction scopes",
             )
         })?;
         Ok(GpuOperationTransaction::begin(
-            &device.device,
+            &ready.device,
             signal,
             state.next_operation_generation,
             stage,
@@ -460,13 +809,10 @@ impl Backend {
     }
 
     pub(crate) fn has_device_slot(&mut self, identity: DeviceSlotIdentity) -> bool {
-        self.ensure_device_states();
         let Some(state) = self.device_states.get_mut(identity.slot()) else {
             return false;
         };
-        if state.generation != identity.generation
-            || self.context.devices.get(identity.slot()).is_none()
-        {
+        if state.generation != identity.generation {
             return false;
         }
         state.observe_terminal();
@@ -478,11 +824,8 @@ impl Backend {
         identity: DeviceSlotIdentity,
         operation: RuntimeOperation,
     ) -> Option<Error> {
-        self.ensure_device_states();
         let state = self.device_states.get_mut(identity.slot())?;
-        if state.generation != identity.generation
-            || self.context.devices.get(identity.slot()).is_none()
-        {
+        if state.generation != identity.generation {
             return None;
         }
         state.terminal().map(|terminal| terminal.error(operation))
@@ -492,11 +835,8 @@ impl Backend {
         &mut self,
         identity: DeviceSlotIdentity,
     ) -> Option<RuntimeCapabilityUnavailableReason> {
-        self.ensure_device_states();
         let state = self.device_states.get_mut(identity.slot())?;
-        if state.generation != identity.generation
-            || self.context.devices.get(identity.slot()).is_none()
-        {
+        if state.generation != identity.generation {
             return None;
         }
         state
@@ -505,10 +845,8 @@ impl Backend {
     }
 
     pub(crate) fn observe_device_terminal(&mut self, identity: DeviceSlotIdentity) {
-        self.ensure_device_states();
         if let Some(state) = self.device_states.get_mut(identity.slot())
             && state.generation == identity.generation
-            && self.context.devices.get(identity.slot()).is_some()
         {
             state.observe_terminal();
         }
@@ -518,15 +856,12 @@ impl Backend {
         &mut self,
         identity: DeviceSlotIdentity,
     ) -> Option<DeviceCapabilities> {
-        self.ensure_device_states();
         let state = self.device_states.get_mut(identity.slot())?;
-        if state.generation != identity.generation
-            || self.context.devices.get(identity.slot()).is_none()
-        {
+        if state.generation != identity.generation {
             return None;
         }
         state.observe_terminal();
-        (state.terminal.is_none()).then_some(state.capabilities)
+        state.terminal().is_none().then_some(state.capabilities)
     }
 
     #[cfg(test)]
@@ -535,7 +870,6 @@ impl Backend {
         identity: DeviceSlotIdentity,
         reason: DeviceLossReason,
     ) {
-        self.ensure_device_states();
         if let Some(state) = self.device_states.get(identity.slot())
             && state.generation == identity.generation
         {
@@ -552,7 +886,6 @@ impl Backend {
         identity: DeviceSlotIdentity,
         timeout: Duration,
     ) -> bool {
-        self.ensure_device_states();
         self.device_states
             .get(identity.slot())
             .filter(|state| state.generation == identity.generation)
@@ -561,12 +894,20 @@ impl Backend {
 
     #[cfg(test)]
     pub(crate) fn renderer_released_for_test(&mut self, identity: DeviceSlotIdentity) -> bool {
-        self.ensure_device_states();
         let Some(state) = self.device_states.get_mut(identity.slot()) else {
             return false;
         };
         state.observe_terminal();
-        state.renderer.is_none()
+        state.ready().is_none_or(|ready| ready.renderer.is_none())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn device_state_ownership_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Option<DeviceStateOwnershipObservationForTest> {
+        let state = self.device_states.get_mut(identity.slot())?;
+        (state.generation == identity.generation).then(|| state.ownership_observation_for_test())
     }
 
     #[cfg(test)]
@@ -574,7 +915,6 @@ impl Backend {
         &mut self,
         identity: DeviceSlotIdentity,
     ) -> Option<u64> {
-        self.ensure_device_states();
         self.device_states
             .get(identity.slot())
             .filter(|state| state.generation == identity.generation)
@@ -599,6 +939,32 @@ impl Backend {
         }
         self.terminal_signal_after_renderer_creation = None;
         self.signal_loss_for_test(identity, DeviceLossReason::Destroyed);
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn add_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
+        self.new_device(None).await?.ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::AdapterUnavailable,
+                "the donor WGPU device could not be created",
+            )
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn destroy_device_for_test(&mut self, identity: DeviceSlotIdentity) -> bool {
+        let Some(state) = self.device_states.get_mut(identity.slot()) else {
+            return false;
+        };
+        if state.generation != identity.generation {
+            return false;
+        }
+        let Some(ready) = state.ready() else {
+            return false;
+        };
+        ready.device.destroy();
+        let _ = ready.device.poll(wgpu::PollType::Poll);
+        true
     }
 }
 
@@ -900,29 +1266,16 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
         context.device_identity,
         RuntimeOperation::SurfaceRendering,
     )?;
-    let slot = context.device_identity.slot();
-    let (render_context, device_states) =
-        (&context.backend.context, &mut context.backend.device_states);
-    let Some(device_handle) = render_context.devices.get(slot) else {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "offscreen Vello device slot disappeared before rendering",
-        ));
+    let resource = {
+        let (device, _) = context
+            .backend
+            .device_queue(context.device_identity, RuntimeOperation::SurfaceRendering)?;
+        cache.acquire(device, request.bounds, descriptor)?
     };
-    let resource = cache.acquire(&device_handle.device, request.bounds, descriptor)?;
     let render_start = Instant::now();
-    let Some(renderer) = device_states
-        .get_mut(slot)
-        .and_then(|state| state.renderer.as_mut())
-    else {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "offscreen Vello renderer disappeared before rendering",
-        ));
-    };
-    let result = renderer.render_to_texture(
-        &device_handle.device,
-        &device_handle.queue,
+    let result = context.backend.render_vello_to_texture(
+        context.device_identity,
+        RuntimeOperation::SurfaceRendering,
         scene,
         &resource.view,
         &vello_render_params(
@@ -931,9 +1284,7 @@ pub(crate) fn render_vello_local_scene_to_offscreen_texture(
             options.antialiasing(),
         ),
     );
-    if let Err(source) = result {
-        let error =
-            Error::new(vello_error_code(&source), vello_error_message(&source)).with_source(source);
+    if let Err(error) = result {
         cache.release_resource(resource)?;
         return Err(error);
     }
@@ -971,16 +1322,9 @@ pub(crate) fn render_vello_surface(
                 *device_identity,
                 RuntimeOperation::SurfaceRendering,
             )?;
-            let slot = device_identity.slot();
             if matches!(resources, HeadlessResources::Pending) {
-                let Some(device_handle) = backend.context.devices.get(slot) else {
-                    return Err(Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "headless Vello device slot disappeared before allocation",
-                    ));
-                };
-                let (next_texture, next_view) = create_headless_texture(
-                    &device_handle.device,
+                let (next_texture, next_view) = backend.create_headless_surface_texture(
+                    *device_identity,
                     *physical_size,
                     surface.options.format,
                 )?;
@@ -992,35 +1336,14 @@ pub(crate) fn render_vello_surface(
             let HeadlessResources::Ready { view, .. } = resources else {
                 unreachable!("headless resources should be ready after allocation");
             };
-            let (render_context, device_states) = (&backend.context, &mut backend.device_states);
-            let Some(device_handle) = render_context.devices.get(slot) else {
-                return Err(Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "headless Vello device slot disappeared before rendering",
-                ));
-            };
             let render_start = Instant::now();
-            let Some(renderer) = device_states
-                .get_mut(slot)
-                .and_then(|state| state.renderer.as_mut())
-            else {
-                return Err(Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "headless Vello renderer disappeared before rendering",
-                ));
-            };
-            renderer
-                .render_to_texture(
-                    &device_handle.device,
-                    &device_handle.queue,
-                    scene,
-                    view,
-                    &vello_render_params(parameters, *physical_size, options.antialiasing()),
-                )
-                .map_err(|source| {
-                    Error::new(vello_error_code(&source), vello_error_message(&source))
-                        .with_source(source)
-                })?;
+            backend.render_vello_to_texture(
+                *device_identity,
+                RuntimeOperation::SurfaceRendering,
+                scene,
+                view,
+                &vello_render_params(parameters, *physical_size, options.antialiasing()),
+            )?;
             Ok(RenderTimings {
                 render_time: render_start.elapsed(),
                 present_time: Duration::ZERO,
@@ -1041,11 +1364,7 @@ pub(crate) fn render_vello_surface(
                     physical_size,
                     resizing,
                 } => {
-                    backend.context.resize_surface(
-                        native,
-                        physical_size.width(),
-                        physical_size.height(),
-                    );
+                    backend.resize_presented_surface(*device_identity, native, *physical_size)?;
                     *lifecycle = PresentedLifecycle::Ready {
                         resizing: *resizing,
                     };
@@ -1061,42 +1380,20 @@ pub(crate) fn render_vello_surface(
                 *device_identity,
                 RuntimeOperation::SurfaceRendering,
             )?;
-            let slot = device_identity.slot();
-            let (render_context, device_states) = (&backend.context, &mut backend.device_states);
-            let Some(device_handle) = render_context.devices.get(slot) else {
-                return Err(Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "presented Vello device slot disappeared before rendering",
-                ));
-            };
             let resizing = lifecycle.resize_state();
             let render_start = Instant::now();
-            let Some(renderer) = device_states
-                .get_mut(slot)
-                .and_then(|state| state.renderer.as_mut())
-            else {
-                return Err(Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "presented Vello renderer disappeared before rendering",
-                ));
-            };
-            renderer
-                .render_to_texture(
-                    &device_handle.device,
-                    &device_handle.queue,
-                    scene,
-                    &native.target_view,
-                    &vello::RenderParams {
-                        width: native.config.width,
-                        height: native.config.height,
-                        base_color: parameters.base_color.into(),
-                        antialiasing_method: options.antialiasing().into(),
-                    },
-                )
-                .map_err(|source| {
-                    Error::new(vello_error_code(&source), vello_error_message(&source))
-                        .with_source(source)
-                })?;
+            backend.render_vello_to_texture(
+                *device_identity,
+                RuntimeOperation::SurfaceRendering,
+                scene,
+                &native.target_view,
+                &vello::RenderParams {
+                    width: native.config.width,
+                    height: native.config.height,
+                    base_color: parameters.base_color.into(),
+                    antialiasing_method: options.antialiasing().into(),
+                },
+            )?;
             let render_time = render_start.elapsed();
 
             let present_start = Instant::now();
@@ -1107,7 +1404,7 @@ pub(crate) fn render_vello_surface(
                 }
                 wgpu::CurrentSurfaceTexture::Outdated
                 | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                    backend.context.configure_surface(native);
+                    backend.configure_presented_surface(*device_identity, native)?;
                     return Err(Error::new(
                         BackendErrorCode::SurfaceOutdated,
                         "surface is outdated and requires reconfiguration",
@@ -1141,21 +1438,20 @@ pub(crate) fn render_vello_surface(
                 }
             };
 
-            let mut encoder =
-                device_handle
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("Surgeist surface blit"),
-                    });
+            let (device, queue) =
+                backend.device_queue(*device_identity, RuntimeOperation::SurfaceRendering)?;
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Surgeist surface blit"),
+            });
             native.blitter.copy(
-                &device_handle.device,
+                device,
                 &mut encoder,
                 &native.target_view,
                 &surface_texture
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default()),
             );
-            device_handle.queue.submit([encoder.finish()]);
+            queue.submit([encoder.finish()]);
             surface_texture.present();
             Ok(RenderTimings {
                 render_time,
@@ -1186,19 +1482,25 @@ pub(crate) fn ensure_vello_renderer(
     if let Some(error) = backend.terminal_error(device_identity, operation) {
         return Err(error);
     }
-    let slot = device_identity.slot();
     let renderer_is_ready = backend
-        .device_states
-        .get(slot)
-        .is_some_and(|state| state.renderer.is_some());
+        .ready_state_mut(
+            device_identity,
+            operation,
+            BackendErrorCode::RendererCreateFailed,
+            "Vello device resources are unavailable before renderer creation",
+        )?
+        .renderer
+        .is_some();
     if !renderer_is_ready {
-        let Some(device_handle) = backend.context.devices.get(slot) else {
-            return Err(Error::new(
+        let renderer = {
+            let ready = backend.ready_state_mut(
+                device_identity,
+                operation,
                 BackendErrorCode::RendererCreateFailed,
-                "Vello device slot disappeared before renderer creation",
-            ));
+                "Vello device resources are unavailable before renderer creation",
+            )?;
+            vello::Renderer::new(&ready.device, vello_renderer_options(options))
         };
-        let renderer = vello::Renderer::new(&device_handle.device, vello_renderer_options(options));
         #[cfg(test)]
         backend.inject_terminal_signal_after_renderer_creation_for_test(device_identity);
         if let Some(error) = backend.terminal_error(device_identity, operation) {
@@ -1211,13 +1513,14 @@ pub(crate) fn ensure_vello_renderer(
             )
             .with_source(source)
         })?;
-        let Some(state) = backend.device_states.get_mut(slot) else {
-            return Err(Error::new(
+        backend
+            .ready_state_mut(
+                device_identity,
+                operation,
                 BackendErrorCode::RendererCreateFailed,
-                "Vello device state disappeared before renderer creation",
-            ));
-        };
-        state.renderer = Some(renderer);
+                "Vello device resources are unavailable before renderer creation",
+            )?
+            .renderer = Some(renderer);
     }
     Ok(())
 }

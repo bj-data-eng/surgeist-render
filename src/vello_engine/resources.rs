@@ -102,6 +102,31 @@ pub(crate) struct CommittedVelloResources {
     atlas_outcome: VelloAtlasOutcome,
 }
 
+/// Per-device owner for retained internal raster resources.
+///
+/// T5 establishes the owner and its terminal drop boundary. T6 will adopt
+/// scope-clean committed leases into this collection after submission.
+pub(crate) struct VelloResourceManager {
+    retained_resources: Vec<CommittedVelloResources>,
+}
+
+impl VelloResourceManager {
+    pub(crate) const fn new() -> Self {
+        Self {
+            retained_resources: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.retained_resources.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty_for_test(&self) -> bool {
+        self.is_empty()
+    }
+}
+
 #[must_use]
 #[cfg_attr(
     not(test),

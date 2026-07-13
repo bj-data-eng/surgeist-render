@@ -14016,6 +14016,91 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
 }
 
 #[test]
+fn surgeist_device_state_owns_selected_wgpu_handles() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+
+    let observation = renderer
+        .default_device_state_ownership_observation_for_test()
+        .expect("T5 ownership coverage requires a real selected WGPU device");
+
+    assert_eq!(
+        observation.selected_wgpu_handles_for_test(),
+        DeviceResourceOwnershipForTest::Ready,
+        "the selected WGPU adapter, device, and queue must live in the ready DeviceState"
+    );
+    assert_eq!(
+        observation.private_engine_for_test(),
+        DeviceResourceOwnershipForTest::Ready,
+        "the selected DeviceState must own its checked internal Vello engine"
+    );
+    assert_eq!(
+        observation.internal_resources_for_test(),
+        DeviceResourceOwnershipForTest::Ready,
+        "the selected DeviceState must own its internal raster resources"
+    );
+    assert_eq!(
+        observation.internal_resources_empty_for_test(),
+        Some(true),
+        "a newly selected device must begin with a valid empty internal resource owner"
+    );
+}
+
+#[test]
+fn terminal_device_cleanup_drops_internal_engine_resources() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let _surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let ready = renderer
+        .default_device_state_ownership_observation_for_test()
+        .expect("T5 terminal cleanup coverage requires a real selected WGPU device");
+
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    let terminal = renderer
+        .default_device_state_ownership_observation_for_test()
+        .expect("the selected device slot must retain terminal identity for diagnostics");
+
+    assert_eq!(
+        ready.private_engine_for_test(),
+        DeviceResourceOwnershipForTest::Ready,
+        "the ready state must own the internal engine before a terminal signal"
+    );
+    assert_eq!(
+        ready.internal_resources_for_test(),
+        DeviceResourceOwnershipForTest::Ready,
+        "the ready state must own internal resources before a terminal signal"
+    );
+    assert_eq!(
+        ready.external_renderer_for_test(),
+        DeviceResourceOwnershipForTest::Ready,
+        "the comparison renderer must be present before terminal cleanup"
+    );
+    assert_eq!(
+        terminal.selected_wgpu_handles_for_test(),
+        DeviceResourceOwnershipForTest::Released,
+        "the terminal transition must release selected WGPU handles exactly once"
+    );
+    assert_eq!(
+        terminal.private_engine_for_test(),
+        DeviceResourceOwnershipForTest::Released,
+        "the terminal transition must release the internal Vello engine"
+    );
+    assert_eq!(
+        terminal.internal_resources_for_test(),
+        DeviceResourceOwnershipForTest::Released,
+        "the terminal transition must release internal raster resources"
+    );
+    assert_eq!(
+        terminal.external_renderer_for_test(),
+        DeviceResourceOwnershipForTest::Released,
+        "the terminal transition must release the temporary comparison renderer"
+    );
+    assert_eq!(
+        terminal.internal_resources_empty_for_test(),
+        None,
+        "released internal resources must not remain reachable after terminal cleanup"
+    );
+}
+
+#[test]
 fn terminal_default_device_rejects_headless_without_disabling_ready_slots() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
 

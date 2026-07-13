@@ -207,10 +207,111 @@ pub(crate) enum SurfaceBackend {
         all(feature = "render-web", target_arch = "wasm32")
     ))]
     Presented {
-        surface: Box<vello::util::RenderSurface<'static>>,
+        surface: Box<PresentedSurface>,
         device_identity: DeviceSlotIdentity,
         lifecycle: PresentedLifecycle,
     },
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+pub(crate) struct PresentedSurface {
+    pub(crate) surface: wgpu::Surface<'static>,
+    pub(crate) config: wgpu::SurfaceConfiguration,
+    pub(crate) format: wgpu::TextureFormat,
+    pub(crate) target_texture: wgpu::Texture,
+    pub(crate) target_view: wgpu::TextureView,
+    pub(crate) blitter: wgpu::util::TextureBlitter,
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+impl PresentedSurface {
+    pub(crate) fn new(
+        surface: wgpu::Surface<'static>,
+        adapter: &wgpu::Adapter,
+        device: &wgpu::Device,
+        physical_size: PhysicalSize,
+        present_mode: wgpu::PresentMode,
+    ) -> Result<Self> {
+        let format = surface
+            .get_capabilities(adapter)
+            .formats
+            .into_iter()
+            .find(|format| {
+                matches!(
+                    format,
+                    wgpu::TextureFormat::Rgba8Unorm | wgpu::TextureFormat::Bgra8Unorm
+                )
+            })
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::SurfaceCreateFailed,
+                    "the selected adapter does not support an Rgba8 or Bgra8 surface format",
+                )
+            })?;
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width: physical_size.width(),
+            height: physical_size.height(),
+            present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: wgpu::CompositeAlphaMode::Auto,
+            view_formats: vec![],
+        };
+        let (target_texture, target_view) = Self::create_targets(physical_size, device);
+        let presented = Self {
+            surface,
+            config,
+            format,
+            target_texture,
+            target_view,
+            blitter: wgpu::util::TextureBlitter::new(device, format),
+        };
+        presented.configure(device);
+        Ok(presented)
+    }
+
+    pub(crate) fn resize(&mut self, device: &wgpu::Device, physical_size: PhysicalSize) {
+        let (target_texture, target_view) = Self::create_targets(physical_size, device);
+        self.target_texture = target_texture;
+        self.target_view = target_view;
+        self.config.width = physical_size.width();
+        self.config.height = physical_size.height();
+        self.configure(device);
+    }
+
+    pub(crate) fn configure(&self, device: &wgpu::Device) {
+        debug_assert_eq!(self.format, self.config.format);
+        self.surface.configure(device, &self.config);
+    }
+
+    fn create_targets(
+        physical_size: PhysicalSize,
+        device: &wgpu::Device,
+    ) -> (wgpu::Texture, wgpu::TextureView) {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: physical_size.width(),
+                height: physical_size.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        (texture, view)
+    }
 }
 
 pub(crate) enum HeadlessResources {
