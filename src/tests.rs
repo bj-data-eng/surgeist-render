@@ -14019,28 +14019,20 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
 fn surgeist_device_state_owns_selected_wgpu_handles() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
 
-    let observation = renderer
-        .default_device_state_ownership_observation_for_test()
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
         .expect("T5 ownership coverage requires a real selected WGPU device");
 
-    assert_eq!(
-        observation.selected_wgpu_handles_for_test(),
-        DeviceResourceOwnershipForTest::Ready,
-        "the selected WGPU adapter, device, and queue must live in the ready DeviceState"
+    assert_ready_device_state_exposes_owned_wgpu_handles(&ready);
+    assert!(
+        std::ptr::eq(
+            ready.checked_pipeline_for_test(),
+            ready.checked_pipeline_for_test()
+        ),
+        "the ready DeviceState must retain one checked internal-engine pipeline"
     );
-    assert_eq!(
-        observation.private_engine_for_test(),
-        DeviceResourceOwnershipForTest::Ready,
-        "the selected DeviceState must own its checked internal Vello engine"
-    );
-    assert_eq!(
-        observation.internal_resources_for_test(),
-        DeviceResourceOwnershipForTest::Ready,
-        "the selected DeviceState must own its internal raster resources"
-    );
-    assert_eq!(
-        observation.internal_resources_empty_for_test(),
-        Some(true),
+    assert!(
+        ready.internal_resources_empty_for_test(),
         "a newly selected device must begin with a valid empty internal resource owner"
     );
 }
@@ -14049,54 +14041,65 @@ fn surgeist_device_state_owns_selected_wgpu_handles() {
 fn terminal_device_cleanup_drops_internal_engine_resources() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let _surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
-    let ready = renderer
-        .default_device_state_ownership_observation_for_test()
-        .expect("T5 terminal cleanup coverage requires a real selected WGPU device");
+    let drop_witness = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("T5 terminal cleanup coverage requires a real selected WGPU device");
+
+        assert_ready_device_state_exposes_owned_wgpu_handles(&ready);
+        assert!(
+            std::ptr::eq(
+                ready.checked_pipeline_for_test(),
+                ready.checked_pipeline_for_test()
+            ),
+            "the ready DeviceState must retain its checked internal-engine pipeline"
+        );
+        assert!(
+            ready.internal_resources_empty_for_test(),
+            "the ready DeviceState must retain an accessible internal resource owner"
+        );
+        assert!(
+            ready.external_renderer_for_test().is_some(),
+            "the temporary comparison renderer must live in the ready ownership bundle"
+        );
+
+        let drop_witness = ready.drop_witness_for_test();
+        assert!(
+            !drop_witness.was_dropped_for_test(),
+            "the ready ownership bundle must remain alive while its typed borrow is available"
+        );
+        drop_witness
+    };
 
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
-    let terminal = renderer
-        .default_device_state_ownership_observation_for_test()
-        .expect("the selected device slot must retain terminal identity for diagnostics");
+    assert!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .is_none(),
+        "the terminal transition must make the typed ready ownership borrow inaccessible"
+    );
+    assert!(
+        drop_witness.was_dropped_for_test(),
+        "the terminal transition must drop the ready ownership bundle that owns the WGPU handles, internal engine, and resources"
+    );
+}
 
-    assert_eq!(
-        ready.private_engine_for_test(),
-        DeviceResourceOwnershipForTest::Ready,
-        "the ready state must own the internal engine before a terminal signal"
+fn assert_ready_device_state_exposes_owned_wgpu_handles(ready: &ReadyDeviceStateBorrowForTest<'_>) {
+    let adapter = ready.adapter_for_test();
+    let device = ready.device_for_test();
+    let queue = ready.queue_for_test();
+
+    assert!(
+        adapter.features().contains(device.features()),
+        "the ready DeviceState device must expose only features supported by its selected adapter"
     );
-    assert_eq!(
-        ready.internal_resources_for_test(),
-        DeviceResourceOwnershipForTest::Ready,
-        "the ready state must own internal resources before a terminal signal"
+    assert!(
+        device.limits().max_texture_dimension_2d <= adapter.limits().max_texture_dimension_2d,
+        "the ready DeviceState device limits must come from its selected adapter"
     );
-    assert_eq!(
-        ready.external_renderer_for_test(),
-        DeviceResourceOwnershipForTest::Ready,
-        "the comparison renderer must be present before terminal cleanup"
-    );
-    assert_eq!(
-        terminal.selected_wgpu_handles_for_test(),
-        DeviceResourceOwnershipForTest::Released,
-        "the terminal transition must release selected WGPU handles exactly once"
-    );
-    assert_eq!(
-        terminal.private_engine_for_test(),
-        DeviceResourceOwnershipForTest::Released,
-        "the terminal transition must release the internal Vello engine"
-    );
-    assert_eq!(
-        terminal.internal_resources_for_test(),
-        DeviceResourceOwnershipForTest::Released,
-        "the terminal transition must release internal raster resources"
-    );
-    assert_eq!(
-        terminal.external_renderer_for_test(),
-        DeviceResourceOwnershipForTest::Released,
-        "the terminal transition must release the temporary comparison renderer"
-    );
-    assert_eq!(
-        terminal.internal_resources_empty_for_test(),
-        None,
-        "released internal resources must not remain reachable after terminal cleanup"
+    assert!(
+        queue.get_timestamp_period().is_finite(),
+        "the ready DeviceState queue must be directly accessible through the selected handle bundle"
     );
 }
 

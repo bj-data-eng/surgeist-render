@@ -608,13 +608,13 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    pub(crate) fn default_device_state_ownership_observation_for_test(
+    pub(crate) fn default_ready_device_state_borrow_for_test(
         &mut self,
-    ) -> Option<DeviceStateOwnershipObservationForTest> {
+    ) -> Option<ReadyDeviceStateBorrowForTest<'_>> {
         let device_identity = self.default_device?;
         self.backend
             .as_mut()?
-            .device_state_ownership_observation_for_test(device_identity)
+            .ready_device_state_borrow_for_test(device_identity)
     }
 
     #[cfg(test)]

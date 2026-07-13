@@ -29,7 +29,7 @@ use std::{
 };
 
 #[cfg(test)]
-use std::sync::Condvar;
+use std::sync::{Condvar, Weak};
 
 pub(crate) struct Backend {
     instance: wgpu::Instance,
@@ -67,6 +67,8 @@ struct ReadyDeviceState {
     )]
     resources: VelloResourceManager,
     renderer: Option<vello::Renderer>,
+    #[cfg(test)]
+    drop_witness: Arc<()>,
 }
 
 enum DeviceLifecycle {
@@ -75,43 +77,78 @@ enum DeviceLifecycle {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DeviceResourceOwnershipForTest {
-    Absent,
-    Ready,
-    Released,
+#[derive(Clone)]
+pub(crate) struct ReadyDeviceStateDropWitnessForTest {
+    ready_bundle: Weak<()>,
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct DeviceStateOwnershipObservationForTest {
-    selected_wgpu_handles: DeviceResourceOwnershipForTest,
-    private_engine: DeviceResourceOwnershipForTest,
-    internal_resources: DeviceResourceOwnershipForTest,
-    external_renderer: DeviceResourceOwnershipForTest,
-    internal_resources_empty: Option<bool>,
+impl ReadyDeviceStateDropWitnessForTest {
+    fn from_ready_bundle(ready_bundle: &Arc<()>) -> Self {
+        Self {
+            ready_bundle: Arc::downgrade(ready_bundle),
+        }
+    }
+
+    pub(crate) fn was_dropped_for_test(&self) -> bool {
+        self.ready_bundle.upgrade().is_none()
+    }
 }
 
 #[cfg(test)]
-impl DeviceStateOwnershipObservationForTest {
-    pub(crate) const fn selected_wgpu_handles_for_test(self) -> DeviceResourceOwnershipForTest {
-        self.selected_wgpu_handles
+pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
+    adapter: &'ready wgpu::Adapter,
+    device: &'ready wgpu::Device,
+    queue: &'ready wgpu::Queue,
+    engine: &'ready VelloEngineState,
+    resources: &'ready VelloResourceManager,
+    renderer: Option<&'ready vello::Renderer>,
+    drop_witness: ReadyDeviceStateDropWitnessForTest,
+}
+
+#[cfg(test)]
+impl ReadyDeviceStateBorrowForTest<'_> {
+    pub(crate) fn adapter_for_test(&self) -> &wgpu::Adapter {
+        self.adapter
     }
 
-    pub(crate) const fn private_engine_for_test(self) -> DeviceResourceOwnershipForTest {
-        self.private_engine
+    pub(crate) fn device_for_test(&self) -> &wgpu::Device {
+        self.device
     }
 
-    pub(crate) const fn internal_resources_for_test(self) -> DeviceResourceOwnershipForTest {
-        self.internal_resources
+    pub(crate) fn queue_for_test(&self) -> &wgpu::Queue {
+        self.queue
     }
 
-    pub(crate) const fn external_renderer_for_test(self) -> DeviceResourceOwnershipForTest {
-        self.external_renderer
+    pub(crate) fn checked_pipeline_for_test(&self) -> &wgpu::ComputePipeline {
+        self.engine.checked_pipeline_for_test()
     }
 
-    pub(crate) const fn internal_resources_empty_for_test(self) -> Option<bool> {
-        self.internal_resources_empty
+    pub(crate) fn internal_resources_empty_for_test(&self) -> bool {
+        self.resources.is_empty_for_test()
+    }
+
+    pub(crate) fn external_renderer_for_test(&self) -> Option<&vello::Renderer> {
+        self.renderer
+    }
+
+    pub(crate) fn drop_witness_for_test(&self) -> ReadyDeviceStateDropWitnessForTest {
+        self.drop_witness.clone()
+    }
+}
+
+#[cfg(test)]
+impl ReadyDeviceState {
+    fn borrow_for_test(&self) -> ReadyDeviceStateBorrowForTest<'_> {
+        ReadyDeviceStateBorrowForTest {
+            adapter: &self.adapter,
+            device: &self.device,
+            queue: &self.queue,
+            engine: &self.engine,
+            resources: &self.resources,
+            renderer: self.renderer.as_ref(),
+            drop_witness: ReadyDeviceStateDropWitnessForTest::from_ready_bundle(&self.drop_witness),
+        }
     }
 }
 
@@ -140,6 +177,8 @@ impl DeviceState {
                 engine,
                 resources,
                 renderer: None,
+                #[cfg(test)]
+                drop_witness: Arc::new(()),
             })),
             capabilities,
             signal,
@@ -179,31 +218,9 @@ impl DeviceState {
     }
 
     #[cfg(test)]
-    fn ownership_observation_for_test(&mut self) -> DeviceStateOwnershipObservationForTest {
+    fn ready_borrow_for_test(&mut self) -> Option<ReadyDeviceStateBorrowForTest<'_>> {
         self.observe_terminal();
-        match &self.lifecycle {
-            DeviceLifecycle::Ready(ready) => {
-                let _checked_pipeline = ready.engine.checked_pipeline_for_test();
-                DeviceStateOwnershipObservationForTest {
-                    selected_wgpu_handles: DeviceResourceOwnershipForTest::Ready,
-                    private_engine: DeviceResourceOwnershipForTest::Ready,
-                    internal_resources: DeviceResourceOwnershipForTest::Ready,
-                    external_renderer: if ready.renderer.is_some() {
-                        DeviceResourceOwnershipForTest::Ready
-                    } else {
-                        DeviceResourceOwnershipForTest::Absent
-                    },
-                    internal_resources_empty: Some(ready.resources.is_empty_for_test()),
-                }
-            }
-            DeviceLifecycle::Terminal(_) => DeviceStateOwnershipObservationForTest {
-                selected_wgpu_handles: DeviceResourceOwnershipForTest::Released,
-                private_engine: DeviceResourceOwnershipForTest::Released,
-                internal_resources: DeviceResourceOwnershipForTest::Released,
-                external_renderer: DeviceResourceOwnershipForTest::Released,
-                internal_resources_empty: None,
-            },
-        }
+        self.ready().map(ReadyDeviceState::borrow_for_test)
     }
 }
 
@@ -902,12 +919,15 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) fn device_state_ownership_observation_for_test(
+    pub(crate) fn ready_device_state_borrow_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-    ) -> Option<DeviceStateOwnershipObservationForTest> {
+    ) -> Option<ReadyDeviceStateBorrowForTest<'_>> {
         let state = self.device_states.get_mut(identity.slot())?;
-        (state.generation == identity.generation).then(|| state.ownership_observation_for_test())
+        if state.generation != identity.generation {
+            return None;
+        }
+        state.ready_borrow_for_test()
     }
 
     #[cfg(test)]
