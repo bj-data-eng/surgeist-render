@@ -14117,6 +14117,52 @@ fn encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit(
     );
 }
 
+#[test]
+fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("T6 cancellation coverage requires a real selected WGPU device");
+    let target_extent = PhysicalSize::new(64, 48);
+    let prepared = VelloScene::prepare_raster_scenario_for_test(
+        VelloRasterScenario::Base,
+        RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect("a non-empty direct Vello target must prepare"),
+    )
+    .expect("the base direct scene must prepare without WGPU submission authority");
+
+    let initial = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("T6 cancellation coverage requires the owned per-device Vello state")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(initial.retained_count_for_test(), 0);
+    assert_eq!(initial.recovery_outcome_for_test(), None);
+
+    let canceled = pollster::block_on(
+        renderer.cancel_prepared_vello_pass_after_submit_for_test(&prepared, target_extent),
+    )
+    .expect(
+        "the cancellation adapter must encode, submit, reach its post-submit checkpoint, and drop locally",
+    );
+    assert_eq!(canceled.retained_count_for_test(), 0);
+    assert_eq!(
+        canceled.recovery_outcome_for_test(),
+        Some(VelloAtlasOutcome::Recreate),
+        "the fresh atlas allocation must derive Recreate from its aborted lease provenance"
+    );
+
+    pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
+        .expect("the next clean pass must recover before retaining fresh internal resources");
+    let recovered = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the selected device must remain ready after recovery")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(recovered.retained_count_for_test(), 1);
+    assert_eq!(
+        recovered.recovery_outcome_for_test(),
+        None,
+        "the next clean pass must consume the prior atlas recovery before retaining fresh resources"
+    );
+}
+
 fn assert_ready_device_state_exposes_owned_wgpu_handles(ready: &ReadyDeviceStateBorrowForTest<'_>) {
     let adapter = ready.adapter_for_test();
     let device = ready.device_for_test();

@@ -1,5 +1,5 @@
 #[cfg(test)]
-use super::gpu_transaction::InternalVelloPayload;
+use super::gpu_transaction::{AfterInternalVelloSubmitCheckpointForTest, InternalVelloPayload};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -14,6 +14,7 @@ use super::surface::{HeadlessResources, SurfaceBackend};
 #[cfg(test)]
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPass, TransactionEncodingState, TransactionTargetIntent,
+    VelloResourceManagerObservationForTest,
 };
 use super::vello_engine::{VelloEngineState, VelloResourceManager};
 use super::*;
@@ -35,7 +36,10 @@ use std::{
 };
 
 #[cfg(test)]
-use std::sync::{Condvar, Weak};
+use std::{
+    sync::{Condvar, Weak},
+    task::{Context, Poll, Waker},
+};
 
 pub(crate) struct Backend {
     instance: wgpu::Instance,
@@ -132,6 +136,12 @@ impl ReadyDeviceStateBorrowForTest<'_> {
 
     pub(crate) fn internal_resources_empty_for_test(&self) -> bool {
         self.resources.is_empty_for_test()
+    }
+
+    pub(crate) fn internal_resource_manager_observation_for_test(
+        &self,
+    ) -> VelloResourceManagerObservationForTest {
+        self.resources.observation_for_test()
     }
 
     pub(crate) fn external_renderer_for_test(&self) -> Option<&vello::Renderer> {
@@ -924,6 +934,120 @@ impl Backend {
         transaction
             .submit_internal_vello(queue, payload, RuntimeOperation::SurfaceRendering)
             .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn cancel_prepared_vello_pass_after_submit_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        prepared: &PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<VelloResourceManagerObservationForTest> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before cancellation submission setup",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before cancellation submission setup",
+            ));
+        }
+        let ready = state.ready_mut().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before cancellation encoding",
+            )
+        })?;
+        let ReadyDeviceState {
+            device,
+            queue,
+            engine,
+            resources,
+            ..
+        } = ready;
+        let target_usage = wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC;
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("T6 cancellation-owned internal Vello target"),
+            size: wgpu::Extent3d {
+                width: target_extent.width(),
+                height: target_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: target_usage,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T6 cancellation-owned internal Vello encoder"),
+        });
+        let mut scope = ActiveVelloEncodingScope::begin(device);
+        let lease = {
+            let mut encoding = TransactionEncodingState::new(
+                &mut scope,
+                queue,
+                &mut command_encoder,
+                &target_view,
+                TransactionTargetIntent::new(
+                    target_extent,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    target_usage,
+                ),
+            );
+            match prepared.encode_into(engine, &mut encoding) {
+                Ok(lease) => lease,
+                Err(failure) => {
+                    let (error, aborted) = failure.into_error_and_aborted_resources();
+                    resources.record_aborted_resources(aborted);
+                    return Err(error);
+                }
+            }
+        };
+        let lease = match scope.finish_with_lease(lease).await {
+            Ok(lease) => lease,
+            Err(failure) => {
+                let (error, aborted) = failure.into_error_and_aborted_resources();
+                resources.record_aborted_resources(aborted);
+                return Err(error);
+            }
+        };
+        let (checkpoint, checkpoint_observed) = AfterInternalVelloSubmitCheckpointForTest::paused();
+        let payload = InternalVelloPayload::paused_after_submit_for_test(
+            command_encoder.finish(),
+            resources.pending_commit(lease),
+            checkpoint,
+        );
+        let mut submission = Box::pin(transaction.submit_internal_vello(
+            queue,
+            payload,
+            RuntimeOperation::SurfaceRendering,
+        ));
+        let waker = Waker::noop();
+        let mut context = Context::from_waker(waker);
+        let poll = submission.as_mut().poll(&mut context);
+        assert!(
+            matches!(poll, Poll::Pending),
+            "the post-submit cancellation checkpoint must pause the real submission future"
+        );
+        checkpoint_observed
+            .try_recv()
+            .expect("the real internal queue submission must reach the post-submit checkpoint");
+        drop(submission);
+
+        Ok(resources.observation_for_test())
     }
 
     pub(crate) fn has_device_slot(&mut self, identity: DeviceSlotIdentity) -> bool {

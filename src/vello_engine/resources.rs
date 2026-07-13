@@ -121,14 +121,14 @@ pub(crate) struct VelloResourceManager {
             reason = "T6 retains aborted atlas recovery until production internal raster submission uses it."
         )
     )]
-    recovery_outcomes: Vec<VelloAtlasOutcome>,
+    pending_atlas_recovery: Option<VelloAtlasOutcome>,
 }
 
 impl VelloResourceManager {
     pub(crate) const fn new() -> Self {
         Self {
             retained_resources: Vec::new(),
-            recovery_outcomes: Vec::new(),
+            pending_atlas_recovery: None,
         }
     }
 
@@ -147,6 +147,7 @@ impl VelloResourceManager {
         &mut self,
         lease: ScopeResolvedVelloResourceLease,
     ) -> PendingVelloResourceCommit<'_> {
+        self.consume_pending_atlas_recovery_before_retaining();
         PendingVelloResourceCommit {
             manager: self,
             lease: Some(lease),
@@ -161,12 +162,48 @@ impl VelloResourceManager {
         )
     )]
     pub(crate) fn record_aborted_resources(&mut self, aborted: AbortedVelloResources) {
-        self.recovery_outcomes.push(aborted.into_atlas_outcome());
+        let outcome = aborted.into_atlas_outcome();
+        self.pending_atlas_recovery = match outcome {
+            VelloAtlasOutcome::MarkDirty | VelloAtlasOutcome::Recreate => Some(outcome),
+            VelloAtlasOutcome::NoAtlas | VelloAtlasOutcome::Retain => None,
+        };
+    }
+
+    fn consume_pending_atlas_recovery_before_retaining(&mut self) {
+        // T6 allocates a fresh atlas for each lease. A new clean lease therefore consumes any
+        // prior quarantine before its resources can become retained for a later raster pass.
+        let _ = self.pending_atlas_recovery.take();
     }
 
     #[cfg(test)]
     pub(crate) fn is_empty_for_test(&self) -> bool {
         self.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observation_for_test(&self) -> VelloResourceManagerObservationForTest {
+        VelloResourceManagerObservationForTest {
+            retained_count: self.retained_resources.len(),
+            recovery_outcome: self.pending_atlas_recovery,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct VelloResourceManagerObservationForTest {
+    retained_count: usize,
+    recovery_outcome: Option<VelloAtlasOutcome>,
+}
+
+#[cfg(test)]
+impl VelloResourceManagerObservationForTest {
+    pub(crate) const fn retained_count_for_test(&self) -> usize {
+        self.retained_count
+    }
+
+    pub(crate) const fn recovery_outcome_for_test(&self) -> Option<VelloAtlasOutcome> {
+        self.recovery_outcome
     }
 }
 

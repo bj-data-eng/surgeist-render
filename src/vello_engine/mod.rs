@@ -28,8 +28,6 @@ mod recording {
         ActiveVelloEncodingScope, TransactionEncodingState, TransactionTargetIntent,
         VelloEncodingFailure, VelloEngineState, encode_recording,
     };
-    #[cfg(test)]
-    pub(crate) use resources::VelloAtlasOutcome;
     pub(super) use resources::VelloResourceLease;
     pub(crate) use resources::{PendingVelloResourceCommit, VelloResourceManager};
     #[cfg(test)]
@@ -38,6 +36,8 @@ mod recording {
         no_atlas_abort_outcome_for_test, no_atlas_commit_outcome_for_test,
         over_limit_buffer_preflight_for_test,
     };
+    #[cfg(test)]
+    pub(crate) use resources::{VelloAtlasOutcome, VelloResourceManagerObservationForTest};
 }
 mod raster {
     include!("raster.rs");
@@ -107,7 +107,7 @@ pub(crate) use recording::{
 };
 
 #[cfg(test)]
-pub(crate) use recording::VelloAtlasOutcome;
+pub(crate) use recording::{VelloAtlasOutcome, VelloResourceManagerObservationForTest};
 
 #[cfg(test)]
 pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> crate::Result<()> {

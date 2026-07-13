@@ -5,6 +5,9 @@ use super::{
 };
 use std::sync::Arc;
 
+#[cfg(test)]
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
 /// Private ownership stage for a render-owned GPU operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
@@ -124,6 +127,29 @@ pub(crate) struct GpuOperationTransaction {
 pub(crate) struct InternalVelloPayload<'resources> {
     command_buffer: wgpu::CommandBuffer,
     resources: PendingVelloResourceCommit<'resources>,
+    #[cfg(test)]
+    after_submit_checkpoint: Option<AfterInternalVelloSubmitCheckpointForTest>,
+}
+
+/// Test-only pause reached after the real queue submission and before transaction completion.
+#[cfg(test)]
+pub(crate) struct AfterInternalVelloSubmitCheckpointForTest {
+    reached: SyncSender<()>,
+}
+
+#[cfg(test)]
+impl AfterInternalVelloSubmitCheckpointForTest {
+    pub(crate) fn paused() -> (Self, Receiver<()>) {
+        let (reached, observed) = sync_channel(1);
+        (Self { reached }, observed)
+    }
+
+    async fn wait(self) {
+        self.reached
+            .send(())
+            .expect("the cancellation adapter must observe the post-submit checkpoint");
+        std::future::pending::<()>().await;
+    }
 }
 
 /// Proof that an internal Vello submission has reached its clean terminal boundary.
@@ -146,6 +172,21 @@ impl<'resources> InternalVelloPayload<'resources> {
         Self {
             command_buffer,
             resources,
+            #[cfg(test)]
+            after_submit_checkpoint: None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn paused_after_submit_for_test(
+        command_buffer: wgpu::CommandBuffer,
+        resources: PendingVelloResourceCommit<'resources>,
+        checkpoint: AfterInternalVelloSubmitCheckpointForTest,
+    ) -> Self {
+        Self {
+            command_buffer,
+            resources,
+            after_submit_checkpoint: Some(checkpoint),
         }
     }
 }
@@ -231,8 +272,14 @@ impl GpuOperationTransaction {
         let InternalVelloPayload {
             command_buffer,
             resources,
+            #[cfg(test)]
+            after_submit_checkpoint,
         } = payload;
         queue.submit([command_buffer]);
+        #[cfg(test)]
+        if let Some(checkpoint) = after_submit_checkpoint {
+            checkpoint.wait().await;
+        }
         match self.finish(operation).await {
             Ok(()) => {
                 resources.commit(VelloResourceCommitProof { _private: () });
