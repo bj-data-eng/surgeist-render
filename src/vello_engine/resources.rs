@@ -36,6 +36,24 @@ pub(crate) enum VelloAtlasOutcome {
     Recreate,
 }
 
+impl VelloAtlasOutcome {
+    const fn merge_pending_recovery(
+        pending: Option<Self>,
+        latest: Self,
+    ) -> Option<Self> {
+        match (pending, latest) {
+            (Some(Self::Recreate), _) | (Some(Self::MarkDirty), Self::Recreate) => {
+                Some(Self::Recreate)
+            }
+            (Some(Self::MarkDirty), _) => Some(Self::MarkDirty),
+            (Some(Self::NoAtlas | Self::Retain) | None, Self::MarkDirty | Self::Recreate) => {
+                Some(latest)
+            }
+            (Some(Self::NoAtlas | Self::Retain) | None, Self::NoAtlas | Self::Retain) => None,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum PendingPersistentAtlas {
     NoAtlas,
@@ -233,10 +251,8 @@ impl VelloResourceManager {
     )]
     pub(crate) fn record_aborted_resources(&mut self, aborted: AbortedVelloResources) {
         let outcome = aborted.into_atlas_outcome();
-        self.pending_atlas_recovery = match outcome {
-            VelloAtlasOutcome::MarkDirty | VelloAtlasOutcome::Recreate => Some(outcome),
-            VelloAtlasOutcome::NoAtlas | VelloAtlasOutcome::Retain => None,
-        };
+        self.pending_atlas_recovery =
+            VelloAtlasOutcome::merge_pending_recovery(self.pending_atlas_recovery, outcome);
     }
 
     fn consume_pending_atlas_recovery_before_retaining(&mut self) {
@@ -825,4 +841,31 @@ const fn texture_format(format: RasterImageFormat) -> wgpu::TextureFormat {
 
 fn render_failed(message: &'static str) -> Error {
     Error::new(BackendErrorCode::RenderFailed, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::VelloAtlasOutcome;
+
+    #[test]
+    fn pending_atlas_recovery_merge_preserves_the_stronger_outcome() {
+        use VelloAtlasOutcome::{MarkDirty, NoAtlas, Recreate, Retain};
+
+        assert_eq!(
+            VelloAtlasOutcome::merge_pending_recovery(Some(MarkDirty), Recreate),
+            Some(Recreate)
+        );
+        assert_eq!(
+            VelloAtlasOutcome::merge_pending_recovery(Some(Recreate), MarkDirty),
+            Some(Recreate)
+        );
+        assert_eq!(
+            VelloAtlasOutcome::merge_pending_recovery(Some(Recreate), NoAtlas),
+            Some(Recreate)
+        );
+        assert_eq!(
+            VelloAtlasOutcome::merge_pending_recovery(Some(MarkDirty), Retain),
+            Some(MarkDirty)
+        );
+    }
 }

@@ -14254,6 +14254,56 @@ fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
     );
 }
 
+#[test]
+fn canceled_vello_atlas_recovery_survives_preallocation_failure() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("T6 recovery coverage requires a real selected WGPU device");
+    let target_extent = PhysicalSize::new(64, 48);
+    let prepared = VelloScene::prepare_raster_scenario_for_test(
+        VelloRasterScenario::Base,
+        RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect("a non-empty direct Vello target must prepare"),
+    )
+    .expect("the base direct scene must prepare without WGPU submission authority");
+
+    let canceled = pollster::block_on(
+        renderer.cancel_prepared_vello_pass_after_submit_for_test(&prepared, target_extent),
+    )
+    .expect("the real submitted cancellation must establish atlas recovery");
+    assert_eq!(
+        canceled.recovery_outcome_for_test(),
+        Some(VelloAtlasOutcome::Recreate)
+    );
+
+    let preallocation_failure = match pollster::block_on(
+        renderer.submit_prepared_vello_pass_for_test(&prepared, PhysicalSize::new(63, 48)),
+    ) {
+        Ok(_) => panic!("a mismatched target must fail before internal Vello resource allocation"),
+        Err(error) => error,
+    };
+    assert_eq!(preallocation_failure.code(), ErrorCode::RenderFailed);
+
+    let pending = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the selected device must remain ready after the pre-allocation failure")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(pending.retained_count_for_test(), 0);
+    assert_eq!(
+        pending.recovery_outcome_for_test(),
+        Some(VelloAtlasOutcome::Recreate),
+        "a pre-allocation failure must not clear recovery from the canceled submitted pass"
+    );
+
+    pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
+        .expect("the next clean pass must consume recovery before retaining its lease");
+    let recovered = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the selected device must remain ready after recovery")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(recovered.retained_count_for_test(), 1);
+    assert_eq!(recovered.recovery_outcome_for_test(), None);
+}
+
 fn assert_ready_device_state_exposes_owned_wgpu_handles(ready: &ReadyDeviceStateBorrowForTest<'_>) {
     let adapter = ready.adapter_for_test();
     let device = ready.device_for_test();
