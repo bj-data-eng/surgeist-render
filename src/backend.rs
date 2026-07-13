@@ -1244,8 +1244,9 @@ impl Backend {
     #[cfg(test)]
     pub(crate) async fn add_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
         self.new_device(None).await?.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::AdapterSelection,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "the donor WGPU device could not be created",
             )
         })
@@ -1557,8 +1558,9 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
     let descriptor =
         offscreen_local_scene_texture_descriptor(request.bounds, request.scale, request.format)?;
     let Some(context) = context else {
-        return Err(Error::new(
-            BackendErrorCode::AdapterUnavailable,
+        return Err(Error::runtime_unavailable(
+            RuntimeOperation::SurfaceRendering,
+            RuntimeCapabilityUnavailableReason::AdapterUnavailable,
             "offscreen Vello local scene rendering requires an available wgpu device context",
         ));
     };
@@ -1638,9 +1640,9 @@ pub(crate) async fn render_internal_vello_surface(
                     *physical_size,
                     surface.options.format,
                 )?;
-                *resources = HeadlessResources::Ready { texture, view };
+                *resources = HeadlessResources::Published { texture, view };
             }
-            let HeadlessResources::Ready { view, .. } = resources else {
+            let HeadlessResources::Published { view, .. } = resources else {
                 unreachable!("headless resources must be ready before internal raster encoding");
             };
             let render_start = Instant::now();
@@ -1740,8 +1742,11 @@ pub(crate) async fn render_internal_vello_surface(
                 }
                 wgpu::CurrentSurfaceTexture::Lost => {
                     *lifecycle = PresentedLifecycle::Lost;
-                    return Err(Error::new(
-                        BackendErrorCode::SurfaceLost,
+                    return Err(Error::runtime_unavailable(
+                        RuntimeOperation::SurfaceRendering,
+                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                            state: RenderSurfaceAvailability::Lost,
+                        },
                         "surface was lost",
                     ));
                 }

@@ -3687,16 +3687,13 @@ fn typed_error_codes_cannot_exist_without_their_matching_payload() {
     }
 
     let backend_codes = [
-        BackendErrorCode::AdapterUnavailable,
         BackendErrorCode::DeviceCreateFailed,
         BackendErrorCode::RendererCreateFailed,
         BackendErrorCode::SurfaceCreateFailed,
         BackendErrorCode::SurfaceConfigureFailed,
-        BackendErrorCode::SurfaceLost,
         BackendErrorCode::SurfaceOutOfMemory,
         BackendErrorCode::SurfaceTimeout,
         BackendErrorCode::SurfaceOutdated,
-        BackendErrorCode::SurfaceUnavailable,
         BackendErrorCode::ImageUploadFailed,
         BackendErrorCode::RenderFailed,
         BackendErrorCode::PresentFailed,
@@ -6884,7 +6881,7 @@ fn shader_pass_contract_only_context_reports_adapter_unavailable() {
     ))
     .expect_err("contract-only shader pass should report missing GPU context");
 
-    assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
+    assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
     assert!(error.message().contains("rect/fullscreen shader pass"));
 }
 
@@ -6946,7 +6943,7 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
     ))
     .expect_err("contract-only offscreen render should report missing GPU context");
 
-    assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
+    assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
     assert!(error.message().contains("offscreen Vello local scene"));
     assert_eq!(cache.stats().allocations, 0);
     assert_eq!(cache.live_count(), 0);
@@ -6973,7 +6970,7 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
             None, options, &mut cache, &scene, request,
         ))
         .expect_err("no GPU machines should report the explicit diagnostic");
-        assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
+        assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
         return;
     };
 
@@ -7145,7 +7142,7 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
             None, options, &mut cache, &scene, request,
         ))
         .expect_err("no GPU machines should report the explicit diagnostic");
-        assert_eq!(error.code(), ErrorCode::AdapterUnavailable);
+        assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
         return;
     };
     let first = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
@@ -7493,7 +7490,10 @@ fn headless_backend_resource_state_tracks_readiness() {
         pollster::block_on(renderer.create_headless(Size::try_new(2.0, 2.0).unwrap(), 1.0))
             .unwrap();
 
-    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation
+    );
     surface
         .resize(Size::try_new(3.0, 3.0).unwrap(), 1.0)
         .unwrap();
@@ -7567,7 +7567,7 @@ fn headless_resize_keeps_target_when_physical_size_is_unchanged() {
     assert!(matches!(
         &surface.backend,
         SurfaceBackend::Headless {
-            resources: HeadlessResources::Ready { .. },
+            resources: HeadlessResources::Pending,
             ..
         }
     ));
@@ -14583,10 +14583,7 @@ fn non_readback_renderer_front_door_is_async() {
             .render(&mut surface, &Scene::new(), Parameters::default())
             .await
             .unwrap();
-        renderer
-            .resume_surface(&mut surface, Attachment::Headless)
-            .await
-            .unwrap();
+        surface.resume(Attachment::Headless).unwrap();
 
         let headless = renderer
             .create_headless(Size::new(1.0, 1.0), 1.0)
@@ -14615,10 +14612,6 @@ fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
 #[test]
 fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage() {
     let stages = [
-        (
-            GpuOperationStage::SurfaceCreate,
-            BackendErrorCode::SurfaceCreateFailed,
-        ),
         (GpuOperationStage::Render, BackendErrorCode::RenderFailed),
         (GpuOperationStage::Present, BackendErrorCode::PresentFailed),
     ];
@@ -15035,7 +15028,7 @@ fn real_gpu_smoke_emits_no_uncaptured_error() {
 }
 
 #[test]
-fn create_headless_reports_unsupported_format() {
+fn headless_bgra8_remains_a_surface_create_diagnostic() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
 
     let error = match pollster::block_on(renderer.create_surface(
@@ -15054,6 +15047,109 @@ fn create_headless_reports_unsupported_format() {
 }
 
 #[test]
+fn surface_operation_matrix_covers_every_kind_state_and_duplicate_transition() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation,
+        "a nonzero headless surface has no publication before its first render"
+    );
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the first headless render should publish a readable texture");
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+
+    surface.resize(Size::new(1.0, 1.0), 2.0).unwrap();
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::Ready,
+        "same-physical resize retains the current publication"
+    );
+    surface.resize(Size::new(3.0, 2.0), 1.0).unwrap();
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation,
+        "a physical-size change invalidates the old publication"
+    );
+
+    surface.suspend().unwrap();
+    surface.suspend().unwrap();
+    assert_eq!(surface.state(), SurfaceState::Suspended);
+    surface.resume(Attachment::Headless).unwrap();
+    surface.resume(Attachment::Headless).unwrap();
+    assert_eq!(surface.state(), SurfaceState::Available);
+
+    let error = pollster::block_on(renderer.resume_surface(&mut surface, Attachment::Headless))
+        .expect_err("renderer resume is not the headless lifecycle operation");
+    assert_eq!(error.code(), ErrorCode::UnsupportedBackend);
+}
+
+#[test]
+fn zero_size_headless_render_diagnoses_and_read_returns_empty() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(0.0, 2.0), 1.0)).unwrap();
+
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Empty);
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("zero-area headless rendering must be rejected before planning");
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                    state: RenderSurfaceAvailability::NonRenderable,
+                },
+            )
+            .unwrap()
+        )
+    );
+
+    let image = renderer
+        .read_headless(&surface)
+        .expect("zero-area headless readback returns a validated empty image");
+    assert_eq!(image.size, PhysicalSize::new(0, 2));
+    assert!(image.rgba.is_empty());
+}
+
+#[test]
+fn nonzero_headless_read_before_publication_reports_uninitialized_without_map() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation,
+        "creation must defer headless texture allocation"
+    );
+    let error = renderer
+        .read_headless(&surface)
+        .expect_err("a nonzero headless surface has no readable publication before render");
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::SurfaceReadback,
+                RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                    state: RenderSurfaceAvailability::Uninitialized,
+                },
+            )
+            .unwrap()
+        )
+    );
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation
+    );
+}
+
+#[test]
 fn surface_suspend_and_resume_preserve_attachment_kind() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
@@ -15064,9 +15160,13 @@ fn surface_suspend_and_resume_preserve_attachment_kind() {
     let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("suspended surfaces should be unavailable");
 
-    assert_eq!(error.code(), ErrorCode::SurfaceUnavailable);
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Suspended,
+    );
 
-    pollster::block_on(renderer.resume_surface(&mut surface, Attachment::Headless)).unwrap();
+    surface.resume(Attachment::Headless).unwrap();
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("resumed headless surface should render");
 
@@ -15678,6 +15778,38 @@ fn assert_runtime_device_lost(error: Error, operation: RuntimeOperation, reason:
             &RuntimeCapabilityUnavailable::try_new(
                 operation,
                 RuntimeCapabilityUnavailableReason::DeviceLost { reason },
+            )
+            .unwrap()
+        )
+    );
+}
+
+fn assert_runtime_adapter_unavailable(error: &Error, operation: RuntimeOperation) {
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                operation,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+            )
+            .unwrap()
+        )
+    );
+}
+
+fn assert_surface_unavailable(
+    error: Error,
+    operation: RuntimeOperation,
+    state: RenderSurfaceAvailability,
+) {
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                operation,
+                RuntimeCapabilityUnavailableReason::SurfaceUnavailable { state },
             )
             .unwrap()
         )
@@ -18209,7 +18341,7 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
     let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
     match pollster::block_on(renderer.render(&mut surface, scene, Parameters::default())) {
         Ok(_) => {}
-        Err(error) if error.code() == ErrorCode::AdapterUnavailable => {
+        Err(error) if error.code() == ErrorCode::RuntimeCapabilityUnavailable => {
             assert!(
                 error.message().contains("backdrop") || error.message().contains("offscreen"),
                 "adapter diagnostic should name the offscreen backdrop boundary: {}",
@@ -18224,7 +18356,7 @@ fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Opt
         Err(error)
             if matches!(
                 error.code(),
-                ErrorCode::AdapterUnavailable | ErrorCode::UnsupportedBackend
+                ErrorCode::RuntimeCapabilityUnavailable | ErrorCode::UnsupportedBackend
             ) =>
         {
             assert!(

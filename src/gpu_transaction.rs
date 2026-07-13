@@ -25,7 +25,6 @@ thread_local! {
 /// Private ownership stage for a render-owned GPU operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
-    SurfaceCreate,
     Render,
     #[cfg(test)]
     Present,
@@ -34,7 +33,6 @@ pub(crate) enum GpuOperationStage {
 impl GpuOperationStage {
     const fn error_code(self) -> BackendErrorCode {
         match self {
-            Self::SurfaceCreate => BackendErrorCode::SurfaceCreateFailed,
             Self::Render => BackendErrorCode::RenderFailed,
             #[cfg(test)]
             Self::Present => BackendErrorCode::PresentFailed,

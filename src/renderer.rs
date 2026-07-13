@@ -67,8 +67,9 @@ impl Renderer {
             #[cfg(feature = "render-window")]
             Attachment::Window(handle) => {
                 let Some(backend) = self.backend.as_mut() else {
-                    return Err(Error::new(
-                        BackendErrorCode::AdapterUnavailable,
+                    return Err(Error::runtime_unavailable(
+                        RuntimeOperation::AdapterSelection,
+                        RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                         "no compatible wgpu adapter is available",
                     ));
                 };
@@ -121,8 +122,9 @@ impl Renderer {
             ));
         };
         let Some(backend) = self.backend.as_mut() else {
-            return Err(Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::AdapterSelection,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "no compatible WebGPU adapter is available",
             ));
         };
@@ -204,25 +206,9 @@ impl Renderer {
             {
                 return Err(error);
             }
-            let texture_transaction = backend.begin_gpu_operation(
-                device_identity,
-                GpuOperationStage::SurfaceCreate,
-                RuntimeOperation::AdapterSelection,
-            )?;
-            let texture_work = (|| -> Result<(wgpu::Texture, wgpu::TextureView)> {
-                let (device, _) =
-                    backend.device_queue(device_identity, RuntimeOperation::AdapterSelection)?;
-                create_headless_texture(device, physical_size, options.format)
-            })();
-            let scope_result = texture_transaction
-                .finish(RuntimeOperation::AdapterSelection)
-                .await;
-            backend.observe_device_terminal(device_identity);
-            scope_result?;
-            let (texture, view) = texture_work?;
             SurfaceBackend::Headless {
                 device_identity,
-                resources: HeadlessResources::Ready { texture, view },
+                resources: HeadlessResources::for_physical_size(physical_size),
                 physical_size,
             }
         } else {
@@ -239,8 +225,9 @@ impl Renderer {
 
     pub fn set_surface_resizing(&mut self, surface: &mut Surface, resizing: bool) -> Result<()> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
-        surface.ensure_available()?;
+        surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
 
         #[cfg(not(any(
             feature = "render-window",
@@ -278,9 +265,26 @@ impl Renderer {
         parameters: Parameters,
     ) -> Result<Stats> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
-        surface.ensure_available()?;
+        surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_renderable()?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
+
+        let Some(device_identity) = surface.device_identity() else {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "no compatible wgpu adapter is available",
+            ));
+        };
+        if self.backend.is_none() {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "no compatible wgpu adapter is available",
+            ));
+        }
 
         let frame_start = Instant::now();
         let encode_start = Instant::now();
@@ -317,28 +321,28 @@ impl Renderer {
         if parameters.debug || self.options.debug() {
             stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
         }
-        if let (Some(backend), Some(device_identity)) =
-            (self.backend.as_mut(), surface.device_identity())
-        {
-            let transaction = backend.begin_gpu_operation(
-                device_identity,
-                GpuOperationStage::Render,
-                RuntimeOperation::SurfaceRendering,
-            )?;
-            let timings = render_internal_vello_surface(
-                backend,
-                transaction,
-                surface,
-                &vello_scene,
-                parameters,
-                self.options.antialiasing(),
-            )
-            .await;
-            backend.observe_device_terminal(device_identity);
-            let timings = timings?;
-            stats.render_time = timings.render_time;
-            stats.present_time = timings.present_time;
-        }
+        let backend = self
+            .backend
+            .as_mut()
+            .expect("surface preflight confirmed the renderer backend is available");
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let timings = render_internal_vello_surface(
+            backend,
+            transaction,
+            surface,
+            &vello_scene,
+            parameters,
+            self.options.antialiasing(),
+        )
+        .await;
+        backend.observe_device_terminal(device_identity);
+        let timings = timings?;
+        stats.render_time = timings.render_time;
+        stats.present_time = timings.present_time;
         stats.frame_time = frame_start.elapsed();
         let mut published = None;
         GpuOperationDraft::new(&mut published, (stats, uploaded_images, parameters)).commit();
@@ -367,6 +371,8 @@ impl Renderer {
             ));
         }
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceResume)?;
+        surface.ensure_available(RuntimeOperation::SurfaceResume)?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
 
         match &surface.backend {
@@ -380,40 +386,75 @@ impl Renderer {
                 *surface = next;
                 Ok(())
             }
-            SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
-                surface.resume(attachment)
-            }
+            SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => unreachable!(),
         }
     }
 
     pub fn read_headless(&mut self, surface: &Surface) -> Result<ImageBuffer> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceReadback)?;
-        if !matches!(surface.backend, SurfaceBackend::Headless { .. }) {
-            return Err(Error::new(
-                BackendErrorCode::UnsupportedBackend,
-                "only rendered headless surfaces can be read back",
-            ));
-        }
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceReadback)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceReadback)?;
-        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceReadback)?;
-        let SurfaceBackend::Headless {
-            device_identity,
-            resources: HeadlessResources::Ready { texture, .. },
-            physical_size,
-            ..
-        } = &surface.backend
-        else {
-            unreachable!("headless backend-kind validation succeeded");
+        surface.ensure_available(RuntimeOperation::SurfaceReadback)?;
+        let (device_identity, texture, physical_size) = match &surface.backend {
+            SurfaceBackend::ContractOnly { physical_size }
+                if physical_size.width() == 0 || physical_size.height() == 0 =>
+            {
+                return Ok(ImageBuffer {
+                    size: *physical_size,
+                    rgba: Vec::new(),
+                });
+            }
+            SurfaceBackend::ContractOnly { .. } => {
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceReadback,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                    "no compatible wgpu adapter is available",
+                ));
+            }
+            SurfaceBackend::Headless {
+                physical_size,
+                resources: HeadlessResources::Empty,
+                ..
+            } => {
+                return Ok(ImageBuffer {
+                    size: *physical_size,
+                    rgba: Vec::new(),
+                });
+            }
+            SurfaceBackend::Headless {
+                resources: HeadlessResources::Pending,
+                ..
+            } => {
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceReadback,
+                    RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                        state: RenderSurfaceAvailability::Uninitialized,
+                    },
+                    "headless surface has no published texture",
+                ));
+            }
+            SurfaceBackend::Headless {
+                device_identity,
+                resources: HeadlessResources::Published { texture, .. },
+                physical_size,
+            } => (*device_identity, texture, *physical_size),
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            SurfaceBackend::Presented { .. } => unreachable!(),
         };
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceReadback)?;
         let Some(backend) = self.backend.as_mut() else {
-            return Err(Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceReadback,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "no compatible wgpu adapter is available",
             ));
         };
         let (device, queue) =
-            backend.device_queue(*device_identity, RuntimeOperation::SurfaceReadback)?;
-        read_texture_rgba(device, queue, texture, *physical_size)
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceReadback)?;
+        read_texture_rgba(device, queue, texture, physical_size)
     }
 
     /// Projects immutable capabilities of the device selected by `surface`.
@@ -531,6 +572,44 @@ impl Renderer {
         ))
     }
 
+    fn validate_surface_operation_backend(
+        &self,
+        surface: &Surface,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        let supported = match operation {
+            RuntimeOperation::SurfaceReadback => matches!(
+                surface.backend,
+                SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. }
+            ),
+            RuntimeOperation::SurfaceResume => {
+                #[cfg(any(
+                    feature = "render-window",
+                    all(feature = "render-web", target_arch = "wasm32")
+                ))]
+                {
+                    matches!(surface.backend, SurfaceBackend::Presented { .. })
+                }
+                #[cfg(not(any(
+                    feature = "render-window",
+                    all(feature = "render-web", target_arch = "wasm32")
+                )))]
+                {
+                    false
+                }
+            }
+            _ => true,
+        };
+        if supported {
+            Ok(())
+        } else {
+            Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "surface backend does not support this operation",
+            ))
+        }
+    }
+
     fn validate_surface_device_terminal(
         &mut self,
         surface: &Surface,
@@ -581,14 +660,16 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) async fn deliberate_validation_error_for_test(&mut self) -> Result<Result<()>> {
         let device_identity = self.default_device.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "real GPU error-scope coverage requires a host adapter",
             )
         })?;
         let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "real GPU error-scope coverage requires a host adapter",
             )
         })?;
@@ -621,14 +702,16 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) async fn scoped_clear_fill_probe_for_test(&mut self) -> Result<ImageBuffer> {
         let device_identity = self.default_device.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "real GPU clear/fill probe requires a host adapter",
             )
         })?;
         let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "real GPU clear/fill probe requires a host adapter",
             )
         })?;
@@ -710,14 +793,16 @@ impl Renderer {
         target_extent: PhysicalSize,
     ) -> Result<super::gpu_transaction::InternalVelloSubmissionObservationForTest> {
         let device_identity = self.default_device.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "T6 transaction coverage requires a ready default device",
             )
         })?;
         let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "T6 transaction coverage requires a renderer backend",
             )
         })?;
@@ -733,14 +818,16 @@ impl Renderer {
         target_extent: PhysicalSize,
     ) -> Result<super::vello_engine::VelloResourceManagerObservationForTest> {
         let device_identity = self.default_device.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "T6 cancellation coverage requires a ready default device",
             )
         })?;
         let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "T6 cancellation coverage requires a renderer backend",
             )
         })?;
@@ -805,8 +892,9 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) async fn add_donor_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
         let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "the renderer has no backend to receive a donor wgpu device",
             )
         })?;
@@ -819,8 +907,9 @@ impl Renderer {
         device_identity: DeviceSlotIdentity,
     ) -> Result<()> {
         let backend = self.backend.as_mut().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "real second-slot WGPU coverage requires a renderer backend",
             )
         })?;
@@ -933,8 +1022,9 @@ impl Renderer {
         let options = self.options;
         let mut cache = OffscreenTextureResourceCache::new();
         let Some(context) = self.default_offscreen_render_context() else {
-            return Err(Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "materialized backdrop captures require an available wgpu device context",
             ));
         };
@@ -948,8 +1038,9 @@ impl Renderer {
         .await?;
         let source = {
             let Some((device, queue)) = self.default_wgpu_device_queue() else {
-                return Err(Error::new(
-                    BackendErrorCode::AdapterUnavailable,
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                     "materialized backdrop captures require an available wgpu device queue",
                 ));
             };
@@ -1060,8 +1151,9 @@ impl Renderer {
         let options = self.options;
         let mut cache = OffscreenTextureResourceCache::new();
         let Some(context) = self.default_offscreen_render_context() else {
-            return Err(Error::new(
-                BackendErrorCode::AdapterUnavailable,
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "resolved layer alpha masks require an available wgpu device context",
             ));
         };
@@ -1075,8 +1167,9 @@ impl Renderer {
         .await?;
         let source = {
             let Some((device, queue)) = self.default_wgpu_device_queue() else {
-                return Err(Error::new(
-                    BackendErrorCode::AdapterUnavailable,
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                     "resolved layer alpha masks require an available wgpu device queue",
                 ));
             };

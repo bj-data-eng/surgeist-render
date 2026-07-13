@@ -2,7 +2,7 @@
 
 use super::gpu_transaction::GpuOperationTransaction;
 use super::{
-    BackendErrorCode, Color, Error, Format, Result, RuntimeOperation,
+    Color, Error, Format, Result, RuntimeCapabilityUnavailableReason, RuntimeOperation,
     texture::{TextureDescriptor, TextureUsageIntent},
 };
 
@@ -313,8 +313,9 @@ pub(crate) async fn encode_clear_fill_pass(
         transaction,
     }) = execution
     else {
-        return Err(Error::new(
-            BackendErrorCode::AdapterUnavailable,
+        return Err(Error::runtime_unavailable(
+            RuntimeOperation::SurfaceRendering,
+            RuntimeCapabilityUnavailableReason::AdapterUnavailable,
             "rect/fullscreen shader pass requires an available wgpu device context",
         ));
     };

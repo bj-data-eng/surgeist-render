@@ -26,16 +26,13 @@ type BackendErrorSource = Box<dyn error::Error + 'static>;
 /// Private code domain accepted by backend error construction.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum BackendErrorCode {
-    AdapterUnavailable,
     DeviceCreateFailed,
     RendererCreateFailed,
     SurfaceCreateFailed,
     SurfaceConfigureFailed,
-    SurfaceLost,
     SurfaceOutOfMemory,
     SurfaceTimeout,
     SurfaceOutdated,
-    SurfaceUnavailable,
     ImageUploadFailed,
     RenderFailed,
     PresentFailed,
@@ -43,17 +40,14 @@ pub(crate) enum BackendErrorCode {
 }
 
 impl BackendErrorCode {
-    const ALL: [Self; 14] = [
-        Self::AdapterUnavailable,
+    const ALL: [Self; 11] = [
         Self::DeviceCreateFailed,
         Self::RendererCreateFailed,
         Self::SurfaceCreateFailed,
         Self::SurfaceConfigureFailed,
-        Self::SurfaceLost,
         Self::SurfaceOutOfMemory,
         Self::SurfaceTimeout,
         Self::SurfaceOutdated,
-        Self::SurfaceUnavailable,
         Self::ImageUploadFailed,
         Self::RenderFailed,
         Self::PresentFailed,
@@ -62,16 +56,13 @@ impl BackendErrorCode {
 
     const fn error_code(self) -> ErrorCode {
         match self {
-            Self::AdapterUnavailable => ErrorCode::AdapterUnavailable,
             Self::DeviceCreateFailed => ErrorCode::DeviceCreateFailed,
             Self::RendererCreateFailed => ErrorCode::RendererCreateFailed,
             Self::SurfaceCreateFailed => ErrorCode::SurfaceCreateFailed,
             Self::SurfaceConfigureFailed => ErrorCode::SurfaceConfigureFailed,
-            Self::SurfaceLost => ErrorCode::SurfaceLost,
             Self::SurfaceOutOfMemory => ErrorCode::SurfaceOutOfMemory,
             Self::SurfaceTimeout => ErrorCode::SurfaceTimeout,
             Self::SurfaceOutdated => ErrorCode::SurfaceOutdated,
-            Self::SurfaceUnavailable => ErrorCode::SurfaceUnavailable,
             Self::ImageUploadFailed => ErrorCode::ImageUploadFailed,
             Self::RenderFailed => ErrorCode::RenderFailed,
             Self::PresentFailed => ErrorCode::PresentFailed,
@@ -124,6 +115,18 @@ impl Error {
             "internal validation",
             "must satisfy the requested validation rule",
         ));
+        error.replace_message(message);
+        error
+    }
+
+    pub(crate) fn runtime_unavailable(
+        operation: RuntimeOperation,
+        reason: RuntimeCapabilityUnavailableReason,
+        message: impl Into<String>,
+    ) -> Self {
+        let diagnostic = RuntimeCapabilityUnavailable::try_new(operation, reason)
+            .expect("runtime unavailability constructors use validated operation/reason pairs");
+        let mut error = Self::runtime_capability_unavailable(diagnostic);
         error.replace_message(message);
         error
     }
@@ -294,16 +297,13 @@ impl error::Error for Error {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Stable classifications for render diagnostics, suitable for programmatic failure handling.
 pub enum ErrorCode {
-    AdapterUnavailable,
     DeviceCreateFailed,
     RendererCreateFailed,
     SurfaceCreateFailed,
     SurfaceConfigureFailed,
-    SurfaceLost,
     SurfaceOutOfMemory,
     SurfaceTimeout,
     SurfaceOutdated,
-    SurfaceUnavailable,
     InvalidInput,
     /// Reports a render primitive that this renderer cannot represent.
     UnsupportedPrimitive,

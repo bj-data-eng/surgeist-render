@@ -1,6 +1,7 @@
 use super::backend::DeviceSlotIdentity;
 use super::{
-    BackendErrorCode, Color, Error, PhysicalSize, Result, Size, geometry::physical_size,
+    BackendErrorCode, Color, Error, PhysicalSize, RenderSurfaceAvailability, Result,
+    RuntimeCapabilityUnavailableReason, RuntimeOperation, Size, geometry::physical_size,
     validation::*,
 };
 use std::sync::Arc;
@@ -63,7 +64,7 @@ impl Surface {
                     return Ok(());
                 }
                 *physical_size = next;
-                *resources = HeadlessResources::Pending;
+                *resources = HeadlessResources::for_physical_size(next);
             }
             #[cfg(any(
                 feature = "render-window",
@@ -97,7 +98,7 @@ impl Surface {
         ))]
         if let SurfaceBackend::Presented { .. } = &self.backend {
             return Err(Error::new(
-                BackendErrorCode::SurfaceUnavailable,
+                BackendErrorCode::UnsupportedBackend,
                 "presented surfaces must be resumed through Renderer::resume_surface",
             ));
         }
@@ -111,14 +112,49 @@ impl Surface {
         self.state
     }
 
-    pub(crate) fn ensure_available(&self) -> Result<()> {
+    pub(crate) fn ensure_available(&self, operation: RuntimeOperation) -> Result<()> {
         if self.state == SurfaceState::Suspended {
-            return Err(Error::new(
-                BackendErrorCode::SurfaceUnavailable,
+            return Err(Error::runtime_unavailable(
+                operation,
+                RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                    state: RenderSurfaceAvailability::Suspended,
+                },
                 "surface is suspended",
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn ensure_renderable(&self) -> Result<()> {
+        let unavailable = match &self.backend {
+            SurfaceBackend::ContractOnly { physical_size }
+            | SurfaceBackend::Headless { physical_size, .. }
+                if physical_size.width() == 0 || physical_size.height() == 0 =>
+            {
+                Some(RenderSurfaceAvailability::NonRenderable)
+            }
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            SurfaceBackend::Presented { lifecycle, .. } => match lifecycle {
+                PresentedLifecycle::NonRenderable { .. } => {
+                    Some(RenderSurfaceAvailability::NonRenderable)
+                }
+                PresentedLifecycle::Occluded { .. } => Some(RenderSurfaceAvailability::Occluded),
+                PresentedLifecycle::Lost => Some(RenderSurfaceAvailability::Lost),
+                PresentedLifecycle::Ready { .. } | PresentedLifecycle::ResizePending { .. } => None,
+            },
+            SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => None,
+        };
+        match unavailable {
+            Some(state) => Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::SurfaceUnavailable { state },
+                "surface is not renderable",
+            )),
+            None => Ok(()),
+        }
     }
 
     #[must_use]
@@ -151,8 +187,9 @@ impl Surface {
         match &self.backend {
             SurfaceBackend::ContractOnly { .. } => SurfaceResourceState::ContractOnly,
             SurfaceBackend::Headless { resources, .. } => match resources {
+                HeadlessResources::Empty => SurfaceResourceState::Empty,
                 HeadlessResources::Pending => SurfaceResourceState::PendingAllocation,
-                HeadlessResources::Ready { .. } => SurfaceResourceState::Ready,
+                HeadlessResources::Published { .. } => SurfaceResourceState::Ready,
             },
             #[cfg(any(
                 feature = "render-window",
@@ -188,6 +225,7 @@ pub enum SurfaceState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceResourceState {
     ContractOnly,
+    Empty,
     PendingAllocation,
     Ready,
     Presented,
@@ -315,11 +353,22 @@ impl PresentedSurface {
 }
 
 pub(crate) enum HeadlessResources {
+    Empty,
     Pending,
-    Ready {
+    Published {
         texture: wgpu::Texture,
         view: wgpu::TextureView,
     },
+}
+
+impl HeadlessResources {
+    pub(crate) const fn for_physical_size(physical_size: PhysicalSize) -> Self {
+        if physical_size.width() == 0 || physical_size.height() == 0 {
+            Self::Empty
+        } else {
+            Self::Pending
+        }
+    }
 }
 
 #[cfg(any(
