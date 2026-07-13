@@ -597,89 +597,106 @@ fn is_dependency_role(component: &str) -> bool {
 #[test]
 fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
     let manifest = include_str!("../Cargo.toml");
-    for (case, addition) in [
-        (
+    for mutation in [
+        ManifestDependencyMutation::append(
             "target dotted normal dependency",
             "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndependencies.hidden-target-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target dotted development dependency",
             "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndev-dependencies.hidden-target-dev-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target dotted build dependency",
             "\n[target.'cfg(all(unix, target_os = \"macos\"))']\nbuild-dependencies.hidden-target-build-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::prepend_root(
             "root dotted normal dependency",
             "\ndependencies.hidden-root-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::prepend_root(
             "root dotted build dependency",
             "\nbuild-dependencies.hidden-root-build-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::prepend_root(
+            "root dotted patch resolution",
+            "\npatch.crates-io.hidden-root-patch-dependency = \"=1.0.0\"\n",
+        ),
+        ManifestDependencyMutation::prepend_root(
+            "root dotted replace resolution",
+            "\nreplace.\"hidden-root-replace-dependency:1.0.0\" = { path = \"../hidden-root-replace-dependency\" }\n",
+        ),
+        ManifestDependencyMutation::prepend_root(
+            "root inline normal dependency",
+            "\ndependencies = { hidden-root-inline-dependency = \"=1.0.0\" }\n",
+        ),
+        ManifestDependencyMutation::prepend_root(
+            "root inline build dependency",
+            "\nbuild-dependencies = { hidden-root-inline-build-dependency = \"=1.0.0\" }\n",
+        ),
+        ManifestDependencyMutation::prepend_root(
+            "root inline patch resolution",
+            "\npatch = { crates-io = { hidden-root-inline-patch-dependency = \"=1.0.0\" } }\n",
+        ),
+        ManifestDependencyMutation::prepend_root(
+            "root inline replace resolution",
+            "\nreplace = { \"hidden-root-inline-replace-dependency:1.0.0\" = { path = \"../hidden-root-inline-replace-dependency\" } }\n",
+        ),
+        ManifestDependencyMutation::append(
             "build dependency table",
             "\n[build-dependencies]\nhidden-build-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target normal dependency table",
             "\n[target.'cfg(unix)'.dependencies]\nhidden-target-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target development dependency table",
             "\n[target.'cfg(unix)'.dev-dependencies]\nhidden-target-dev-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target build dependency table",
             "\n[target.'cfg(unix)'.build-dependencies]\nhidden-target-build-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target inline normal dependency",
             "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndependencies = { hidden-target-dependency = \"=1.0.0\" }\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target inline development dependency",
             "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndev-dependencies = { hidden-target-dev-dependency = \"=1.0.0\" }\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "target inline build dependency",
             "\n[target.'cfg(all(unix, target_os = \"macos\"))']\nbuild-dependencies = { hidden-target-build-dependency = \"=1.0.0\" }\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "workspace dependency table",
             "\n[workspace.dependencies]\nhidden-workspace-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "dependency subtable",
             "\n[dependencies.hidden-subtable-dependency]\nversion = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "dependency array table",
             "\n[[dependencies]]\nhidden-array-dependency = \"=1.0.0\"\n",
         ),
-        (
+        ManifestDependencyMutation::append(
             "patch resolution table",
             "\n[patch.crates-io]\nhidden-patch-dependency = \"=1.0.0\"\n",
         ),
-        (
-            "dotted patch resolution",
-            "\npatch.crates-io.hidden-patch-dependency = \"=1.0.0\"\n",
-        ),
-        (
+        ManifestDependencyMutation::append(
             "replace resolution table",
-            "\n[replace]\n\"hidden-replace-dependency:1.0.0\" = { version = \"=1.0.1\" }\n",
+            "\n[replace]\n\"hidden-replace-dependency:1.0.0\" = { path = \"../hidden-replace-dependency\" }\n",
         ),
-        (
-            "dotted replace resolution",
-            "\nreplace.\"hidden=replace-dependency:1.0.0\" = { version = \"=1.0.1\" }\n",
-        ),
-        (
+        ManifestDependencyMutation::append(
             "duplicate approved dependency table",
             "\n[dependencies]\nhidden-duplicate-table-dependency = \"=1.0.0\"\n",
         ),
     ] {
-        assert_manifest_dependency_roles_rejected([manifest, addition].concat(), case);
+        let mutated_manifest = mutation.apply(manifest);
+        assert_manifest_dependency_roles_rejected(mutated_manifest, mutation.case);
     }
 
     let duplicate_cross_role = manifest.replacen(
@@ -698,6 +715,65 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
         1,
     );
     assert_manifest_dependency_roles_rejected(duplicate_key, "duplicate dependency key");
+}
+
+#[derive(Clone, Copy)]
+enum ManifestMutationPlacement {
+    PrependAtRoot,
+    AppendTable,
+}
+
+#[derive(Clone, Copy)]
+struct ManifestDependencyMutation {
+    case: &'static str,
+    addition: &'static str,
+    placement: ManifestMutationPlacement,
+}
+
+impl ManifestDependencyMutation {
+    const fn prepend_root(case: &'static str, addition: &'static str) -> Self {
+        Self {
+            case,
+            addition,
+            placement: ManifestMutationPlacement::PrependAtRoot,
+        }
+    }
+
+    const fn append(case: &'static str, addition: &'static str) -> Self {
+        Self {
+            case,
+            addition,
+            placement: ManifestMutationPlacement::AppendTable,
+        }
+    }
+
+    fn apply(self, manifest: &str) -> String {
+        let mutated_manifest = match self.placement {
+            ManifestMutationPlacement::PrependAtRoot => [self.addition, manifest].concat(),
+            ManifestMutationPlacement::AppendTable => [manifest, self.addition].concat(),
+        };
+        if matches!(self.placement, ManifestMutationPlacement::PrependAtRoot) {
+            assert_root_manifest_mutation_precedes_first_table(
+                &mutated_manifest,
+                self.addition,
+                self.case,
+            );
+        }
+        mutated_manifest
+    }
+}
+
+fn assert_root_manifest_mutation_precedes_first_table(manifest: &str, addition: &str, case: &str) {
+    let mutation_offset = manifest
+        .find(addition.trim())
+        .unwrap_or_else(|| panic!("missing {case} mutation"));
+    let first_table_offset = manifest
+        .find('[')
+        .expect("the checked manifest must contain a table");
+    assert!(
+        mutation_offset < first_table_offset,
+        "{case} must be located before the manifest's first table"
+    );
 }
 
 #[test]
