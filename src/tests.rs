@@ -14118,6 +14118,94 @@ fn encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit(
 }
 
 #[test]
+fn internal_vello_encoding_shares_the_frame_transaction_submission() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("T6 transaction submission coverage requires a real selected WGPU device");
+    let target_extent = PhysicalSize::new(64, 48);
+    let prepared = VelloScene::prepare_raster_scenario_for_test(
+        VelloRasterScenario::Base,
+        RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect("a non-empty direct Vello target must prepare"),
+    )
+    .expect("the base direct scene must prepare without WGPU submission authority");
+
+    let observation =
+        pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
+            .expect("the frame transaction must submit the checked internal Vello payload");
+
+    assert_eq!(
+        observation.queue_submission_count_for_test(),
+        1,
+        "the internal payload must use exactly one real frame transaction queue submission"
+    );
+    assert_eq!(
+        observation.payload_raster_pass_count_for_test(),
+        1,
+        "the one consumed internal payload command buffer must be the direct raster pass"
+    );
+    assert!(
+        observation
+            .transaction_generation_for_test()
+            .is_some_and(|generation| generation != 0),
+        "the real queue submission must retain its nonzero frame operation generation"
+    );
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the selected device must remain ready after a clean transaction")
+            .internal_resource_manager_observation_for_test()
+            .retained_count_for_test(),
+        1,
+        "the clean transaction must adopt its one committed internal resource lease"
+    );
+}
+
+#[test]
+fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("T6 direct-raster allocation coverage requires a real selected WGPU device");
+    let target_extent = PhysicalSize::new(64, 48);
+    let prepared = VelloScene::prepare_raster_scenario_for_test(
+        VelloRasterScenario::Base,
+        RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect("a non-empty direct Vello target must prepare"),
+    )
+    .expect("the base direct scene must prepare without effect-graph authority");
+
+    let observation =
+        pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
+            .expect("the direct scene must submit through its one internal raster payload");
+    assert_eq!(
+        observation.payload_raster_pass_count_for_test(),
+        1,
+        "the effect-free direct scene must consume exactly one internal raster payload pass"
+    );
+
+    let allocation_summary = observation.allocation_summary_for_test();
+    assert!(
+        allocation_summary.as_ref().is_some_and(|summary| {
+            summary.internal_vello_raster_buffer_requests_for_test() > 0
+                && summary.internal_vello_raster_buffer_allocations_for_test() > 0
+                && summary.internal_vello_raster_image_requests_for_test() > 0
+                && summary.internal_vello_raster_image_allocations_for_test() > 0
+        }),
+        "the transaction-owned direct payload must carry actual internal Vello buffer/image allocation roles"
+    );
+    let allocation_summary = allocation_summary
+        .expect("the consumed internal payload must retain its closed allocation-role summary");
+    assert_eq!(
+        allocation_summary.custom_effect_offscreen_requests_for_test(),
+        0,
+        "the direct payload must request no custom effect/offscreen resource role"
+    );
+    assert_eq!(
+        allocation_summary.custom_effect_offscreen_allocations_for_test(),
+        0,
+        "the direct payload must allocate no custom effect/offscreen resource role"
+    );
+}
+
+#[test]
 fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("T6 cancellation coverage requires a real selected WGPU device");

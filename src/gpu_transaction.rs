@@ -6,7 +6,13 @@ use super::{
 use std::sync::Arc;
 
 #[cfg(test)]
-use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+use std::sync::{
+    Mutex,
+    mpsc::{Receiver, SyncSender, sync_channel},
+};
+
+#[cfg(test)]
+use super::vello_engine::VelloResourceAllocationSummaryForTest;
 
 /// Private ownership stage for a render-owned GPU operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -128,7 +134,75 @@ pub(crate) struct InternalVelloPayload<'resources> {
     command_buffer: wgpu::CommandBuffer,
     resources: PendingVelloResourceCommit<'resources>,
     #[cfg(test)]
+    submission_observation: Option<InternalVelloSubmissionObservationForTest>,
+    #[cfg(test)]
     after_submit_checkpoint: Option<AfterInternalVelloSubmitCheckpointForTest>,
+}
+
+/// Test-only evidence carried by the real single-buffer internal raster payload.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct InternalVelloSubmissionObservationForTest {
+    state: Arc<Mutex<InternalVelloSubmissionObservationStateForTest>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct InternalVelloSubmissionObservationStateForTest {
+    queue_submission_count: usize,
+    transaction_generation: Option<u64>,
+    payload_raster_pass_count: usize,
+    allocation_summary: Option<VelloResourceAllocationSummaryForTest>,
+}
+
+#[cfg(test)]
+impl InternalVelloSubmissionObservationForTest {
+    fn record_payload_submission(
+        &self,
+        transaction_generation: u64,
+        allocation_summary: VelloResourceAllocationSummaryForTest,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("internal Vello submission observation must remain available");
+        state.queue_submission_count = state.queue_submission_count.saturating_add(1);
+        state.transaction_generation = Some(transaction_generation);
+        // `InternalVelloPayload` owns exactly the command buffer consumed by this transition.
+        state.payload_raster_pass_count = state.payload_raster_pass_count.saturating_add(1);
+        state.allocation_summary = Some(allocation_summary);
+    }
+
+    pub(crate) fn queue_submission_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .expect("internal Vello submission observation must remain available")
+            .queue_submission_count
+    }
+
+    pub(crate) fn transaction_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("internal Vello submission observation must remain available")
+            .transaction_generation
+    }
+
+    pub(crate) fn payload_raster_pass_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .expect("internal Vello submission observation must remain available")
+            .payload_raster_pass_count
+    }
+
+    pub(crate) fn allocation_summary_for_test(
+        &self,
+    ) -> Option<VelloResourceAllocationSummaryForTest> {
+        self.state
+            .lock()
+            .expect("internal Vello submission observation must remain available")
+            .allocation_summary
+            .clone()
+    }
 }
 
 /// Test-only pause reached after the real queue submission and before transaction completion.
@@ -173,8 +247,21 @@ impl<'resources> InternalVelloPayload<'resources> {
             command_buffer,
             resources,
             #[cfg(test)]
+            submission_observation: None,
+            #[cfg(test)]
             after_submit_checkpoint: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observed_for_test(
+        command_buffer: wgpu::CommandBuffer,
+        resources: PendingVelloResourceCommit<'resources>,
+        submission_observation: InternalVelloSubmissionObservationForTest,
+    ) -> Self {
+        let mut payload = Self::new(command_buffer, resources);
+        payload.submission_observation = Some(submission_observation);
+        payload
     }
 
     #[cfg(test)]
@@ -186,6 +273,7 @@ impl<'resources> InternalVelloPayload<'resources> {
         Self {
             command_buffer,
             resources,
+            submission_observation: None,
             after_submit_checkpoint: Some(checkpoint),
         }
     }
@@ -273,9 +361,18 @@ impl GpuOperationTransaction {
             command_buffer,
             resources,
             #[cfg(test)]
+            submission_observation,
+            #[cfg(test)]
             after_submit_checkpoint,
         } = payload;
         queue.submit([command_buffer]);
+        #[cfg(test)]
+        if let Some(observation) = submission_observation {
+            observation.record_payload_submission(
+                self.lease.generation(),
+                resources.allocation_summary_for_test(),
+            );
+        }
         #[cfg(test)]
         if let Some(checkpoint) = after_submit_checkpoint {
             checkpoint.wait().await;

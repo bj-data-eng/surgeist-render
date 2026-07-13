@@ -37,7 +37,10 @@ mod recording {
         over_limit_buffer_preflight_for_test,
     };
     #[cfg(test)]
-    pub(crate) use resources::{VelloAtlasOutcome, VelloResourceManagerObservationForTest};
+    pub(crate) use resources::{
+        VelloAtlasOutcome, VelloResourceAllocationSummaryForTest,
+        VelloResourceManagerObservationForTest,
+    };
 }
 mod raster {
     include!("raster.rs");
@@ -107,7 +110,10 @@ pub(crate) use recording::{
 };
 
 #[cfg(test)]
-pub(crate) use recording::{VelloAtlasOutcome, VelloResourceManagerObservationForTest};
+pub(crate) use recording::{
+    VelloAtlasOutcome, VelloResourceAllocationSummaryForTest,
+    VelloResourceManagerObservationForTest,
+};
 
 #[cfg(test)]
 pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> crate::Result<()> {

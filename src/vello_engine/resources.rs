@@ -78,9 +78,93 @@ struct PendingVelloResources {
     released_images: HashSet<ImageHandle>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelloResourceAllocationRoleForTest {
+    InternalVelloRasterBuffer,
+    InternalVelloRasterImage,
+    CustomEffectOffscreen,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct VelloResourceAllocationSummaryForTest {
+    requested_roles: Vec<VelloResourceAllocationRoleForTest>,
+    allocated_roles: Vec<VelloResourceAllocationRoleForTest>,
+}
+
+#[cfg(test)]
+impl VelloResourceAllocationSummaryForTest {
+    fn role_for_intent(intent: &ResourceIntent) -> VelloResourceAllocationRoleForTest {
+        match intent {
+            ResourceIntent::Buffer(_) => VelloResourceAllocationRoleForTest::InternalVelloRasterBuffer,
+            ResourceIntent::Image(_) => VelloResourceAllocationRoleForTest::InternalVelloRasterImage,
+        }
+    }
+
+    fn record_request(&mut self, intent: &ResourceIntent) {
+        self.requested_roles.push(Self::role_for_intent(intent));
+    }
+
+    fn record_allocation(&mut self, intent: &ResourceIntent) {
+        self.allocated_roles.push(Self::role_for_intent(intent));
+    }
+
+    fn role_count(
+        roles: &[VelloResourceAllocationRoleForTest],
+        role: VelloResourceAllocationRoleForTest,
+    ) -> usize {
+        roles.iter().filter(|actual| **actual == role).count()
+    }
+
+    pub(crate) fn internal_vello_raster_buffer_requests_for_test(&self) -> usize {
+        Self::role_count(
+            &self.requested_roles,
+            VelloResourceAllocationRoleForTest::InternalVelloRasterBuffer,
+        )
+    }
+
+    pub(crate) fn internal_vello_raster_buffer_allocations_for_test(&self) -> usize {
+        Self::role_count(
+            &self.allocated_roles,
+            VelloResourceAllocationRoleForTest::InternalVelloRasterBuffer,
+        )
+    }
+
+    pub(crate) fn internal_vello_raster_image_requests_for_test(&self) -> usize {
+        Self::role_count(
+            &self.requested_roles,
+            VelloResourceAllocationRoleForTest::InternalVelloRasterImage,
+        )
+    }
+
+    pub(crate) fn internal_vello_raster_image_allocations_for_test(&self) -> usize {
+        Self::role_count(
+            &self.allocated_roles,
+            VelloResourceAllocationRoleForTest::InternalVelloRasterImage,
+        )
+    }
+
+    pub(crate) fn custom_effect_offscreen_requests_for_test(&self) -> usize {
+        Self::role_count(
+            &self.requested_roles,
+            VelloResourceAllocationRoleForTest::CustomEffectOffscreen,
+        )
+    }
+
+    pub(crate) fn custom_effect_offscreen_allocations_for_test(&self) -> usize {
+        Self::role_count(
+            &self.allocated_roles,
+            VelloResourceAllocationRoleForTest::CustomEffectOffscreen,
+        )
+    }
+}
+
 #[must_use]
 pub(crate) struct VelloResourceLease {
     pending: PendingVelloResources,
+    #[cfg(test)]
+    allocation_summary: VelloResourceAllocationSummaryForTest,
 }
 
 #[must_use = "scope-clean Vello resource leases must be committed or aborted"]
@@ -222,6 +306,14 @@ pub(crate) struct PendingVelloResourceCommit<'manager> {
 }
 
 impl PendingVelloResourceCommit<'_> {
+    #[cfg(test)]
+    pub(crate) fn allocation_summary_for_test(&self) -> VelloResourceAllocationSummaryForTest {
+        self.lease
+            .as_ref()
+            .expect("pending Vello resource commits must own their scope-resolved lease")
+            .allocation_summary_for_test()
+    }
+
     #[cfg_attr(
         not(test),
         expect(
@@ -274,15 +366,25 @@ impl VelloResourceLease {
             released_buffers: HashSet::new(),
             released_images: HashSet::new(),
         };
+        #[cfg(test)]
+        let mut allocation_summary = VelloResourceAllocationSummaryForTest::default();
 
         for intent in intents {
+            #[cfg(test)]
+            allocation_summary.record_request(intent);
             match intent {
                 ResourceIntent::Buffer(buffer) => allocate_buffer(device, &mut pending, buffer)?,
                 ResourceIntent::Image(image) => allocate_image(device, &mut pending, image)?,
             }
+            #[cfg(test)]
+            allocation_summary.record_allocation(intent);
         }
 
-        Ok(Self { pending })
+        Ok(Self {
+            pending,
+            #[cfg(test)]
+            allocation_summary,
+        })
     }
 
     pub(super) fn buffer(&self, handle: BufferHandle) -> Result<&wgpu::Buffer> {
@@ -417,6 +519,10 @@ impl VelloResourceLease {
 }
 
 impl ScopeResolvedVelloResourceLease {
+    #[cfg(test)]
+    fn allocation_summary_for_test(&self) -> VelloResourceAllocationSummaryForTest {
+        self.lease.allocation_summary.clone()
+    }
     fn commit(self) -> CommittedVelloResources {
         self.lease.into_committed_resources()
     }

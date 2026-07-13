@@ -1,5 +1,8 @@
 #[cfg(test)]
-use super::gpu_transaction::{AfterInternalVelloSubmitCheckpointForTest, InternalVelloPayload};
+use super::gpu_transaction::{
+    AfterInternalVelloSubmitCheckpointForTest, InternalVelloPayload,
+    InternalVelloSubmissionObservationForTest,
+};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -847,7 +850,7 @@ impl Backend {
         identity: DeviceSlotIdentity,
         prepared: &PreparedVelloPass,
         target_extent: PhysicalSize,
-    ) -> Result<()> {
+    ) -> Result<InternalVelloSubmissionObservationForTest> {
         let transaction = self.begin_gpu_operation(
             identity,
             GpuOperationStage::Render,
@@ -929,11 +932,16 @@ impl Backend {
                 return Err(error);
             }
         };
-        let payload =
-            InternalVelloPayload::new(command_encoder.finish(), resources.pending_commit(lease));
+        let observation = InternalVelloSubmissionObservationForTest::default();
+        let payload = InternalVelloPayload::observed_for_test(
+            command_encoder.finish(),
+            resources.pending_commit(lease),
+            observation.clone(),
+        );
         transaction
             .submit_internal_vello(queue, payload, RuntimeOperation::SurfaceRendering)
-            .await
+            .await?;
+        Ok(observation)
     }
 
     #[cfg(test)]

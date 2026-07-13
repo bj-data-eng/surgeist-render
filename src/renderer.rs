@@ -747,7 +747,7 @@ impl Renderer {
         &mut self,
         prepared: &super::vello_engine::PreparedVelloPass,
         target_extent: PhysicalSize,
-    ) -> Result<()> {
+    ) -> Result<super::gpu_transaction::InternalVelloSubmissionObservationForTest> {
         let device_identity = self.default_device.ok_or_else(|| {
             Error::new(
                 BackendErrorCode::AdapterUnavailable,
