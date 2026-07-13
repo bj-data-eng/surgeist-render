@@ -11,32 +11,32 @@ use crate::{BackendErrorCode, Error, PhysicalSize, Result};
 
 /// A symbolic resource identity within one prepared Vello pass.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ResourceId(u64);
+pub(super) struct ResourceId(u64);
 
 /// A symbolic buffer reference used by the compute-dispatch recording.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct BufferHandle(ResourceId);
+pub(super) struct BufferHandle(ResourceId);
 
 /// A symbolic image reference used by the compute-dispatch recording.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct ImageHandle(ResourceId);
+pub(super) struct ImageHandle(ResourceId);
 
 /// The only image format required by the pinned Vello raster path.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RasterImageFormat {
+pub(super) enum RasterImageFormat {
     Rgba8Unorm,
 }
 
 /// The fixed algorithm phase associated with a recorded dispatch.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RasterPhase {
+pub(super) enum RasterPhase {
     Coarse,
     Fine,
 }
 
 /// The antialiasing-specific final raster program selected for one pass.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum FineRasterVariant {
+pub(super) enum FineRasterVariant {
     Area,
     Msaa8,
     Msaa16,
@@ -44,7 +44,7 @@ pub(crate) enum FineRasterVariant {
 
 /// The closed set of compute programs used by the pinned Vello schedule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RasterKernel {
+pub(super) enum RasterKernel {
     PathTagReduce,
     PathTagReduce2,
     PathTagScan1,
@@ -76,66 +76,58 @@ enum ResourceBinding {
     TargetOutput,
 }
 
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum DispatchBindingKind {
-    Buffer,
-    Image,
-    TargetOutput,
-}
-
 /// The bindings accepted by the coarse draw-leaf operation.
-pub(crate) struct DrawLeafBindings {
-    pub(crate) config: BufferHandle,
-    pub(crate) scene: BufferHandle,
-    pub(crate) draw_reduced: BufferHandle,
-    pub(crate) path_bboxes: BufferHandle,
-    pub(crate) draw_monoids: BufferHandle,
-    pub(crate) info_bin_data: BufferHandle,
-    pub(crate) clip_inputs: BufferHandle,
+pub(super) struct DrawLeafBindings {
+    pub(super) config: BufferHandle,
+    pub(super) scene: BufferHandle,
+    pub(super) draw_reduced: BufferHandle,
+    pub(super) path_bboxes: BufferHandle,
+    pub(super) draw_monoids: BufferHandle,
+    pub(super) info_bin_data: BufferHandle,
+    pub(super) clip_inputs: BufferHandle,
 }
 
 /// The bindings accepted by the coarse clip-leaf operation.
-pub(crate) struct ClipLeafBindings {
-    pub(crate) config: BufferHandle,
-    pub(crate) clip_inputs: BufferHandle,
-    pub(crate) path_bboxes: BufferHandle,
-    pub(crate) clip_bics: BufferHandle,
-    pub(crate) clip_elements: BufferHandle,
-    pub(crate) draw_monoids: BufferHandle,
-    pub(crate) clip_bboxes: BufferHandle,
+pub(super) struct ClipLeafBindings {
+    pub(super) config: BufferHandle,
+    pub(super) clip_inputs: BufferHandle,
+    pub(super) path_bboxes: BufferHandle,
+    pub(super) clip_bics: BufferHandle,
+    pub(super) clip_elements: BufferHandle,
+    pub(super) draw_monoids: BufferHandle,
+    pub(super) clip_bboxes: BufferHandle,
 }
 
 /// The bindings accepted by the coarse binning operation.
-pub(crate) struct BinningBindings {
-    pub(crate) config: BufferHandle,
-    pub(crate) draw_monoids: BufferHandle,
-    pub(crate) path_bboxes: BufferHandle,
-    pub(crate) clip_bboxes: BufferHandle,
-    pub(crate) draw_bboxes: BufferHandle,
-    pub(crate) bump: BufferHandle,
-    pub(crate) info_bin_data: BufferHandle,
-    pub(crate) bin_headers: BufferHandle,
+pub(super) struct BinningBindings {
+    pub(super) config: BufferHandle,
+    pub(super) draw_monoids: BufferHandle,
+    pub(super) path_bboxes: BufferHandle,
+    pub(super) clip_bboxes: BufferHandle,
+    pub(super) draw_bboxes: BufferHandle,
+    pub(super) bump: BufferHandle,
+    pub(super) info_bin_data: BufferHandle,
+    pub(super) bin_headers: BufferHandle,
 }
 
 /// The bindings accepted by the final coarse-raster operation.
-pub(crate) struct CoarseRasterBindings {
-    pub(crate) config: BufferHandle,
-    pub(crate) scene: BufferHandle,
-    pub(crate) draw_monoids: BufferHandle,
-    pub(crate) bin_headers: BufferHandle,
-    pub(crate) info_bin_data: BufferHandle,
-    pub(crate) paths: BufferHandle,
-    pub(crate) tile: BufferHandle,
-    pub(crate) bump: BufferHandle,
-    pub(crate) per_tile_command_list: BufferHandle,
+pub(super) struct CoarseRasterBindings {
+    pub(super) config: BufferHandle,
+    pub(super) scene: BufferHandle,
+    pub(super) draw_monoids: BufferHandle,
+    pub(super) bin_headers: BufferHandle,
+    pub(super) info_bin_data: BufferHandle,
+    pub(super) paths: BufferHandle,
+    pub(super) tile: BufferHandle,
+    pub(super) bump: BufferHandle,
+    pub(super) per_tile_command_list: BufferHandle,
 }
 
 /// A coarse-phase operation whose constructor fixes its kernel and binding layout.
-pub(crate) struct CoarseDispatch(DispatchIntent);
+pub(super) struct CoarseDispatch(DispatchIntent);
 
 impl CoarseDispatch {
-    pub(crate) fn path_tag_reduce(
+    pub(super) fn path_tag_reduce(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         scene: BufferHandle,
@@ -152,7 +144,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_tag_reduce2(
+    pub(super) fn path_tag_reduce2(
         workgroups: vello_encoding::WorkgroupSize,
         path_reduced: BufferHandle,
         path_reduced2: BufferHandle,
@@ -167,7 +159,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_tag_scan1(
+    pub(super) fn path_tag_scan1(
         workgroups: vello_encoding::WorkgroupSize,
         path_reduced: BufferHandle,
         path_reduced2: BufferHandle,
@@ -184,7 +176,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_tag_scan(
+    pub(super) fn path_tag_scan(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         scene: BufferHandle,
@@ -203,7 +195,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_tag_scan_large(
+    pub(super) fn path_tag_scan_large(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         scene: BufferHandle,
@@ -222,7 +214,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn bbox_clear(
+    pub(super) fn bbox_clear(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         path_bboxes: BufferHandle,
@@ -237,7 +229,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn flatten(
+    pub(super) fn flatten(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         scene: BufferHandle,
@@ -260,7 +252,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn draw_reduce(
+    pub(super) fn draw_reduce(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         scene: BufferHandle,
@@ -277,7 +269,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn draw_leaf(
+    pub(super) fn draw_leaf(
         workgroups: vello_encoding::WorkgroupSize,
         bindings: DrawLeafBindings,
     ) -> Self {
@@ -305,7 +297,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn clip_reduce(
+    pub(super) fn clip_reduce(
         workgroups: vello_encoding::WorkgroupSize,
         clip_inputs: BufferHandle,
         path_bboxes: BufferHandle,
@@ -324,7 +316,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn clip_leaf(
+    pub(super) fn clip_leaf(
         workgroups: vello_encoding::WorkgroupSize,
         bindings: ClipLeafBindings,
     ) -> Self {
@@ -352,7 +344,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn binning(
+    pub(super) fn binning(
         workgroups: vello_encoding::WorkgroupSize,
         bindings: BinningBindings,
     ) -> Self {
@@ -382,7 +374,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn tile_alloc(
+    pub(super) fn tile_alloc(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         scene: BufferHandle,
@@ -405,7 +397,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_count_setup(
+    pub(super) fn path_count_setup(
         workgroups: vello_encoding::WorkgroupSize,
         bump: BufferHandle,
         indirect_count: BufferHandle,
@@ -420,7 +412,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_count(
+    pub(super) fn path_count(
         indirect_count: BufferHandle,
         config: BufferHandle,
         bump: BufferHandle,
@@ -443,7 +435,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn backdrop(
+    pub(super) fn backdrop(
         workgroups: vello_encoding::WorkgroupSize,
         config: BufferHandle,
         bump: BufferHandle,
@@ -462,7 +454,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn coarse(
+    pub(super) fn coarse(
         workgroups: vello_encoding::WorkgroupSize,
         bindings: CoarseRasterBindings,
     ) -> Self {
@@ -494,7 +486,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_tiling_setup(
+    pub(super) fn path_tiling_setup(
         workgroups: vello_encoding::WorkgroupSize,
         bump: BufferHandle,
         indirect_count: BufferHandle,
@@ -511,7 +503,7 @@ impl CoarseDispatch {
         ))
     }
 
-    pub(crate) fn path_tiling(
+    pub(super) fn path_tiling(
         indirect_count: BufferHandle,
         bump: BufferHandle,
         segment_counts: BufferHandle,
@@ -540,15 +532,15 @@ impl CoarseDispatch {
 }
 
 /// The shared resources bound by every fine-phase operation.
-pub(crate) struct FineDispatchBindings {
-    pub(crate) workgroups: vello_encoding::WorkgroupSize,
-    pub(crate) config: BufferHandle,
-    pub(crate) segments: BufferHandle,
-    pub(crate) per_tile_command_list: BufferHandle,
-    pub(crate) info_bin_data: BufferHandle,
-    pub(crate) blend_spill: BufferHandle,
-    pub(crate) gradient_image: ImageHandle,
-    pub(crate) image_atlas: ImageHandle,
+pub(super) struct FineDispatchBindings {
+    pub(super) workgroups: vello_encoding::WorkgroupSize,
+    pub(super) config: BufferHandle,
+    pub(super) segments: BufferHandle,
+    pub(super) per_tile_command_list: BufferHandle,
+    pub(super) info_bin_data: BufferHandle,
+    pub(super) blend_spill: BufferHandle,
+    pub(super) gradient_image: ImageHandle,
+    pub(super) image_atlas: ImageHandle,
 }
 
 impl FineDispatchBindings {
@@ -570,10 +562,10 @@ impl FineDispatchBindings {
 }
 
 /// A fine-phase operation with a fixed final-raster kernel and binding layout.
-pub(crate) struct FineDispatch(DispatchIntent);
+pub(super) struct FineDispatch(DispatchIntent);
 
 impl FineDispatch {
-    pub(crate) fn area(bindings: FineDispatchBindings) -> Self {
+    pub(super) fn area(bindings: FineDispatchBindings) -> Self {
         let (workgroups, bindings) = bindings.into_parts();
         Self(DispatchIntent::fine_direct(
             RasterKernel::FineArea,
@@ -582,7 +574,7 @@ impl FineDispatch {
         ))
     }
 
-    pub(crate) fn msaa8(bindings: FineDispatchBindings, mask_lut: BufferHandle) -> Self {
+    pub(super) fn msaa8(bindings: FineDispatchBindings, mask_lut: BufferHandle) -> Self {
         let (workgroups, mut bindings) = bindings.into_parts();
         bindings.push(ResourceBinding::Buffer(mask_lut));
         Self(DispatchIntent::fine_direct(
@@ -592,7 +584,7 @@ impl FineDispatch {
         ))
     }
 
-    pub(crate) fn msaa16(bindings: FineDispatchBindings, mask_lut: BufferHandle) -> Self {
+    pub(super) fn msaa16(bindings: FineDispatchBindings, mask_lut: BufferHandle) -> Self {
         let (workgroups, mut bindings) = bindings.into_parts();
         bindings.push(ResourceBinding::Buffer(mask_lut));
         Self(DispatchIntent::fine_direct(
@@ -608,7 +600,7 @@ impl FineDispatch {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResourceReference {
+pub(super) enum ResourceReference {
     Buffer(BufferHandle),
     Image(ImageHandle),
 }
@@ -633,7 +625,7 @@ impl From<ImageHandle> for ResourceReference {
         reason = "C03 T3 dispatch IR is retained for T4 transaction-owned encoding."
     )
 )]
-pub(crate) struct DispatchIntent {
+pub(super) struct DispatchIntent {
     phase: RasterPhase,
     kernel: RasterKernel,
     workgroups: vello_encoding::WorkgroupSize,
@@ -648,7 +640,7 @@ pub(crate) struct DispatchIntent {
         reason = "C03 T3 indirect-dispatch data is consumed by the later checked realization stage."
     )
 )]
-pub(crate) struct IndirectDispatch {
+pub(super) struct IndirectDispatch {
     buffer: BufferHandle,
     offset: u64,
 }
@@ -661,7 +653,7 @@ pub(crate) struct IndirectDispatch {
         reason = "C03 T3 resource intents are deliberately held for later private resource ownership."
     )
 )]
-pub(crate) enum ResourceIntent {
+pub(super) enum ResourceIntent {
     Buffer(BufferIntent),
     Image(ImageIntent),
 }
@@ -673,7 +665,7 @@ pub(crate) enum ResourceIntent {
         reason = "C03 T3 buffer intent metadata is consumed by the later checked realization stage."
     )
 )]
-pub(crate) struct BufferIntent {
+pub(super) struct BufferIntent {
     resource: BufferHandle,
     role: BufferRole,
     byte_len: u64,
@@ -686,7 +678,7 @@ pub(crate) struct BufferIntent {
         reason = "C03 T3 image intent metadata is consumed by the later resource manager."
     )
 )]
-pub(crate) struct ImageIntent {
+pub(super) struct ImageIntent {
     resource: ImageHandle,
     role: ImageRole,
     extent: PhysicalSize,
@@ -695,13 +687,13 @@ pub(crate) struct ImageIntent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ImageRetention {
+pub(super) enum ImageRetention {
     Transient,
     PersistentImageAtlas,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum BufferRole {
+pub(super) enum BufferRole {
     Scene,
     Config,
     InfoBinData,
@@ -731,7 +723,7 @@ pub(crate) enum BufferRole {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ImageRole {
+pub(super) enum ImageRole {
     GradientRamp,
     ImageAtlas,
 }
@@ -744,7 +736,7 @@ pub(crate) enum ImageRole {
         reason = "C03 T3 recordings are intentionally staged until T4 owns checked encoding."
     )
 )]
-pub(crate) struct Recording {
+pub(super) struct Recording {
     commands: Vec<RasterCommand>,
 }
 
@@ -755,7 +747,7 @@ pub(crate) struct Recording {
         reason = "C03 T3 recording commands are intentionally consumed by the later realization stage."
     )
 )]
-pub(crate) enum RasterCommand {
+pub(super) enum RasterCommand {
     UploadScene {
         buffer: BufferHandle,
         packed: Vec<u8>,
@@ -784,7 +776,7 @@ pub(crate) enum RasterCommand {
 }
 
 /// Builder-only state that turns symbolic requests into a completed recording.
-pub(crate) struct RecordingBuilder {
+pub(super) struct RecordingBuilder {
     next_resource_id: u64,
     commands: Vec<RasterCommand>,
     resource_intents: Vec<ResourceIntent>,
@@ -801,14 +793,14 @@ impl Default for RecordingBuilder {
 }
 
 impl RecordingBuilder {
-    pub(crate) fn upload_scene(&mut self, packed: Vec<u8>) -> Result<BufferHandle> {
+    pub(super) fn upload_scene(&mut self, packed: Vec<u8>) -> Result<BufferHandle> {
         let buffer = self.allocate_buffer(BufferRole::Scene, packed.len() as u64)?;
         self.commands
             .push(RasterCommand::UploadScene { buffer, packed });
         Ok(buffer)
     }
 
-    pub(crate) fn upload_config(&mut self, config: ConfigUniform) -> Result<BufferHandle> {
+    pub(super) fn upload_config(&mut self, config: ConfigUniform) -> Result<BufferHandle> {
         let buffer = self.allocate_buffer(
             BufferRole::Config,
             std::mem::size_of::<ConfigUniform>() as u64,
@@ -818,7 +810,7 @@ impl RecordingBuilder {
         Ok(buffer)
     }
 
-    pub(crate) fn upload_gradient_ramps(
+    pub(super) fn upload_gradient_ramps(
         &mut self,
         extent: PhysicalSize,
         ramps: Vec<u32>,
@@ -834,7 +826,7 @@ impl RecordingBuilder {
         Ok(image)
     }
 
-    pub(crate) fn new_transient_image(
+    pub(super) fn new_transient_image(
         &mut self,
         role: ImageRole,
         extent: PhysicalSize,
@@ -847,7 +839,7 @@ impl RecordingBuilder {
         )
     }
 
-    pub(crate) fn request_image_atlas(&mut self, extent: PhysicalSize) -> Result<ImageHandle> {
+    pub(super) fn request_image_atlas(&mut self, extent: PhysicalSize) -> Result<ImageHandle> {
         self.allocate_image(
             ImageRole::ImageAtlas,
             extent,
@@ -856,7 +848,7 @@ impl RecordingBuilder {
         )
     }
 
-    pub(crate) fn write_image(
+    pub(super) fn write_image(
         &mut self,
         image: ImageHandle,
         origin: [u32; 2],
@@ -869,15 +861,15 @@ impl RecordingBuilder {
         });
     }
 
-    pub(crate) fn new_buffer(&mut self, role: BufferRole, byte_len: u64) -> Result<BufferHandle> {
+    pub(super) fn new_buffer(&mut self, role: BufferRole, byte_len: u64) -> Result<BufferHandle> {
         self.allocate_buffer(role, byte_len)
     }
 
-    pub(crate) fn clear_buffer(&mut self, buffer: BufferHandle) {
+    pub(super) fn clear_buffer(&mut self, buffer: BufferHandle) {
         self.commands.push(RasterCommand::ClearBuffer(buffer));
     }
 
-    pub(crate) fn upload_mask_lut(
+    pub(super) fn upload_mask_lut(
         &mut self,
         variant: FineRasterVariant,
         samples: Vec<u8>,
@@ -891,21 +883,21 @@ impl RecordingBuilder {
         Ok(buffer)
     }
 
-    pub(crate) fn record_coarse(&mut self, dispatch: CoarseDispatch) {
+    pub(super) fn record_coarse(&mut self, dispatch: CoarseDispatch) {
         self.commands
             .push(RasterCommand::Dispatch(dispatch.into_dispatch_intent()));
     }
 
-    pub(crate) fn record_fine(&mut self, dispatch: FineDispatch) {
+    pub(super) fn record_fine(&mut self, dispatch: FineDispatch) {
         self.commands
             .push(RasterCommand::Dispatch(dispatch.into_dispatch_intent()));
     }
 
-    pub(crate) fn release(&mut self, resource: impl Into<ResourceReference>) {
+    pub(super) fn release(&mut self, resource: impl Into<ResourceReference>) {
         self.commands.push(RasterCommand::Release(resource.into()));
     }
 
-    pub(crate) fn finish(self) -> (Recording, Vec<ResourceIntent>) {
+    pub(super) fn finish(self) -> (Recording, Vec<ResourceIntent>) {
         (
             Recording {
                 commands: self.commands,
@@ -1015,17 +1007,77 @@ impl DispatchIntent {
 
 #[cfg(test)]
 impl Recording {
-    pub(crate) fn dispatches_for_test(&self) -> Vec<&DispatchIntent> {
-        self.commands
+    pub(super) fn has_fixed_schedule_for_test(&self, expected_fine: FineRasterVariant) -> bool {
+        let dispatches = self
+            .commands
             .iter()
             .filter_map(|command| match command {
                 RasterCommand::Dispatch(dispatch) => Some(dispatch),
                 _ => None,
             })
-            .collect()
+            .collect::<Vec<_>>();
+        let expected_coarse = [
+            (RasterKernel::PathTagReduce, 3),
+            (RasterKernel::PathTagScan, 4),
+            (RasterKernel::BboxClear, 2),
+            (RasterKernel::Flatten, 6),
+            (RasterKernel::DrawReduce, 3),
+            (RasterKernel::DrawLeaf, 7),
+            (RasterKernel::Binning, 8),
+            (RasterKernel::TileAlloc, 6),
+            (RasterKernel::PathCountSetup, 2),
+            (RasterKernel::PathCount, 6),
+            (RasterKernel::Backdrop, 4),
+            (RasterKernel::Coarse, 9),
+            (RasterKernel::PathTilingSetup, 3),
+            (RasterKernel::PathTiling, 6),
+        ];
+        if dispatches.len() != expected_coarse.len() + 1 {
+            return false;
+        }
+        if dispatches[..expected_coarse.len()]
+            .iter()
+            .zip(expected_coarse)
+            .any(|(dispatch, (kernel, binding_count))| {
+                dispatch.phase != RasterPhase::Coarse
+                    || dispatch.kernel != kernel
+                    || dispatch.bindings.len() != binding_count
+                    || !dispatch
+                        .bindings
+                        .iter()
+                        .all(|binding| matches!(binding, ResourceBinding::Buffer(_)))
+            })
+        {
+            return false;
+        }
+        let Some(final_dispatch) = dispatches.last() else {
+            return false;
+        };
+        let expected_kernel = match expected_fine {
+            FineRasterVariant::Area => RasterKernel::FineArea,
+            FineRasterVariant::Msaa8 => RasterKernel::FineMsaa8,
+            FineRasterVariant::Msaa16 => RasterKernel::FineMsaa16,
+        };
+        if final_dispatch.phase != RasterPhase::Fine || final_dispatch.kernel != expected_kernel {
+            return false;
+        }
+        let mut bindings = final_dispatch.bindings.iter();
+        if !(0..5).all(|_| matches!(bindings.next(), Some(ResourceBinding::Buffer(_))))
+            || !matches!(bindings.next(), Some(ResourceBinding::TargetOutput))
+            || !matches!(bindings.next(), Some(ResourceBinding::Image(_)))
+            || !matches!(bindings.next(), Some(ResourceBinding::Image(_)))
+        {
+            return false;
+        }
+        if !matches!(expected_fine, FineRasterVariant::Area)
+            && !matches!(bindings.next(), Some(ResourceBinding::Buffer(_)))
+        {
+            return false;
+        }
+        bindings.next().is_none()
     }
 
-    pub(crate) fn is_self_consistent_for_test(&self, intents: &[ResourceIntent]) -> bool {
+    pub(super) fn is_self_consistent_for_test(&self, intents: &[ResourceIntent]) -> bool {
         let mut known = Vec::with_capacity(intents.len());
         let mut persistent = Vec::new();
         for intent in intents {
@@ -1136,7 +1188,7 @@ impl Recording {
         released.len() + persistent.len() == known.len()
     }
 
-    pub(crate) fn final_dispatch_targets_output_for_test(&self) -> bool {
+    pub(super) fn final_dispatch_targets_output_for_test(&self) -> bool {
         self.commands
             .iter()
             .rev()
@@ -1154,39 +1206,8 @@ impl Recording {
 }
 
 #[cfg(test)]
-impl DispatchIntent {
-    pub(crate) const fn phase_for_test(&self) -> RasterPhase {
-        self.phase
-    }
-
-    pub(crate) const fn kernel_for_test(&self) -> RasterKernel {
-        self.kernel
-    }
-
-    pub(crate) const fn fine_variant_for_test(&self) -> Option<FineRasterVariant> {
-        match self.kernel {
-            RasterKernel::FineArea => Some(FineRasterVariant::Area),
-            RasterKernel::FineMsaa8 => Some(FineRasterVariant::Msaa8),
-            RasterKernel::FineMsaa16 => Some(FineRasterVariant::Msaa16),
-            _ => None,
-        }
-    }
-
-    pub(crate) fn binding_kinds_for_test(&self) -> Vec<DispatchBindingKind> {
-        self.bindings
-            .iter()
-            .map(|binding| match binding {
-                ResourceBinding::Buffer(_) => DispatchBindingKind::Buffer,
-                ResourceBinding::Image(_) => DispatchBindingKind::Image,
-                ResourceBinding::TargetOutput => DispatchBindingKind::TargetOutput,
-            })
-            .collect()
-    }
-}
-
-#[cfg(test)]
 impl ResourceIntent {
-    pub(crate) const fn is_persistent_image_atlas_for_test(&self) -> bool {
+    pub(super) const fn is_persistent_image_atlas_for_test(&self) -> bool {
         matches!(
             self,
             Self::Image(ImageIntent {
@@ -1197,7 +1218,7 @@ impl ResourceIntent {
         )
     }
 
-    pub(crate) const fn is_transient_buffer_for_test(&self) -> bool {
+    pub(super) const fn is_transient_buffer_for_test(&self) -> bool {
         matches!(self, Self::Buffer(_))
     }
 }

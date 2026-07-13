@@ -8,6 +8,8 @@ use vello_encoding::{Encoding, RenderConfig, Resolver, make_mask_lut, make_mask_
 
 use crate::{Antialiasing, Error, PhysicalSize, Result};
 
+#[cfg(test)]
+use super::PreparedVelloPassObservation;
 use super::recording::{
     BinningBindings, BufferHandle, BufferRole, ClipLeafBindings, CoarseDispatch,
     CoarseRasterBindings, DrawLeafBindings, FineDispatch, FineDispatchBindings, FineRasterVariant,
@@ -81,7 +83,7 @@ impl RasterParameters {
         reason = "C03 T3 target intent is consumed by the later transaction-owned realization stage."
     )
 )]
-pub(crate) struct RasterTargetIntent {
+struct RasterTargetIntent {
     extent: PhysicalSize,
     format: RasterImageFormat,
     access: RasterTargetAccess,
@@ -92,7 +94,7 @@ enum RasterTargetAccess {
     StorageWrite,
 }
 
-/// A private prepared pass that has no runtime resource or submission authority.
+/// An opaque prepared pass that has no runtime resource or submission authority.
 #[cfg_attr(
     not(test),
     expect(
@@ -609,26 +611,38 @@ fn validate_target_dimension(field: &'static str, value: u32) -> Result<()> {
 
 #[cfg(test)]
 impl PreparedVelloPass {
-    pub(crate) const fn recording_for_test(&self) -> &Recording {
-        &self.recording
-    }
-
-    pub(crate) const fn target_intent_for_test(&self) -> &RasterTargetIntent {
-        &self.target_intent
-    }
-
-    pub(crate) fn resource_intents_for_test(&self) -> &[ResourceIntent] {
-        &self.resource_intents
+    pub(super) fn observation_for_test(&self) -> PreparedVelloPassObservation {
+        PreparedVelloPassObservation {
+            target_extent: self.target_intent.extent,
+            is_rgba8_storage: self.target_intent.is_rgba8_storage_for_test(),
+            final_dispatch_targets_output: self.recording.final_dispatch_targets_output_for_test(),
+            is_self_consistent: self
+                .recording
+                .is_self_consistent_for_test(&self.resource_intents),
+            has_area_schedule: self
+                .recording
+                .has_fixed_schedule_for_test(FineRasterVariant::Area),
+            has_msaa8_schedule: self
+                .recording
+                .has_fixed_schedule_for_test(FineRasterVariant::Msaa8),
+            has_msaa16_schedule: self
+                .recording
+                .has_fixed_schedule_for_test(FineRasterVariant::Msaa16),
+            has_persistent_image_atlas: self
+                .resource_intents
+                .iter()
+                .any(ResourceIntent::is_persistent_image_atlas_for_test),
+            has_transient_buffer: self
+                .resource_intents
+                .iter()
+                .any(ResourceIntent::is_transient_buffer_for_test),
+        }
     }
 }
 
 #[cfg(test)]
 impl RasterTargetIntent {
-    pub(crate) const fn extent_for_test(&self) -> PhysicalSize {
-        self.extent
-    }
-
-    pub(crate) const fn is_rgba8_storage_for_test(&self) -> bool {
+    const fn is_rgba8_storage_for_test(&self) -> bool {
         matches!(self.format, RasterImageFormat::Rgba8Unorm)
             && matches!(self.access, RasterTargetAccess::StorageWrite)
     }

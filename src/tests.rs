@@ -1,11 +1,8 @@
 use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
 use super::vello_engine::{
+    RasterParameters, RasterRecorder,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
-    raster::{RasterParameters, RasterRecorder},
-    recording::{
-        BufferRole, CoarseDispatch, DispatchBindingKind, FineRasterVariant, RasterKernel,
-        RasterPhase, RecordingBuilder,
-    },
+    prepared_vello_pass_observation_for_test,
     scene::VelloScene,
 };
 use super::{
@@ -64,10 +61,10 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
     .expect("a non-empty target must prepare");
     let mut recorder = RasterRecorder::default();
 
-    for (antialiasing, expected_fine) in [
-        (Antialiasing::Area, FineRasterVariant::Area),
-        (Antialiasing::Msaa8, FineRasterVariant::Msaa8),
-        (Antialiasing::Msaa16, FineRasterVariant::Msaa16),
+    for antialiasing in [
+        Antialiasing::Area,
+        Antialiasing::Msaa8,
+        Antialiasing::Msaa16,
     ] {
         let prepared = recorder
             .prepare(
@@ -75,112 +72,29 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
                 parameters.with_antialiasing(antialiasing),
             )
             .expect("recording preparation must not require a runtime resource");
-        let target = prepared.target_intent_for_test();
-        assert_eq!(target.extent_for_test(), PhysicalSize::new(64, 48));
-        assert!(target.is_rgba8_storage_for_test());
-
-        let recording = prepared.recording_for_test();
-        assert!(recording.final_dispatch_targets_output_for_test());
-        assert!(recording.is_self_consistent_for_test(prepared.resource_intents_for_test()));
-        let dispatches = recording.dispatches_for_test();
-        let first_fine = dispatches
-            .iter()
-            .position(|dispatch| dispatch.phase_for_test() == RasterPhase::Fine)
-            .expect("the prepared recording must contain a fine raster phase");
-        assert!(
-            dispatches[..first_fine]
-                .iter()
-                .all(|dispatch| dispatch.phase_for_test() == RasterPhase::Coarse)
-        );
-        assert!(
-            dispatches[first_fine..]
-                .iter()
-                .all(|dispatch| dispatch.phase_for_test() == RasterPhase::Fine)
-        );
-        assert!(
-            dispatches[..first_fine]
-                .iter()
-                .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::Coarse)
-        );
-        assert!(
-            dispatches[..first_fine]
-                .iter()
-                .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::PathTiling)
-        );
-        let buffers = |count| vec![DispatchBindingKind::Buffer; count];
+        let observation = prepared_vello_pass_observation_for_test(&prepared);
         assert_eq!(
-            dispatches[..first_fine]
-                .iter()
-                .map(|dispatch| {
-                    (
-                        dispatch.kernel_for_test(),
-                        dispatch.binding_kinds_for_test(),
-                    )
-                })
-                .collect::<Vec<_>>(),
-            vec![
-                (RasterKernel::PathTagReduce, buffers(3)),
-                (RasterKernel::PathTagScan, buffers(4)),
-                (RasterKernel::BboxClear, buffers(2)),
-                (RasterKernel::Flatten, buffers(6)),
-                (RasterKernel::DrawReduce, buffers(3)),
-                (RasterKernel::DrawLeaf, buffers(7)),
-                (RasterKernel::Binning, buffers(8)),
-                (RasterKernel::TileAlloc, buffers(6)),
-                (RasterKernel::PathCountSetup, buffers(2)),
-                (RasterKernel::PathCount, buffers(6)),
-                (RasterKernel::Backdrop, buffers(4)),
-                (RasterKernel::Coarse, buffers(9)),
-                (RasterKernel::PathTilingSetup, buffers(3)),
-                (RasterKernel::PathTiling, buffers(6)),
-            ]
+            observation.target_extent_for_test(),
+            PhysicalSize::new(64, 48)
         );
-        assert_eq!(
-            dispatches[first_fine..].len(),
-            1,
-            "the prepared pass must select exactly one fine raster operation"
-        );
-        let final_dispatch = dispatches
-            .last()
-            .expect("the fine phase must end in one selected raster variant");
-        assert_eq!(final_dispatch.fine_variant_for_test(), Some(expected_fine));
-        let mut expected_fine_bindings = buffers(5);
-        expected_fine_bindings.extend([
-            DispatchBindingKind::TargetOutput,
-            DispatchBindingKind::Image,
-            DispatchBindingKind::Image,
-        ]);
-        if !matches!(expected_fine, FineRasterVariant::Area) {
-            expected_fine_bindings.push(DispatchBindingKind::Buffer);
-        }
-        assert_eq!(
-            final_dispatch.binding_kinds_for_test(),
-            expected_fine_bindings
-        );
-        assert!(
-            prepared
-                .resource_intents_for_test()
-                .iter()
-                .any(|intent| intent.is_persistent_image_atlas_for_test())
-        );
-        assert!(
-            prepared
-                .resource_intents_for_test()
-                .iter()
-                .any(|intent| intent.is_transient_buffer_for_test())
-        );
+        assert!(observation.is_rgba8_storage_for_test());
+        assert!(observation.final_dispatch_targets_output_for_test());
+        assert!(observation.is_self_consistent_for_test());
+        let has_fixed_schedule = match antialiasing {
+            Antialiasing::Area => observation.has_area_schedule_for_test(),
+            Antialiasing::Msaa8 => observation.has_msaa8_schedule_for_test(),
+            Antialiasing::Msaa16 => observation.has_msaa16_schedule_for_test(),
+        };
+        assert!(has_fixed_schedule);
+        assert!(observation.has_persistent_image_atlas_for_test());
+        assert!(observation.has_transient_buffer_for_test());
     }
 
     let empty_prepared = RasterRecorder::default()
         .prepare(&vello_encoding::Encoding::new(), parameters)
         .expect("an empty Vello encoding must still produce a typed raster schedule");
-    assert!(
-        empty_prepared
-            .recording_for_test()
-            .dispatches_for_test()
-            .iter()
-            .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::FineArea)
-    );
+    let empty_observation = prepared_vello_pass_observation_for_test(&empty_prepared);
+    assert!(empty_observation.has_area_schedule_for_test());
 
     let zero_width = RasterParameters::try_new(
         PhysicalSize::new(0, 48),
@@ -215,28 +129,6 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
         assert_eq!(diagnostic.field(), field);
         assert_eq!(diagnostic.value(), (u32::MAX - 14).to_string());
     }
-
-    let mut typed_recording = RecordingBuilder::default();
-    let config = typed_recording
-        .new_buffer(BufferRole::Config, 4)
-        .expect("a typed coarse descriptor needs a config buffer");
-    let scene = typed_recording
-        .new_buffer(BufferRole::Scene, 4)
-        .expect("a typed coarse descriptor needs a scene buffer");
-    let path_reduced = typed_recording
-        .new_buffer(BufferRole::PathReduced, 4)
-        .expect("a typed coarse descriptor needs a path-reduced buffer");
-    typed_recording.record_coarse(CoarseDispatch::path_tag_reduce(
-        (1, 1, 1),
-        config,
-        scene,
-        path_reduced,
-    ));
-    typed_recording.release(config);
-    typed_recording.release(scene);
-    typed_recording.release(path_reduced);
-    let (typed_recording, typed_intents) = typed_recording.finish();
-    assert!(typed_recording.is_self_consistent_for_test(&typed_intents));
 }
 
 #[test]
