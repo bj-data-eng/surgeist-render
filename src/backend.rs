@@ -12,7 +12,7 @@ use super::surface::PresentedLifecycle;
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::PresentedSurface;
-use super::surface::{HeadlessResources, SurfaceBackend};
+use super::surface::{HeadlessPublication, SurfaceBackend};
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
     TransactionTargetIntent, VelloEngineState, VelloResourceManager, scene::VelloScene,
@@ -1616,6 +1616,39 @@ pub(crate) struct RenderTimings {
     pub(crate) present_time: Duration,
 }
 
+/// Private result of a clean frame transaction, held until the renderer publishes it.
+#[must_use = "clean frame results must be committed or dropped"]
+pub(crate) struct SurfaceFrameCommit {
+    timings: RenderTimings,
+    headless_publication: Option<HeadlessPublication>,
+}
+
+impl SurfaceFrameCommit {
+    fn without_headless_publication(timings: RenderTimings) -> Self {
+        Self {
+            timings,
+            headless_publication: None,
+        }
+    }
+
+    fn headless(publication: HeadlessPublication, timings: RenderTimings) -> Self {
+        Self {
+            timings,
+            headless_publication: Some(publication),
+        }
+    }
+
+    pub(crate) const fn timings(&self) -> RenderTimings {
+        self.timings
+    }
+
+    pub(crate) fn commit(self, surface: &mut Surface) {
+        if let Some(publication) = self.headless_publication {
+            surface.commit_headless_publication(publication);
+        }
+    }
+}
+
 pub(crate) async fn render_internal_vello_surface(
     backend: &mut Backend,
     transaction: GpuOperationTransaction,
@@ -1623,28 +1656,26 @@ pub(crate) async fn render_internal_vello_surface(
     scene: &VelloScene,
     parameters: Parameters,
     antialiasing: Antialiasing,
-) -> Result<RenderTimings> {
+) -> Result<SurfaceFrameCommit> {
     match &mut surface.backend {
-        SurfaceBackend::ContractOnly { .. } => Ok(RenderTimings::default()),
+        SurfaceBackend::ContractOnly { .. } => Ok(
+            SurfaceFrameCommit::without_headless_publication(RenderTimings::default()),
+        ),
         SurfaceBackend::Headless {
             device_identity,
-            resources,
             physical_size,
+            ..
         } => {
             if physical_size.width() == 0 || physical_size.height() == 0 {
-                return Ok(RenderTimings::default());
+                return Ok(SurfaceFrameCommit::without_headless_publication(
+                    RenderTimings::default(),
+                ));
             }
-            if matches!(resources, HeadlessResources::Pending) {
-                let (texture, view) = backend.create_headless_surface_texture(
-                    *device_identity,
-                    *physical_size,
-                    surface.options.format,
-                )?;
-                *resources = HeadlessResources::Ready { texture, view };
-            }
-            let HeadlessResources::Ready { view, .. } = resources else {
-                unreachable!("headless resources must be ready before internal raster encoding");
-            };
+            let (texture, view) = backend.create_headless_surface_texture(
+                *device_identity,
+                *physical_size,
+                surface.options.format,
+            )?;
             let render_start = Instant::now();
             backend
                 .render_internal_vello_to_texture(
@@ -1653,7 +1684,7 @@ pub(crate) async fn render_internal_vello_surface(
                         identity: *device_identity,
                         operation: RuntimeOperation::SurfaceRendering,
                         scene,
-                        target: view,
+                        target: &view,
                         target_extent: *physical_size,
                         base_color: parameters.base_color,
                         antialiasing,
@@ -1663,10 +1694,13 @@ pub(crate) async fn render_internal_vello_surface(
                     },
                 )
                 .await?;
-            Ok(RenderTimings {
-                render_time: render_start.elapsed(),
-                present_time: Duration::ZERO,
-            })
+            Ok(SurfaceFrameCommit::headless(
+                HeadlessPublication::new(texture, view),
+                RenderTimings {
+                    render_time: render_start.elapsed(),
+                    present_time: Duration::ZERO,
+                },
+            ))
         }
         #[cfg(any(
             feature = "render-window",
@@ -1688,7 +1722,9 @@ pub(crate) async fn render_internal_vello_surface(
                     };
                 }
                 PresentedLifecycle::NonRenderable { .. } | PresentedLifecycle::Lost => {
-                    return Ok(RenderTimings::default());
+                    return Ok(SurfaceFrameCommit::without_headless_publication(
+                        RenderTimings::default(),
+                    ));
                 }
                 PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
             }
@@ -1729,10 +1765,12 @@ pub(crate) async fn render_internal_vello_surface(
                 }
                 wgpu::CurrentSurfaceTexture::Occluded => {
                     *lifecycle = PresentedLifecycle::Occluded { resizing };
-                    return Ok(RenderTimings {
-                        render_time,
-                        present_time: present_start.elapsed(),
-                    });
+                    return Ok(SurfaceFrameCommit::without_headless_publication(
+                        RenderTimings {
+                            render_time,
+                            present_time: present_start.elapsed(),
+                        },
+                    ));
                 }
                 wgpu::CurrentSurfaceTexture::Timeout => {
                     return Err(Error::new(
@@ -1772,10 +1810,12 @@ pub(crate) async fn render_internal_vello_surface(
             );
             queue.submit([encoder.finish()]);
             surface_texture.present();
-            Ok(RenderTimings {
-                render_time,
-                present_time: present_start.elapsed(),
-            })
+            Ok(SurfaceFrameCommit::without_headless_publication(
+                RenderTimings {
+                    render_time,
+                    present_time: present_start.elapsed(),
+                },
+            ))
         }
     }
 }

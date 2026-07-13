@@ -1,5 +1,3 @@
-#[cfg(test)]
-use super::gpu_transaction::GpuOperationTransaction;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -31,6 +29,23 @@ pub struct Renderer {
     uploaded_images: HashSet<ImageId>,
     backend: Option<Backend>,
     default_device: Option<DeviceSlotIdentity>,
+}
+
+struct RenderPublication {
+    frame: SurfaceFrameCommit,
+    stats: Stats,
+    uploaded_images: HashSet<ImageId>,
+    parameters: Parameters,
+}
+
+impl RenderPublication {
+    fn commit(self, renderer: &mut Renderer, surface: &mut Surface) -> Stats {
+        self.frame.commit(surface);
+        renderer.stats = self.stats;
+        renderer.uploaded_images = self.uploaded_images;
+        surface.last_parameters = Some(self.parameters);
+        self.stats
+    }
 }
 
 impl Renderer {
@@ -330,7 +345,7 @@ impl Renderer {
             GpuOperationStage::Render,
             RuntimeOperation::SurfaceRendering,
         )?;
-        let timings = render_internal_vello_surface(
+        let frame = render_internal_vello_surface(
             backend,
             transaction,
             surface,
@@ -340,18 +355,25 @@ impl Renderer {
         )
         .await;
         backend.observe_device_terminal(device_identity);
-        let timings = timings?;
+        let frame = frame?;
+        let timings = frame.timings();
         stats.render_time = timings.render_time;
         stats.present_time = timings.present_time;
         stats.frame_time = frame_start.elapsed();
         let mut published = None;
-        GpuOperationDraft::new(&mut published, (stats, uploaded_images, parameters)).commit();
-        let (stats, uploaded_images, parameters) =
+        GpuOperationDraft::new(
+            &mut published,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+        )
+        .commit();
+        let publication =
             published.expect("a clean GPU transaction must commit its staged public state");
-        self.stats = stats;
-        self.uploaded_images = uploaded_images;
-        surface.last_parameters = Some(parameters);
-        Ok(stats)
+        Ok(publication.commit(self, surface))
     }
 
     /// Resumes a compatible surface, awaiting recreation when it is presented.
@@ -774,21 +796,6 @@ impl Renderer {
         let (device, queue) =
             backend.device_queue(device_identity, RuntimeOperation::SurfaceReadback)?;
         read_texture_rgba(device, queue, &destination_texture, PhysicalSize::new(2, 2))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn start_default_gpu_operation_for_test(
-        &mut self,
-    ) -> Option<GpuOperationTransaction> {
-        let device_identity = self.default_device?;
-        self.backend
-            .as_mut()?
-            .begin_gpu_operation(
-                device_identity,
-                GpuOperationStage::Render,
-                RuntimeOperation::SurfaceRendering,
-            )
-            .ok()
     }
 
     #[cfg(test)]

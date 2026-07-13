@@ -235,6 +235,16 @@ impl Surface {
             } => Some(*device_identity),
         }
     }
+
+    pub(crate) fn commit_headless_publication(&mut self, publication: HeadlessPublication) {
+        let SurfaceBackend::Headless { resources, .. } = &mut self.backend else {
+            unreachable!("only a headless surface can commit a headless publication");
+        };
+        *resources = HeadlessResources::Ready {
+            texture: publication.texture,
+            view: publication.view,
+        };
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -378,8 +388,24 @@ pub(crate) enum HeadlessResources {
     Pending,
     Ready {
         texture: wgpu::Texture,
+        #[expect(
+            dead_code,
+            reason = "the publication retains its paired texture view for later GPU consumers"
+        )]
         view: wgpu::TextureView,
     },
+}
+
+#[must_use = "headless frame publications must be committed or dropped"]
+pub(crate) struct HeadlessPublication {
+    pub(crate) texture: wgpu::Texture,
+    pub(crate) view: wgpu::TextureView,
+}
+
+impl HeadlessPublication {
+    pub(crate) const fn new(texture: wgpu::Texture, view: wgpu::TextureView) -> Self {
+        Self { texture, view }
+    }
 }
 
 impl HeadlessResources {

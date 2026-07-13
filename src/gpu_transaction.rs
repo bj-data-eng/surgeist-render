@@ -20,6 +20,7 @@ use super::vello_engine::VelloResourceAllocationSummaryForTest;
 #[cfg(test)]
 thread_local! {
     static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
+    static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
 }
 
 /// Private ownership stage for a render-owned GPU operation.
@@ -276,6 +277,81 @@ pub(crate) struct AfterInternalVelloSubmitCheckpointForTest {
     reached: SyncSender<()>,
 }
 
+/// Private test control applied by the production submission path after `queue.submit`.
+#[cfg(test)]
+#[derive(Clone)]
+enum InternalVelloPostSubmitControlForTest {
+    Fail,
+    Pause(SyncSender<()>),
+}
+
+#[cfg(test)]
+pub(crate) struct ScopedInternalVelloPostSubmitControlForTest {
+    reached: Option<Receiver<()>>,
+    previous: Option<InternalVelloPostSubmitControlForTest>,
+}
+
+#[cfg(test)]
+impl ScopedInternalVelloPostSubmitControlForTest {
+    pub(crate) fn failing() -> Self {
+        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST
+            .with(|active| active.replace(Some(InternalVelloPostSubmitControlForTest::Fail)));
+        Self {
+            reached: None,
+            previous,
+        }
+    }
+
+    pub(crate) fn paused() -> Self {
+        let (reached, observed) = sync_channel(1);
+        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(InternalVelloPostSubmitControlForTest::Pause(reached)))
+        });
+        Self {
+            reached: Some(observed),
+            previous,
+        }
+    }
+
+    pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
+        self.reached
+            .as_ref()
+            .expect("only a paused post-submit control has a submission receiver")
+            .recv_timeout(deadline)
+            .expect(
+                "the real production submission did not reach the bounded post-submit checkpoint",
+            );
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedInternalVelloPostSubmitControlForTest {
+    fn drop(&mut self) {
+        ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+impl InternalVelloPostSubmitControlForTest {
+    async fn apply(self) -> Result<()> {
+        match self {
+            Self::Fail => Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "test-injected scoped failure after internal Vello submission",
+            )),
+            Self::Pause(reached) => {
+                reached
+                    .send(())
+                    .expect("the production render test must observe the post-submit checkpoint");
+                std::future::pending::<()>().await;
+                Ok(())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 impl AfterInternalVelloSubmitCheckpointForTest {
     pub(crate) fn paused() -> (Self, Receiver<()>) {
@@ -448,6 +524,12 @@ impl GpuOperationTransaction {
         #[cfg(test)]
         if let Some(checkpoint) = after_submit_checkpoint {
             checkpoint.wait().await;
+        }
+        #[cfg(test)]
+        if let Some(control) = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST
+            .with(|active| active.borrow().clone())
+        {
+            control.apply().await?;
         }
         match self.finish(operation).await {
             Ok(()) => {

@@ -1,4 +1,6 @@
-use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationStage};
+use super::gpu_transaction::{
+    GpuOperationLease, GpuOperationStage, ScopedInternalVelloPostSubmitControlForTest,
+};
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
@@ -28,7 +30,7 @@ use super::{
 };
 use std::{
     fs,
-    future::{Future, pending},
+    future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     path::PathBuf,
     process::Command,
@@ -14701,55 +14703,39 @@ fn terminal_record_snapshots_share_identity_and_keep_the_first_record() {
 #[test]
 fn dropped_gpu_operation_future_aborts_draft_state_and_leases() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    if let Some(transaction) = renderer.start_default_gpu_operation_for_test() {
-        let mut published = None;
-        {
-            let future = async {
-                let draft = GpuOperationDraft::new(&mut published, true);
-                pending::<()>().await;
-                transaction
-                    .finish(RuntimeOperation::SurfaceRendering)
-                    .await?;
-                draft.commit();
-                Result::<()>::Ok(())
-            };
-            let mut future = std::pin::pin!(future);
-            let mut context = Context::from_waker(Waker::noop());
-            assert!(matches!(
-                Future::poll(future.as_mut(), &mut context),
-                Poll::Pending
-            ));
-            assert!(
-                renderer
-                    .default_device_active_operation_generation_for_test()
-                    .is_some()
-            );
-        }
-        assert_eq!(published, None);
-        assert_eq!(
-            renderer.default_device_active_operation_generation_for_test(),
-            None
-        );
-        return;
-    }
-
-    let signal = super::backend::DeviceSignal::new_for_test();
-    let mut published = None;
-    let future = async {
-        let draft = GpuOperationDraft::new(&mut published, true);
-        let lease = GpuOperationLease::begin_for_test(&signal).unwrap();
-        assert!(signal.active_generation_for_test().is_some());
-        pending::<()>().await;
-        drop(lease);
-        draft.commit();
-    };
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    let pause = ScopedInternalVelloPostSubmitControlForTest::paused();
     {
+        let future = renderer.render(&mut surface, &scene, Parameters::default());
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
-        assert_eq!(Future::poll(future.as_mut(), &mut context), Poll::Pending);
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        pause.wait_for_submission_for_test(Duration::from_secs(2));
     }
-    assert_eq!(published, None);
-    assert_eq!(signal.active_generation_for_test(), None);
+    drop(pause);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "dropping the production render future must release its active transaction lease"
+    );
+    assert_eq!(
+        surface.resource_state(),
+        SurfaceResourceState::PendingAllocation
+    );
+    let error = renderer
+        .read_headless(&surface)
+        .expect_err("a canceled first frame must not publish readable bytes");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceReadback,
+        RenderSurfaceAvailability::Uninitialized,
+    );
 }
 
 #[test]
@@ -17580,6 +17566,131 @@ fn unsupported_path_shadows_report_typed_error() {
 }
 
 #[test]
+fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+    let mut first = Scene::new();
+    first.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &first, Parameters::default()))
+        .expect("the first frame must establish a readable publication");
+    let published = renderer
+        .read_headless(&surface)
+        .expect("the first frame publication must be readable");
+
+    let mut replacement = Scene::new();
+    replacement.fill(
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    let failure = ScopedInternalVelloPostSubmitControlForTest::failing();
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &replacement, Parameters::default()))
+            .expect_err("the scoped post-submit failure must abort the replacement frame");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    drop(failure);
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    assert_eq!(
+        renderer
+            .read_headless(&surface)
+            .expect("a failed frame must retain the previous publication")
+            .rgba,
+        published.rgba,
+        "a failed submitted frame must not overwrite readable published pixels"
+    );
+
+    let pause = ScopedInternalVelloPostSubmitControlForTest::paused();
+    {
+        let future = renderer.render(&mut surface, &replacement, Parameters::default());
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        pause.wait_for_submission_for_test(Duration::from_secs(2));
+    }
+    drop(pause);
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    assert_eq!(
+        renderer
+            .read_headless(&surface)
+            .expect("a canceled frame must retain the previous publication")
+            .rgba,
+        published.rgba,
+        "a canceled submitted frame must not overwrite readable published pixels"
+    );
+
+    let mut uninitialized =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+    let failure = ScopedInternalVelloPostSubmitControlForTest::failing();
+    pollster::block_on(renderer.render(&mut uninitialized, &replacement, Parameters::default()))
+        .expect_err("a failed first frame must not create a publication");
+    drop(failure);
+    assert_eq!(
+        uninitialized.resource_state(),
+        SurfaceResourceState::PendingAllocation
+    );
+    let error = renderer
+        .read_headless(&uninitialized)
+        .expect_err("a failed first frame must remain unreadable");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceReadback,
+        RenderSurfaceAvailability::Uninitialized,
+    );
+}
+
+#[test]
+fn failed_frame_returns_all_leases_and_preserves_last_successful_stats() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+    let mut first = Scene::new();
+    first.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    let last_successful =
+        pollster::block_on(renderer.render(&mut surface, &first, Parameters::default()))
+            .expect("the first frame must commit stats before failure coverage");
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the successful frame must retain a ready device")
+        .internal_resource_manager_observation_for_test();
+
+    let mut failing_scene = Scene::new();
+    failing_scene.fill(
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    let failure = ScopedInternalVelloPostSubmitControlForTest::failing();
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &failing_scene, Parameters::default()))
+            .expect_err("the scoped post-submit failure must abort the frame");
+    drop(failure);
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(renderer.stats(), last_successful);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "the failed frame must return its transaction lease"
+    );
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("a scoped frame failure must not terminally lose the device")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(
+        resources_after.retained_count_for_test(),
+        resources_before.retained_count_for_test(),
+        "the failed frame must not retain an additional internal resource lease"
+    );
+    assert_eq!(
+        resources_after.retained_atlas_byte_len_for_test(),
+        resources_before.retained_atlas_byte_len_for_test(),
+        "the failed frame must preserve the prior committed resource allocation"
+    );
+}
+
+#[test]
 fn headless_render_can_be_read_back() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
@@ -17590,6 +17701,7 @@ fn headless_render_can_be_read_back() {
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let image = renderer.read_headless(&surface).unwrap();
 
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     assert_eq!(image.size, PhysicalSize::new(4, 4));
     assert_eq!(image.rgba.len(), 4 * 4 * 4);
     assert!(image.rgba.iter().any(|channel| *channel != 0));
