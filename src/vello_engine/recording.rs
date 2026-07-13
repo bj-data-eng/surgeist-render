@@ -70,21 +70,540 @@ pub(crate) enum RasterKernel {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ResourceBinding {
+enum ResourceBinding {
     Buffer(BufferHandle),
     Image(ImageHandle),
     TargetOutput,
 }
 
-impl From<BufferHandle> for ResourceBinding {
-    fn from(value: BufferHandle) -> Self {
-        Self::Buffer(value)
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum DispatchBindingKind {
+    Buffer,
+    Image,
+    TargetOutput,
+}
+
+/// The bindings accepted by the coarse draw-leaf operation.
+pub(crate) struct DrawLeafBindings {
+    pub(crate) config: BufferHandle,
+    pub(crate) scene: BufferHandle,
+    pub(crate) draw_reduced: BufferHandle,
+    pub(crate) path_bboxes: BufferHandle,
+    pub(crate) draw_monoids: BufferHandle,
+    pub(crate) info_bin_data: BufferHandle,
+    pub(crate) clip_inputs: BufferHandle,
+}
+
+/// The bindings accepted by the coarse clip-leaf operation.
+pub(crate) struct ClipLeafBindings {
+    pub(crate) config: BufferHandle,
+    pub(crate) clip_inputs: BufferHandle,
+    pub(crate) path_bboxes: BufferHandle,
+    pub(crate) clip_bics: BufferHandle,
+    pub(crate) clip_elements: BufferHandle,
+    pub(crate) draw_monoids: BufferHandle,
+    pub(crate) clip_bboxes: BufferHandle,
+}
+
+/// The bindings accepted by the coarse binning operation.
+pub(crate) struct BinningBindings {
+    pub(crate) config: BufferHandle,
+    pub(crate) draw_monoids: BufferHandle,
+    pub(crate) path_bboxes: BufferHandle,
+    pub(crate) clip_bboxes: BufferHandle,
+    pub(crate) draw_bboxes: BufferHandle,
+    pub(crate) bump: BufferHandle,
+    pub(crate) info_bin_data: BufferHandle,
+    pub(crate) bin_headers: BufferHandle,
+}
+
+/// The bindings accepted by the final coarse-raster operation.
+pub(crate) struct CoarseRasterBindings {
+    pub(crate) config: BufferHandle,
+    pub(crate) scene: BufferHandle,
+    pub(crate) draw_monoids: BufferHandle,
+    pub(crate) bin_headers: BufferHandle,
+    pub(crate) info_bin_data: BufferHandle,
+    pub(crate) paths: BufferHandle,
+    pub(crate) tile: BufferHandle,
+    pub(crate) bump: BufferHandle,
+    pub(crate) per_tile_command_list: BufferHandle,
+}
+
+/// A coarse-phase operation whose constructor fixes its kernel and binding layout.
+pub(crate) struct CoarseDispatch(DispatchIntent);
+
+impl CoarseDispatch {
+    pub(crate) fn path_tag_reduce(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        scene: BufferHandle,
+        path_reduced: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathTagReduce,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(path_reduced),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_tag_reduce2(
+        workgroups: vello_encoding::WorkgroupSize,
+        path_reduced: BufferHandle,
+        path_reduced2: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathTagReduce2,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(path_reduced),
+                ResourceBinding::Buffer(path_reduced2),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_tag_scan1(
+        workgroups: vello_encoding::WorkgroupSize,
+        path_reduced: BufferHandle,
+        path_reduced2: BufferHandle,
+        path_reduced_scan: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathTagScan1,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(path_reduced),
+                ResourceBinding::Buffer(path_reduced2),
+                ResourceBinding::Buffer(path_reduced_scan),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_tag_scan(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        scene: BufferHandle,
+        path_tag_parent: BufferHandle,
+        path_monoids: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathTagScan,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(path_tag_parent),
+                ResourceBinding::Buffer(path_monoids),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_tag_scan_large(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        scene: BufferHandle,
+        path_tag_parent: BufferHandle,
+        path_monoids: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathTagScanLarge,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(path_tag_parent),
+                ResourceBinding::Buffer(path_monoids),
+            ],
+        ))
+    }
+
+    pub(crate) fn bbox_clear(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        path_bboxes: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::BboxClear,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(path_bboxes),
+            ],
+        ))
+    }
+
+    pub(crate) fn flatten(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        scene: BufferHandle,
+        path_monoids: BufferHandle,
+        path_bboxes: BufferHandle,
+        bump: BufferHandle,
+        lines: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::Flatten,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(path_monoids),
+                ResourceBinding::Buffer(path_bboxes),
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(lines),
+            ],
+        ))
+    }
+
+    pub(crate) fn draw_reduce(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        scene: BufferHandle,
+        draw_reduced: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::DrawReduce,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(draw_reduced),
+            ],
+        ))
+    }
+
+    pub(crate) fn draw_leaf(
+        workgroups: vello_encoding::WorkgroupSize,
+        bindings: DrawLeafBindings,
+    ) -> Self {
+        let DrawLeafBindings {
+            config,
+            scene,
+            draw_reduced,
+            path_bboxes,
+            draw_monoids,
+            info_bin_data,
+            clip_inputs,
+        } = bindings;
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::DrawLeaf,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(draw_reduced),
+                ResourceBinding::Buffer(path_bboxes),
+                ResourceBinding::Buffer(draw_monoids),
+                ResourceBinding::Buffer(info_bin_data),
+                ResourceBinding::Buffer(clip_inputs),
+            ],
+        ))
+    }
+
+    pub(crate) fn clip_reduce(
+        workgroups: vello_encoding::WorkgroupSize,
+        clip_inputs: BufferHandle,
+        path_bboxes: BufferHandle,
+        clip_bics: BufferHandle,
+        clip_elements: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::ClipReduce,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(clip_inputs),
+                ResourceBinding::Buffer(path_bboxes),
+                ResourceBinding::Buffer(clip_bics),
+                ResourceBinding::Buffer(clip_elements),
+            ],
+        ))
+    }
+
+    pub(crate) fn clip_leaf(
+        workgroups: vello_encoding::WorkgroupSize,
+        bindings: ClipLeafBindings,
+    ) -> Self {
+        let ClipLeafBindings {
+            config,
+            clip_inputs,
+            path_bboxes,
+            clip_bics,
+            clip_elements,
+            draw_monoids,
+            clip_bboxes,
+        } = bindings;
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::ClipLeaf,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(clip_inputs),
+                ResourceBinding::Buffer(path_bboxes),
+                ResourceBinding::Buffer(clip_bics),
+                ResourceBinding::Buffer(clip_elements),
+                ResourceBinding::Buffer(draw_monoids),
+                ResourceBinding::Buffer(clip_bboxes),
+            ],
+        ))
+    }
+
+    pub(crate) fn binning(
+        workgroups: vello_encoding::WorkgroupSize,
+        bindings: BinningBindings,
+    ) -> Self {
+        let BinningBindings {
+            config,
+            draw_monoids,
+            path_bboxes,
+            clip_bboxes,
+            draw_bboxes,
+            bump,
+            info_bin_data,
+            bin_headers,
+        } = bindings;
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::Binning,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(draw_monoids),
+                ResourceBinding::Buffer(path_bboxes),
+                ResourceBinding::Buffer(clip_bboxes),
+                ResourceBinding::Buffer(draw_bboxes),
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(info_bin_data),
+                ResourceBinding::Buffer(bin_headers),
+            ],
+        ))
+    }
+
+    pub(crate) fn tile_alloc(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        scene: BufferHandle,
+        draw_bboxes: BufferHandle,
+        bump: BufferHandle,
+        paths: BufferHandle,
+        tile: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::TileAlloc,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(draw_bboxes),
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(paths),
+                ResourceBinding::Buffer(tile),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_count_setup(
+        workgroups: vello_encoding::WorkgroupSize,
+        bump: BufferHandle,
+        indirect_count: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathCountSetup,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(indirect_count),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_count(
+        indirect_count: BufferHandle,
+        config: BufferHandle,
+        bump: BufferHandle,
+        lines: BufferHandle,
+        paths: BufferHandle,
+        tile: BufferHandle,
+        segment_counts: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_indirect(
+            RasterKernel::PathCount,
+            indirect_count,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(lines),
+                ResourceBinding::Buffer(paths),
+                ResourceBinding::Buffer(tile),
+                ResourceBinding::Buffer(segment_counts),
+            ],
+        ))
+    }
+
+    pub(crate) fn backdrop(
+        workgroups: vello_encoding::WorkgroupSize,
+        config: BufferHandle,
+        bump: BufferHandle,
+        paths: BufferHandle,
+        tile: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::Backdrop,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(paths),
+                ResourceBinding::Buffer(tile),
+            ],
+        ))
+    }
+
+    pub(crate) fn coarse(
+        workgroups: vello_encoding::WorkgroupSize,
+        bindings: CoarseRasterBindings,
+    ) -> Self {
+        let CoarseRasterBindings {
+            config,
+            scene,
+            draw_monoids,
+            bin_headers,
+            info_bin_data,
+            paths,
+            tile,
+            bump,
+            per_tile_command_list,
+        } = bindings;
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::Coarse,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(config),
+                ResourceBinding::Buffer(scene),
+                ResourceBinding::Buffer(draw_monoids),
+                ResourceBinding::Buffer(bin_headers),
+                ResourceBinding::Buffer(info_bin_data),
+                ResourceBinding::Buffer(paths),
+                ResourceBinding::Buffer(tile),
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(per_tile_command_list),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_tiling_setup(
+        workgroups: vello_encoding::WorkgroupSize,
+        bump: BufferHandle,
+        indirect_count: BufferHandle,
+        per_tile_command_list: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_direct(
+            RasterKernel::PathTilingSetup,
+            workgroups,
+            vec![
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(indirect_count),
+                ResourceBinding::Buffer(per_tile_command_list),
+            ],
+        ))
+    }
+
+    pub(crate) fn path_tiling(
+        indirect_count: BufferHandle,
+        bump: BufferHandle,
+        segment_counts: BufferHandle,
+        lines: BufferHandle,
+        paths: BufferHandle,
+        tile: BufferHandle,
+        segments: BufferHandle,
+    ) -> Self {
+        Self(DispatchIntent::coarse_indirect(
+            RasterKernel::PathTiling,
+            indirect_count,
+            vec![
+                ResourceBinding::Buffer(bump),
+                ResourceBinding::Buffer(segment_counts),
+                ResourceBinding::Buffer(lines),
+                ResourceBinding::Buffer(paths),
+                ResourceBinding::Buffer(tile),
+                ResourceBinding::Buffer(segments),
+            ],
+        ))
+    }
+
+    fn into_dispatch_intent(self) -> DispatchIntent {
+        self.0
     }
 }
 
-impl From<ImageHandle> for ResourceBinding {
-    fn from(value: ImageHandle) -> Self {
-        Self::Image(value)
+/// The shared resources bound by every fine-phase operation.
+pub(crate) struct FineDispatchBindings {
+    pub(crate) workgroups: vello_encoding::WorkgroupSize,
+    pub(crate) config: BufferHandle,
+    pub(crate) segments: BufferHandle,
+    pub(crate) per_tile_command_list: BufferHandle,
+    pub(crate) info_bin_data: BufferHandle,
+    pub(crate) blend_spill: BufferHandle,
+    pub(crate) gradient_image: ImageHandle,
+    pub(crate) image_atlas: ImageHandle,
+}
+
+impl FineDispatchBindings {
+    fn into_parts(self) -> (vello_encoding::WorkgroupSize, Vec<ResourceBinding>) {
+        (
+            self.workgroups,
+            vec![
+                ResourceBinding::Buffer(self.config),
+                ResourceBinding::Buffer(self.segments),
+                ResourceBinding::Buffer(self.per_tile_command_list),
+                ResourceBinding::Buffer(self.info_bin_data),
+                ResourceBinding::Buffer(self.blend_spill),
+                ResourceBinding::TargetOutput,
+                ResourceBinding::Image(self.gradient_image),
+                ResourceBinding::Image(self.image_atlas),
+            ],
+        )
+    }
+}
+
+/// A fine-phase operation with a fixed final-raster kernel and binding layout.
+pub(crate) struct FineDispatch(DispatchIntent);
+
+impl FineDispatch {
+    pub(crate) fn area(bindings: FineDispatchBindings) -> Self {
+        let (workgroups, bindings) = bindings.into_parts();
+        Self(DispatchIntent::fine_direct(
+            RasterKernel::FineArea,
+            workgroups,
+            bindings,
+        ))
+    }
+
+    pub(crate) fn msaa8(bindings: FineDispatchBindings, mask_lut: BufferHandle) -> Self {
+        let (workgroups, mut bindings) = bindings.into_parts();
+        bindings.push(ResourceBinding::Buffer(mask_lut));
+        Self(DispatchIntent::fine_direct(
+            RasterKernel::FineMsaa8,
+            workgroups,
+            bindings,
+        ))
+    }
+
+    pub(crate) fn msaa16(bindings: FineDispatchBindings, mask_lut: BufferHandle) -> Self {
+        let (workgroups, mut bindings) = bindings.into_parts();
+        bindings.push(ResourceBinding::Buffer(mask_lut));
+        Self(DispatchIntent::fine_direct(
+            RasterKernel::FineMsaa16,
+            workgroups,
+            bindings,
+        ))
+    }
+
+    fn into_dispatch_intent(self) -> DispatchIntent {
+        self.0
     }
 }
 
@@ -372,37 +891,14 @@ impl RecordingBuilder {
         Ok(buffer)
     }
 
-    pub(crate) fn dispatch(
-        &mut self,
-        phase: RasterPhase,
-        kernel: RasterKernel,
-        workgroups: vello_encoding::WorkgroupSize,
-        bindings: impl IntoIterator<Item = ResourceBinding>,
-    ) {
-        self.commands.push(RasterCommand::Dispatch(DispatchIntent {
-            phase,
-            kernel,
-            workgroups,
-            bindings: bindings.into_iter().collect(),
-            indirect: None,
-        }));
+    pub(crate) fn record_coarse(&mut self, dispatch: CoarseDispatch) {
+        self.commands
+            .push(RasterCommand::Dispatch(dispatch.into_dispatch_intent()));
     }
 
-    pub(crate) fn dispatch_indirect(
-        &mut self,
-        phase: RasterPhase,
-        kernel: RasterKernel,
-        buffer: BufferHandle,
-        offset: u64,
-        bindings: impl IntoIterator<Item = ResourceBinding>,
-    ) {
-        self.commands.push(RasterCommand::Dispatch(DispatchIntent {
-            phase,
-            kernel,
-            workgroups: (0, 0, 0),
-            bindings: bindings.into_iter().collect(),
-            indirect: Some(IndirectDispatch { buffer, offset }),
-        }));
+    pub(crate) fn record_fine(&mut self, dispatch: FineDispatch) {
+        self.commands
+            .push(RasterCommand::Dispatch(dispatch.into_dispatch_intent()));
     }
 
     pub(crate) fn release(&mut self, resource: impl Into<ResourceReference>) {
@@ -470,6 +966,50 @@ impl RecordingBuilder {
         let id = ResourceId(self.next_resource_id);
         self.next_resource_id = next;
         Ok(id)
+    }
+}
+
+impl DispatchIntent {
+    fn coarse_direct(
+        kernel: RasterKernel,
+        workgroups: vello_encoding::WorkgroupSize,
+        bindings: Vec<ResourceBinding>,
+    ) -> Self {
+        Self {
+            phase: RasterPhase::Coarse,
+            kernel,
+            workgroups,
+            bindings,
+            indirect: None,
+        }
+    }
+
+    fn coarse_indirect(
+        kernel: RasterKernel,
+        buffer: BufferHandle,
+        bindings: Vec<ResourceBinding>,
+    ) -> Self {
+        Self {
+            phase: RasterPhase::Coarse,
+            kernel,
+            workgroups: (0, 0, 0),
+            bindings,
+            indirect: Some(IndirectDispatch { buffer, offset: 0 }),
+        }
+    }
+
+    fn fine_direct(
+        kernel: RasterKernel,
+        workgroups: vello_encoding::WorkgroupSize,
+        bindings: Vec<ResourceBinding>,
+    ) -> Self {
+        Self {
+            phase: RasterPhase::Fine,
+            kernel,
+            workgroups,
+            bindings,
+            indirect: None,
+        }
     }
 }
 
@@ -630,6 +1170,17 @@ impl DispatchIntent {
             RasterKernel::FineMsaa16 => Some(FineRasterVariant::Msaa16),
             _ => None,
         }
+    }
+
+    pub(crate) fn binding_kinds_for_test(&self) -> Vec<DispatchBindingKind> {
+        self.bindings
+            .iter()
+            .map(|binding| match binding {
+                ResourceBinding::Buffer(_) => DispatchBindingKind::Buffer,
+                ResourceBinding::Image(_) => DispatchBindingKind::Image,
+                ResourceBinding::TargetOutput => DispatchBindingKind::TargetOutput,
+            })
+            .collect()
     }
 }
 

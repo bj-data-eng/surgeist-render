@@ -9,8 +9,9 @@ use vello_encoding::{Encoding, RenderConfig, Resolver, make_mask_lut, make_mask_
 use crate::{Antialiasing, Error, PhysicalSize, Result};
 
 use super::recording::{
-    BufferHandle, BufferRole, FineRasterVariant, ImageHandle, ImageRole, RasterImageFormat,
-    RasterKernel, RasterPhase, Recording, RecordingBuilder, ResourceBinding, ResourceIntent,
+    BinningBindings, BufferHandle, BufferRole, ClipLeafBindings, CoarseDispatch,
+    CoarseRasterBindings, DrawLeafBindings, FineDispatch, FineDispatchBindings, FineRasterVariant,
+    ImageHandle, ImageRole, RasterImageFormat, Recording, RecordingBuilder, ResourceIntent,
 };
 
 #[cfg_attr(
@@ -241,12 +242,12 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         BufferRole::PathReduced,
         sizes.path_reduced.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::PathTagReduce,
+    recording.record_coarse(CoarseDispatch::path_tag_reduce(
         workgroups.path_reduce,
-        [config.into(), scene.into(), path_reduced.into()],
-    );
+        config,
+        scene,
+        path_reduced,
+    ));
 
     let mut path_tag_parent = path_reduced;
     let mut large_path_scan = None;
@@ -256,27 +257,22 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
             BufferRole::PathReduced2,
             sizes.path_reduced2.size_in_bytes(),
         )?;
-        recording.dispatch(
-            RasterPhase::Coarse,
-            RasterKernel::PathTagReduce2,
+        recording.record_coarse(CoarseDispatch::path_tag_reduce2(
             workgroups.path_reduce2,
-            [path_reduced.into(), path_reduced2.into()],
-        );
+            path_reduced,
+            path_reduced2,
+        ));
         let path_reduced_scan = buffer(
             recording,
             BufferRole::PathReducedScan,
             sizes.path_reduced_scan.size_in_bytes(),
         )?;
-        recording.dispatch(
-            RasterPhase::Coarse,
-            RasterKernel::PathTagScan1,
+        recording.record_coarse(CoarseDispatch::path_tag_scan1(
             workgroups.path_scan1,
-            [
-                path_reduced.into(),
-                path_reduced2.into(),
-                path_reduced_scan.into(),
-            ],
-        );
+            path_reduced,
+            path_reduced2,
+            path_reduced_scan,
+        ));
         path_tag_parent = path_reduced_scan;
         large_path_scan = Some((path_reduced2, path_reduced_scan));
     }
@@ -286,21 +282,23 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         BufferRole::PathMonoids,
         sizes.path_monoids.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        if workgroups.use_large_path_scan {
-            RasterKernel::PathTagScanLarge
-        } else {
-            RasterKernel::PathTagScan
-        },
-        workgroups.path_scan,
-        [
-            config.into(),
-            scene.into(),
-            path_tag_parent.into(),
-            path_monoids.into(),
-        ],
-    );
+    recording.record_coarse(if workgroups.use_large_path_scan {
+        CoarseDispatch::path_tag_scan_large(
+            workgroups.path_scan,
+            config,
+            scene,
+            path_tag_parent,
+            path_monoids,
+        )
+    } else {
+        CoarseDispatch::path_tag_scan(
+            workgroups.path_scan,
+            config,
+            scene,
+            path_tag_parent,
+            path_monoids,
+        )
+    });
     recording.release(path_reduced);
     if let Some((path_reduced2, path_reduced_scan)) = large_path_scan {
         recording.release(path_reduced2);
@@ -312,12 +310,11 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         BufferRole::PathBboxes,
         sizes.path_bboxes.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::BboxClear,
+    recording.record_coarse(CoarseDispatch::bbox_clear(
         workgroups.bbox_clear,
-        [config.into(), path_bboxes.into()],
-    );
+        config,
+        path_bboxes,
+    ));
     let bump = buffer(
         recording,
         BufferRole::Bump,
@@ -325,30 +322,26 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
     )?;
     recording.clear_buffer(bump);
     let lines = buffer(recording, BufferRole::Lines, sizes.lines.size_in_bytes())?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::Flatten,
+    recording.record_coarse(CoarseDispatch::flatten(
         workgroups.flatten,
-        [
-            config.into(),
-            scene.into(),
-            path_monoids.into(),
-            path_bboxes.into(),
-            bump.into(),
-            lines.into(),
-        ],
-    );
+        config,
+        scene,
+        path_monoids,
+        path_bboxes,
+        bump,
+        lines,
+    ));
     let draw_reduced = buffer(
         recording,
         BufferRole::DrawReduced,
         sizes.draw_reduced.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::DrawReduce,
+    recording.record_coarse(CoarseDispatch::draw_reduce(
         workgroups.draw_reduce,
-        [config.into(), scene.into(), draw_reduced.into()],
-    );
+        config,
+        scene,
+        draw_reduced,
+    ));
     let draw_monoids = buffer(
         recording,
         BufferRole::DrawMonoids,
@@ -359,20 +352,18 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         BufferRole::ClipInputs,
         sizes.clip_inps.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::DrawLeaf,
+    recording.record_coarse(CoarseDispatch::draw_leaf(
         workgroups.draw_leaf,
-        [
-            config.into(),
-            scene.into(),
-            draw_reduced.into(),
-            path_bboxes.into(),
-            draw_monoids.into(),
-            info_bin_data.into(),
-            clip_inputs.into(),
-        ],
-    );
+        DrawLeafBindings {
+            config,
+            scene,
+            draw_reduced,
+            path_bboxes,
+            draw_monoids,
+            info_bin_data,
+            clip_inputs,
+        },
+    ));
     recording.release(draw_reduced);
 
     let clip_elements = buffer(
@@ -386,17 +377,13 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         sizes.clip_bics.size_in_bytes(),
     )?;
     if workgroups.clip_reduce.0 > 0 {
-        recording.dispatch(
-            RasterPhase::Coarse,
-            RasterKernel::ClipReduce,
+        recording.record_coarse(CoarseDispatch::clip_reduce(
             workgroups.clip_reduce,
-            [
-                clip_inputs.into(),
-                path_bboxes.into(),
-                clip_bics.into(),
-                clip_elements.into(),
-            ],
-        );
+            clip_inputs,
+            path_bboxes,
+            clip_bics,
+            clip_elements,
+        ));
     }
     let clip_bboxes = buffer(
         recording,
@@ -404,20 +391,18 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         sizes.clip_bboxes.size_in_bytes(),
     )?;
     if workgroups.clip_leaf.0 > 0 {
-        recording.dispatch(
-            RasterPhase::Coarse,
-            RasterKernel::ClipLeaf,
+        recording.record_coarse(CoarseDispatch::clip_leaf(
             workgroups.clip_leaf,
-            [
-                config.into(),
-                clip_inputs.into(),
-                path_bboxes.into(),
-                clip_bics.into(),
-                clip_elements.into(),
-                draw_monoids.into(),
-                clip_bboxes.into(),
-            ],
-        );
+            ClipLeafBindings {
+                config,
+                clip_inputs,
+                path_bboxes,
+                clip_bics,
+                clip_elements,
+                draw_monoids,
+                clip_bboxes,
+            },
+        ));
     }
     recording.release(clip_inputs);
     recording.release(clip_bics);
@@ -433,38 +418,32 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         BufferRole::BinHeaders,
         sizes.bin_headers.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::Binning,
+    recording.record_coarse(CoarseDispatch::binning(
         workgroups.binning,
-        [
-            config.into(),
-            draw_monoids.into(),
-            path_bboxes.into(),
-            clip_bboxes.into(),
-            draw_bboxes.into(),
-            bump.into(),
-            info_bin_data.into(),
-            bin_headers.into(),
-        ],
-    );
+        BinningBindings {
+            config,
+            draw_monoids,
+            path_bboxes,
+            clip_bboxes,
+            draw_bboxes,
+            bump,
+            info_bin_data,
+            bin_headers,
+        },
+    ));
     recording.release(path_bboxes);
     recording.release(clip_bboxes);
 
     let paths = buffer(recording, BufferRole::Paths, sizes.paths.size_in_bytes())?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::TileAlloc,
+    recording.record_coarse(CoarseDispatch::tile_alloc(
         workgroups.tile_alloc,
-        [
-            config.into(),
-            scene.into(),
-            draw_bboxes.into(),
-            bump.into(),
-            paths.into(),
-            tile.into(),
-        ],
-    );
+        config,
+        scene,
+        draw_bboxes,
+        bump,
+        paths,
+        tile,
+    ));
     recording.release(draw_bboxes);
     recording.release(path_monoids);
 
@@ -473,80 +452,64 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         BufferRole::IndirectCount,
         sizes.indirect_count.size_in_bytes(),
     )?;
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::PathCountSetup,
+    recording.record_coarse(CoarseDispatch::path_count_setup(
         workgroups.path_count_setup,
-        [bump.into(), indirect_count.into()],
-    );
+        bump,
+        indirect_count,
+    ));
     let segment_counts = buffer(
         recording,
         BufferRole::SegmentCounts,
         sizes.seg_counts.size_in_bytes(),
     )?;
-    recording.dispatch_indirect(
-        RasterPhase::Coarse,
-        RasterKernel::PathCount,
+    recording.record_coarse(CoarseDispatch::path_count(
         indirect_count,
-        0,
-        [
-            config.into(),
-            bump.into(),
-            lines.into(),
-            paths.into(),
-            tile.into(),
-            segment_counts.into(),
-        ],
-    );
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::Backdrop,
+        config,
+        bump,
+        lines,
+        paths,
+        tile,
+        segment_counts,
+    ));
+    recording.record_coarse(CoarseDispatch::backdrop(
         workgroups.backdrop,
-        [config.into(), bump.into(), paths.into(), tile.into()],
-    );
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::Coarse,
+        config,
+        bump,
+        paths,
+        tile,
+    ));
+    recording.record_coarse(CoarseDispatch::coarse(
         workgroups.coarse,
-        [
-            config.into(),
-            scene.into(),
-            draw_monoids.into(),
-            bin_headers.into(),
-            info_bin_data.into(),
-            paths.into(),
-            tile.into(),
-            bump.into(),
-            per_tile_command_list.into(),
-        ],
-    );
+        CoarseRasterBindings {
+            config,
+            scene,
+            draw_monoids,
+            bin_headers,
+            info_bin_data,
+            paths,
+            tile,
+            bump,
+            per_tile_command_list,
+        },
+    ));
     recording.release(draw_monoids);
     recording.release(bin_headers);
     recording.release(scene);
-    recording.dispatch(
-        RasterPhase::Coarse,
-        RasterKernel::PathTilingSetup,
+    recording.record_coarse(CoarseDispatch::path_tiling_setup(
         workgroups.path_tiling_setup,
-        [
-            bump.into(),
-            indirect_count.into(),
-            per_tile_command_list.into(),
-        ],
-    );
-    recording.dispatch_indirect(
-        RasterPhase::Coarse,
-        RasterKernel::PathTiling,
+        bump,
         indirect_count,
-        0,
-        [
-            bump.into(),
-            segment_counts.into(),
-            lines.into(),
-            paths.into(),
-            tile.into(),
-            segments.into(),
-        ],
-    );
+        per_tile_command_list,
+    ));
+    recording.record_coarse(CoarseDispatch::path_tiling(
+        indirect_count,
+        bump,
+        segment_counts,
+        lines,
+        paths,
+        tile,
+        segments,
+    ));
     recording.release(indirect_count);
     recording.release(segment_counts);
     recording.release(lines);
@@ -572,40 +535,30 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
 }
 
 fn record_fine(recording: &mut RecordingBuilder, fine: FineSchedule) -> Result<()> {
-    let mut bindings = vec![
-        ResourceBinding::from(fine.config),
-        ResourceBinding::from(fine.segments),
-        ResourceBinding::from(fine.per_tile_command_list),
-        ResourceBinding::from(fine.info_bin_data),
-        ResourceBinding::from(fine.blend_spill),
-        ResourceBinding::TargetOutput,
-        ResourceBinding::from(fine.gradient_image),
-        ResourceBinding::from(fine.image_atlas),
-    ];
-    let kernel = match fine.variant {
-        FineRasterVariant::Area => RasterKernel::FineArea,
-        FineRasterVariant::Msaa8 | FineRasterVariant::Msaa16 => {
-            let mask_lut = recording.upload_mask_lut(
-                fine.variant,
-                match fine.variant {
-                    FineRasterVariant::Msaa8 => make_mask_lut(),
-                    FineRasterVariant::Msaa16 => make_mask_lut_16(),
-                    FineRasterVariant::Area => Vec::new(),
-                },
-            )?;
-            bindings.push(mask_lut.into());
-            let kernel = match fine.variant {
-                FineRasterVariant::Msaa8 => RasterKernel::FineMsaa8,
-                FineRasterVariant::Msaa16 => RasterKernel::FineMsaa16,
-                FineRasterVariant::Area => RasterKernel::FineArea,
-            };
-            recording.dispatch(RasterPhase::Fine, kernel, fine.workgroups, bindings);
-            recording.release(mask_lut);
-            release_fine_resources(recording, fine);
-            return Ok(());
-        }
+    let bindings = FineDispatchBindings {
+        workgroups: fine.workgroups,
+        config: fine.config,
+        segments: fine.segments,
+        per_tile_command_list: fine.per_tile_command_list,
+        info_bin_data: fine.info_bin_data,
+        blend_spill: fine.blend_spill,
+        gradient_image: fine.gradient_image,
+        image_atlas: fine.image_atlas,
     };
-    recording.dispatch(RasterPhase::Fine, kernel, fine.workgroups, bindings);
+    match fine.variant {
+        FineRasterVariant::Area => recording.record_fine(FineDispatch::area(bindings)),
+        FineRasterVariant::Msaa8 => {
+            let mask_lut = recording.upload_mask_lut(FineRasterVariant::Msaa8, make_mask_lut())?;
+            recording.record_fine(FineDispatch::msaa8(bindings, mask_lut));
+            recording.release(mask_lut);
+        }
+        FineRasterVariant::Msaa16 => {
+            let mask_lut =
+                recording.upload_mask_lut(FineRasterVariant::Msaa16, make_mask_lut_16())?;
+            recording.record_fine(FineDispatch::msaa16(bindings, mask_lut));
+            recording.release(mask_lut);
+        }
+    }
     release_fine_resources(recording, fine);
     Ok(())
 }

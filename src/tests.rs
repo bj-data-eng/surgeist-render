@@ -2,7 +2,10 @@ use super::gpu_transaction::{GpuOperationDraft, GpuOperationLease, GpuOperationS
 use super::vello_engine::{
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
     raster::{RasterParameters, RasterRecorder},
-    recording::{FineRasterVariant, RasterKernel, RasterPhase},
+    recording::{
+        BufferRole, CoarseDispatch, DispatchBindingKind, FineRasterVariant, RasterKernel,
+        RasterPhase, RecordingBuilder,
+    },
     scene::VelloScene,
 };
 use super::{
@@ -104,12 +107,55 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
                 .iter()
                 .any(|dispatch| dispatch.kernel_for_test() == RasterKernel::PathTiling)
         );
+        let buffers = |count| vec![DispatchBindingKind::Buffer; count];
         assert_eq!(
-            dispatches
-                .last()
-                .expect("the fine phase must end in one selected raster variant")
-                .fine_variant_for_test(),
-            Some(expected_fine)
+            dispatches[..first_fine]
+                .iter()
+                .map(|dispatch| {
+                    (
+                        dispatch.kernel_for_test(),
+                        dispatch.binding_kinds_for_test(),
+                    )
+                })
+                .collect::<Vec<_>>(),
+            vec![
+                (RasterKernel::PathTagReduce, buffers(3)),
+                (RasterKernel::PathTagScan, buffers(4)),
+                (RasterKernel::BboxClear, buffers(2)),
+                (RasterKernel::Flatten, buffers(6)),
+                (RasterKernel::DrawReduce, buffers(3)),
+                (RasterKernel::DrawLeaf, buffers(7)),
+                (RasterKernel::Binning, buffers(8)),
+                (RasterKernel::TileAlloc, buffers(6)),
+                (RasterKernel::PathCountSetup, buffers(2)),
+                (RasterKernel::PathCount, buffers(6)),
+                (RasterKernel::Backdrop, buffers(4)),
+                (RasterKernel::Coarse, buffers(9)),
+                (RasterKernel::PathTilingSetup, buffers(3)),
+                (RasterKernel::PathTiling, buffers(6)),
+            ]
+        );
+        assert_eq!(
+            dispatches[first_fine..].len(),
+            1,
+            "the prepared pass must select exactly one fine raster operation"
+        );
+        let final_dispatch = dispatches
+            .last()
+            .expect("the fine phase must end in one selected raster variant");
+        assert_eq!(final_dispatch.fine_variant_for_test(), Some(expected_fine));
+        let mut expected_fine_bindings = buffers(5);
+        expected_fine_bindings.extend([
+            DispatchBindingKind::TargetOutput,
+            DispatchBindingKind::Image,
+            DispatchBindingKind::Image,
+        ]);
+        if !matches!(expected_fine, FineRasterVariant::Area) {
+            expected_fine_bindings.push(DispatchBindingKind::Buffer);
+        }
+        assert_eq!(
+            final_dispatch.binding_kinds_for_test(),
+            expected_fine_bindings
         );
         assert!(
             prepared
@@ -146,6 +192,51 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
         .invalid_value_diagnostic()
         .expect("an invalid target must retain an invalid-value diagnostic");
     assert_eq!(diagnostic.field(), "raster target width");
+
+    for extent in [
+        PhysicalSize::new(u32::MAX - 15, 1),
+        PhysicalSize::new(1, u32::MAX - 15),
+    ] {
+        assert!(
+            RasterParameters::try_new(extent, peniko::Color::BLACK, Antialiasing::Area).is_ok(),
+            "the largest dimension with room for tile padding must be accepted"
+        );
+    }
+
+    for (extent, field) in [
+        (PhysicalSize::new(u32::MAX - 14, 1), "raster target width"),
+        (PhysicalSize::new(1, u32::MAX - 14), "raster target height"),
+    ] {
+        let error = RasterParameters::try_new(extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect_err("the first dimension without room for tile padding must be rejected");
+        let diagnostic = error
+            .invalid_value_diagnostic()
+            .expect("an oversized target must retain an invalid-value diagnostic");
+        assert_eq!(diagnostic.field(), field);
+        assert_eq!(diagnostic.value(), (u32::MAX - 14).to_string());
+    }
+
+    let mut typed_recording = RecordingBuilder::default();
+    let config = typed_recording
+        .new_buffer(BufferRole::Config, 4)
+        .expect("a typed coarse descriptor needs a config buffer");
+    let scene = typed_recording
+        .new_buffer(BufferRole::Scene, 4)
+        .expect("a typed coarse descriptor needs a scene buffer");
+    let path_reduced = typed_recording
+        .new_buffer(BufferRole::PathReduced, 4)
+        .expect("a typed coarse descriptor needs a path-reduced buffer");
+    typed_recording.record_coarse(CoarseDispatch::path_tag_reduce(
+        (1, 1, 1),
+        config,
+        scene,
+        path_reduced,
+    ));
+    typed_recording.release(config);
+    typed_recording.release(scene);
+    typed_recording.release(path_reduced);
+    let (typed_recording, typed_intents) = typed_recording.finish();
+    assert!(typed_recording.is_self_consistent_for_test(&typed_intents));
 }
 
 #[test]
