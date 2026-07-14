@@ -289,10 +289,7 @@ impl Renderer {
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     ))]
-    pub(crate) async fn configure_presented_surface_if_needed(
-        &mut self,
-        surface: &mut Surface,
-    ) -> Result<()> {
+    async fn configure_presented_surface_if_needed(&mut self, surface: &mut Surface) -> Result<()> {
         let (device_identity, native, requested_physical_size, present_mode, needs_configuration) =
             match &surface.backend {
                 SurfaceBackend::Presented {
@@ -347,6 +344,14 @@ impl Renderer {
             return Err(error);
         };
         Ok(())
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) async fn configure_presented_surface_for_test(
+        &mut self,
+        surface: &mut Surface,
+    ) -> Result<()> {
+        self.configure_presented_surface_if_needed(surface).await
     }
 
     #[cfg(not(any(

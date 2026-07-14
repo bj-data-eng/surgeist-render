@@ -15249,6 +15249,24 @@ fn available_presented_resume_keeps_the_installed_attachment_without_recreating(
     );
 }
 
+#[test]
+fn presented_configuration_test_seam_is_test_only() {
+    let renderer_source = include_str!("renderer.rs");
+    assert!(
+        !renderer_source.contains("pub(crate) async fn configure_presented_surface_if_needed"),
+        "presented configuration must remain a private production helper"
+    );
+    assert_eq!(
+        renderer_source
+            .matches(
+                "#[cfg(all(test, feature = \"render-window\"))]\n    pub(crate) async fn configure_presented_surface_for_test(\n        &mut self,\n        surface: &mut Surface,\n    ) -> Result<()> {\n        self.configure_presented_surface_if_needed(surface).await\n    }"
+            )
+            .count(),
+        1,
+        "the only crate-visible presented configuration seam must be a test-only delegator"
+    );
+}
+
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_setup_and_resize_commit_only_after_clean_configuration() {
@@ -15268,7 +15286,7 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
     ));
     assert_eq!(presented_resource_id_for_test(&surface), None);
 
-    pollster::block_on(renderer.configure_presented_surface_if_needed(&mut surface))
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .expect("initial presented configuration must commit only after clean scopes");
     let initial_resource = presented_resource_id_for_test(&surface)
         .expect("clean configuration must commit one resource bundle");
@@ -15283,7 +15301,7 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
         PresentedLifecycle::ResizePending { .. }
     ));
     let failure = ScopedPresentedConfigureControlForTest::failing();
-    let error = pollster::block_on(renderer.configure_presented_surface_if_needed(&mut surface))
+    let error = pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .expect_err("a scoped configure failure must leave the requested resize pending");
     assert_eq!(error.code(), ErrorCode::SurfaceConfigureFailed);
     assert!(failure.scope_resolution_observed_for_test());
@@ -15299,7 +15317,7 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
 
     let checkpoint = ScopedPresentedConfigureControlForTest::paused();
     {
-        let future = renderer.configure_presented_surface_if_needed(&mut surface);
+        let future = renderer.configure_presented_surface_for_test(&mut surface);
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(
@@ -15323,7 +15341,7 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
     );
 
     let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
-    let error = pollster::block_on(renderer.configure_presented_surface_if_needed(&mut surface))
+    let error = pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .expect_err("a terminal signal at final configuration publication must prevent commit");
     drop(loss);
     assert_runtime_device_lost(
@@ -15367,7 +15385,7 @@ fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
         PresentedLifecycle::NonRenderable { .. }
     ));
     assert_eq!(presented_resource_id_for_test(&first), None);
-    pollster::block_on(renderer.configure_presented_surface_if_needed(&mut first))
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut first))
         .expect("zero-area presented setup must avoid configuration and target allocation");
     assert_eq!(presented_resource_id_for_test(&first), None);
 
@@ -15389,7 +15407,7 @@ fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
         Attachment::from_web_canvas("display-free-presented-test-target"),
     ))
     .expect("resuming a nonzero requested surface must configure it transactionally");
-    pollster::block_on(renderer.configure_presented_surface_if_needed(&mut second))
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut second))
         .expect("each ready presented surface must configure its own resource bundle");
 
     let first_resource =
