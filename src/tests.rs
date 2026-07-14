@@ -3,8 +3,11 @@ use super::gpu_transaction::{
     ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
 };
 use super::renderer::ScopedFinalPublicationLossForTest;
-#[cfg(feature = "render-window")]
-use super::renderer::ScopedPresentedConfigureControlForTest;
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::PresentedSurfaceState;
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
@@ -33,11 +36,6 @@ use super::{
     },
 };
 
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-use super::surface::PresentedSurfaceState;
 use std::{
     fs,
     future::Future,
@@ -15255,47 +15253,53 @@ fn available_presented_resume_keeps_the_installed_attachment_without_recreating(
 #[test]
 fn presented_setup_and_resize_commit_only_after_clean_configuration() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("presented configuration coverage requires a host adapter");
-    let mut state = PresentedSurfaceState::new(PhysicalSize::new(2, 2), ResizeState::Idle);
+        .expect("presented configuration coverage requires a compatible device");
+    let mut surface = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(2.0, 2.0),
+            ..SurfaceOptions::default()
+        },
+    );
 
     assert!(matches!(
-        state.lifecycle(),
+        presented_lifecycle_for_test(&surface),
         PresentedLifecycle::ResizePending { .. }
     ));
-    assert_eq!(state.committed_resource_id_for_test(), None);
+    assert_eq!(presented_resource_id_for_test(&surface), None);
 
-    pollster::block_on(renderer.configure_presented_state_for_test(&mut state))
+    pollster::block_on(renderer.configure_presented_surface_if_needed(&mut surface))
         .expect("initial presented configuration must commit only after clean scopes");
-    let initial_resource = state
-        .committed_resource_id_for_test()
+    let initial_resource = presented_resource_id_for_test(&surface)
         .expect("clean configuration must commit one resource bundle");
     assert!(matches!(
-        state.lifecycle(),
+        presented_lifecycle_for_test(&surface),
         PresentedLifecycle::Ready { .. }
     ));
 
-    state.resize_requested_for_test(PhysicalSize::new(3, 2));
+    surface.resize(Size::new(3.0, 2.0), 1.0).unwrap();
     assert!(matches!(
-        state.lifecycle(),
+        presented_lifecycle_for_test(&surface),
         PresentedLifecycle::ResizePending { .. }
     ));
     let failure = ScopedPresentedConfigureControlForTest::failing();
-    let error = pollster::block_on(renderer.configure_presented_state_for_test(&mut state))
+    let error = pollster::block_on(renderer.configure_presented_surface_if_needed(&mut surface))
         .expect_err("a scoped configure failure must leave the requested resize pending");
     assert_eq!(error.code(), ErrorCode::SurfaceConfigureFailed);
     assert!(failure.scope_resolution_observed_for_test());
+    drop(failure);
     assert_eq!(
-        state.committed_resource_id_for_test(),
+        presented_resource_id_for_test(&surface),
         Some(initial_resource)
     );
     assert!(matches!(
-        state.lifecycle(),
+        presented_lifecycle_for_test(&surface),
         PresentedLifecycle::ResizePending { .. }
     ));
 
     let checkpoint = ScopedPresentedConfigureControlForTest::paused();
     {
-        let future = renderer.configure_presented_state_for_test(&mut state);
+        let future = renderer.configure_presented_surface_if_needed(&mut surface);
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(
@@ -15304,71 +15308,132 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
         ));
         checkpoint.wait_for_draft_for_test(Duration::from_secs(2));
     }
+    drop(checkpoint);
     assert_eq!(
-        state.committed_resource_id_for_test(),
+        presented_resource_id_for_test(&surface),
         Some(initial_resource)
     );
     assert!(matches!(
-        state.lifecycle(),
+        presented_lifecycle_for_test(&surface),
         PresentedLifecycle::ResizePending { .. }
     ));
     assert_eq!(
         renderer.default_device_active_operation_generation_for_test(),
         None
     );
+
+    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    let error = pollster::block_on(renderer.configure_presented_surface_if_needed(&mut surface))
+        .expect_err("a terminal signal at final configuration publication must prevent commit");
+    drop(loss);
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Unknown,
+    );
+    assert_eq!(
+        presented_resource_id_for_test(&surface),
+        Some(initial_resource)
+    );
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::ResizePending { .. }
+    ));
 }
 
 #[cfg(feature = "render-window")]
 #[test]
 fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("presented configuration coverage requires a host adapter");
-    let mut first = PresentedSurfaceState::new(PhysicalSize::new(0, 2), ResizeState::Resizing);
-    let mut second = PresentedSurfaceState::new(PhysicalSize::new(2, 2), ResizeState::Idle);
+        .expect("presented configuration coverage requires a compatible device");
+    let mut first = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(0.0, 2.0),
+            ..SurfaceOptions::default()
+        },
+    );
+    let mut second = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(2.0, 2.0),
+            ..SurfaceOptions::default()
+        },
+    );
+    renderer.set_surface_resizing(&mut first, true).unwrap();
 
     assert!(matches!(
-        first.lifecycle(),
+        presented_lifecycle_for_test(&first),
         PresentedLifecycle::NonRenderable { .. }
     ));
-    assert_eq!(first.committed_resource_id_for_test(), None);
-    assert_eq!(first.configuration_attempts_for_test(), 0);
-    pollster::block_on(renderer.configure_presented_state_for_test(&mut first))
+    assert_eq!(presented_resource_id_for_test(&first), None);
+    pollster::block_on(renderer.configure_presented_surface_if_needed(&mut first))
         .expect("zero-area presented setup must avoid configuration and target allocation");
-    assert_eq!(first.configuration_attempts_for_test(), 0);
+    assert_eq!(presented_resource_id_for_test(&first), None);
 
-    first.resize_requested_for_test(PhysicalSize::new(2, 2));
-    first.suspend_for_test();
+    first.resize(Size::new(2.0, 2.0), 1.0).unwrap();
+    first.suspend().unwrap();
     assert!(matches!(
-        first.lifecycle(),
+        presented_lifecycle_for_test(&first),
         PresentedLifecycle::ResizePending { .. }
     ));
-    assert_eq!(first.configuration_attempts_for_test(), 0);
-    let error = pollster::block_on(renderer.configure_presented_state_for_test(&mut first))
-        .expect_err("a suspended resize must retain its requested configuration without WGPU work");
+    let error =
+        pollster::block_on(renderer.render(&mut first, &Scene::new(), Parameters::default()))
+            .expect_err(
+                "a suspended resize must retain its requested configuration without WGPU work",
+            );
     assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
-    assert_eq!(first.configuration_attempts_for_test(), 0);
-    first.resume_for_test();
-    pollster::block_on(renderer.configure_presented_state_for_test(&mut first))
-        .expect("resuming a nonzero requested surface must configure it transactionally");
-    pollster::block_on(renderer.configure_presented_state_for_test(&mut second))
+    assert_eq!(presented_resource_id_for_test(&first), None);
+    pollster::block_on(renderer.resume_surface(
+        &mut first,
+        Attachment::from_web_canvas("display-free-presented-test-target"),
+    ))
+    .expect("resuming a nonzero requested surface must configure it transactionally");
+    pollster::block_on(renderer.configure_presented_surface_if_needed(&mut second))
         .expect("each ready presented surface must configure its own resource bundle");
 
-    let first_resource = first
-        .committed_resource_id_for_test()
-        .expect("first surface must own a committed bundle");
-    let second_resource = second
-        .committed_resource_id_for_test()
+    let first_resource =
+        presented_resource_id_for_test(&first).expect("first surface must own a committed bundle");
+    let second_resource = presented_resource_id_for_test(&second)
         .expect("second surface must own a committed bundle");
     assert_ne!(first_resource, second_resource);
 
-    first.resize_requested_for_test(PhysicalSize::new(2, 2));
-    assert_eq!(first.committed_resource_id_for_test(), Some(first_resource));
+    first.resize(Size::new(1.0, 1.0), 2.0).unwrap();
+    assert_eq!(presented_resource_id_for_test(&first), Some(first_resource));
     assert!(matches!(
-        first.lifecycle(),
+        presented_lifecycle_for_test(&first),
         PresentedLifecycle::Ready {
             resizing: ResizeState::Resizing
         }
     ));
+}
+
+#[cfg(feature = "render-window")]
+fn display_free_presented_surface_for_test(
+    renderer: &mut Renderer,
+    options: SurfaceOptions,
+) -> Surface {
+    renderer
+        .display_free_presented_surface_for_test(options)
+        .expect("the display-free fixture must establish a real presented surface backend")
+}
+
+#[cfg(feature = "render-window")]
+fn presented_lifecycle_for_test(surface: &Surface) -> PresentedLifecycle {
+    match &surface.backend {
+        SurfaceBackend::Presented { state, .. } => state.lifecycle(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+fn presented_resource_id_for_test(surface: &Surface) -> Option<u64> {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface
+            .committed()
+            .map(|resources| resources.resource_id_for_test()),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
 }
 
 #[test]

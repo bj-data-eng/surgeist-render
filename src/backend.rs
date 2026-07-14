@@ -44,9 +44,87 @@ use std::{
     task::{Context, Poll, Waker},
 };
 
+#[cfg(all(test, feature = "render-window"))]
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
+
 #[cfg(test)]
 thread_local! {
     static ACTIVE_OFFSCREEN_TEXTURE_ACQUIRE_OBSERVATION_FOR_TEST: RefCell<Option<Arc<AtomicUsize>>> = const { RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "render-window"))]
+thread_local! {
+    static ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST: RefCell<Option<PresentedConfigureControlForTest>> = const { RefCell::new(None) };
+}
+
+#[cfg(all(test, feature = "render-window"))]
+#[derive(Clone)]
+enum PresentedConfigureControlForTest {
+    Fail {
+        scope_resolution_observed: SyncSender<()>,
+    },
+    Pause {
+        reached: SyncSender<()>,
+    },
+}
+
+/// Private deterministic control for the production Configure transaction path.
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) struct ScopedPresentedConfigureControlForTest {
+    observed: Receiver<()>,
+    failure_scope_resolution: Option<Receiver<()>>,
+    previous: Option<PresentedConfigureControlForTest>,
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl ScopedPresentedConfigureControlForTest {
+    pub(crate) fn failing() -> Self {
+        let (scope_resolution_observed, observed) = sync_channel(1);
+        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(PresentedConfigureControlForTest::Fail {
+                scope_resolution_observed,
+            }))
+        });
+        let (_unused, reached) = sync_channel(1);
+        Self {
+            observed: reached,
+            failure_scope_resolution: Some(observed),
+            previous,
+        }
+    }
+
+    pub(crate) fn paused() -> Self {
+        let (reached, observed) = sync_channel(1);
+        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(PresentedConfigureControlForTest::Pause { reached }))
+        });
+        Self {
+            observed,
+            failure_scope_resolution: None,
+            previous,
+        }
+    }
+
+    pub(crate) fn wait_for_draft_for_test(&self, deadline: Duration) {
+        self.observed
+            .recv_timeout(deadline)
+            .expect("the Configure transaction did not reach its bounded draft checkpoint");
+    }
+
+    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
+        self.failure_scope_resolution
+            .as_ref()
+            .is_some_and(|observed| observed.try_recv().is_ok())
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl Drop for ScopedPresentedConfigureControlForTest {
+    fn drop(&mut self) {
+        ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
 }
 
 #[cfg(test)]
@@ -861,9 +939,42 @@ impl Backend {
             "presented device resources are unavailable before configuration",
         )?;
         let draft = surface.configure_draft(&ready.device, physical_size, present_mode);
-        transaction
-            .finish(RuntimeOperation::SurfaceRendering)
-            .await?;
+        #[cfg(all(test, feature = "render-window"))]
+        let control =
+            ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
+        #[cfg(all(test, feature = "render-window"))]
+        if let Some(PresentedConfigureControlForTest::Fail { .. }) = &control {
+            let _ = ready.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Surgeist test-injected Configure validation failure"),
+                size: wgpu::Extent3d {
+                    width: 0,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        }
+        #[cfg(all(test, feature = "render-window"))]
+        if let Some(PresentedConfigureControlForTest::Pause { reached }) = &control {
+            reached
+                .send(())
+                .expect("the Configure test must observe the draft checkpoint");
+            std::future::pending::<()>().await;
+        }
+        let result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+        #[cfg(all(test, feature = "render-window"))]
+        if let Some(PresentedConfigureControlForTest::Fail {
+            scope_resolution_observed,
+        }) = control
+        {
+            let _ = scope_resolution_observed.send(());
+        }
+        result?;
         Ok(draft)
     }
 
@@ -1786,7 +1897,7 @@ pub(crate) async fn render_internal_vello_surface(
             let render_time = render_start.elapsed();
 
             let present_start = Instant::now();
-            let surface_texture = match native.surface.get_current_texture() {
+            let surface_texture = match native.host_surface().get_current_texture() {
                 wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
                 wgpu::CurrentSurfaceTexture::Outdated
                 | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {

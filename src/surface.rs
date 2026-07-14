@@ -283,9 +283,24 @@ pub(crate) enum SurfaceBackend {
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 pub(crate) struct PresentedSurface {
-    pub(crate) surface: wgpu::Surface<'static>,
+    target: PresentedSurfaceTarget,
     pub(crate) format: wgpu::TextureFormat,
     committed: Option<PresentedResourceBundle>,
+}
+
+/// The external host effect owned by a presented surface.
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+enum PresentedSurfaceTarget {
+    Host(wgpu::Surface<'static>),
+    /// Test-only substitution for the unavailable display-host configure effect.
+    ///
+    /// Configuration still allocates the production per-surface target bundle
+    /// under the real Configure transaction.
+    #[cfg(all(test, feature = "render-window"))]
+    DisplayFreeHostEffectForTest,
 }
 
 #[cfg(any(
@@ -333,10 +348,19 @@ impl PresentedSurface {
                 )
             })?;
         Ok(Self {
-            surface,
+            target: PresentedSurfaceTarget::Host(surface),
             format,
             committed: None,
         })
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) const fn display_free_for_test() -> Self {
+        Self {
+            target: PresentedSurfaceTarget::DisplayFreeHostEffectForTest,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            committed: None,
+        }
     }
 
     pub(crate) fn committed(&self) -> Option<&PresentedResourceBundle> {
@@ -356,9 +380,23 @@ impl PresentedSurface {
         present_mode: wgpu::PresentMode,
     ) -> PresentedConfigurationDraft {
         let config = presented_configuration(self.format, physical_size, present_mode);
-        self.surface.configure(device, &config);
+        match &self.target {
+            PresentedSurfaceTarget::Host(surface) => surface.configure(device, &config),
+            #[cfg(all(test, feature = "render-window"))]
+            PresentedSurfaceTarget::DisplayFreeHostEffectForTest => {}
+        }
         PresentedConfigurationDraft {
             resources: PresentedResourceBundle::new(device, config),
+        }
+    }
+
+    pub(crate) fn host_surface(&self) -> &wgpu::Surface<'static> {
+        match &self.target {
+            PresentedSurfaceTarget::Host(surface) => surface,
+            #[cfg(all(test, feature = "render-window"))]
+            PresentedSurfaceTarget::DisplayFreeHostEffectForTest => {
+                panic!("the display-free presented fixture substitutes only host configuration")
+            }
         }
     }
 
@@ -403,22 +441,9 @@ impl PresentedResourceBundle {
 }
 
 #[cfg(all(test, feature = "render-window"))]
-impl PresentedConfigurationDraft {
-    pub(crate) fn for_test(device: &wgpu::Device, physical_size: PhysicalSize) -> Self {
-        Self {
-            resources: PresentedResourceBundle::new(
-                device,
-                presented_configuration(
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    physical_size,
-                    wgpu::PresentMode::Fifo,
-                ),
-            ),
-        }
-    }
-
+impl PresentedResourceBundle {
     pub(crate) const fn resource_id_for_test(&self) -> u64 {
-        self.resources.resource_id
+        self.resource_id
     }
 }
 
@@ -515,14 +540,6 @@ pub(crate) enum PresentedLifecycle {
 pub(crate) struct PresentedSurfaceState {
     requested_physical_size: PhysicalSize,
     lifecycle: PresentedLifecycle,
-    #[cfg(all(test, feature = "render-window"))]
-    configuration_attempts: usize,
-    #[cfg(all(test, feature = "render-window"))]
-    committed_resource_id: Option<u64>,
-    #[cfg(all(test, feature = "render-window"))]
-    committed_physical_size: Option<PhysicalSize>,
-    #[cfg(all(test, feature = "render-window"))]
-    suspended_for_test: bool,
 }
 
 #[cfg(any(
@@ -545,14 +562,6 @@ impl PresentedSurfaceState {
         Self {
             requested_physical_size: physical_size,
             lifecycle,
-            #[cfg(all(test, feature = "render-window"))]
-            configuration_attempts: 0,
-            #[cfg(all(test, feature = "render-window"))]
-            committed_resource_id: None,
-            #[cfg(all(test, feature = "render-window"))]
-            committed_physical_size: None,
-            #[cfg(all(test, feature = "render-window"))]
-            suspended_for_test: false,
         }
     }
 
@@ -620,48 +629,6 @@ impl PresentedSurfaceState {
 
     pub(crate) fn set_resizing(&mut self, resizing: ResizeState) {
         self.lifecycle = self.lifecycle.with_resizing(resizing);
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn resize_requested_for_test(&mut self, next: PhysicalSize) {
-        self.resize_requested(self.committed_physical_size, next);
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn committed_resource_id_for_test(&self) -> Option<u64> {
-        self.committed_resource_id
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) const fn configuration_attempts_for_test(&self) -> usize {
-        self.configuration_attempts
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn record_configuration_attempt_for_test(&mut self) {
-        self.configuration_attempts = self.configuration_attempts.saturating_add(1);
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn commit_resource_id_for_test(&mut self, resource_id: u64) {
-        self.committed_resource_id = Some(resource_id);
-        self.committed_physical_size = Some(self.requested_physical_size);
-        self.commit_configuration();
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn suspend_for_test(&mut self) {
-        self.suspended_for_test = true;
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn resume_for_test(&mut self) {
-        self.suspended_for_test = false;
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) const fn suspended_for_test(&self) -> bool {
-        self.suspended_for_test
     }
 }
 
