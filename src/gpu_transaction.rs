@@ -19,6 +19,7 @@ use super::vello_engine::VelloResourceAllocationSummaryForTest;
 
 #[cfg(test)]
 thread_local! {
+    static ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<GpuOperationSubmissionObservationForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
 }
@@ -27,20 +28,23 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
     Render,
-    #[cfg(test)]
+    Configure,
     Present,
 }
 
 impl GpuOperationStage {
+    const ALL: [Self; 3] = [Self::Render, Self::Configure, Self::Present];
+
     const fn error_code(self) -> BackendErrorCode {
         match self {
             Self::Render => BackendErrorCode::RenderFailed,
-            #[cfg(test)]
+            Self::Configure => BackendErrorCode::SurfaceConfigureFailed,
             Self::Present => BackendErrorCode::PresentFailed,
         }
     }
 
     fn classify_fault(self, kind: GpuFaultKind, message: &str) -> Error {
+        debug_assert!(Self::ALL.contains(&self));
         let code = if kind == GpuFaultKind::OutOfMemory {
             BackendErrorCode::SurfaceOutOfMemory
         } else {
@@ -111,6 +115,124 @@ impl GpuOperationLease {
     pub(crate) const fn generation_for_test(&self) -> u64 {
         self.generation
     }
+}
+
+/// Test-only observation of one generic transaction-owned command-buffer submission.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct GpuOperationSubmissionObservationForTest {
+    state: Arc<Mutex<GpuOperationSubmissionObservationStateForTest>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct GpuOperationSubmissionObservationStateForTest {
+    queue_submission_count: usize,
+    transaction_generation: Option<u64>,
+    active_generation: Option<u64>,
+    scopes_resolved: bool,
+}
+
+#[cfg(test)]
+impl GpuOperationSubmissionObservationForTest {
+    fn record_submission(&self, transaction_generation: u64, active_generation: Option<u64>) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("GPU operation submission observation must remain available");
+        state.queue_submission_count = state.queue_submission_count.saturating_add(1);
+        state.transaction_generation = Some(transaction_generation);
+        state.active_generation = active_generation;
+    }
+
+    fn record_scope_resolution(&self) {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .scopes_resolved = true;
+    }
+
+    pub(crate) fn queue_submission_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .queue_submission_count
+    }
+
+    pub(crate) fn transaction_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .transaction_generation
+    }
+
+    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .active_generation
+    }
+
+    pub(crate) fn scopes_resolved_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .scopes_resolved
+    }
+}
+
+/// Installs a private observation for generic transaction submissions on this thread.
+#[cfg(test)]
+pub(crate) struct ScopedGpuOperationSubmissionObservationForTest {
+    observation: GpuOperationSubmissionObservationForTest,
+    previous: Option<GpuOperationSubmissionObservationForTest>,
+}
+
+#[cfg(test)]
+impl ScopedGpuOperationSubmissionObservationForTest {
+    pub(crate) fn begin() -> Self {
+        let observation = GpuOperationSubmissionObservationForTest::default();
+        let previous = ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST
+            .with(|active| active.replace(Some(observation.clone())));
+        Self {
+            observation,
+            previous,
+        }
+    }
+
+    pub(crate) fn observation_for_test(&self) -> GpuOperationSubmissionObservationForTest {
+        self.observation.clone()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedGpuOperationSubmissionObservationForTest {
+    fn drop(&mut self) {
+        ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_active_gpu_operation_submission_for_test(
+    transaction_generation: u64,
+    active_generation: Option<u64>,
+) {
+    ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+        if let Some(observation) = active.borrow().as_ref() {
+            observation.record_submission(transaction_generation, active_generation);
+        }
+    });
+}
+
+#[cfg(test)]
+fn record_active_gpu_operation_scope_resolution_for_test() {
+    ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+        if let Some(observation) = active.borrow().as_ref() {
+            observation.record_scope_resolution();
+        }
+    });
 }
 
 impl Drop for GpuOperationLease {
@@ -517,6 +639,26 @@ impl GpuOperationTransaction {
             return Err(classify_captured_error(self.stage, error));
         }
         Ok(())
+    }
+
+    /// Submits one command buffer while this transaction owns its generation and scopes.
+    pub(crate) async fn submit_command_buffer(
+        self,
+        queue: &wgpu::Queue,
+        command_buffer: wgpu::CommandBuffer,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        queue.submit([command_buffer]);
+        #[cfg(test)]
+        record_active_gpu_operation_submission_for_test(
+            self.lease.generation(),
+            self.lease.active_generation_for_test(),
+        );
+
+        let result = self.finish(operation).await;
+        #[cfg(test)]
+        record_active_gpu_operation_scope_resolution_for_test();
+        result
     }
 
     pub(crate) async fn submit_internal_vello(

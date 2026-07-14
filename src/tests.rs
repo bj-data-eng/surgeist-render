@@ -1,5 +1,6 @@
 use super::gpu_transaction::{
-    GpuOperationLease, GpuOperationStage, ScopedInternalVelloPostSubmitControlForTest,
+    GpuOperationLease, GpuOperationStage, ScopedGpuOperationSubmissionObservationForTest,
+    ScopedInternalVelloPostSubmitControlForTest,
 };
 use super::renderer::ScopedFinalPublicationLossForTest;
 use super::vello_engine::{
@@ -6911,6 +6912,38 @@ fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
         "blue channel should be cleared: {blue}"
     );
     assert_eq!(alpha, 255);
+}
+
+#[test]
+fn non_readback_gpu_submissions_are_owned_by_gpu_operation_transactions() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("real GPU transaction submission coverage requires a host adapter");
+
+    let output = pollster::block_on(renderer.scoped_clear_fill_probe_for_test())
+        .expect("the real clear/fill path must complete without a terminal GPU signal");
+    let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
+    assert!((60..=68).contains(&red));
+    assert!((124..=132).contains(&green));
+    assert!((187..=195).contains(&blue));
+    assert_eq!(alpha, 255);
+
+    let submission = submission_scope.observation_for_test();
+    assert_eq!(
+        submission.queue_submission_count_for_test(),
+        1,
+        "the real clear/fill command buffer must submit through a GPU operation transaction"
+    );
+    assert_eq!(
+        submission.transaction_generation_for_test(),
+        submission.active_generation_for_test(),
+        "the transaction generation must remain active at the real queue submission"
+    );
+    assert!(
+        submission.scopes_resolved_for_test(),
+        "the transaction must resolve its nested WGPU scopes before returning"
+    );
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
 #[test]
@@ -14616,6 +14649,10 @@ fn surface_resize_rejects_physical_size_overflow_without_mutating_options() {
 fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stage() {
     let stages = [
         (GpuOperationStage::Render, BackendErrorCode::RenderFailed),
+        (
+            GpuOperationStage::Configure,
+            BackendErrorCode::SurfaceConfigureFailed,
+        ),
         (GpuOperationStage::Present, BackendErrorCode::PresentFailed),
     ];
     let faults = [

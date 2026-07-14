@@ -986,9 +986,9 @@ impl Renderer {
             GpuOperationStage::Render,
             RuntimeOperation::SurfaceRendering,
         )?;
-        let work = (|| -> Result<()> {
-            let (device, queue) =
-                backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+        let (device, queue) =
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+        let command_buffer = {
             let texture = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("Surgeist second-slot terminal test target"),
                 size: wgpu::Extent3d {
@@ -1025,13 +1025,25 @@ impl Renderer {
                     multiview_mask: None,
                 });
             }
-            queue.submit([encoder.finish()]);
-            Ok(())
-        })();
-        let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+            Ok(encoder.finish())
+        };
+        let scope_result = match command_buffer {
+            Ok(command_buffer) => {
+                transaction
+                    .submit_command_buffer(
+                        queue,
+                        command_buffer,
+                        RuntimeOperation::SurfaceRendering,
+                    )
+                    .await
+            }
+            Err(error) => match transaction.finish(RuntimeOperation::SurfaceRendering).await {
+                Ok(()) => Err(error),
+                Err(scope_error) => Err(scope_error),
+            },
+        };
         backend.observe_device_terminal(device_identity);
-        scope_result?;
-        work
+        scope_result
     }
 
     fn materialize_resolved_backdrops<'a>(

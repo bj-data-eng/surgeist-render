@@ -348,8 +348,13 @@ pub(crate) async fn encode_clear_fill_pass(
             multiview_mask: None,
         });
     }
-    context.queue.submit([encoder.finish()]);
-    transaction.finish(RuntimeOperation::SurfaceRendering).await
+    transaction
+        .submit_command_buffer(
+            context.queue,
+            encoder.finish(),
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await
 }
 
 fn validate_label(name: &'static str, value: &'static str) -> Result<()> {
