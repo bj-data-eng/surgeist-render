@@ -8,6 +8,11 @@ use super::renderer::ScopedFinalPublicationLossForTest;
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::PresentedSurfaceState;
+#[cfg(feature = "render-window")]
+use super::surface::{
+    DisplayFreePresentedSurfaceObservationForTest,
+    DisplayFreePresentedSurfaceObservationHandleForTest, PresentedAcquireOutcomeForTest,
+};
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
@@ -15361,6 +15366,173 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
 
 #[cfg(feature = "render-window")]
 #[test]
+fn presented_acquire_outcomes_map_every_surface_result_before_commit() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented acquire coverage requires a compatible device");
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+
+    let mut success = configured_display_free_presented_surface_for_test(&mut renderer);
+    set_presented_acquire_outcome_for_test(&mut success, PresentedAcquireOutcomeForTest::Success);
+    let stats = pollster::block_on(renderer.render(&mut success, &Scene::new(), parameters))
+        .expect("a successful acquire must present and publish the frame");
+    assert_eq!(renderer.stats(), stats);
+    assert_eq!(success.last_parameters, Some(parameters));
+    assert_eq!(
+        presented_observation_for_test(&success).present_count_for_test(),
+        1,
+        "a successful acquired texture must be presented exactly once"
+    );
+
+    for outcome in [
+        PresentedAcquireOutcomeForTest::Suboptimal,
+        PresentedAcquireOutcomeForTest::Outdated,
+    ] {
+        let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+        let stats_before = renderer.stats();
+        let parameters_before = surface.last_parameters;
+        let resource_before = presented_resource_id_for_test(&surface);
+        set_presented_acquire_outcome_for_test(&mut surface, outcome);
+
+        let error = pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+            .expect_err("suboptimal and outdated acquisition must retry configuration then fail");
+        assert_eq!(error.code(), ErrorCode::SurfaceOutdated);
+        assert_eq!(renderer.stats(), stats_before);
+        assert_eq!(surface.last_parameters, parameters_before);
+        assert!(matches!(
+            presented_lifecycle_for_test(&surface),
+            PresentedLifecycle::Ready { .. }
+        ));
+        assert_ne!(presented_resource_id_for_test(&surface), resource_before);
+        let observation = presented_observation_for_test(&surface);
+        assert_eq!(observation.present_count_for_test(), 0);
+        assert_eq!(
+            observation.discarded_count_for_test(),
+            if outcome == PresentedAcquireOutcomeForTest::Suboptimal {
+                1
+            } else {
+                0
+            },
+            "only an acquired suboptimal texture needs RAII discard"
+        );
+    }
+
+    for outcome in [
+        PresentedAcquireOutcomeForTest::Timeout,
+        PresentedAcquireOutcomeForTest::Validation,
+    ] {
+        let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+        let stats_before = renderer.stats();
+        set_presented_acquire_outcome_for_test(&mut surface, outcome);
+        let error = pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+            .expect_err("failed acquire must not publish frame state");
+        assert_eq!(
+            error.code(),
+            match outcome {
+                PresentedAcquireOutcomeForTest::Timeout => ErrorCode::SurfaceTimeout,
+                PresentedAcquireOutcomeForTest::Validation => ErrorCode::PresentFailed,
+                _ => unreachable!(),
+            }
+        );
+        assert_eq!(renderer.stats(), stats_before);
+        assert_eq!(surface.last_parameters, None);
+        assert_eq!(
+            presented_observation_for_test(&surface).present_count_for_test(),
+            0
+        );
+    }
+
+    let mut occluded = configured_display_free_presented_surface_for_test(&mut renderer);
+    set_presented_acquire_outcome_for_test(&mut occluded, PresentedAcquireOutcomeForTest::Occluded);
+    let error = pollster::block_on(renderer.render(&mut occluded, &Scene::new(), parameters))
+        .expect_err("occluded acquire must not report a successful frame");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Occluded,
+    );
+    assert!(matches!(
+        presented_lifecycle_for_test(&occluded),
+        PresentedLifecycle::Occluded { .. }
+    ));
+    assert_eq!(occluded.last_parameters, None);
+
+    let mut lost = configured_display_free_presented_surface_for_test(&mut renderer);
+    set_presented_acquire_outcome_for_test(&mut lost, PresentedAcquireOutcomeForTest::Lost);
+    let error = pollster::block_on(renderer.render(&mut lost, &Scene::new(), parameters))
+        .expect_err("surface loss must not report a successful frame");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Lost,
+    );
+    assert!(matches!(
+        presented_lifecycle_for_test(&lost),
+        PresentedLifecycle::Lost
+    ));
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_blit_and_present_remain_scoped_until_frame_commit() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let checkpoint = ScopedGpuOperationPostSubmitCheckpointForTest::yielding();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented transaction coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let stats_before = renderer.stats();
+    let parameters = Parameters {
+        base_color: Color::TRANSPARENT,
+        debug: true,
+    };
+
+    let observation = presented_observation_handle_for_test(&surface);
+    let scene = Scene::new();
+    let stats = {
+        let future = renderer.render(&mut surface, &scene, parameters);
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        checkpoint.wait_for_submission_for_test(Duration::from_secs(2));
+
+        let observation = observation.snapshot_for_test();
+        assert_eq!(observation.acquire_count_for_test(), 1);
+        assert_eq!(observation.present_count_for_test(), 1);
+        assert_eq!(observation.discarded_count_for_test(), 0);
+        let submission = submission_scope.observation_for_test();
+        assert_eq!(submission.queue_submission_count_for_test(), 1);
+        assert_eq!(
+            submission.transaction_generation_for_test(),
+            submission.active_generation_for_test()
+        );
+        assert!(!submission.scopes_resolved_for_test());
+
+        checkpoint.release_for_test();
+        pollster::block_on(future).expect("scoped present must publish only after scopes")
+    };
+    assert_eq!(renderer.stats(), stats);
+    assert_ne!(renderer.stats(), stats_before);
+    assert_eq!(renderer.stats(), stats);
+    assert_eq!(surface.last_parameters, Some(parameters));
+    assert!(
+        submission_scope
+            .observation_for_test()
+            .scopes_resolved_for_test()
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
 fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("presented configuration coverage requires a compatible device");
@@ -15434,6 +15606,51 @@ fn display_free_presented_surface_for_test(
     renderer
         .display_free_presented_surface_for_test(options)
         .expect("the display-free fixture must establish a real presented surface backend")
+}
+
+#[cfg(feature = "render-window")]
+fn configured_display_free_presented_surface_for_test(renderer: &mut Renderer) -> Surface {
+    let mut surface = display_free_presented_surface_for_test(
+        renderer,
+        SurfaceOptions {
+            size: Size::new(2.0, 2.0),
+            ..SurfaceOptions::default()
+        },
+    );
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .expect("the display-free surface must configure through the real Configure transaction");
+    surface
+}
+
+#[cfg(feature = "render-window")]
+fn set_presented_acquire_outcome_for_test(
+    surface: &mut Surface,
+    outcome: PresentedAcquireOutcomeForTest,
+) {
+    match &mut surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.set_acquire_outcome_for_test(outcome),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+fn presented_observation_for_test(
+    surface: &Surface,
+) -> DisplayFreePresentedSurfaceObservationForTest {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.observation_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+fn presented_observation_handle_for_test(
+    surface: &Surface,
+) -> DisplayFreePresentedSurfaceObservationHandleForTest {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.observation_handle_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
 }
 
 #[cfg(feature = "render-window")]

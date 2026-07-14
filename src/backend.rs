@@ -2,17 +2,17 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-use super::surface::PresentedSurface;
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::{PresentedConfigurationDraft, PresentedLifecycle};
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::{PresentedSurface, PresentedSurfaceAcquire};
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
     TransactionTargetIntent, VelloEngineState, VelloResourceManager, scene::VelloScene,
@@ -834,6 +834,23 @@ impl Backend {
             operation,
             BackendErrorCode::RenderFailed,
             "GPU device resources are unavailable",
+        )?;
+        Ok((&ready.device, &ready.queue))
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn present_device_queue(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Result<(&wgpu::Device, &wgpu::Queue)> {
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::PresentFailed,
+            "presented device resources are unavailable before output submission",
         )?;
         Ok((&ready.device, &ready.queue))
     }
@@ -1897,33 +1914,58 @@ pub(crate) async fn render_internal_vello_surface(
             let render_time = render_start.elapsed();
 
             let present_start = Instant::now();
-            let surface_texture = match native.host_surface().get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
-                wgpu::CurrentSurfaceTexture::Outdated
-                | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
+            let transaction = backend.begin_gpu_operation(
+                *device_identity,
+                GpuOperationStage::Present,
+                RuntimeOperation::SurfaceRendering,
+            )?;
+            let (device, queue) = backend.present_device_queue(*device_identity)?;
+            let surface_texture = match native.acquire_texture(device) {
+                PresentedSurfaceAcquire::Success(surface_texture) => surface_texture,
+                PresentedSurfaceAcquire::Suboptimal(surface_texture) => {
+                    drop(surface_texture);
+                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
                     state.mark_configuration_pending();
+                    scope_result?;
+                    return Err(Error::new(
+                        BackendErrorCode::SurfaceOutdated,
+                        "surface is suboptimal and requires reconfiguration",
+                    ));
+                }
+                PresentedSurfaceAcquire::Outdated => {
+                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+                    state.mark_configuration_pending();
+                    scope_result?;
                     return Err(Error::new(
                         BackendErrorCode::SurfaceOutdated,
                         "surface is outdated and requires reconfiguration",
                     ));
                 }
-                wgpu::CurrentSurfaceTexture::Occluded => {
+                PresentedSurfaceAcquire::Occluded => {
+                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
                     state.mark_occluded();
-                    return Ok(SurfaceFrameCommit::without_headless_publication(
-                        RenderTimings {
-                            render_time,
-                            present_time: present_start.elapsed(),
+                    scope_result?;
+                    return Err(Error::runtime_unavailable(
+                        RuntimeOperation::SurfaceRendering,
+                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                            state: RenderSurfaceAvailability::Occluded,
                         },
+                        "surface is occluded",
                     ));
                 }
-                wgpu::CurrentSurfaceTexture::Timeout => {
+                PresentedSurfaceAcquire::Timeout => {
+                    transaction
+                        .finish(RuntimeOperation::SurfaceRendering)
+                        .await?;
                     return Err(Error::new(
                         BackendErrorCode::SurfaceTimeout,
                         "timed out acquiring surface texture",
                     ));
                 }
-                wgpu::CurrentSurfaceTexture::Lost => {
+                PresentedSurfaceAcquire::Lost => {
+                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
                     state.mark_lost();
+                    scope_result?;
                     return Err(Error::runtime_unavailable(
                         RuntimeOperation::SurfaceRendering,
                         RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
@@ -1932,28 +1974,31 @@ pub(crate) async fn render_internal_vello_surface(
                         "surface was lost",
                     ));
                 }
-                wgpu::CurrentSurfaceTexture::Validation => {
+                PresentedSurfaceAcquire::Validation => {
+                    transaction
+                        .finish(RuntimeOperation::SurfaceRendering)
+                        .await?;
                     return Err(Error::new(
-                        BackendErrorCode::RenderFailed,
+                        BackendErrorCode::PresentFailed,
                         "surface texture validation failed",
                     ));
                 }
             };
-            let (device, queue) =
-                backend.device_queue(*device_identity, RuntimeOperation::SurfaceRendering)?;
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Surgeist surface blit"),
             });
-            resources.blitter.copy(
-                device,
-                &mut encoder,
-                &resources.target_view,
-                &surface_texture
-                    .texture
-                    .create_view(&wgpu::TextureViewDescriptor::default()),
-            );
-            queue.submit([encoder.finish()]);
-            surface_texture.present();
+            let surface_view = surface_texture.create_view();
+            resources
+                .blitter
+                .copy(device, &mut encoder, &resources.target_view, &surface_view);
+            transaction
+                .submit_command_buffer_with_host_effect(
+                    queue,
+                    encoder.finish(),
+                    || surface_texture.present(),
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await?;
             Ok(SurfaceFrameCommit::without_headless_publication(
                 RenderTimings {
                     render_time,

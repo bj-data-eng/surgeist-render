@@ -472,28 +472,41 @@ impl Renderer {
         if parameters.debug || self.options.debug() {
             stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
         }
-        let backend = self
+        let frame = {
+            let backend = self
+                .backend
+                .as_mut()
+                .expect("surface preflight confirmed the renderer backend is available");
+            let transaction = backend.begin_gpu_operation(
+                device_identity,
+                GpuOperationStage::Render,
+                RuntimeOperation::SurfaceRendering,
+            )?;
+            let frame = render_internal_vello_surface(
+                backend,
+                transaction,
+                surface,
+                &vello_scene,
+                parameters,
+                self.options.antialiasing(),
+            )
+            .await;
+            backend.observe_device_terminal(device_identity);
+            frame
+        };
+        let frame = match frame {
+            Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
+                self.configure_presented_surface_if_needed(surface).await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+            Ok(frame) => frame,
+        };
+        let publication_signal = self
             .backend
             .as_mut()
-            .expect("surface preflight confirmed the renderer backend is available");
-        let transaction = backend.begin_gpu_operation(
-            device_identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::SurfaceRendering,
-        )?;
-        let frame = render_internal_vello_surface(
-            backend,
-            transaction,
-            surface,
-            &vello_scene,
-            parameters,
-            self.options.antialiasing(),
-        )
-        .await;
-        backend.observe_device_terminal(device_identity);
-        let frame = frame?;
-        let publication_signal =
-            backend.publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
+            .expect("surface preflight confirmed the renderer backend is available")
+            .publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
         let timings = frame.timings();
         stats.render_time = timings.render_time;
         stats.present_time = timings.present_time;

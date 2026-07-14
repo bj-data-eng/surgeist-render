@@ -36,13 +36,11 @@ pub(crate) enum GpuOperationStage {
         all(feature = "render-web", target_arch = "wasm32")
     ))]
     Configure,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C04 T4 preserves the Present mapping until T6 adds its production GPU operation"
-        )
-    )]
+    #[cfg(any(
+        test,
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
     Present,
 }
 
@@ -56,6 +54,11 @@ impl GpuOperationStage {
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
             Self::Configure => BackendErrorCode::SurfaceConfigureFailed,
+            #[cfg(any(
+                test,
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
             Self::Present => BackendErrorCode::PresentFailed,
         }
     }
@@ -755,12 +758,25 @@ impl GpuOperationTransaction {
         command_buffer: wgpu::CommandBuffer,
         operation: RuntimeOperation,
     ) -> Result<()> {
+        self.submit_command_buffer_with_host_effect(queue, command_buffer, || {}, operation)
+            .await
+    }
+
+    /// Submits output work and applies its non-rollbackable host effect while scoped.
+    pub(crate) async fn submit_command_buffer_with_host_effect(
+        self,
+        queue: &wgpu::Queue,
+        command_buffer: wgpu::CommandBuffer,
+        host_effect: impl FnOnce(),
+        operation: RuntimeOperation,
+    ) -> Result<()> {
         queue.submit([command_buffer]);
         #[cfg(test)]
         let submission_observation = record_active_gpu_operation_submission_for_test(
             self.lease.generation(),
             self.lease.active_generation_for_test(),
         );
+        host_effect();
         #[cfg(test)]
         wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
 

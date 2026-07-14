@@ -6,6 +6,9 @@ use super::{
 };
 use std::sync::Arc;
 
+#[cfg(all(test, feature = "render-window"))]
+use std::sync::Mutex;
+
 #[derive(Clone)]
 pub(crate) struct RendererIdentity(Arc<()>);
 
@@ -300,7 +303,65 @@ enum PresentedSurfaceTarget {
     /// Configuration still allocates the production per-surface target bundle
     /// under the real Configure transaction.
     #[cfg(all(test, feature = "render-window"))]
-    DisplayFreeHostEffectForTest,
+    DisplayFreeHostEffectForTest(Arc<Mutex<DisplayFreePresentedSurfaceStateForTest>>),
+}
+
+/// The finite WGPU acquire outcomes exercised by the display-free presentation fixture.
+#[cfg(all(test, feature = "render-window"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PresentedAcquireOutcomeForTest {
+    Success,
+    Suboptimal,
+    Outdated,
+    Occluded,
+    Timeout,
+    Lost,
+    Validation,
+}
+
+#[cfg(all(test, feature = "render-window"))]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct DisplayFreePresentedSurfaceObservationForTest {
+    acquire_count: usize,
+    present_count: usize,
+    discarded_count: usize,
+}
+
+#[cfg(all(test, feature = "render-window"))]
+#[derive(Clone)]
+pub(crate) struct DisplayFreePresentedSurfaceObservationHandleForTest(
+    Arc<Mutex<DisplayFreePresentedSurfaceStateForTest>>,
+);
+
+#[cfg(all(test, feature = "render-window"))]
+impl DisplayFreePresentedSurfaceObservationHandleForTest {
+    pub(crate) fn snapshot_for_test(&self) -> DisplayFreePresentedSurfaceObservationForTest {
+        self.0
+            .lock()
+            .expect("display-free presentation fixture state must remain available")
+            .observation
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl DisplayFreePresentedSurfaceObservationForTest {
+    pub(crate) const fn acquire_count_for_test(self) -> usize {
+        self.acquire_count
+    }
+
+    pub(crate) const fn present_count_for_test(self) -> usize {
+        self.present_count
+    }
+
+    pub(crate) const fn discarded_count_for_test(self) -> usize {
+        self.discarded_count
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) struct DisplayFreePresentedSurfaceStateForTest {
+    next_outcome: PresentedAcquireOutcomeForTest,
+    observation: DisplayFreePresentedSurfaceObservationForTest,
 }
 
 #[cfg(any(
@@ -323,6 +384,36 @@ pub(crate) struct PresentedResourceBundle {
 ))]
 pub(crate) struct PresentedConfigurationDraft {
     resources: PresentedResourceBundle,
+}
+
+/// An acquired host frame that returns/discards itself unless it is presented.
+#[must_use = "acquired surface textures must be presented or dropped"]
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+pub(crate) enum AcquiredPresentedSurfaceTexture {
+    Host(Option<wgpu::SurfaceTexture>),
+    #[cfg(all(test, feature = "render-window"))]
+    DisplayFree {
+        texture: wgpu::Texture,
+        state: Arc<Mutex<DisplayFreePresentedSurfaceStateForTest>>,
+        presented: bool,
+    },
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+pub(crate) enum PresentedSurfaceAcquire {
+    Success(AcquiredPresentedSurfaceTexture),
+    Suboptimal(AcquiredPresentedSurfaceTexture),
+    Outdated,
+    Occluded,
+    Timeout,
+    Lost,
+    Validation,
 }
 
 #[cfg(any(
@@ -355,9 +446,14 @@ impl PresentedSurface {
     }
 
     #[cfg(all(test, feature = "render-window"))]
-    pub(crate) const fn display_free_for_test() -> Self {
+    pub(crate) fn display_free_for_test() -> Self {
         Self {
-            target: PresentedSurfaceTarget::DisplayFreeHostEffectForTest,
+            target: PresentedSurfaceTarget::DisplayFreeHostEffectForTest(Arc::new(Mutex::new(
+                DisplayFreePresentedSurfaceStateForTest {
+                    next_outcome: PresentedAcquireOutcomeForTest::Success,
+                    observation: DisplayFreePresentedSurfaceObservationForTest::default(),
+                },
+            ))),
             format: wgpu::TextureFormat::Rgba8Unorm,
             committed: None,
         }
@@ -383,25 +479,180 @@ impl PresentedSurface {
         match &self.target {
             PresentedSurfaceTarget::Host(surface) => surface.configure(device, &config),
             #[cfg(all(test, feature = "render-window"))]
-            PresentedSurfaceTarget::DisplayFreeHostEffectForTest => {}
+            PresentedSurfaceTarget::DisplayFreeHostEffectForTest(_) => {}
         }
         PresentedConfigurationDraft {
             resources: PresentedResourceBundle::new(device, config),
         }
     }
 
-    pub(crate) fn host_surface(&self) -> &wgpu::Surface<'static> {
+    pub(crate) fn acquire_texture(&self, device: &wgpu::Device) -> PresentedSurfaceAcquire {
+        #[cfg(not(all(test, feature = "render-window")))]
+        let _ = device;
         match &self.target {
-            PresentedSurfaceTarget::Host(surface) => surface,
+            PresentedSurfaceTarget::Host(surface) => match surface.get_current_texture() {
+                wgpu::CurrentSurfaceTexture::Success(texture) => PresentedSurfaceAcquire::Success(
+                    AcquiredPresentedSurfaceTexture::Host(Some(texture)),
+                ),
+                wgpu::CurrentSurfaceTexture::Suboptimal(texture) => {
+                    PresentedSurfaceAcquire::Suboptimal(AcquiredPresentedSurfaceTexture::Host(
+                        Some(texture),
+                    ))
+                }
+                wgpu::CurrentSurfaceTexture::Outdated => PresentedSurfaceAcquire::Outdated,
+                wgpu::CurrentSurfaceTexture::Occluded => PresentedSurfaceAcquire::Occluded,
+                wgpu::CurrentSurfaceTexture::Timeout => PresentedSurfaceAcquire::Timeout,
+                wgpu::CurrentSurfaceTexture::Lost => PresentedSurfaceAcquire::Lost,
+                wgpu::CurrentSurfaceTexture::Validation => PresentedSurfaceAcquire::Validation,
+            },
             #[cfg(all(test, feature = "render-window"))]
-            PresentedSurfaceTarget::DisplayFreeHostEffectForTest => {
-                panic!("the display-free presented fixture substitutes only host configuration")
+            PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) => {
+                let outcome = {
+                    let mut state = state
+                        .lock()
+                        .expect("display-free presentation fixture state must remain available");
+                    let outcome = state.next_outcome;
+                    state.next_outcome = PresentedAcquireOutcomeForTest::Success;
+                    outcome
+                };
+                let texture = || {
+                    let resources = self.committed.as_ref().expect(
+                        "display-free acquire requires committed presented target resources",
+                    );
+                    device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("Surgeist display-free acquired presentation texture"),
+                        size: wgpu::Extent3d {
+                            width: resources.config.width,
+                            height: resources.config.height,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: resources.config.format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        view_formats: &[],
+                    })
+                };
+                let acquired = || {
+                    let mut fixture = state
+                        .lock()
+                        .expect("display-free presentation fixture state must remain available");
+                    fixture.observation.acquire_count =
+                        fixture.observation.acquire_count.saturating_add(1);
+                    drop(fixture);
+                    AcquiredPresentedSurfaceTexture::DisplayFree {
+                        texture: texture(),
+                        state: Arc::clone(state),
+                        presented: false,
+                    }
+                };
+                match outcome {
+                    PresentedAcquireOutcomeForTest::Success => {
+                        PresentedSurfaceAcquire::Success(acquired())
+                    }
+                    PresentedAcquireOutcomeForTest::Suboptimal => {
+                        PresentedSurfaceAcquire::Suboptimal(acquired())
+                    }
+                    PresentedAcquireOutcomeForTest::Outdated => PresentedSurfaceAcquire::Outdated,
+                    PresentedAcquireOutcomeForTest::Occluded => PresentedSurfaceAcquire::Occluded,
+                    PresentedAcquireOutcomeForTest::Timeout => PresentedSurfaceAcquire::Timeout,
+                    PresentedAcquireOutcomeForTest::Lost => PresentedSurfaceAcquire::Lost,
+                    PresentedAcquireOutcomeForTest::Validation => {
+                        PresentedSurfaceAcquire::Validation
+                    }
+                }
             }
         }
     }
 
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn set_acquire_outcome_for_test(&mut self, outcome: PresentedAcquireOutcomeForTest) {
+        let PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) = &self.target else {
+            panic!("only the display-free presented fixture accepts synthetic acquire outcomes");
+        };
+        state
+            .lock()
+            .expect("display-free presentation fixture state must remain available")
+            .next_outcome = outcome;
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn observation_for_test(&self) -> DisplayFreePresentedSurfaceObservationForTest {
+        self.observation_handle_for_test().snapshot_for_test()
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn observation_handle_for_test(
+        &self,
+    ) -> DisplayFreePresentedSurfaceObservationHandleForTest {
+        let PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) = &self.target else {
+            panic!("only the display-free presented fixture exposes presentation observations");
+        };
+        DisplayFreePresentedSurfaceObservationHandleForTest(Arc::clone(state))
+    }
+
     pub(crate) fn commit_configuration(&mut self, draft: PresentedConfigurationDraft) {
         self.committed = Some(draft.resources);
+    }
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+impl AcquiredPresentedSurfaceTexture {
+    pub(crate) fn create_view(&self) -> wgpu::TextureView {
+        match self {
+            Self::Host(texture) => texture
+                .as_ref()
+                .expect("an unpresented host surface texture must remain available")
+                .texture
+                .create_view(&wgpu::TextureViewDescriptor::default()),
+            #[cfg(all(test, feature = "render-window"))]
+            Self::DisplayFree { texture, .. } => {
+                texture.create_view(&wgpu::TextureViewDescriptor::default())
+            }
+        }
+    }
+
+    pub(crate) fn present(mut self) {
+        match &mut self {
+            Self::Host(texture) => texture
+                .take()
+                .expect("a host surface texture is presented at most once")
+                .present(),
+            #[cfg(all(test, feature = "render-window"))]
+            Self::DisplayFree {
+                state, presented, ..
+            } => {
+                *presented = true;
+                let mut state = state
+                    .lock()
+                    .expect("display-free presentation fixture state must remain available");
+                state.observation.present_count = state.observation.present_count.saturating_add(1);
+            }
+        }
+    }
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+impl Drop for AcquiredPresentedSurfaceTexture {
+    fn drop(&mut self) {
+        #[cfg(all(test, feature = "render-window"))]
+        if let Self::DisplayFree {
+            state, presented, ..
+        } = self
+            && !*presented
+        {
+            let mut state = state
+                .lock()
+                .expect("display-free presentation fixture state must remain available");
+            state.observation.discarded_count = state.observation.discarded_count.saturating_add(1);
+        }
     }
 }
 
