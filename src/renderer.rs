@@ -15,12 +15,19 @@ use super::{
     vello_engine::scene::VelloScene,
     *,
 };
+#[cfg(test)]
+use std::cell::RefCell;
 use std::{
     collections::HashSet,
     future::Future,
     pin::Pin,
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
+}
 
 pub struct Renderer {
     identity: RendererIdentity,
@@ -45,6 +52,36 @@ impl RenderPublication {
         renderer.uploaded_images = self.uploaded_images;
         surface.last_parameters = Some(self.parameters);
         self.stats
+    }
+}
+
+/// Private control that injects loss after a clean transaction and before publication.
+#[cfg(test)]
+pub(crate) struct ScopedFinalPublicationLossForTest {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl ScopedFinalPublicationLossForTest {
+    pub(crate) fn after_transaction_completion() -> Self {
+        let previous = ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| active.replace(true));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedFinalPublicationLossForTest {
+    fn drop(&mut self) {
+        ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous;
+        });
+    }
+}
+
+#[cfg(test)]
+fn inject_final_publication_loss_for_test(signal: &DeviceSignal) {
+    if ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| *active.borrow()) {
+        signal.record_loss_for_test(DeviceLossReason::Unknown);
     }
 }
 
@@ -356,6 +393,8 @@ impl Renderer {
         .await;
         backend.observe_device_terminal(device_identity);
         let frame = frame?;
+        let publication_signal =
+            backend.publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
         let timings = frame.timings();
         stats.render_time = timings.render_time;
         stats.present_time = timings.present_time;
@@ -373,7 +412,19 @@ impl Renderer {
         .commit();
         let publication =
             published.expect("a clean GPU transaction must commit its staged public state");
-        Ok(publication.commit(self, surface))
+        #[cfg(test)]
+        inject_final_publication_loss_for_test(&publication_signal);
+        match publication_signal.commit_if_no_terminal(RuntimeOperation::SurfaceRendering, || {
+            publication.commit(self, surface)
+        }) {
+            Ok(stats) => Ok(stats),
+            Err(error) => {
+                if let Some(backend) = self.backend.as_mut() {
+                    backend.observe_device_terminal(device_identity);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Resumes a compatible surface, awaiting recreation when it is presented.
@@ -858,6 +909,11 @@ impl Renderer {
         self.backend
             .as_mut()?
             .active_operation_generation_for_test(device_identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn uploaded_images_for_test(&self) -> HashSet<ImageId> {
+        self.uploaded_images.clone()
     }
 
     #[cfg(test)]

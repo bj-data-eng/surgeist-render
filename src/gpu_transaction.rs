@@ -281,23 +281,31 @@ pub(crate) struct AfterInternalVelloSubmitCheckpointForTest {
 #[cfg(test)]
 #[derive(Clone)]
 enum InternalVelloPostSubmitControlForTest {
-    Fail,
+    Fail {
+        scope_resolution_observed: SyncSender<()>,
+    },
     Pause(SyncSender<()>),
 }
 
 #[cfg(test)]
 pub(crate) struct ScopedInternalVelloPostSubmitControlForTest {
     reached: Option<Receiver<()>>,
+    scope_resolution_observed: Option<Receiver<()>>,
     previous: Option<InternalVelloPostSubmitControlForTest>,
 }
 
 #[cfg(test)]
 impl ScopedInternalVelloPostSubmitControlForTest {
     pub(crate) fn failing() -> Self {
-        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST
-            .with(|active| active.replace(Some(InternalVelloPostSubmitControlForTest::Fail)));
+        let (scope_resolution_observed, observed) = sync_channel(1);
+        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(InternalVelloPostSubmitControlForTest::Fail {
+                scope_resolution_observed,
+            }))
+        });
         Self {
             reached: None,
+            scope_resolution_observed: Some(observed),
             previous,
         }
     }
@@ -309,6 +317,7 @@ impl ScopedInternalVelloPostSubmitControlForTest {
         });
         Self {
             reached: Some(observed),
+            scope_resolution_observed: None,
             previous,
         }
     }
@@ -321,6 +330,12 @@ impl ScopedInternalVelloPostSubmitControlForTest {
             .expect(
                 "the real production submission did not reach the bounded post-submit checkpoint",
             );
+    }
+
+    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
+        self.scope_resolution_observed
+            .as_ref()
+            .is_some_and(|observed| observed.try_recv().is_ok())
     }
 }
 
@@ -335,18 +350,29 @@ impl Drop for ScopedInternalVelloPostSubmitControlForTest {
 
 #[cfg(test)]
 impl InternalVelloPostSubmitControlForTest {
-    async fn apply(self) -> Result<()> {
+    async fn apply(self, device: &wgpu::Device) {
         match self {
-            Self::Fail => Err(Error::new(
-                BackendErrorCode::RenderFailed,
-                "test-injected scoped failure after internal Vello submission",
-            )),
+            Self::Fail { .. } => {
+                let _ = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Surgeist test-injected scoped validation failure"),
+                    size: wgpu::Extent3d {
+                        width: 0,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+            }
             Self::Pause(reached) => {
                 reached
                     .send(())
                     .expect("the production render test must observe the post-submit checkpoint");
                 std::future::pending::<()>().await;
-                Ok(())
             }
         }
     }
@@ -459,6 +485,16 @@ impl GpuOperationTransaction {
             .pop()
             .await;
 
+        #[cfg(test)]
+        ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            if let Some(InternalVelloPostSubmitControlForTest::Fail {
+                scope_resolution_observed,
+            }) = active.borrow().as_ref()
+            {
+                let _ = scope_resolution_observed.send(());
+            }
+        });
+
         if let Some(terminal) = self.lease.finish() {
             return match terminal.as_ref() {
                 DeviceTerminalSignal::Lost { .. } => Err(terminal.error(operation)),
@@ -485,10 +521,13 @@ impl GpuOperationTransaction {
 
     pub(crate) async fn submit_internal_vello(
         self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         payload: InternalVelloPayload<'_>,
         operation: RuntimeOperation,
     ) -> Result<()> {
+        #[cfg(not(test))]
+        let _ = device;
         let InternalVelloPayload {
             command_buffer,
             resources,
@@ -529,7 +568,7 @@ impl GpuOperationTransaction {
         if let Some(control) = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST
             .with(|active| active.borrow().clone())
         {
-            control.apply().await?;
+            control.apply(device).await;
         }
         match self.finish(operation).await {
             Ok(()) => {

@@ -242,7 +242,6 @@ impl Surface {
         };
         *resources = HeadlessResources::Ready {
             texture: publication.texture,
-            view: publication.view,
         };
     }
 }
@@ -386,25 +385,17 @@ impl PresentedSurface {
 pub(crate) enum HeadlessResources {
     Empty,
     Pending,
-    Ready {
-        texture: wgpu::Texture,
-        #[expect(
-            dead_code,
-            reason = "the publication retains its paired texture view for later GPU consumers"
-        )]
-        view: wgpu::TextureView,
-    },
+    Ready { texture: wgpu::Texture },
 }
 
 #[must_use = "headless frame publications must be committed or dropped"]
 pub(crate) struct HeadlessPublication {
     pub(crate) texture: wgpu::Texture,
-    pub(crate) view: wgpu::TextureView,
 }
 
 impl HeadlessPublication {
-    pub(crate) const fn new(texture: wgpu::Texture, view: wgpu::TextureView) -> Self {
-        Self { texture, view }
+    pub(crate) const fn new(texture: wgpu::Texture) -> Self {
+        Self { texture }
     }
 }
 

@@ -1,6 +1,7 @@
 use super::gpu_transaction::{
     GpuOperationLease, GpuOperationStage, ScopedInternalVelloPostSubmitControlForTest,
 };
+use super::renderer::ScopedFinalPublicationLossForTest;
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
@@ -17588,6 +17589,10 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         pollster::block_on(renderer.render(&mut surface, &replacement, Parameters::default()))
             .expect_err("the scoped post-submit failure must abort the replacement frame");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(
+        failure.scope_resolution_observed_for_test(),
+        "the scoped failure must resolve the real transaction scopes before returning"
+    );
     drop(failure);
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     assert_eq!(
@@ -17638,6 +17643,81 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         error,
         RuntimeOperation::SurfaceReadback,
         RenderSurfaceAvailability::Uninitialized,
+    );
+}
+
+#[test]
+fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
+    let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255]))
+        .expect("the baseline image must be valid");
+    let mut first = Scene::new();
+    first.image(image, Rect::new(0.0, 0.0, 2.0, 2.0), ImageFit::Stretch);
+    let first_parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &first, first_parameters))
+        .expect("the first frame must establish the public state to preserve");
+    let prior_pixels = renderer
+        .read_headless(&surface)
+        .expect("the first frame must establish readable pixels");
+    let prior_texture = match &surface.backend {
+        SurfaceBackend::Headless {
+            resources: HeadlessResources::Ready { texture },
+            ..
+        } => texture.clone(),
+        _ => panic!("the readable headless frame must retain its published texture"),
+    };
+    let prior_stats = renderer.stats();
+    let prior_parameters = surface.last_parameters;
+    let prior_uploaded_images = renderer.uploaded_images_for_test();
+
+    let replacement =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 255, 255, 255]))
+            .expect("the replacement image must be valid");
+    let mut next = Scene::new();
+    next.image(
+        replacement,
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        ImageFit::Stretch,
+    );
+    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    let error = pollster::block_on(renderer.render(
+        &mut surface,
+        &next,
+        Parameters {
+            base_color: Color::TRANSPARENT,
+            debug: false,
+        },
+    ))
+    .expect_err("a terminal signal before publication must fail the active frame");
+    drop(loss);
+
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Unknown,
+    );
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    match &surface.backend {
+        SurfaceBackend::Headless {
+            resources: HeadlessResources::Ready { texture },
+            ..
+        } => assert_eq!(
+            texture, &prior_texture,
+            "the terminal failure must retain the exact texture containing the prior public pixels"
+        ),
+        _ => panic!("the terminal failure must retain the prior headless publication"),
+    }
+    assert_eq!(renderer.stats(), prior_stats);
+    assert_eq!(surface.last_parameters, prior_parameters);
+    assert_eq!(renderer.uploaded_images_for_test(), prior_uploaded_images);
+    assert!(
+        prior_pixels.rgba.iter().any(|channel| *channel != 0),
+        "the preserved public frame must have established non-empty pixels before the race"
     );
 }
 

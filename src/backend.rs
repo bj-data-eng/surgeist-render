@@ -433,6 +433,22 @@ impl DeviceSignal {
             .clone()
     }
 
+    /// Linearizes public state with terminal signal delivery.
+    pub(crate) fn commit_if_no_terminal<T>(
+        &self,
+        operation: RuntimeOperation,
+        commit: impl FnOnce() -> T,
+    ) -> Result<T> {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(terminal) = state.first_terminal.as_ref() {
+            return Err(terminal.error(operation));
+        }
+        Ok(commit())
+    }
+
     /// Atomically snapshots terminal state and releases this operation's lease.
     pub(crate) fn finish_active_generation(
         &self,
@@ -518,6 +534,14 @@ impl DeviceSignal {
     #[cfg(test)]
     pub(crate) fn record_uncaptured_fault_for_test(&self, kind: GpuFaultKind, message: &str) {
         self.record_fault(kind, message.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn record_loss_for_test(&self, reason: DeviceLossReason) {
+        self.record(DeviceTerminalSignal::lost(
+            reason,
+            "test device loss".into(),
+        ));
     }
 
     #[cfg(test)]
@@ -818,7 +842,7 @@ impl Backend {
             logical_pass,
         );
         transaction
-            .submit_internal_vello(&ready.queue, payload, request.operation)
+            .submit_internal_vello(&ready.device, &ready.queue, payload, request.operation)
             .await
     }
 
@@ -1004,7 +1028,7 @@ impl Backend {
             observation.clone(),
         );
         transaction
-            .submit_internal_vello(queue, payload, RuntimeOperation::SurfaceRendering)
+            .submit_internal_vello(device, queue, payload, RuntimeOperation::SurfaceRendering)
             .await?;
         Ok(observation)
     }
@@ -1106,6 +1130,7 @@ impl Backend {
             checkpoint,
         );
         let mut submission = Box::pin(transaction.submit_internal_vello(
+            device,
             queue,
             payload,
             RuntimeOperation::SurfaceRendering,
@@ -1146,6 +1171,29 @@ impl Backend {
             return None;
         }
         state.terminal().map(|terminal| terminal.error(operation))
+    }
+
+    pub(crate) fn publication_signal(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
+    ) -> Result<Arc<DeviceSignal>> {
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot disappeared before frame publication",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before frame publication",
+            ));
+        }
+        if let Some(terminal) = state.terminal() {
+            return Err(terminal.error(operation));
+        }
+        Ok(Arc::clone(&state.signal))
     }
 
     pub(crate) fn terminal_reason(
@@ -1695,7 +1743,7 @@ pub(crate) async fn render_internal_vello_surface(
                 )
                 .await?;
             Ok(SurfaceFrameCommit::headless(
-                HeadlessPublication::new(texture, view),
+                HeadlessPublication::new(texture),
                 RenderTimings {
                     render_time: render_start.elapsed(),
                     present_time: Duration::ZERO,
