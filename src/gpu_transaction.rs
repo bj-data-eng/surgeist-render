@@ -30,13 +30,11 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
     Render,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C04 T4 preserves the Configure mapping until T5 adds its production GPU operation"
-        )
-    )]
+    #[cfg(any(
+        test,
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
     Configure,
     #[cfg_attr(
         not(test),
@@ -52,6 +50,11 @@ impl GpuOperationStage {
     const fn error_code(self) -> BackendErrorCode {
         match self {
             Self::Render => BackendErrorCode::RenderFailed,
+            #[cfg(any(
+                test,
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
             Self::Configure => BackendErrorCode::SurfaceConfigureFailed,
             Self::Present => BackendErrorCode::PresentFailed,
         }

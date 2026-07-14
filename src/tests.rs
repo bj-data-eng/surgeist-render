@@ -3,6 +3,8 @@ use super::gpu_transaction::{
     ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
 };
 use super::renderer::ScopedFinalPublicationLossForTest;
+#[cfg(feature = "render-window")]
+use super::renderer::ScopedPresentedConfigureControlForTest;
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
@@ -30,6 +32,12 @@ use super::{
         headless_texture_descriptor,
     },
 };
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::PresentedSurfaceState;
 use std::{
     fs,
     future::Future,
@@ -7672,13 +7680,14 @@ fn presented_surface_lifecycle_state_names_pending_resize() {
 ))]
 #[test]
 fn presented_surface_lifecycle_recovers_from_zero_size_at_current_native_size() {
-    let state = PresentedLifecycle::NonRenderable {
-        physical_size: PhysicalSize::new(0, 0),
-        resizing: ResizeState::Resizing,
-    };
+    let mut state = PresentedSurfaceState::new(PhysicalSize::new(0, 0), ResizeState::Resizing);
+    state.resize_requested(
+        Some(PhysicalSize::new(640, 480)),
+        PhysicalSize::new(640, 480),
+    );
 
     assert_eq!(
-        state.resize_requested(PhysicalSize::new(640, 480), PhysicalSize::new(640, 480)),
+        state.lifecycle(),
         PresentedLifecycle::Ready {
             resizing: ResizeState::Resizing,
         }
@@ -15240,6 +15249,126 @@ fn available_presented_resume_keeps_the_installed_attachment_without_recreating(
         matches!(action, PresentedResumeAction::NoOp),
         "an available presented surface must retain its attachment without WGPU recreation"
     );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_setup_and_resize_commit_only_after_clean_configuration() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented configuration coverage requires a host adapter");
+    let mut state = PresentedSurfaceState::new(PhysicalSize::new(2, 2), ResizeState::Idle);
+
+    assert!(matches!(
+        state.lifecycle(),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    assert_eq!(state.committed_resource_id_for_test(), None);
+
+    pollster::block_on(renderer.configure_presented_state_for_test(&mut state))
+        .expect("initial presented configuration must commit only after clean scopes");
+    let initial_resource = state
+        .committed_resource_id_for_test()
+        .expect("clean configuration must commit one resource bundle");
+    assert!(matches!(
+        state.lifecycle(),
+        PresentedLifecycle::Ready { .. }
+    ));
+
+    state.resize_requested_for_test(PhysicalSize::new(3, 2));
+    assert!(matches!(
+        state.lifecycle(),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    let failure = ScopedPresentedConfigureControlForTest::failing();
+    let error = pollster::block_on(renderer.configure_presented_state_for_test(&mut state))
+        .expect_err("a scoped configure failure must leave the requested resize pending");
+    assert_eq!(error.code(), ErrorCode::SurfaceConfigureFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    assert_eq!(
+        state.committed_resource_id_for_test(),
+        Some(initial_resource)
+    );
+    assert!(matches!(
+        state.lifecycle(),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+
+    let checkpoint = ScopedPresentedConfigureControlForTest::paused();
+    {
+        let future = renderer.configure_presented_state_for_test(&mut state);
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        checkpoint.wait_for_draft_for_test(Duration::from_secs(2));
+    }
+    assert_eq!(
+        state.committed_resource_id_for_test(),
+        Some(initial_resource)
+    );
+    assert!(matches!(
+        state.lifecycle(),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented configuration coverage requires a host adapter");
+    let mut first = PresentedSurfaceState::new(PhysicalSize::new(0, 2), ResizeState::Resizing);
+    let mut second = PresentedSurfaceState::new(PhysicalSize::new(2, 2), ResizeState::Idle);
+
+    assert!(matches!(
+        first.lifecycle(),
+        PresentedLifecycle::NonRenderable { .. }
+    ));
+    assert_eq!(first.committed_resource_id_for_test(), None);
+    assert_eq!(first.configuration_attempts_for_test(), 0);
+    pollster::block_on(renderer.configure_presented_state_for_test(&mut first))
+        .expect("zero-area presented setup must avoid configuration and target allocation");
+    assert_eq!(first.configuration_attempts_for_test(), 0);
+
+    first.resize_requested_for_test(PhysicalSize::new(2, 2));
+    first.suspend_for_test();
+    assert!(matches!(
+        first.lifecycle(),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    assert_eq!(first.configuration_attempts_for_test(), 0);
+    let error = pollster::block_on(renderer.configure_presented_state_for_test(&mut first))
+        .expect_err("a suspended resize must retain its requested configuration without WGPU work");
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(first.configuration_attempts_for_test(), 0);
+    first.resume_for_test();
+    pollster::block_on(renderer.configure_presented_state_for_test(&mut first))
+        .expect("resuming a nonzero requested surface must configure it transactionally");
+    pollster::block_on(renderer.configure_presented_state_for_test(&mut second))
+        .expect("each ready presented surface must configure its own resource bundle");
+
+    let first_resource = first
+        .committed_resource_id_for_test()
+        .expect("first surface must own a committed bundle");
+    let second_resource = second
+        .committed_resource_id_for_test()
+        .expect("second surface must own a committed bundle");
+    assert_ne!(first_resource, second_resource);
+
+    first.resize_requested_for_test(PhysicalSize::new(2, 2));
+    assert_eq!(first.committed_resource_id_for_test(), Some(first_resource));
+    assert!(matches!(
+        first.lifecycle(),
+        PresentedLifecycle::Ready {
+            resizing: ResizeState::Resizing
+        }
+    ));
 }
 
 #[test]

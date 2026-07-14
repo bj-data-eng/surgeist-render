@@ -6,13 +6,13 @@ use super::gpu_transaction::{
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-use super::surface::PresentedLifecycle;
+use super::surface::PresentedSurface;
+use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-use super::surface::PresentedSurface;
-use super::surface::{HeadlessPublication, SurfaceBackend};
+use super::surface::{PresentedConfigurationDraft, PresentedLifecycle};
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
     TransactionTargetIntent, VelloEngineState, VelloResourceManager, scene::VelloScene,
@@ -697,8 +697,6 @@ impl Backend {
     pub(crate) async fn create_presented_surface(
         &mut self,
         target: impl Into<wgpu::SurfaceTarget<'static>>,
-        physical_size: PhysicalSize,
-        present_mode: wgpu::PresentMode,
     ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
         let surface = self
             .instance
@@ -722,13 +720,7 @@ impl Backend {
             BackendErrorCode::SurfaceCreateFailed,
             "the selected presentation device is unavailable",
         )?;
-        let presented = PresentedSurface::new(
-            surface,
-            &ready.adapter,
-            &ready.device,
-            physical_size,
-            present_mode,
-        )?;
+        let presented = PresentedSurface::new(surface, &ready.adapter)?;
         Ok((presented, identity))
     }
 
@@ -850,39 +842,29 @@ impl Backend {
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     ))]
-    fn resize_presented_surface(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        surface: &mut PresentedSurface,
-        physical_size: PhysicalSize,
-    ) -> Result<()> {
-        let ready = self.ready_state_mut(
-            identity,
-            RuntimeOperation::SurfaceRendering,
-            BackendErrorCode::RenderFailed,
-            "presented Vello device resources are unavailable before resize",
-        )?;
-        surface.resize(&ready.device, physical_size);
-        Ok(())
-    }
-
-    #[cfg(any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    ))]
-    fn configure_presented_surface(
+    pub(crate) async fn configure_presented_surface(
         &mut self,
         identity: DeviceSlotIdentity,
         surface: &PresentedSurface,
-    ) -> Result<()> {
+        physical_size: PhysicalSize,
+        present_mode: wgpu::PresentMode,
+    ) -> Result<PresentedConfigurationDraft> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Configure,
+            RuntimeOperation::SurfaceRendering,
+        )?;
         let ready = self.ready_state_mut(
             identity,
             RuntimeOperation::SurfaceRendering,
-            BackendErrorCode::RenderFailed,
-            "presented Vello device resources are unavailable before configuration",
+            BackendErrorCode::SurfaceConfigureFailed,
+            "presented device resources are unavailable before configuration",
         )?;
-        surface.configure(&ready.device);
-        Ok(())
+        let draft = surface.configure_draft(&ready.device, physical_size, present_mode);
+        transaction
+            .finish(RuntimeOperation::SurfaceRendering)
+            .await?;
+        Ok(draft)
     }
 
     pub(crate) fn begin_gpu_operation(
@@ -1757,27 +1739,30 @@ pub(crate) async fn render_internal_vello_surface(
         SurfaceBackend::Presented {
             surface: native,
             device_identity,
-            lifecycle,
+            state,
         } => {
-            match lifecycle {
-                PresentedLifecycle::ResizePending {
-                    physical_size,
-                    resizing,
-                } => {
-                    backend.resize_presented_surface(*device_identity, native, *physical_size)?;
-                    *lifecycle = PresentedLifecycle::Ready {
-                        resizing: *resizing,
-                    };
-                }
+            match state.lifecycle() {
                 PresentedLifecycle::NonRenderable { .. } | PresentedLifecycle::Lost => {
                     return Ok(SurfaceFrameCommit::without_headless_publication(
                         RenderTimings::default(),
                     ));
                 }
+                PresentedLifecycle::ResizePending { .. } => {
+                    return Err(Error::new(
+                        BackendErrorCode::SurfaceConfigureFailed,
+                        "presented rendering started before configuration committed",
+                    ));
+                }
                 PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
             }
 
-            let resizing = lifecycle.resize_state();
+            let resources = native.committed().ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::SurfaceConfigureFailed,
+                    "ready presented lifecycle has no committed target resources",
+                )
+            })?;
+            let _ = &resources.target_texture;
             let render_start = Instant::now();
             backend
                 .render_internal_vello_to_texture(
@@ -1786,8 +1771,11 @@ pub(crate) async fn render_internal_vello_surface(
                         identity: *device_identity,
                         operation: RuntimeOperation::SurfaceRendering,
                         scene,
-                        target: &native.target_view,
-                        target_extent: PhysicalSize::new(native.config.width, native.config.height),
+                        target: &resources.target_view,
+                        target_extent: PhysicalSize::new(
+                            resources.config.width,
+                            resources.config.height,
+                        ),
                         base_color: parameters.base_color,
                         antialiasing,
                         target_usage: wgpu::TextureUsages::STORAGE_BINDING
@@ -1799,20 +1787,17 @@ pub(crate) async fn render_internal_vello_surface(
 
             let present_start = Instant::now();
             let surface_texture = match native.surface.get_current_texture() {
-                wgpu::CurrentSurfaceTexture::Success(surface_texture) => {
-                    *lifecycle = PresentedLifecycle::Ready { resizing };
-                    surface_texture
-                }
+                wgpu::CurrentSurfaceTexture::Success(surface_texture) => surface_texture,
                 wgpu::CurrentSurfaceTexture::Outdated
                 | wgpu::CurrentSurfaceTexture::Suboptimal(_) => {
-                    backend.configure_presented_surface(*device_identity, native)?;
+                    state.mark_configuration_pending();
                     return Err(Error::new(
                         BackendErrorCode::SurfaceOutdated,
                         "surface is outdated and requires reconfiguration",
                     ));
                 }
                 wgpu::CurrentSurfaceTexture::Occluded => {
-                    *lifecycle = PresentedLifecycle::Occluded { resizing };
+                    state.mark_occluded();
                     return Ok(SurfaceFrameCommit::without_headless_publication(
                         RenderTimings {
                             render_time,
@@ -1827,7 +1812,7 @@ pub(crate) async fn render_internal_vello_surface(
                     ));
                 }
                 wgpu::CurrentSurfaceTexture::Lost => {
-                    *lifecycle = PresentedLifecycle::Lost;
+                    state.mark_lost();
                     return Err(Error::runtime_unavailable(
                         RuntimeOperation::SurfaceRendering,
                         RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
@@ -1848,10 +1833,10 @@ pub(crate) async fn render_internal_vello_surface(
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("Surgeist surface blit"),
             });
-            native.blitter.copy(
+            resources.blitter.copy(
                 device,
                 &mut encoder,
-                &native.target_view,
+                &resources.target_view,
                 &surface_texture
                     .texture
                     .create_view(&wgpu::TextureViewDescriptor::default()),

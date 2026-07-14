@@ -70,11 +70,8 @@ impl Surface {
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            SurfaceBackend::Presented {
-                surface, lifecycle, ..
-            } => {
-                let current = PhysicalSize::new(surface.config.width, surface.config.height);
-                *lifecycle = lifecycle.resize_requested(current, next);
+            SurfaceBackend::Presented { surface, state, .. } => {
+                state.resize_requested(surface.committed_physical_size(), next);
             }
         }
         Ok(())
@@ -123,8 +120,10 @@ impl Surface {
         if state == SurfaceState::Available && matches!(lifecycle, PresentedLifecycle::Ready { .. })
         {
             PresentedResumeAction::NoOp
-        } else {
+        } else if matches!(lifecycle, PresentedLifecycle::Lost) {
             PresentedResumeAction::Recreate
+        } else {
+            PresentedResumeAction::Configure
         }
     }
 
@@ -158,7 +157,7 @@ impl Surface {
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            SurfaceBackend::Presented { lifecycle, .. } => match lifecycle {
+            SurfaceBackend::Presented { state, .. } => match state.lifecycle() {
                 PresentedLifecycle::NonRenderable { .. } => {
                     Some(RenderSurfaceAvailability::NonRenderable)
                 }
@@ -197,9 +196,7 @@ impl Surface {
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            SurfaceBackend::Presented { surface, .. } => {
-                PhysicalSize::new(surface.config.width, surface.config.height)
-            }
+            SurfaceBackend::Presented { state, .. } => state.requested_physical_size(),
         }
     }
 
@@ -277,7 +274,7 @@ pub(crate) enum SurfaceBackend {
     Presented {
         surface: Box<PresentedSurface>,
         device_identity: DeviceSlotIdentity,
-        lifecycle: PresentedLifecycle,
+        state: PresentedSurfaceState,
     },
 }
 
@@ -287,11 +284,30 @@ pub(crate) enum SurfaceBackend {
 ))]
 pub(crate) struct PresentedSurface {
     pub(crate) surface: wgpu::Surface<'static>,
-    pub(crate) config: wgpu::SurfaceConfiguration,
     pub(crate) format: wgpu::TextureFormat,
+    committed: Option<PresentedResourceBundle>,
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+pub(crate) struct PresentedResourceBundle {
+    pub(crate) config: wgpu::SurfaceConfiguration,
     pub(crate) target_texture: wgpu::Texture,
     pub(crate) target_view: wgpu::TextureView,
     pub(crate) blitter: wgpu::util::TextureBlitter,
+    #[cfg(all(test, feature = "render-window"))]
+    resource_id: u64,
+}
+
+#[must_use = "presented configuration resources must be committed or dropped"]
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+pub(crate) struct PresentedConfigurationDraft {
+    resources: PresentedResourceBundle,
 }
 
 #[cfg(any(
@@ -299,13 +315,7 @@ pub(crate) struct PresentedSurface {
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 impl PresentedSurface {
-    pub(crate) fn new(
-        surface: wgpu::Surface<'static>,
-        adapter: &wgpu::Adapter,
-        device: &wgpu::Device,
-        physical_size: PhysicalSize,
-        present_mode: wgpu::PresentMode,
-    ) -> Result<Self> {
+    pub(crate) fn new(surface: wgpu::Surface<'static>, adapter: &wgpu::Adapter) -> Result<Self> {
         let format = surface
             .get_capabilities(adapter)
             .formats
@@ -322,47 +332,49 @@ impl PresentedSurface {
                     "the selected adapter does not support an Rgba8 or Bgra8 surface format",
                 )
             })?;
-        let config = wgpu::SurfaceConfiguration {
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            format,
-            width: physical_size.width(),
-            height: physical_size.height(),
-            present_mode,
-            desired_maximum_frame_latency: 2,
-            alpha_mode: wgpu::CompositeAlphaMode::Auto,
-            view_formats: vec![],
-        };
-        let (target_texture, target_view) = Self::create_targets(physical_size, device);
-        let presented = Self {
+        Ok(Self {
             surface,
-            config,
             format,
-            target_texture,
-            target_view,
-            blitter: wgpu::util::TextureBlitter::new(device, format),
-        };
-        presented.configure(device);
-        Ok(presented)
+            committed: None,
+        })
     }
 
-    pub(crate) fn resize(&mut self, device: &wgpu::Device, physical_size: PhysicalSize) {
-        let (target_texture, target_view) = Self::create_targets(physical_size, device);
-        self.target_texture = target_texture;
-        self.target_view = target_view;
-        self.config.width = physical_size.width();
-        self.config.height = physical_size.height();
-        self.configure(device);
+    pub(crate) fn committed(&self) -> Option<&PresentedResourceBundle> {
+        self.committed.as_ref()
     }
 
-    pub(crate) fn configure(&self, device: &wgpu::Device) {
-        debug_assert_eq!(self.format, self.config.format);
-        self.surface.configure(device, &self.config);
+    pub(crate) fn committed_physical_size(&self) -> Option<PhysicalSize> {
+        self.committed
+            .as_ref()
+            .map(|resources| PhysicalSize::new(resources.config.width, resources.config.height))
     }
 
-    fn create_targets(
-        physical_size: PhysicalSize,
+    pub(crate) fn configure_draft(
+        &self,
         device: &wgpu::Device,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
+        physical_size: PhysicalSize,
+        present_mode: wgpu::PresentMode,
+    ) -> PresentedConfigurationDraft {
+        let config = presented_configuration(self.format, physical_size, present_mode);
+        self.surface.configure(device, &config);
+        PresentedConfigurationDraft {
+            resources: PresentedResourceBundle::new(device, config),
+        }
+    }
+
+    pub(crate) fn commit_configuration(&mut self, draft: PresentedConfigurationDraft) {
+        self.committed = Some(draft.resources);
+    }
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+impl PresentedResourceBundle {
+    fn new(device: &wgpu::Device, config: wgpu::SurfaceConfiguration) -> Self {
+        let physical_size = PhysicalSize::new(config.width, config.height);
+        let format = config.format;
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: None,
             size: wgpu::Extent3d {
@@ -378,9 +390,62 @@ impl PresentedSurface {
             view_formats: &[],
         });
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        (texture, view)
+        Self {
+            config,
+            target_texture: texture,
+            target_view: view,
+            blitter: wgpu::util::TextureBlitter::new(device, format),
+            #[cfg(all(test, feature = "render-window"))]
+            resource_id: NEXT_PRESENTED_RESOURCE_ID
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+        }
     }
 }
+
+#[cfg(all(test, feature = "render-window"))]
+impl PresentedConfigurationDraft {
+    pub(crate) fn for_test(device: &wgpu::Device, physical_size: PhysicalSize) -> Self {
+        Self {
+            resources: PresentedResourceBundle::new(
+                device,
+                presented_configuration(
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    physical_size,
+                    wgpu::PresentMode::Fifo,
+                ),
+            ),
+        }
+    }
+
+    pub(crate) const fn resource_id_for_test(&self) -> u64 {
+        self.resources.resource_id
+    }
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+fn presented_configuration(
+    format: wgpu::TextureFormat,
+    physical_size: PhysicalSize,
+    present_mode: wgpu::PresentMode,
+) -> wgpu::SurfaceConfiguration {
+    wgpu::SurfaceConfiguration {
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        format,
+        width: physical_size.width(),
+        height: physical_size.height(),
+        present_mode,
+        desired_maximum_frame_latency: 2,
+        alpha_mode: wgpu::CompositeAlphaMode::Auto,
+        view_formats: vec![],
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+static NEXT_PRESENTED_RESOURCE_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) enum HeadlessResources {
     Empty,
@@ -442,6 +507,164 @@ pub(crate) enum PresentedLifecycle {
     Lost,
 }
 
+/// Requested presented extent/lifecycle kept independently from optional committed resources.
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+pub(crate) struct PresentedSurfaceState {
+    requested_physical_size: PhysicalSize,
+    lifecycle: PresentedLifecycle,
+    #[cfg(all(test, feature = "render-window"))]
+    configuration_attempts: usize,
+    #[cfg(all(test, feature = "render-window"))]
+    committed_resource_id: Option<u64>,
+    #[cfg(all(test, feature = "render-window"))]
+    committed_physical_size: Option<PhysicalSize>,
+    #[cfg(all(test, feature = "render-window"))]
+    suspended_for_test: bool,
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+impl PresentedSurfaceState {
+    pub(crate) fn new(physical_size: PhysicalSize, resizing: ResizeState) -> Self {
+        let lifecycle = if physical_size.width() == 0 || physical_size.height() == 0 {
+            PresentedLifecycle::NonRenderable {
+                physical_size,
+                resizing,
+            }
+        } else {
+            PresentedLifecycle::ResizePending {
+                physical_size,
+                resizing,
+            }
+        };
+        Self {
+            requested_physical_size: physical_size,
+            lifecycle,
+            #[cfg(all(test, feature = "render-window"))]
+            configuration_attempts: 0,
+            #[cfg(all(test, feature = "render-window"))]
+            committed_resource_id: None,
+            #[cfg(all(test, feature = "render-window"))]
+            committed_physical_size: None,
+            #[cfg(all(test, feature = "render-window"))]
+            suspended_for_test: false,
+        }
+    }
+
+    pub(crate) const fn lifecycle(&self) -> PresentedLifecycle {
+        self.lifecycle
+    }
+
+    pub(crate) const fn requested_physical_size(&self) -> PhysicalSize {
+        self.requested_physical_size
+    }
+
+    pub(crate) const fn needs_configuration(&self) -> bool {
+        matches!(self.lifecycle, PresentedLifecycle::ResizePending { .. })
+    }
+
+    pub(crate) fn resize_requested(
+        &mut self,
+        committed_physical_size: Option<PhysicalSize>,
+        next: PhysicalSize,
+    ) {
+        let resizing = self.lifecycle.resize_state();
+        self.requested_physical_size = next;
+        self.lifecycle = if next.width() == 0 || next.height() == 0 {
+            PresentedLifecycle::NonRenderable {
+                physical_size: next,
+                resizing,
+            }
+        } else if self.lifecycle.physical_size() == Some(next) {
+            self.lifecycle
+        } else if committed_physical_size == Some(next) {
+            PresentedLifecycle::Ready { resizing }
+        } else {
+            PresentedLifecycle::ResizePending {
+                physical_size: next,
+                resizing,
+            }
+        };
+    }
+
+    pub(crate) fn commit_configuration(&mut self) {
+        let resizing = self.lifecycle.resize_state();
+        debug_assert!(self.requested_physical_size.width() > 0);
+        debug_assert!(self.requested_physical_size.height() > 0);
+        self.lifecycle = PresentedLifecycle::Ready { resizing };
+    }
+
+    pub(crate) fn mark_configuration_pending(&mut self) {
+        if self.requested_physical_size.width() > 0 && self.requested_physical_size.height() > 0 {
+            self.lifecycle = PresentedLifecycle::ResizePending {
+                physical_size: self.requested_physical_size,
+                resizing: self.lifecycle.resize_state(),
+            };
+        }
+    }
+
+    pub(crate) fn mark_occluded(&mut self) {
+        self.lifecycle = PresentedLifecycle::Occluded {
+            resizing: self.lifecycle.resize_state(),
+        };
+    }
+
+    pub(crate) fn mark_lost(&mut self) {
+        self.lifecycle = PresentedLifecycle::Lost;
+    }
+
+    pub(crate) fn set_resizing(&mut self, resizing: ResizeState) {
+        self.lifecycle = self.lifecycle.with_resizing(resizing);
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn resize_requested_for_test(&mut self, next: PhysicalSize) {
+        self.resize_requested(self.committed_physical_size, next);
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn committed_resource_id_for_test(&self) -> Option<u64> {
+        self.committed_resource_id
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) const fn configuration_attempts_for_test(&self) -> usize {
+        self.configuration_attempts
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn record_configuration_attempt_for_test(&mut self) {
+        self.configuration_attempts = self.configuration_attempts.saturating_add(1);
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn commit_resource_id_for_test(&mut self, resource_id: u64) {
+        self.committed_resource_id = Some(resource_id);
+        self.committed_physical_size = Some(self.requested_physical_size);
+        self.commit_configuration();
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn suspend_for_test(&mut self) {
+        self.suspended_for_test = true;
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn resume_for_test(&mut self) {
+        self.suspended_for_test = false;
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) const fn suspended_for_test(&self) -> bool {
+        self.suspended_for_test
+    }
+}
+
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -449,6 +672,7 @@ pub(crate) enum PresentedLifecycle {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PresentedResumeAction {
     NoOp,
+    Configure,
     Recreate,
 }
 
@@ -503,26 +727,6 @@ impl PresentedLifecycle {
             },
             Self::Occluded { .. } => Self::Occluded { resizing },
             Self::Lost => Self::Lost,
-        }
-    }
-
-    pub(crate) fn resize_requested(self, current: PhysicalSize, next: PhysicalSize) -> Self {
-        let resizing = self.resize_state();
-        if next.width() == 0 || next.height() == 0 {
-            return Self::NonRenderable {
-                physical_size: next,
-                resizing,
-            };
-        }
-        if matches!(self, Self::NonRenderable { .. }) && current == next {
-            return Self::Ready { resizing };
-        }
-        if current == next || self.physical_size() == Some(next) {
-            return self;
-        }
-        Self::ResizePending {
-            physical_size: next,
-            resizing,
         }
     }
 }

@@ -2,7 +2,7 @@
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-use super::surface::{PresentedLifecycle, ResizeState};
+use super::surface::{PresentedLifecycle, PresentedSurfaceState, ResizeState};
 use super::{
     backend::*,
     command::{RenderCommand, RenderCommands},
@@ -17,6 +17,8 @@ use super::{
 };
 #[cfg(test)]
 use std::cell::RefCell;
+#[cfg(all(test, feature = "render-window"))]
+use std::sync::mpsc::{Receiver, SyncSender, sync_channel};
 use std::{
     collections::HashSet,
     future::Future,
@@ -27,6 +29,11 @@ use std::{
 #[cfg(test)]
 thread_local! {
     static ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
+}
+
+#[cfg(all(test, feature = "render-window"))]
+thread_local! {
+    static ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST: RefCell<Option<PresentedConfigureControlForTest>> = const { RefCell::new(None) };
 }
 
 pub struct Renderer {
@@ -85,6 +92,76 @@ fn inject_final_publication_loss_for_test(signal: &DeviceSignal) {
     }
 }
 
+#[cfg(all(test, feature = "render-window"))]
+#[derive(Clone)]
+enum PresentedConfigureControlForTest {
+    Fail {
+        scope_resolution_observed: SyncSender<()>,
+    },
+    Pause {
+        reached: SyncSender<()>,
+    },
+}
+
+/// Private deterministic control for the real Configure transaction test harness.
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) struct ScopedPresentedConfigureControlForTest {
+    observed: Receiver<()>,
+    failure_scope_resolution: Option<Receiver<()>>,
+    previous: Option<PresentedConfigureControlForTest>,
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl ScopedPresentedConfigureControlForTest {
+    pub(crate) fn failing() -> Self {
+        let (scope_resolution_observed, observed) = sync_channel(1);
+        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(PresentedConfigureControlForTest::Fail {
+                scope_resolution_observed,
+            }))
+        });
+        let (_unused, reached) = sync_channel(1);
+        Self {
+            observed: reached,
+            failure_scope_resolution: Some(observed),
+            previous,
+        }
+    }
+
+    pub(crate) fn paused() -> Self {
+        let (reached, observed) = sync_channel(1);
+        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(PresentedConfigureControlForTest::Pause { reached }))
+        });
+        Self {
+            observed,
+            failure_scope_resolution: None,
+            previous,
+        }
+    }
+
+    pub(crate) fn wait_for_draft_for_test(&self, deadline: Duration) {
+        self.observed
+            .recv_timeout(deadline)
+            .expect("the Configure transaction did not reach its bounded draft checkpoint");
+    }
+
+    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
+        self.failure_scope_resolution
+            .as_ref()
+            .is_some_and(|observed| observed.try_recv().is_ok())
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl Drop for ScopedPresentedConfigureControlForTest {
+    fn drop(&mut self) {
+        ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
 impl Renderer {
     pub async fn new(options: Options) -> Result<Self> {
         let mut backend = Backend::new();
@@ -126,37 +203,26 @@ impl Renderer {
                     ));
                 };
                 let physical_size = physical_size(options.size, options.scale)?;
-                let (surface, device_identity) = backend
-                    .create_presented_surface(
-                        handle.clone(),
-                        physical_size,
-                        options.present_mode.into(),
-                    )
-                    .await
-                    .map_err(|source| {
-                        Error::new(
-                            BackendErrorCode::SurfaceCreateFailed,
-                            "failed to create native surface",
-                        )
-                        .with_source(source)
-                    })?;
+                let (surface, device_identity) =
+                    backend.create_presented_surface(handle.clone()).await?;
                 if let Some(error) =
                     backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
                 {
                     return Err(error);
                 }
-                Ok(Surface::with_backend(
+                let mut created = Surface::with_backend(
                     Attachment::Window(handle),
                     options,
                     SurfaceBackend::Presented {
                         surface: Box::new(surface),
                         device_identity,
-                        lifecycle: PresentedLifecycle::Ready {
-                            resizing: ResizeState::Idle,
-                        },
+                        state: PresentedSurfaceState::new(physical_size, ResizeState::Idle),
                     },
                     self.identity.clone(),
-                ))
+                );
+                self.configure_presented_surface_if_needed(&mut created)
+                    .await?;
+                Ok(created)
             }
         }
     }
@@ -182,36 +248,26 @@ impl Renderer {
         };
         let physical_size = physical_size(options.size, options.scale)?;
         let (surface, device_identity) = backend
-            .create_presented_surface(
-                wgpu::SurfaceTarget::Canvas(html_canvas),
-                physical_size,
-                options.present_mode.into(),
-            )
-            .await
-            .map_err(|source| {
-                Error::new(
-                    BackendErrorCode::SurfaceCreateFailed,
-                    "failed to create web canvas surface",
-                )
-                .with_source(source)
-            })?;
+            .create_presented_surface(wgpu::SurfaceTarget::Canvas(html_canvas))
+            .await?;
         if let Some(error) =
             backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
         {
             return Err(error);
         }
-        Ok(Surface::with_backend(
+        let mut created = Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
             SurfaceBackend::Presented {
                 surface: Box::new(surface),
                 device_identity,
-                lifecycle: PresentedLifecycle::Ready {
-                    resizing: ResizeState::Idle,
-                },
+                state: PresentedSurfaceState::new(physical_size, ResizeState::Idle),
             },
             self.identity.clone(),
-        ))
+        );
+        self.configure_presented_surface_if_needed(&mut created)
+            .await?;
+        Ok(created)
     }
 
     #[cfg(not(all(feature = "render-web", target_arch = "wasm32")))]
@@ -291,18 +347,156 @@ impl Renderer {
             feature = "render-window",
             all(feature = "render-web", target_arch = "wasm32")
         ))]
-        if let SurfaceBackend::Presented { lifecycle, .. } = &mut surface.backend {
+        if let SurfaceBackend::Presented { state, .. } = &mut surface.backend {
             let next = if resizing {
                 ResizeState::Resizing
             } else {
                 ResizeState::Idle
             };
-            if lifecycle.resize_state() == next {
+            if state.lifecycle().resize_state() == next {
                 return Ok(());
             }
-            *lifecycle = lifecycle.with_resizing(next);
+            state.set_resizing(next);
         }
 
+        Ok(())
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    async fn configure_presented_surface_if_needed(&mut self, surface: &mut Surface) -> Result<()> {
+        let (device_identity, native, requested_physical_size, present_mode, needs_configuration) =
+            match &surface.backend {
+                SurfaceBackend::Presented {
+                    surface: native,
+                    device_identity,
+                    state,
+                } => (
+                    *device_identity,
+                    native.as_ref(),
+                    state.requested_physical_size(),
+                    surface.options.present_mode.into(),
+                    state.needs_configuration(),
+                ),
+                SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
+                    return Ok(());
+                }
+            };
+        if !needs_configuration {
+            return Ok(());
+        }
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "no compatible wgpu adapter is available",
+            )
+        })?;
+        let draft = backend
+            .configure_presented_surface(
+                device_identity,
+                native,
+                requested_physical_size,
+                present_mode,
+            )
+            .await?;
+        let SurfaceBackend::Presented { surface, state, .. } = &mut surface.backend else {
+            unreachable!("presented configuration must commit into the originating surface");
+        };
+        surface.commit_configuration(draft);
+        state.commit_configuration();
+        Ok(())
+    }
+
+    #[cfg(not(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )))]
+    async fn configure_presented_surface_if_needed(
+        &mut self,
+        _surface: &mut Surface,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) async fn configure_presented_state_for_test(
+        &mut self,
+        state: &mut PresentedSurfaceState,
+    ) -> Result<()> {
+        if !state.needs_configuration() {
+            return Ok(());
+        }
+        if state.suspended_for_test() {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                    state: RenderSurfaceAvailability::Suspended,
+                },
+                "surface is suspended",
+            ));
+        }
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "presented configuration coverage requires a host adapter",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "presented configuration coverage requires a renderer backend",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Configure,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let (device, _) =
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+        state.record_configuration_attempt_for_test();
+        let draft = super::surface::PresentedConfigurationDraft::for_test(
+            device,
+            state.requested_physical_size(),
+        );
+        let control =
+            ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
+        if let Some(PresentedConfigureControlForTest::Fail { .. }) = &control {
+            let _ = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Surgeist test-injected Configure validation failure"),
+                size: wgpu::Extent3d {
+                    width: 0,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        }
+        if let Some(PresentedConfigureControlForTest::Pause { reached }) = &control {
+            reached
+                .send(())
+                .expect("the Configure test must observe the draft checkpoint");
+            std::future::pending::<()>().await;
+        }
+        let result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+        if let Some(PresentedConfigureControlForTest::Fail {
+            scope_resolution_observed,
+        }) = control
+        {
+            let _ = scope_resolution_observed.send(());
+        }
+        result?;
+        state.commit_resource_id_for_test(draft.resource_id_for_test());
         Ok(())
     }
 
@@ -322,6 +516,8 @@ impl Renderer {
         surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
         surface.ensure_renderable()?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
+
+        self.configure_presented_surface_if_needed(surface).await?;
 
         let Some(device_identity) = surface.device_identity() else {
             return Err(Error::runtime_unavailable(
@@ -450,15 +646,24 @@ impl Renderer {
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            SurfaceBackend::Presented { lifecycle, .. } => {
-                let action = Surface::presented_resume_action(surface.state, *lifecycle);
+            SurfaceBackend::Presented { state, .. } => {
+                let action = Surface::presented_resume_action(surface.state, state.lifecycle());
                 self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
                 surface.ensure_attachment_compatible(&attachment)?;
                 match action {
                     super::surface::PresentedResumeAction::NoOp => Ok(()),
+                    super::surface::PresentedResumeAction::Configure => {
+                        surface.attachment = attachment;
+                        surface.state = SurfaceState::Available;
+                        self.configure_presented_surface_if_needed(surface).await
+                    }
                     super::surface::PresentedResumeAction::Recreate => {
+                        let resizing = state.lifecycle().resize_state();
                         let mut next = self.create_surface(attachment, surface.options).await?;
                         next.last_parameters = surface.last_parameters;
+                        if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+                            state.set_resizing(resizing);
+                        }
                         *surface = next;
                         Ok(())
                     }
@@ -1364,8 +1569,8 @@ fn runtime_surface_unavailable_reason(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     ))]
-    if let SurfaceBackend::Presented { lifecycle, .. } = &_surface.backend {
-        let state = match lifecycle {
+    if let SurfaceBackend::Presented { state, .. } = &_surface.backend {
+        let state = match state.lifecycle() {
             PresentedLifecycle::NonRenderable { .. } => RenderSurfaceAvailability::NonRenderable,
             PresentedLifecycle::Occluded { .. } => RenderSurfaceAvailability::Occluded,
             PresentedLifecycle::Lost => RenderSurfaceAvailability::Lost,
