@@ -595,6 +595,14 @@ impl PresentedSurface {
     pub(crate) fn commit_configuration(&mut self, draft: PresentedConfigurationDraft) {
         self.committed = Some(draft.resources);
     }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn is_display_free_for_test(&self) -> bool {
+        matches!(
+            self.target,
+            PresentedSurfaceTarget::DisplayFreeHostEffectForTest(_)
+        )
+    }
 }
 
 #[cfg(any(
@@ -633,6 +641,16 @@ impl AcquiredPresentedSurfaceTexture {
                 state.observation.present_count = state.observation.present_count.saturating_add(1);
             }
         }
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl Surface {
+    pub(crate) fn is_display_free_presented_for_test(&self) -> bool {
+        matches!(
+            &self.backend,
+            SurfaceBackend::Presented { surface, .. } if surface.is_display_free_for_test()
+        )
     }
 }
 

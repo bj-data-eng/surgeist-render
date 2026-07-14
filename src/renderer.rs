@@ -575,6 +575,19 @@ impl Renderer {
                     }
                     super::surface::PresentedResumeAction::Recreate => {
                         let resizing = state.lifecycle().resize_state();
+                        #[cfg(all(test, feature = "render-window"))]
+                        if surface.is_display_free_presented_for_test() {
+                            let mut next =
+                                self.display_free_presented_surface_for_test(surface.options)?;
+                            next.last_parameters = surface.last_parameters;
+                            if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+                                state.set_resizing(resizing);
+                            }
+                            self.configure_presented_surface_if_needed(&mut next)
+                                .await?;
+                            *surface = next;
+                            return Ok(());
+                        }
                         let mut next = self.create_surface(attachment, surface.options).await?;
                         next.last_parameters = surface.last_parameters;
                         if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
@@ -832,6 +845,14 @@ impl Renderer {
         if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
         {
             backend.signal_loss_for_test(device_identity, reason);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_default_uncaptured_fault_for_test(&mut self, kind: GpuFaultKind) {
+        if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
+        {
+            backend.signal_uncaptured_fault_for_test(device_identity, kind);
         }
     }
 

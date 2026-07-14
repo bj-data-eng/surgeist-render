@@ -1356,6 +1356,21 @@ impl Backend {
     }
 
     #[cfg(test)]
+    pub(crate) fn signal_uncaptured_fault_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        kind: GpuFaultKind,
+    ) {
+        if let Some(state) = self.device_states.get(identity.slot())
+            && state.generation == identity.generation
+        {
+            state
+                .signal
+                .record_uncaptured_fault_for_test(kind, "test uncaptured GPU fault");
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn wait_for_terminal_for_test(
         &mut self,
         identity: DeviceSlotIdentity,

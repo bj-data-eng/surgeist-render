@@ -15599,6 +15599,140 @@ fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
 }
 
 #[cfg(feature = "render-window")]
+#[test]
+fn surface_loss_can_resume_but_device_loss_requires_a_new_renderer() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("surface lifecycle coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let initial_resource = presented_resource_id_for_test(&surface)
+        .expect("the fixture must commit its initial target");
+
+    set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Lost);
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("surface loss must not terminally lose its ready device");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Lost,
+    );
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Lost
+    ));
+    assert_eq!(
+        presented_resource_id_for_test(&surface),
+        Some(initial_resource)
+    );
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("display-free-presented-test-target"),
+    ))
+    .expect("a lost surface must recreate on its same ready device");
+    let resumed_resource = presented_resource_id_for_test(&surface)
+        .expect("resuming the lost surface must configure a new target");
+    assert_ne!(resumed_resource, initial_resource);
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the recreated surface must render through the original ready device");
+
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    let error = pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("display-free-presented-test-target"),
+    ))
+    .expect_err("resume must not revive a terminal device generation");
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceResume,
+        DeviceLossReason::Destroyed,
+    );
+    assert_eq!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::DeviceLost {
+            reason: DeviceLossReason::Destroyed,
+        }),
+    );
+
+    let mut replacement = pollster::block_on(Renderer::new(Options::default()))
+        .expect("a new renderer is the explicit recovery path after device loss");
+    let mut replacement_surface =
+        configured_display_free_presented_surface_for_test(&mut replacement);
+    pollster::block_on(replacement.render(
+        &mut replacement_surface,
+        &Scene::new(),
+        Parameters::default(),
+    ))
+    .expect("a replacement renderer must own a fresh ready device generation");
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented lifecycle coverage requires a compatible device");
+    let mut first = configured_display_free_presented_surface_for_test(&mut renderer);
+    let mut second = configured_display_free_presented_surface_for_test(&mut renderer);
+    let first_initial = presented_resource_id_for_test(&first).unwrap();
+    let second_initial = presented_resource_id_for_test(&second).unwrap();
+
+    first.resize(Size::new(1.0, 1.0), 2.0).unwrap();
+    assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
+    assert!(matches!(
+        presented_lifecycle_for_test(&first),
+        PresentedLifecycle::Ready { .. }
+    ));
+
+    first.resize(Size::new(3.0, 2.0), 1.0).unwrap();
+    assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
+    assert!(matches!(
+        presented_lifecycle_for_test(&first),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    assert_eq!(
+        presented_resource_id_for_test(&second),
+        Some(second_initial)
+    );
+
+    first.suspend().unwrap();
+    first.suspend().unwrap();
+    let error =
+        pollster::block_on(renderer.render(&mut first, &Scene::new(), Parameters::default()))
+            .expect_err("suspended surfaces must fail before configuring or rendering");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Suspended,
+    );
+    assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
+
+    pollster::block_on(renderer.resume_surface(
+        &mut first,
+        Attachment::from_web_canvas("display-free-presented-test-target"),
+    ))
+    .expect("resume must configure only the first surface's pending physical target");
+    let first_resized = presented_resource_id_for_test(&first).unwrap();
+    assert_ne!(first_resized, first_initial);
+    assert_eq!(
+        presented_resource_id_for_test(&second),
+        Some(second_initial)
+    );
+
+    pollster::block_on(renderer.resume_surface(
+        &mut first,
+        Attachment::from_web_canvas("display-free-presented-test-target"),
+    ))
+    .expect("a compatible duplicate resume must retain the committed target");
+    assert_eq!(presented_resource_id_for_test(&first), Some(first_resized));
+
+    pollster::block_on(renderer.render(&mut first, &Scene::new(), Parameters::default()))
+        .expect("the resized surface must render with its own committed target");
+    pollster::block_on(renderer.render(&mut second, &Scene::new(), Parameters::default()))
+        .expect("the untouched surface must retain and render with its own target");
+}
+
+#[cfg(feature = "render-window")]
 fn display_free_presented_surface_for_test(
     renderer: &mut Renderer,
     options: SurfaceOptions,
@@ -15881,6 +16015,74 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
         DeviceLossReason::Destroyed,
     );
     assert!(renderer.default_device_renderer_released_for_test());
+}
+
+#[test]
+fn uncaptured_gpu_error_faults_only_its_device_generation() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut faulted =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let healthy_slot = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("device-isolation coverage requires a second ready device slot");
+    let mut healthy =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let SurfaceBackend::Headless {
+        device_identity, ..
+    } = &mut healthy.backend
+    else {
+        panic!("the test environment must create a device-backed healthy surface");
+    };
+    *device_identity = healthy_slot;
+
+    renderer.signal_default_uncaptured_fault_for_test(GpuFaultKind::Validation);
+
+    let error =
+        pollster::block_on(renderer.render(&mut faulted, &Scene::new(), Parameters::default()))
+            .expect_err(
+                "a no-active-generation uncaptured fault must be consumed by the next operation",
+            );
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::DeviceFaulted {
+                    kind: GpuFaultKind::Validation,
+                },
+            )
+            .unwrap()
+        )
+    );
+    assert!(renderer.default_device_renderer_released_for_test());
+    assert_eq!(
+        renderer.runtime_capabilities(&faulted),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::DeviceFaulted {
+            kind: GpuFaultKind::Validation,
+        }),
+    );
+    let error = match pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)) {
+        Ok(_) => panic!("a terminal default slot must reject new default headless surfaces"),
+        Err(error) => error,
+    };
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::AdapterSelection,
+                RuntimeCapabilityUnavailableReason::DeviceFaulted {
+                    kind: GpuFaultKind::Validation,
+                },
+            )
+            .unwrap()
+        )
+    );
+
+    pollster::block_on(renderer.render(&mut healthy, &Scene::new(), Parameters::default()))
+        .expect("a healthy device slot and its surface must continue after another slot faults");
+    assert!(matches!(
+        renderer.runtime_capabilities(&healthy),
+        RuntimeCapabilities::Available(_)
+    ));
 }
 
 #[test]
