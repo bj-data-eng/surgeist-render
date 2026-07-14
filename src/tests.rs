@@ -1,6 +1,6 @@
 use super::gpu_transaction::{
-    GpuOperationLease, GpuOperationStage, ScopedGpuOperationSubmissionObservationForTest,
-    ScopedInternalVelloPostSubmitControlForTest,
+    GpuOperationLease, GpuOperationStage, ScopedGpuOperationPostSubmitCheckpointForTest,
+    ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
 };
 use super::renderer::ScopedFinalPublicationLossForTest;
 use super::vello_engine::{
@@ -6943,6 +6943,47 @@ fn non_readback_gpu_submissions_are_owned_by_gpu_operation_transactions() {
         submission.scopes_resolved_for_test(),
         "the transaction must resolve its nested WGPU scopes before returning"
     );
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[test]
+fn canceled_generic_submission_after_real_submit_clears_ownership_without_public_result() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let checkpoint = ScopedGpuOperationPostSubmitCheckpointForTest::begin();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("generic transaction cancellation coverage requires a host adapter");
+    let stats_before = renderer.stats();
+    let uploaded_images_before = renderer.uploaded_images_for_test();
+
+    {
+        let future = renderer.scoped_clear_fill_probe_for_test();
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        checkpoint.wait_for_submission_for_test(Duration::from_secs(2));
+    }
+
+    let submission = submission_scope.observation_for_test();
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    assert_eq!(
+        submission.transaction_generation_for_test(),
+        submission.active_generation_for_test(),
+        "the submitted generic transaction must own the active generation at its checkpoint"
+    );
+    assert!(
+        !submission.scopes_resolved_for_test(),
+        "cancellation before scope completion must not report a successful scope resolution"
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "dropping the pending generic submission must clear its active generation"
+    );
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(renderer.uploaded_images_for_test(), uploaded_images_before);
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 

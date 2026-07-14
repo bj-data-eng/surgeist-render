@@ -20,6 +20,7 @@ use super::vello_engine::VelloResourceAllocationSummaryForTest;
 #[cfg(test)]
 thread_local! {
     static ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<GpuOperationSubmissionObservationForTest>> = const { RefCell::new(None) };
+    static ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST: RefCell<Option<SyncSender<()>>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
 }
@@ -28,13 +29,25 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
     Render,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C04 T4 preserves the Configure mapping until T5 adds its production GPU operation"
+        )
+    )]
     Configure,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C04 T4 preserves the Present mapping until T6 adds its production GPU operation"
+        )
+    )]
     Present,
 }
 
 impl GpuOperationStage {
-    const ALL: [Self; 3] = [Self::Render, Self::Configure, Self::Present];
-
     const fn error_code(self) -> BackendErrorCode {
         match self {
             Self::Render => BackendErrorCode::RenderFailed,
@@ -44,7 +57,6 @@ impl GpuOperationStage {
     }
 
     fn classify_fault(self, kind: GpuFaultKind, message: &str) -> Error {
-        debug_assert!(Self::ALL.contains(&self));
         let code = if kind == GpuFaultKind::OutOfMemory {
             BackendErrorCode::SurfaceOutOfMemory
         } else {
@@ -214,6 +226,38 @@ impl Drop for ScopedGpuOperationSubmissionObservationForTest {
     }
 }
 
+/// Private test-only pause immediately after a generic transaction submits work.
+#[cfg(test)]
+pub(crate) struct ScopedGpuOperationPostSubmitCheckpointForTest {
+    observed: Receiver<()>,
+    previous: Option<SyncSender<()>>,
+}
+
+#[cfg(test)]
+impl ScopedGpuOperationPostSubmitCheckpointForTest {
+    pub(crate) fn begin() -> Self {
+        let (reached, observed) = sync_channel(1);
+        let previous = ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST
+            .with(|active| active.replace(Some(reached)));
+        Self { observed, previous }
+    }
+
+    pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
+        self.observed
+            .recv_timeout(deadline)
+            .expect("the real generic submission did not reach the bounded post-submit checkpoint");
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedGpuOperationPostSubmitCheckpointForTest {
+    fn drop(&mut self) {
+        ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
 #[cfg(test)]
 fn record_active_gpu_operation_submission_for_test(
     transaction_generation: u64,
@@ -233,6 +277,18 @@ fn record_active_gpu_operation_scope_resolution_for_test() {
             observation.record_scope_resolution();
         }
     });
+}
+
+#[cfg(test)]
+async fn wait_at_active_gpu_operation_post_submit_checkpoint_for_test() {
+    let checkpoint =
+        ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| active.borrow().clone());
+    if let Some(reached) = checkpoint {
+        reached
+            .send(())
+            .expect("the generic submission test must observe the post-submit checkpoint");
+        std::future::pending::<()>().await;
+    }
 }
 
 impl Drop for GpuOperationLease {
@@ -654,6 +710,8 @@ impl GpuOperationTransaction {
             self.lease.generation(),
             self.lease.active_generation_for_test(),
         );
+        #[cfg(test)]
+        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
 
         let result = self.finish(operation).await;
         #[cfg(test)]
