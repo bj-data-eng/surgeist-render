@@ -16,7 +16,7 @@ use super::{
     *,
 };
 #[cfg(test)]
-use std::cell::RefCell;
+use std::{cell::RefCell, sync::Arc};
 use std::{
     collections::HashSet,
     future::Future,
@@ -569,9 +569,10 @@ impl Renderer {
                 match action {
                     super::surface::PresentedResumeAction::NoOp => Ok(()),
                     super::surface::PresentedResumeAction::Configure => {
+                        self.configure_presented_surface_if_needed(surface).await?;
                         surface.attachment = attachment;
                         surface.state = SurfaceState::Available;
-                        self.configure_presented_surface_if_needed(surface).await
+                        Ok(())
                     }
                     super::surface::PresentedResumeAction::Recreate => {
                         let resizing = state.lifecycle().resize_state();
@@ -849,9 +850,27 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    pub(crate) fn signal_default_uncaptured_fault_for_test(&mut self, kind: GpuFaultKind) {
-        if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
-        {
+    pub(crate) fn device_signal_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+    ) -> Option<Arc<DeviceSignal>> {
+        self.backend
+            .as_mut()?
+            .device_signal_for_test(device_identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn default_device_signal_for_test(&mut self) -> Option<Arc<DeviceSignal>> {
+        self.device_signal_for_test(self.default_device?)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_device_uncaptured_fault_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+        kind: GpuFaultKind,
+    ) {
+        if let Some(backend) = self.backend.as_mut() {
             backend.signal_uncaptured_fault_for_test(device_identity, kind);
         }
     }

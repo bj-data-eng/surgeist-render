@@ -15707,6 +15707,49 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
     );
     assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
 
+    let attachment_kind_before = first.attachment.kind();
+    let attachment_identity_before = match &first.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must retain a web-canvas attachment"),
+    };
+    let lifecycle_before = presented_lifecycle_for_test(&first);
+    let parameters_before = first.last_parameters;
+    let stats_before = renderer.stats();
+    let observation_before = presented_observation_for_test(&first);
+    let failure = ScopedPresentedConfigureControlForTest::failing();
+    let error = pollster::block_on(renderer.resume_surface(
+        &mut first,
+        Attachment::from_web_canvas("failed-resume-replacement"),
+    ))
+    .expect_err("a failed resume configuration must preserve pre-call state");
+    assert_eq!(error.code(), ErrorCode::SurfaceConfigureFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    drop(failure);
+    assert_eq!(first.attachment.kind(), attachment_kind_before);
+    assert_eq!(
+        match &first.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("the failed resume must retain its original attachment kind"),
+        },
+        attachment_identity_before
+    );
+    assert_eq!(first.state(), SurfaceState::Suspended);
+    assert_eq!(presented_lifecycle_for_test(&first), lifecycle_before);
+    assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
+    assert_eq!(first.last_parameters, parameters_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(presented_observation_for_test(&first), observation_before);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "a failed configure transaction must return its active generation"
+    );
+    assert_eq!(
+        presented_resource_id_for_test(&second),
+        Some(second_initial),
+        "a failed resume must not disturb another surface's committed target"
+    );
+
     pollster::block_on(renderer.resume_surface(
         &mut first,
         Attachment::from_web_canvas("display-free-presented-test-target"),
@@ -16034,25 +16077,36 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
     };
     *device_identity = healthy_slot;
 
-    renderer.signal_default_uncaptured_fault_for_test(GpuFaultKind::Validation);
-
-    let error =
-        pollster::block_on(renderer.render(&mut faulted, &Scene::new(), Parameters::default()))
-            .expect_err(
-                "a no-active-generation uncaptured fault must be consumed by the next operation",
-            );
-    assert_eq!(
-        error.runtime_capability_unavailable_diagnostic(),
-        Some(
-            &RuntimeCapabilityUnavailable::try_new(
-                RuntimeOperation::SurfaceRendering,
-                RuntimeCapabilityUnavailableReason::DeviceFaulted {
-                    kind: GpuFaultKind::Validation,
-                },
-            )
-            .unwrap()
-        )
-    );
+    let active_signal = renderer
+        .default_device_signal_for_test()
+        .expect("active-generation coverage requires the default device signal");
+    let checkpoint = ScopedGpuOperationPostSubmitCheckpointForTest::yielding();
+    let error = {
+        let future = renderer.scoped_clear_fill_probe_for_test();
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        checkpoint.wait_for_submission_for_test(Duration::from_secs(2));
+        let active_generation = active_signal
+            .active_generation_for_test()
+            .expect("the real transaction must retain an active generation after submit");
+        active_signal.record_uncaptured_fault_for_test(GpuFaultKind::Validation, "active fault");
+        assert_eq!(
+            active_signal
+                .first_terminal()
+                .expect("the uncaptured error must terminally fault the active device")
+                .operation_generation_for_test(),
+            Some(active_generation)
+        );
+        checkpoint.release_for_test();
+        pollster::block_on(future)
+            .expect_err("an active-generation uncaptured fault must fail its transaction")
+    };
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(active_signal.active_generation_for_test(), None);
     assert!(renderer.default_device_renderer_released_for_test());
     assert_eq!(
         renderer.runtime_capabilities(&faulted),
@@ -16060,15 +16114,16 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
             kind: GpuFaultKind::Validation,
         }),
     );
-    let error = match pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)) {
-        Ok(_) => panic!("a terminal default slot must reject new default headless surfaces"),
-        Err(error) => error,
-    };
+    let error =
+        pollster::block_on(renderer.render(&mut faulted, &Scene::new(), Parameters::default()))
+            .expect_err(
+                "the next default-device operation must report the terminal uncaptured fault",
+            );
     assert_eq!(
         error.runtime_capability_unavailable_diagnostic(),
         Some(
             &RuntimeCapabilityUnavailable::try_new(
-                RuntimeOperation::AdapterSelection,
+                RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::DeviceFaulted {
                     kind: GpuFaultKind::Validation,
                 },
@@ -16083,6 +16138,23 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
         renderer.runtime_capabilities(&healthy),
         RuntimeCapabilities::Available(_)
     ));
+
+    let idle_slot = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("no-active-generation coverage requires a third ready device slot");
+    let idle_signal = renderer
+        .device_signal_for_test(idle_slot)
+        .expect("the idle device slot must retain its real DeviceSignal");
+    assert_eq!(idle_signal.active_generation_for_test(), None);
+    renderer.signal_device_uncaptured_fault_for_test(idle_slot, GpuFaultKind::Internal);
+    assert_eq!(
+        idle_signal
+            .first_terminal()
+            .expect("an idle uncaptured fault must terminally affect its own device slot")
+            .operation_generation_for_test(),
+        None
+    );
+    pollster::block_on(renderer.render(&mut healthy, &Scene::new(), Parameters::default()))
+        .expect("the healthy slot must remain usable after active and idle faults elsewhere");
 }
 
 #[test]

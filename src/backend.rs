@@ -1371,6 +1371,17 @@ impl Backend {
     }
 
     #[cfg(test)]
+    pub(crate) fn device_signal_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Option<Arc<DeviceSignal>> {
+        self.device_states
+            .get(identity.slot())
+            .filter(|state| state.generation == identity.generation)
+            .map(|state| Arc::clone(&state.signal))
+    }
+
+    #[cfg(test)]
     pub(crate) fn wait_for_terminal_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
