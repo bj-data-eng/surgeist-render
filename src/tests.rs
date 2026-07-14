@@ -6988,6 +6988,60 @@ fn canceled_generic_submission_after_real_submit_clears_ownership_without_public
 }
 
 #[test]
+fn generic_submission_observation_remains_bound_across_interleaved_scope_resolution() {
+    let first_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let checkpoint = ScopedGpuOperationPostSubmitCheckpointForTest::yielding();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("generic submission observation coverage requires a host adapter");
+
+    let (output, interleaved_scope) = {
+        let future = renderer.scoped_clear_fill_probe_for_test();
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        checkpoint.wait_for_submission_for_test(Duration::from_secs(2));
+
+        let interleaved_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+        checkpoint.release_for_test();
+        let output = pollster::block_on(future)
+            .expect("the submitted clear/fill transaction must resolve its real scopes");
+        (output, interleaved_scope)
+    };
+    let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
+    assert!((60..=68).contains(&red));
+    assert!((124..=132).contains(&green));
+    assert!((187..=195).contains(&blue));
+    assert_eq!(alpha, 255);
+
+    let first = first_scope.observation_for_test();
+    assert_eq!(first.queue_submission_count_for_test(), 1);
+    assert_eq!(
+        first.transaction_generation_for_test(),
+        first.active_generation_for_test(),
+        "the first observer must record its transaction's active generation at submit"
+    );
+    assert!(
+        first.scopes_resolved_for_test(),
+        "the original observer must receive its transaction's scope completion"
+    );
+
+    let interleaved = interleaved_scope.observation_for_test();
+    assert_eq!(
+        interleaved.queue_submission_count_for_test(),
+        0,
+        "the interleaved observer must not receive another transaction's submission"
+    );
+    assert!(
+        !interleaved.scopes_resolved_for_test(),
+        "the interleaved observer must not receive another transaction's scope completion"
+    );
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[test]
 fn offscreen_texture_allocation_uses_explicit_bounded_layer_descriptor() {
     let bounds = command::OffscreenBounds::try_new(Rect::new(2.0, 3.0, 10.0, 6.0)).unwrap();
 

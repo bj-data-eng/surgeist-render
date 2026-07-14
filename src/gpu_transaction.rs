@@ -8,6 +8,7 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{
     Mutex,
+    atomic::{AtomicBool, Ordering},
     mpsc::{Receiver, SyncSender, sync_channel},
 };
 
@@ -20,7 +21,7 @@ use super::vello_engine::VelloResourceAllocationSummaryForTest;
 #[cfg(test)]
 thread_local! {
     static ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<GpuOperationSubmissionObservationForTest>> = const { RefCell::new(None) };
-    static ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST: RefCell<Option<SyncSender<()>>> = const { RefCell::new(None) };
+    static ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST: RefCell<Option<GpuOperationPostSubmitControlForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
 }
@@ -230,22 +231,61 @@ impl Drop for ScopedGpuOperationSubmissionObservationForTest {
 #[cfg(test)]
 pub(crate) struct ScopedGpuOperationPostSubmitCheckpointForTest {
     observed: Receiver<()>,
-    previous: Option<SyncSender<()>>,
+    release: Option<Arc<AtomicBool>>,
+    previous: Option<GpuOperationPostSubmitControlForTest>,
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+enum GpuOperationPostSubmitControlForTest {
+    Pause(SyncSender<()>),
+    Yield {
+        reached: SyncSender<()>,
+        released: Arc<AtomicBool>,
+    },
 }
 
 #[cfg(test)]
 impl ScopedGpuOperationPostSubmitCheckpointForTest {
     pub(crate) fn begin() -> Self {
         let (reached, observed) = sync_channel(1);
-        let previous = ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST
-            .with(|active| active.replace(Some(reached)));
-        Self { observed, previous }
+        let previous = ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| {
+            active.replace(Some(GpuOperationPostSubmitControlForTest::Pause(reached)))
+        });
+        Self {
+            observed,
+            release: None,
+            previous,
+        }
+    }
+
+    pub(crate) fn yielding() -> Self {
+        let (reached, observed) = sync_channel(1);
+        let released = Arc::new(AtomicBool::new(false));
+        let previous = ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| {
+            active.replace(Some(GpuOperationPostSubmitControlForTest::Yield {
+                reached,
+                released: Arc::clone(&released),
+            }))
+        });
+        Self {
+            observed,
+            release: Some(released),
+            previous,
+        }
     }
 
     pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
         self.observed
             .recv_timeout(deadline)
             .expect("the real generic submission did not reach the bounded post-submit checkpoint");
+    }
+
+    pub(crate) fn release_for_test(&self) {
+        self.release
+            .as_ref()
+            .expect("only a yielding post-submit checkpoint can resume the submission")
+            .store(true, Ordering::SeqCst);
     }
 }
 
@@ -262,32 +302,40 @@ impl Drop for ScopedGpuOperationPostSubmitCheckpointForTest {
 fn record_active_gpu_operation_submission_for_test(
     transaction_generation: u64,
     active_generation: Option<u64>,
-) {
+) -> Option<GpuOperationSubmissionObservationForTest> {
     ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
-        if let Some(observation) = active.borrow().as_ref() {
+        let observation = active.borrow().clone();
+        if let Some(observation) = &observation {
             observation.record_submission(transaction_generation, active_generation);
         }
-    });
-}
-
-#[cfg(test)]
-fn record_active_gpu_operation_scope_resolution_for_test() {
-    ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
-        if let Some(observation) = active.borrow().as_ref() {
-            observation.record_scope_resolution();
-        }
-    });
+        observation
+    })
 }
 
 #[cfg(test)]
 async fn wait_at_active_gpu_operation_post_submit_checkpoint_for_test() {
     let checkpoint =
         ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| active.borrow().clone());
-    if let Some(reached) = checkpoint {
-        reached
-            .send(())
-            .expect("the generic submission test must observe the post-submit checkpoint");
-        std::future::pending::<()>().await;
+    match checkpoint {
+        Some(GpuOperationPostSubmitControlForTest::Pause(reached)) => {
+            reached
+                .send(())
+                .expect("the generic submission test must observe the post-submit checkpoint");
+            std::future::pending::<()>().await;
+        }
+        Some(GpuOperationPostSubmitControlForTest::Yield { reached, released }) => {
+            reached
+                .send(())
+                .expect("the generic submission test must observe the post-submit checkpoint");
+            std::future::poll_fn(|_| {
+                released
+                    .load(Ordering::SeqCst)
+                    .then_some(())
+                    .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
+            })
+            .await;
+        }
+        None => {}
     }
 }
 
@@ -706,7 +754,7 @@ impl GpuOperationTransaction {
     ) -> Result<()> {
         queue.submit([command_buffer]);
         #[cfg(test)]
-        record_active_gpu_operation_submission_for_test(
+        let submission_observation = record_active_gpu_operation_submission_for_test(
             self.lease.generation(),
             self.lease.active_generation_for_test(),
         );
@@ -715,7 +763,9 @@ impl GpuOperationTransaction {
 
         let result = self.finish(operation).await;
         #[cfg(test)]
-        record_active_gpu_operation_scope_resolution_for_test();
+        if let Some(observation) = submission_observation {
+            observation.record_scope_resolution();
+        }
         result
     }
 
