@@ -15603,9 +15603,30 @@ fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
 fn surface_loss_can_resume_but_device_loss_requires_a_new_renderer() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("surface lifecycle coverage requires a compatible device");
-    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let mut other = configured_display_free_presented_surface_for_test(&mut renderer);
+    let other_device = presented_device_identity_for_test(&other);
+    let other_resource = presented_resource_id_for_test(&other)
+        .expect("the default fixture must commit its initial target");
+    let donor_device = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("surface-loss recreation coverage requires a non-default ready device slot");
+    assert_ne!(donor_device, other_device);
+    let initial_attachment = "display-free-donor-initial";
+    let mut surface = configured_display_free_presented_surface_on_device_for_test(
+        &mut renderer,
+        donor_device,
+        Attachment::from_web_canvas(initial_attachment),
+    );
+    let original_options = surface.options;
+    let original_renderer_identity = surface.renderer_identity.clone();
+    let original_parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), original_parameters))
+        .expect("the donor surface must render before loss");
     let initial_resource = presented_resource_id_for_test(&surface)
         .expect("the fixture must commit its initial target");
+    assert_eq!(presented_device_identity_for_test(&surface), donor_device);
 
     set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Lost);
     let error =
@@ -15626,18 +15647,37 @@ fn surface_loss_can_resume_but_device_loss_requires_a_new_renderer() {
     );
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 
+    let replacement_attachment = "display-free-donor-replacement";
     pollster::block_on(renderer.resume_surface(
         &mut surface,
-        Attachment::from_web_canvas("display-free-presented-test-target"),
+        Attachment::from_web_canvas(replacement_attachment),
     ))
     .expect("a lost surface must recreate on its same ready device");
     let resumed_resource = presented_resource_id_for_test(&surface)
         .expect("resuming the lost surface must configure a new target");
     assert_ne!(resumed_resource, initial_resource);
+    assert_eq!(presented_device_identity_for_test(&surface), donor_device);
+    assert_eq!(surface.options, original_options);
+    assert!(
+        surface
+            .renderer_identity
+            .matches(&original_renderer_identity)
+    );
+    assert_eq!(surface.last_parameters, Some(original_parameters));
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("the recreated display-free surface must retain a web-canvas attachment"),
+        },
+        replacement_attachment
+    );
+    assert_eq!(presented_resource_id_for_test(&other), Some(other_resource));
     pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
         .expect("the recreated surface must render through the original ready device");
+    pollster::block_on(renderer.render(&mut other, &Scene::new(), Parameters::default()))
+        .expect("the default surface must remain coherent after donor-surface recreation");
 
-    renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    renderer.signal_device_loss_for_test(donor_device, DeviceLossReason::Destroyed);
     let error = pollster::block_on(renderer.resume_surface(
         &mut surface,
         Attachment::from_web_canvas("display-free-presented-test-target"),
@@ -15800,6 +15840,27 @@ fn configured_display_free_presented_surface_for_test(renderer: &mut Renderer) -
 }
 
 #[cfg(feature = "render-window")]
+fn configured_display_free_presented_surface_on_device_for_test(
+    renderer: &mut Renderer,
+    device_identity: DeviceSlotIdentity,
+    attachment: Attachment,
+) -> Surface {
+    let mut surface = renderer
+        .display_free_presented_surface_on_device_for_test(
+            SurfaceOptions {
+                size: Size::new(2.0, 2.0),
+                ..SurfaceOptions::default()
+            },
+            device_identity,
+            attachment,
+        )
+        .expect("the display-free fixture must establish a real presented surface backend");
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .expect("the display-free surface must configure through the real Configure transaction");
+    surface
+}
+
+#[cfg(feature = "render-window")]
 fn set_presented_acquire_outcome_for_test(
     surface: &mut Surface,
     outcome: PresentedAcquireOutcomeForTest,
@@ -15846,6 +15907,13 @@ fn presented_resource_id_for_test(surface: &Surface) -> Option<u64> {
             .map(|resources| resources.resource_id_for_test()),
         _ => panic!("the fixture must retain a presented surface backend"),
     }
+}
+
+#[cfg(feature = "render-window")]
+fn presented_device_identity_for_test(surface: &Surface) -> DeviceSlotIdentity {
+    surface
+        .device_identity()
+        .expect("the display-free fixture must retain a device slot identity")
 }
 
 #[test]
@@ -16077,6 +16145,23 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
     };
     *device_identity = healthy_slot;
 
+    let idle_slot = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("no-active-generation coverage requires a third ready device slot");
+    let mut idle = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    assert_eq!(
+        idle.resource_state(),
+        SurfaceResourceState::PendingAllocation,
+        "the idle donor surface must not carry resources created by another device"
+    );
+    let SurfaceBackend::Headless {
+        device_identity, ..
+    } = &mut idle.backend
+    else {
+        panic!("the idle donor test requires a pending device-backed surface");
+    };
+    *device_identity = idle_slot;
+    assert_eq!(idle.device_identity(), Some(idle_slot));
+
     let active_signal = renderer
         .default_device_signal_for_test()
         .expect("active-generation coverage requires the default device signal");
@@ -16139,8 +16224,6 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
         RuntimeCapabilities::Available(_)
     ));
 
-    let idle_slot = pollster::block_on(renderer.add_donor_device_slot_for_test())
-        .expect("no-active-generation coverage requires a third ready device slot");
     let idle_signal = renderer
         .device_signal_for_test(idle_slot)
         .expect("the idle device slot must retain its real DeviceSignal");
@@ -16152,6 +16235,30 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
             .expect("an idle uncaptured fault must terminally affect its own device slot")
             .operation_generation_for_test(),
         None
+    );
+    let error =
+        pollster::block_on(renderer.render(&mut idle, &Scene::new(), Parameters::default()))
+            .expect_err("the next operation naming the idle faulted slot must reject it");
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::DeviceFaulted {
+                    kind: GpuFaultKind::Internal,
+                },
+            )
+            .unwrap()
+        )
+    );
+    assert_eq!(
+        idle_signal.active_generation_for_test(),
+        None,
+        "terminal preflight must not begin an idle-slot GPU operation"
+    );
+    assert!(
+        renderer.device_renderer_released_for_test(idle_slot),
+        "terminal preflight must release the idle slot without resource use"
     );
     pollster::block_on(renderer.render(&mut healthy, &Scene::new(), Parameters::default()))
         .expect("the healthy slot must remain usable after active and idle faults elsewhere");

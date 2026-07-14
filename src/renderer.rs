@@ -370,8 +370,6 @@ impl Renderer {
         &mut self,
         options: SurfaceOptions,
     ) -> Result<Surface> {
-        validate_surface_options(options)?;
-        let physical_size = physical_size(options.size, options.scale)?;
         let device_identity = self.default_device.ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -379,6 +377,28 @@ impl Renderer {
                 "display-free presented configuration coverage requires a host adapter",
             )
         })?;
+        self.display_free_presented_surface_on_device_for_test(
+            options,
+            device_identity,
+            Attachment::from_web_canvas("display-free-presented-test-target"),
+        )
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn display_free_presented_surface_on_device_for_test(
+        &mut self,
+        options: SurfaceOptions,
+        device_identity: DeviceSlotIdentity,
+        attachment: Attachment,
+    ) -> Result<Surface> {
+        validate_surface_options(options)?;
+        if !matches!(&attachment, Attachment::WebCanvas(_)) {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceCreateFailed,
+                "the display-free presented fixture requires a web-canvas attachment",
+            ));
+        }
+        let physical_size = physical_size(options.size, options.scale)?;
         let backend = self.backend.as_mut().ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -386,13 +406,20 @@ impl Renderer {
                 "display-free presented configuration coverage requires a renderer backend",
             )
         })?;
+        if !backend.has_device_slot(device_identity) {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the display-free presented fixture requires a current device slot",
+            ));
+        }
         if let Some(error) =
             backend.terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
         {
             return Err(error);
         }
         Ok(Surface::with_backend(
-            Attachment::from_web_canvas("display-free-presented-test-target"),
+            attachment,
             options,
             SurfaceBackend::Presented {
                 surface: Box::new(super::surface::PresentedSurface::display_free_for_test()),
@@ -578,9 +605,16 @@ impl Renderer {
                         let resizing = state.lifecycle().resize_state();
                         #[cfg(all(test, feature = "render-window"))]
                         if surface.is_display_free_presented_for_test() {
-                            let mut next =
-                                self.display_free_presented_surface_for_test(surface.options)?;
+                            let device_identity = surface.device_identity().expect(
+                                "a display-free presented surface must retain its device identity",
+                            );
+                            let mut next = self.display_free_presented_surface_on_device_for_test(
+                                surface.options,
+                                device_identity,
+                                attachment,
+                            )?;
                             next.last_parameters = surface.last_parameters;
+                            next.renderer_identity = surface.renderer_identity.clone();
                             if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
                                 state.set_resizing(resizing);
                             }
@@ -843,8 +877,18 @@ impl Renderer {
 
     #[cfg(test)]
     pub(crate) fn signal_default_device_loss_for_test(&mut self, reason: DeviceLossReason) {
-        if let (Some(backend), Some(device_identity)) = (self.backend.as_mut(), self.default_device)
-        {
+        if let Some(device_identity) = self.default_device {
+            self.signal_device_loss_for_test(device_identity, reason);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn signal_device_loss_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+        reason: DeviceLossReason,
+    ) {
+        if let Some(backend) = self.backend.as_mut() {
             backend.signal_loss_for_test(device_identity, reason);
         }
     }
@@ -884,6 +928,16 @@ impl Renderer {
             (None, None) => true,
             _ => false,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn device_renderer_released_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+    ) -> bool {
+        self.backend
+            .as_mut()
+            .is_some_and(|backend| backend.renderer_released_for_test(device_identity))
     }
 
     #[cfg(test)]
