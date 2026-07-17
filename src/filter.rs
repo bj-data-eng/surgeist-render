@@ -10,7 +10,7 @@ use super::{
 const LUMA_RED: f64 = 0.213;
 const LUMA_GREEN: f64 = 0.715;
 const LUMA_BLUE: f64 = 0.072;
-const DEFAULT_KERNEL_STD_DEV_MULTIPLE: f64 = 2.5;
+pub(crate) const CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS: f64 = 2.5;
 const DEFAULT_MAX_BLUR_RADIUS: f64 = 256.0;
 
 /// Source bounds for a pixel-moving filter operation.
@@ -375,8 +375,10 @@ impl BlurPolicy {
     pub fn css_filter_default() -> Self {
         Self::try_new(
             BlurRadiusInterpretation::CssLengthAsStandardDeviation,
-            KernelSupportRadius::try_standard_deviation_multiple(DEFAULT_KERNEL_STD_DEV_MULTIPLE)
-                .expect("default kernel support radius is valid"),
+            KernelSupportRadius::try_standard_deviation_multiple(
+                CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS,
+            )
+            .expect("default kernel support radius is valid"),
             LargeBlurRadiusPolicy::try_reject_above(DEFAULT_MAX_BLUR_RADIUS)
                 .expect("default large-radius policy is valid"),
             TransparentEdgeSamplingPolicy::TransparentBlack,
@@ -427,7 +429,7 @@ pub(crate) fn vello_outer_shadow_support_radius(blur_radius: f64) -> Result<f64>
     let standard_deviation =
         BlurRadiusInterpretation::VelloShadowBlurRadiusAsDiameter.standard_deviation(blur_radius);
     let support = KernelSupportRadius {
-        standard_deviation_multiple: DEFAULT_KERNEL_STD_DEV_MULTIPLE,
+        standard_deviation_multiple: CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS,
     }
     .support_radius(standard_deviation);
     if !support.is_finite() {
@@ -598,6 +600,164 @@ fn checked_rounded_i32(value: f64, name: &str) -> Result<i32> {
         ));
     }
     Ok(value as i32)
+}
+
+/// Context-free algorithm phase for one authored filter list.
+///
+/// This phase preserves authored operation order and per-operation color clamp
+/// boundaries without carrying pixels, logical bounds, or backend state.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AlgorithmFilterPlan {
+    authored_operation_count: usize,
+    steps: Vec<AlgorithmFilterStep>,
+}
+
+impl AlgorithmFilterPlan {
+    pub(crate) fn from_filter_list(filters: &FilterList) -> Self {
+        let authored_operation_count = filters.ops().len();
+        let mut steps = Vec::new();
+        let mut color_run = Vec::new();
+
+        for op in filters.ops() {
+            match op.kind() {
+                FilterOpKind::Blur(blur) if blur.radius() == 0.0 => {}
+                FilterOpKind::Blur(blur) => {
+                    flush_algorithm_color_run(&mut steps, &mut color_run);
+                    steps.push(AlgorithmFilterStep::Blur(*blur));
+                }
+                FilterOpKind::DropShadow(shadow) => {
+                    flush_algorithm_color_run(&mut steps, &mut color_run);
+                    steps.push(AlgorithmFilterStep::DropShadow(*shadow));
+                }
+                FilterOpKind::Brightness(amount) => push_algorithm_color_operation(
+                    &mut color_run,
+                    ColorFilterOp::Brightness(*amount),
+                ),
+                FilterOpKind::Contrast(amount) => {
+                    push_algorithm_color_operation(&mut color_run, ColorFilterOp::Contrast(*amount))
+                }
+                FilterOpKind::Grayscale(amount) => push_algorithm_color_operation(
+                    &mut color_run,
+                    ColorFilterOp::Grayscale(*amount),
+                ),
+                FilterOpKind::HueRotate(angle) => {
+                    push_algorithm_color_operation(&mut color_run, ColorFilterOp::HueRotate(*angle))
+                }
+                FilterOpKind::Invert(amount) => {
+                    push_algorithm_color_operation(&mut color_run, ColorFilterOp::Invert(*amount))
+                }
+                FilterOpKind::Opacity(amount) => {
+                    push_algorithm_color_operation(&mut color_run, ColorFilterOp::Opacity(*amount))
+                }
+                FilterOpKind::Saturate(amount) => {
+                    push_algorithm_color_operation(&mut color_run, ColorFilterOp::Saturate(*amount))
+                }
+                FilterOpKind::Sepia(amount) => {
+                    push_algorithm_color_operation(&mut color_run, ColorFilterOp::Sepia(*amount))
+                }
+            }
+        }
+
+        flush_algorithm_color_run(&mut steps, &mut color_run);
+        Self {
+            authored_operation_count,
+            steps,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn authored_operation_count(&self) -> usize {
+        self.authored_operation_count
+    }
+
+    #[must_use]
+    pub(crate) fn steps(&self) -> &[AlgorithmFilterStep] {
+        &self.steps
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum AlgorithmFilterStep {
+    ColorRun(AlgorithmColorFilterRun),
+    Blur(FilterBlur),
+    DropShadow(FilterDropShadow),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct AlgorithmColorFilterRun {
+    operations: Vec<ClampedColorFilterOperation>,
+}
+
+impl AlgorithmColorFilterRun {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C06 T3 records authored color operations for C07 lowering."
+        )
+    )]
+    #[must_use]
+    pub(crate) fn operations(&self) -> &[ClampedColorFilterOperation] {
+        &self.operations
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ColorClampBoundary {
+    ClampStraightRgbaToUnitThenPremultiply,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ClampedColorFilterOperation {
+    operation: ColorFilterOp,
+    clamp_boundary: ColorClampBoundary,
+}
+
+impl ClampedColorFilterOperation {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C06 T3 records each authored color operation for C07 lowering."
+        )
+    )]
+    #[must_use]
+    pub(crate) const fn operation(self) -> ColorFilterOp {
+        self.operation
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C06 T3 records each authored clamp boundary for C07 lowering."
+        )
+    )]
+    #[must_use]
+    pub(crate) const fn clamp_boundary(self) -> ColorClampBoundary {
+        self.clamp_boundary
+    }
+}
+
+fn flush_algorithm_color_run(
+    steps: &mut Vec<AlgorithmFilterStep>,
+    color_run: &mut Vec<ClampedColorFilterOperation>,
+) {
+    if !color_run.is_empty() {
+        steps.push(AlgorithmFilterStep::ColorRun(AlgorithmColorFilterRun {
+            operations: std::mem::take(color_run),
+        }));
+    }
+}
+
+fn push_algorithm_color_operation(
+    color_run: &mut Vec<ClampedColorFilterOperation>,
+    operation: ColorFilterOp,
+) {
+    color_run.push(ClampedColorFilterOperation {
+        operation,
+        clamp_boundary: ColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply,
+    });
 }
 
 /// Render-owned ordered classifier for materialized image filters.

@@ -8771,6 +8771,224 @@ fn logical_bounds_preserve_large_finite_translation_until_frame_scale_resolution
     assert_eq!(resolved.device_extent, Some((2, 1)));
 }
 
+use super::frame::{
+    OrderedFilterEdgeObservation, OrderedFilterIntentObservation, OrderedFilterPlanObservation,
+    OrderedFilterStepObservation,
+};
+
+fn observe_ordered_filter_plan(
+    filters: &FilterList,
+    source_rect: Rect,
+    transform: Transform,
+    surface_scale: f64,
+    backdrop: bool,
+) -> Result<OrderedFilterPlanObservation> {
+    super::frame::ordered_filter_plan_for_test(
+        filters,
+        source_rect,
+        transform,
+        surface_scale,
+        backdrop,
+    )
+}
+
+#[test]
+fn filter_bounds_fold_blur_and_signed_drop_shadow_outsets_in_order() {
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(0.0).unwrap()),
+        FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(-3.25, 4.5),
+                FilterBlur::try_new(0.5).unwrap(),
+                Color::BLACK,
+            )
+            .unwrap(),
+        ),
+        FilterOp::sepia(UnitFilterAmount::try_new(0.25).unwrap()),
+    ])
+    .unwrap();
+    let observed = observe_ordered_filter_plan(
+        &filters,
+        Rect::new(10.25, -4.5, 20.0, 10.0),
+        Transform::identity(),
+        2.0,
+        false,
+    )
+    .unwrap();
+
+    assert!(
+        observed
+            .steps
+            .iter()
+            .all(|step| step.result_bounds.is_some()),
+        "legacy filter classifiers do not produce ordered result-bound records"
+    );
+    assert_eq!(observed.authored_operation_count, 5);
+    assert!(!observed.is_empty);
+    assert!(observed.has_spatial_mapping);
+    assert_eq!(observed.initial_bounds, [10.25, -4.5, 20.0, 10.0]);
+    assert_eq!(observed.final_bounds, [3.0, -7.0, 29.75, 21.0]);
+    assert_eq!(observed.steps.len(), 4, "zero blur must be elided");
+
+    assert_eq!(
+        observed.steps[0],
+        OrderedFilterStepObservation {
+            source_bounds: [10.25, -4.5, 20.0, 10.0],
+            result_bounds: Some([10.25, -4.5, 20.0, 10.0]),
+            source_device_origin: Some((20, -9)),
+            source_device_extent: Some((41, 20)),
+            result_device_origin: Some((20, -9)),
+            result_device_extent: Some((41, 20)),
+            edge: OrderedFilterEdgeObservation::NoSampling,
+            intent: OrderedFilterIntentObservation::ColorRun {
+                operations: vec![ColorFilterOp::Brightness(
+                    FilterAmount::try_new(1.25).unwrap(),
+                )],
+                clamp_boundaries_after_operation: vec![0],
+            },
+        }
+    );
+    assert_eq!(
+        observed.steps[1],
+        OrderedFilterStepObservation {
+            source_bounds: [10.25, -4.5, 20.0, 10.0],
+            result_bounds: Some([7.75, -7.0, 25.0, 15.0]),
+            source_device_origin: Some((20, -9)),
+            source_device_extent: Some((41, 20)),
+            result_device_origin: Some((15, -14)),
+            result_device_extent: Some((51, 30)),
+            edge: OrderedFilterEdgeObservation::TransparentBlack,
+            intent: OrderedFilterIntentObservation::Blur {
+                standard_deviation: 1.0,
+                inclusive_support_taps: 5,
+            },
+        }
+    );
+    assert_eq!(
+        observed.steps[2],
+        OrderedFilterStepObservation {
+            source_bounds: [7.75, -7.0, 25.0, 15.0],
+            result_bounds: Some([3.0, -7.0, 29.75, 21.0]),
+            source_device_origin: Some((15, -14)),
+            source_device_extent: Some((51, 30)),
+            result_device_origin: Some((6, -14)),
+            result_device_extent: Some((60, 42)),
+            edge: OrderedFilterEdgeObservation::TransparentBlack,
+            intent: OrderedFilterIntentObservation::DropShadow {
+                offset: (-3.25, 4.5),
+                standard_deviation: 0.5,
+                inclusive_support_taps: 3,
+                uses_source_alpha: true,
+                retains_unchanged_source: true,
+                continuous_offset: true,
+            },
+        }
+    );
+    assert_eq!(
+        observed.steps[3],
+        OrderedFilterStepObservation {
+            source_bounds: [3.0, -7.0, 29.75, 21.0],
+            result_bounds: Some([3.0, -7.0, 29.75, 21.0]),
+            source_device_origin: Some((6, -14)),
+            source_device_extent: Some((60, 42)),
+            result_device_origin: Some((6, -14)),
+            result_device_extent: Some((60, 42)),
+            edge: OrderedFilterEdgeObservation::NoSampling,
+            intent: OrderedFilterIntentObservation::ColorRun {
+                operations: vec![ColorFilterOp::Sepia(
+                    UnitFilterAmount::try_new(0.25).unwrap(),
+                )],
+                clamp_boundaries_after_operation: vec![0],
+            },
+        }
+    );
+
+    let backdrop = observe_ordered_filter_plan(
+        &FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap(),
+        Rect::new(0.0, 0.0, 4.0, 3.0),
+        Transform::identity(),
+        2.0,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        backdrop.steps[0].edge,
+        OrderedFilterEdgeObservation::SemanticBorderMirror([0.0, 0.0, 4.0, 3.0])
+    );
+    assert_eq!(backdrop.final_bounds, [-2.5, -2.5, 9.0, 8.0]);
+
+    for transform in [Transform::identity(), Transform::scale(0.0, 1.0).unwrap()] {
+        let source = if transform == Transform::identity() {
+            Rect::new(1.0, 2.0, 0.0, 3.0)
+        } else {
+            Rect::new(1.0, 2.0, 4.0, 3.0)
+        };
+        let empty = observe_ordered_filter_plan(&filters, source, transform, 2.0, false).unwrap();
+        assert!(empty.is_empty);
+        assert!(!empty.has_spatial_mapping);
+        assert!(empty.steps.is_empty());
+    }
+
+    let support_error = observe_ordered_filter_plan(
+        &FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(256.0).unwrap())]).unwrap(),
+        Rect::new(0.0, 0.0, 1.0e-12, 1.0e-12),
+        Transform::identity(),
+        f64::from(u32::MAX),
+        false,
+    )
+    .expect_err("unrepresentable raster-aware support must remain a typed failure");
+    assert_eq!(support_error.code(), ErrorCode::InvalidInput);
+    assert!(support_error.invalid_value_diagnostic().is_some());
+}
+
+#[test]
+fn color_filter_fusion_preserves_each_source_clamp() {
+    let operations = vec![
+        ColorFilterOp::Brightness(FilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Contrast(FilterAmount::try_new(2.0).unwrap()),
+        ColorFilterOp::Opacity(UnitFilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap()),
+    ];
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.0).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(2.0).unwrap()),
+        FilterOp::opacity(UnitFilterAmount::try_new(1.0).unwrap()),
+        FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
+    ])
+    .unwrap();
+    let observed = observe_ordered_filter_plan(
+        &filters,
+        Rect::new(-1.0, 2.0, 2.0, 3.0),
+        Transform::identity(),
+        1.5,
+        false,
+    )
+    .unwrap();
+
+    let OrderedFilterIntentObservation::ColorRun {
+        operations: observed_operations,
+        clamp_boundaries_after_operation,
+    } = &observed.steps[0].intent
+    else {
+        panic!("adjacent authored color operations must share one semantic pass intent");
+    };
+    assert_eq!(
+        clamp_boundaries_after_operation,
+        &[0, 1, 2, 3],
+        "fused intent lost authored clamp boundaries"
+    );
+    assert_eq!(observed.steps.len(), 1);
+    assert_eq!(observed_operations, &operations);
+    assert_eq!(observed.steps[0].source_bounds, [-1.0, 2.0, 2.0, 3.0]);
+    assert_eq!(observed.steps[0].result_bounds, Some([-1.0, 2.0, 2.0, 3.0]));
+    assert_eq!(
+        observed.steps[0].edge,
+        OrderedFilterEdgeObservation::NoSampling
+    );
+}
+
 #[test]
 fn materialized_image_filter_classifier_preserves_mixed_filter_order() {
     let shadow = FilterDropShadow::try_from_shadow(
