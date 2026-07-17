@@ -1,7 +1,7 @@
 # GPU Render Pipeline C04 Atomic Frame Publication And Presentation
 
 ## Header
-- Cycle: `C04`; owner: `surgeist-render`; status: `complete`.
+- Cycle: `C04`; owner: `surgeist-render`; status: `in_progress`.
 - Cycle base and published prerequisite: `cffc37b909d63c5382e6ef3b91653ed2943f3cbf` (C03).
 - Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S12-S13A, publication/lifecycle portions of S25-S26, applicable S29, and C04-applicable S31-S37 evidence.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at `c1a203393b2549603c0a0d5698099f55018abe2e`, normalized SHA-256 `70b345be31ac5bf4fcae72e2d3c5901c8e04ad0b2c26080851bd2c50d7150cde`, entry `C04 Atomic Frame Publication And Presentation`.
