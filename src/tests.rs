@@ -7337,6 +7337,16 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
     assert_eq!(cache.stats().hits, 1);
     assert_eq!(cache.live_count(), 1);
     assert_eq!(cache.released_resource_count(), 0);
+    let image = pollster::block_on(renderer.read_render_texture_for_test(
+        second.texture(),
+        second.target().descriptor().physical_size(),
+    ))
+    .expect("reused offscreen texture readback requires the same host adapter");
+    assert_eq!(image.size(), PhysicalSize::new(3, 2));
+    assert!(
+        image.rgba().chunks_exact(4).all(|pixel| pixel[3] > 0),
+        "the reused offscreen texture must contain rendered pixels"
+    );
     second.release(&mut cache).unwrap();
     assert_eq!(cache.live_count(), 0);
     assert_eq!(cache.released_resource_count(), 1);
@@ -21121,10 +21131,24 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         ["src/readback.rs", "src/renderer.rs"],
         "all current texture downloads must enter the one private owner from Renderer"
     );
+    let renderer_download_routes = [
+        ("pub async fn read_headless(", ".read_headless("),
+        (
+            "pub(crate) async fn read_render_texture_for_test(",
+            ".read_render_texture_for_test(",
+        ),
+        (
+            "pub(crate) async fn scoped_clear_fill_probe_for_test(",
+            ".scoped_clear_fill_probe_for_test(",
+        ),
+    ];
+    for (caller, _) in renderer_download_routes {
+        assert!(
+            source_braced_block_from_marker(renderer_source, caller).contains(readback_entry),
+            "{caller} must route its texture download through the private readback owner"
+        );
+    }
     for caller in [
-        "pub async fn read_headless(",
-        "pub(crate) async fn read_render_texture_for_test(",
-        "pub(crate) async fn scoped_clear_fill_probe_for_test(",
         "async fn materialize_resolved_backdrop(",
         "async fn materialize_resolved_layer_mask(",
     ] {
@@ -21158,6 +21182,20 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
             "contract-only behavior must remain separate in {contract_test}"
         );
     }
+    let required_headless_marker = ["fn render_scene_to_required_", "headless("].concat();
+    let required_headless_helper =
+        source_braced_block_from_marker(tests_source, &required_headless_marker);
+    assert!(!required_headless_helper.contains("return;"));
+    assert!(required_headless_helper.contains(".expect("));
+    assert!(
+        required_headless_helper.contains(".read_headless("),
+        "the required-headless helper must execute Renderer::read_headless"
+    );
+    let required_download_routes = renderer_download_routes
+        .map(|(_, call)| call)
+        .into_iter()
+        .chain(["render_scene_to_required_headless("])
+        .collect::<Vec<_>>();
     for required_host_test in [
         "offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available",
         "offscreen_reuses_resources_across_repeated_bounded_requests",
@@ -21176,12 +21214,13 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
             !body.contains("return;"),
             "required-host test {required_host_test} must not pass by returning early"
         );
+        assert!(
+            required_download_routes
+                .iter()
+                .any(|route| body.contains(route)),
+            "required-host test {required_host_test} must execute a recognized download route"
+        );
     }
-    let required_headless_marker = ["fn render_scene_to_required_", "headless("].concat();
-    let required_headless_helper =
-        source_braced_block_from_marker(tests_source, &required_headless_marker);
-    assert!(!required_headless_helper.contains("return;"));
-    assert!(required_headless_helper.contains(".expect("));
 }
 
 #[test]
