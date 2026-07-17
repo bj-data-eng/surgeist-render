@@ -277,7 +277,8 @@ impl FramePlan {
         commands: RenderCommands,
         context: FrameContext,
     ) -> Result<Self> {
-        let commands = RenderCommands::new(prune_semantically_empty_commands(commands.commands));
+        let contribution = SemanticSourceContribution::try_from_commands(commands.commands)?;
+        let commands = RenderCommands::new(contribution.commands);
         let selection_requirements = graph_selection_requirements(&commands.commands);
         if selection_requirements.is_empty() {
             return Ok(Self::DirectVello(DirectVelloPlan {
@@ -364,21 +365,126 @@ fn require_graph_text_bounds(commands: &[RenderCommand], path: &mut Vec<usize>) 
     Ok(())
 }
 
-fn prune_semantically_empty_commands(commands: Vec<RenderCommand>) -> Vec<RenderCommand> {
-    commands
-        .into_iter()
-        .filter_map(|command| match command {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SemanticSourceBounds {
+    Empty,
+    NonEmpty(NonEmptyLogicalBounds),
+    Unspecified,
+}
+
+impl SemanticSourceBounds {
+    fn try_for_command(command: &RenderCommand) -> Result<Self> {
+        match commands_bounds_for_planning(std::slice::from_ref(command))? {
+            Some(bounds) => Self::try_from_rect(bounds.rect()),
+            None => Ok(Self::Unspecified),
+        }
+    }
+
+    fn try_from_rect(rect: Rect) -> Result<Self> {
+        match LogicalBounds::try_from_rect(rect, "semantic source bounds")? {
+            LogicalBounds::Empty(_) => Ok(Self::Empty),
+            LogicalBounds::NonEmpty(bounds) => Ok(Self::NonEmpty(bounds)),
+        }
+    }
+
+    fn try_union(self, other: Self) -> Result<Self> {
+        match (self, other) {
+            (Self::Empty, bounds) | (bounds, Self::Empty) => Ok(bounds),
+            (Self::Unspecified, _) | (_, Self::Unspecified) => Ok(Self::Unspecified),
+            (Self::NonEmpty(a), Self::NonEmpty(b)) => a
+                .try_union(b, "semantic source bounds union")
+                .map(Self::NonEmpty),
+        }
+    }
+
+    fn require_non_empty_for_graph(
+        self,
+        name: &'static str,
+    ) -> Result<Option<NonEmptyLogicalBounds>> {
+        match self {
+            Self::Empty => Ok(None),
+            Self::NonEmpty(bounds) => Ok(Some(bounds)),
+            Self::Unspecified => Err(Error::invalid_value(
+                name,
+                "unspecified",
+                "must be explicit before semantic graph source planning",
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticSourceContribution {
+    commands: Vec<RenderCommand>,
+    bounds: SemanticSourceBounds,
+}
+
+impl SemanticSourceContribution {
+    fn try_from_commands(commands: Vec<RenderCommand>) -> Result<Self> {
+        let mut contributing_commands = Vec::with_capacity(commands.len());
+        let mut contribution_bounds = SemanticSourceBounds::Empty;
+        for command in commands {
+            let Some((command, bounds)) = Self::try_from_command(command)? else {
+                continue;
+            };
+            contribution_bounds = contribution_bounds.try_union(bounds)?;
+            contributing_commands.push(command);
+        }
+        Ok(Self {
+            commands: contributing_commands,
+            bounds: contribution_bounds,
+        })
+    }
+
+    fn try_from_command(
+        command: RenderCommand,
+    ) -> Result<Option<(RenderCommand, SemanticSourceBounds)>> {
+        match command {
             RenderCommand::TextRun { bounds, .. } if bounds.kind() == TextRunBoundsKind::Empty => {
-                None
+                Ok(None)
             }
             RenderCommand::Layer { layer, children } => {
-                let children = prune_semantically_empty_commands(children);
-                (!children.is_empty() || layer.backdrop.is_some())
-                    .then_some(RenderCommand::Layer { layer, children })
+                let children = Self::try_from_commands(children)?;
+                let affects_parent_without_source = layer.backdrop.is_some();
+                let rank_deficient = linear_transform_is_rank_deficient(layer.transform)?;
+                if (children.commands.is_empty() || rank_deficient)
+                    && !affects_parent_without_source
+                {
+                    return Ok(None);
+                }
+
+                let child_bounds = children.bounds;
+                let command = RenderCommand::Layer {
+                    layer,
+                    children: children.commands,
+                };
+                let bounds = if child_bounds == SemanticSourceBounds::Unspecified
+                    && !affects_parent_without_source
+                {
+                    SemanticSourceBounds::Unspecified
+                } else {
+                    SemanticSourceBounds::try_for_command(&command)?
+                };
+                if bounds == SemanticSourceBounds::Empty && !affects_parent_without_source {
+                    return Ok(None);
+                }
+                let bounds = if bounds == SemanticSourceBounds::Empty {
+                    SemanticSourceBounds::Unspecified
+                } else {
+                    bounds
+                };
+                Ok(Some((command, bounds)))
             }
-            command => Some(command),
-        })
-        .collect()
+            command => {
+                let bounds = SemanticSourceBounds::try_for_command(&command)?;
+                if bounds == SemanticSourceBounds::Empty {
+                    Ok(None)
+                } else {
+                    Ok(Some((command, bounds)))
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1978,17 +2084,17 @@ impl SemanticFrameGraphPlanner {
         capture_transform: Transform,
         parent_to_surface: Transform,
     ) -> Result<PlannedGraphParent> {
-        if commands.is_empty() {
-            return Ok(parent);
-        }
-        let Some(bounds) = commands_bounds_for_planning(&commands)? else {
+        let contribution = SemanticSourceContribution::try_from_commands(commands)?;
+        let Some(logical_bounds) = contribution
+            .bounds
+            .require_non_empty_for_graph("Vello span bounds")?
+        else {
             return Ok(parent);
         };
-        let logical_bounds = LogicalBounds::try_from_rect(bounds.rect(), "Vello span bounds")?;
         let raster_transform = capture_transform.then(parent_to_surface)?;
         let spatial = match self
             .context
-            .plan_local_bounds(logical_bounds, raster_transform)?
+            .plan_local_bounds(LogicalBounds::NonEmpty(logical_bounds), raster_transform)?
         {
             FrameSpatialPlan::Empty(_) => return Ok(parent),
             FrameSpatialPlan::NonEmpty(spatial) => spatial,
@@ -2004,7 +2110,7 @@ impl SemanticFrameGraphPlanner {
             Vec::new(),
             SemanticPassResult::Resource(capture_resource),
         ))?;
-        let commands = RenderCommands::new(commands);
+        let commands = RenderCommands::new(contribution.commands);
         self.vello_spans.push(SemanticVelloSpan {
             capture_pass,
             scope,
@@ -2095,29 +2201,29 @@ impl SemanticFrameGraphPlanner {
         raster_transform: Transform,
         planned_bounds: Option<super::command::OffscreenBounds>,
     ) -> Result<Option<PlannedGraphResource>> {
-        if children.is_empty() {
+        let contribution = SemanticSourceContribution::try_from_commands(children)?;
+        if contribution.commands.is_empty() {
             return Ok(None);
         }
-        let bounds = match planned_bounds {
-            Some(bounds) => bounds,
-            None => {
-                let Some(bounds) = commands_bounds_for_planning(&children)? else {
-                    return Ok(None);
-                };
-                bounds
-            }
+        let source_bounds = match planned_bounds {
+            Some(bounds) => SemanticSourceBounds::try_from_rect(bounds.rect())?,
+            None => contribution.bounds,
         };
-        let logical_bounds = LogicalBounds::try_from_rect(bounds.rect(), "layer source bounds")?;
+        let Some(logical_bounds) =
+            source_bounds.require_non_empty_for_graph("layer source bounds")?
+        else {
+            return Ok(None);
+        };
         let spatial = match self
             .context
-            .plan_local_bounds(logical_bounds, raster_transform)?
+            .plan_local_bounds(LogicalBounds::NonEmpty(logical_bounds), raster_transform)?
         {
             FrameSpatialPlan::Empty(_) => return Ok(None),
             FrameSpatialPlan::NonEmpty(spatial) => spatial,
         };
         let source_parent = self.declare_transparent_parent(spatial)?;
         let source_parent = self.plan_commands(
-            children,
+            contribution.commands,
             source_parent,
             SemanticVelloSpanScope::LayerSource,
             Transform::identity(),

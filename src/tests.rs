@@ -9337,6 +9337,100 @@ fn empty_masked_subtree_does_not_select_graph_or_split_vello_span() {
 }
 
 #[test]
+fn zero_area_masked_source_does_not_select_graph_or_split_vello_span() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
+                .unwrap(),
+            |scene| {
+                scene.fill(Rect::new(0.0, 3.0, 0.0, 2.0), Color::BLACK);
+            },
+        )
+        .stroke(
+            Shape::rect(Rect::new(3.0, 0.0, 2.0, 2.0)),
+            Stroke::try_new(1.0).unwrap(),
+            Color::BLACK,
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the zero-area-source fixture must produce one complete plan");
+
+    assert!(
+        plan.route == FramePlanRouteObservation::DirectVello
+            && plan.selection_requirements.is_empty()
+            && plan.resource_count == 0
+            && plan.pass_count == 0
+            && plan.vello_spans.is_empty()
+            && plan.direct_commands
+                == [
+                    VelloCommandObservation::Fill,
+                    VelloCommandObservation::Stroke,
+                ],
+        "zero-area masked source selected graph or split Vello span"
+    );
+}
+
+#[test]
+fn rank_deficient_masked_source_does_not_select_graph_or_split_vello_span() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_transform(Transform::scale(0.0, 1.0).unwrap())
+                .unwrap()
+                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
+                .unwrap(),
+            |scene| {
+                scene.fill(Rect::new(0.0, 3.0, 2.0, 2.0), Color::BLACK);
+            },
+        )
+        .stroke(
+            Shape::rect(Rect::new(3.0, 0.0, 2.0, 2.0)),
+            Stroke::try_new(1.0).unwrap(),
+            Color::BLACK,
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the rank-deficient-source fixture must produce one complete plan");
+
+    assert!(
+        plan.route == FramePlanRouteObservation::DirectVello
+            && plan.selection_requirements.is_empty()
+            && plan.resource_count == 0
+            && plan.pass_count == 0
+            && plan.vello_spans.is_empty()
+            && plan.direct_commands
+                == [
+                    VelloCommandObservation::Fill,
+                    VelloCommandObservation::Stroke,
+                ],
+        "rank-deficient masked source selected graph or split Vello span"
+    );
+}
+
+#[test]
 fn gpu_graph_is_selected_only_for_supported_custom_requirements() {
     let mask = opaque_planning_mask(PhysicalSize::new(4, 4));
     let mut scene = Scene::new();
