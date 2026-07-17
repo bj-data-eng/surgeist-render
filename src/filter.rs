@@ -610,6 +610,7 @@ fn checked_rounded_i32(value: f64, name: &str) -> Result<i32> {
 pub(crate) struct AlgorithmFilterPlan {
     authored_operation_count: usize,
     steps: Vec<AlgorithmFilterStep>,
+    output_is_always_transparent: bool,
 }
 
 impl AlgorithmFilterPlan {
@@ -617,6 +618,7 @@ impl AlgorithmFilterPlan {
         let authored_operation_count = filters.ops().len();
         let mut steps = Vec::new();
         let mut color_run = Vec::new();
+        let mut output_is_always_transparent = false;
 
         for op in filters.ops() {
             match op.kind() {
@@ -647,6 +649,7 @@ impl AlgorithmFilterPlan {
                     push_algorithm_color_operation(&mut color_run, ColorFilterOp::Invert(*amount))
                 }
                 FilterOpKind::Opacity(amount) => {
+                    output_is_always_transparent |= amount.value() == 0.0;
                     push_algorithm_color_operation(&mut color_run, ColorFilterOp::Opacity(*amount))
                 }
                 FilterOpKind::Saturate(amount) => {
@@ -662,6 +665,7 @@ impl AlgorithmFilterPlan {
         Self {
             authored_operation_count,
             steps,
+            output_is_always_transparent,
         }
     }
 
@@ -673,6 +677,11 @@ impl AlgorithmFilterPlan {
     #[must_use]
     pub(crate) fn steps(&self) -> &[AlgorithmFilterStep] {
         &self.steps
+    }
+
+    #[must_use]
+    pub(crate) const fn output_is_always_transparent(&self) -> bool {
+        self.output_is_always_transparent
     }
 }
 

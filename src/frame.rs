@@ -536,18 +536,23 @@ impl SemanticSourceContribution {
                 let mut source_bounds = children.bounds;
 
                 if let Some(backdrop) = layer.backdrop.as_deref() {
-                    let mut backdrop_bounds =
-                        SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
-                    if let Some(clip) = backdrop.clip() {
-                        backdrop_bounds = backdrop_bounds.try_intersect(
-                            SemanticSourceBounds::try_for_clip(clip)?,
-                            "backdrop clip intersection",
-                        )?;
-                    }
-                    if backdrop_bounds == SemanticSourceBounds::Empty {
+                    let filter_plan = AlgorithmFilterPlan::from_filter_list(backdrop.filters());
+                    if filter_plan.output_is_always_transparent() {
                         layer.backdrop = None;
                     } else {
-                        source_bounds = source_bounds.try_union(backdrop_bounds)?;
+                        let mut backdrop_bounds =
+                            SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
+                        if let Some(clip) = backdrop.clip() {
+                            backdrop_bounds = backdrop_bounds.try_intersect(
+                                SemanticSourceBounds::try_for_clip(clip)?,
+                                "backdrop clip intersection",
+                            )?;
+                        }
+                        if backdrop_bounds == SemanticSourceBounds::Empty {
+                            layer.backdrop = None;
+                        } else {
+                            source_bounds = source_bounds.try_union(backdrop_bounds)?;
+                        }
                     }
                 }
 
@@ -2048,6 +2053,20 @@ struct PlannedGraphParent {
     spatial: NonEmptyFrameSpatialPlan,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureParentLocality {
+    External,
+    CaptureLocal,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SemanticCommandPlanningState {
+    parent_locality: CaptureParentLocality,
+    span_scope: SemanticVelloSpanScope,
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+}
+
 struct SemanticFrameGraphPlanner {
     context: FrameContext,
     builder: SemanticGraphBuilder,
@@ -2104,9 +2123,12 @@ impl SemanticFrameGraphPlanner {
         let parent = planner.plan_commands(
             commands.commands,
             parent,
-            SemanticVelloSpanScope::CurrentParent,
-            Transform::identity(),
-            Transform::identity(),
+            SemanticCommandPlanningState {
+                parent_locality: CaptureParentLocality::External,
+                span_scope: SemanticVelloSpanScope::CurrentParent,
+                capture_transform: Transform::identity(),
+                parent_to_surface: Transform::identity(),
+            },
         )?;
         let present = graph_build(planner.builder.declare_pass(
             SemanticPassIntent::Present,
@@ -2146,19 +2168,16 @@ impl SemanticFrameGraphPlanner {
         &mut self,
         commands: Vec<RenderCommand>,
         mut parent: PlannedGraphParent,
-        scope: SemanticVelloSpanScope,
-        capture_transform: Transform,
-        parent_to_surface: Transform,
+        state: SemanticCommandPlanningState,
     ) -> Result<PlannedGraphParent> {
         let mut span = Vec::new();
         for command in commands {
-            if command_is_local_to_capture(&command, false) {
+            if command_is_local_to_capture(&command, state.parent_locality) {
                 span.push(command);
                 continue;
             }
 
-            parent =
-                self.flush_vello_span(span, parent, scope, capture_transform, parent_to_surface)?;
+            parent = self.flush_vello_span(span, parent, state)?;
             span = Vec::new();
             let RenderCommand::Layer { layer, children } = command else {
                 return Err(Error::new(
@@ -2166,25 +2185,16 @@ impl SemanticFrameGraphPlanner {
                     "frame partition classified a non-layer command as a custom boundary",
                 ));
             };
-            parent = self.plan_external_layer(
-                layer,
-                children,
-                parent,
-                scope,
-                capture_transform,
-                parent_to_surface,
-            )?;
+            parent = self.plan_external_layer(layer, children, parent, state)?;
         }
-        self.flush_vello_span(span, parent, scope, capture_transform, parent_to_surface)
+        self.flush_vello_span(span, parent, state)
     }
 
     fn flush_vello_span(
         &mut self,
         commands: Vec<RenderCommand>,
         parent: PlannedGraphParent,
-        scope: SemanticVelloSpanScope,
-        capture_transform: Transform,
-        parent_to_surface: Transform,
+        state: SemanticCommandPlanningState,
     ) -> Result<PlannedGraphParent> {
         let contribution = SemanticSourceContribution::try_from_commands(commands)?;
         let Some(logical_bounds) = contribution
@@ -2193,7 +2203,7 @@ impl SemanticFrameGraphPlanner {
         else {
             return Ok(parent);
         };
-        let raster_transform = capture_transform.then(parent_to_surface)?;
+        let raster_transform = state.capture_transform.then(state.parent_to_surface)?;
         let spatial = match self
             .context
             .plan_local_bounds(LogicalBounds::NonEmpty(logical_bounds), raster_transform)?
@@ -2215,10 +2225,10 @@ impl SemanticFrameGraphPlanner {
         let commands = RenderCommands::new(contribution.commands);
         self.vello_spans.push(SemanticVelloSpan {
             capture_pass,
-            scope,
+            scope: state.span_scope,
             commands,
-            capture_transform,
-            parent_to_surface,
+            capture_transform: state.capture_transform,
+            parent_to_surface: state.parent_to_surface,
             antialiasing: self.context.antialiasing,
             captured_before_outer_semantics: true,
         });
@@ -2248,19 +2258,24 @@ impl SemanticFrameGraphPlanner {
         layer: NormalizedLayer,
         children: Vec<RenderCommand>,
         parent: PlannedGraphParent,
-        scope: SemanticVelloSpanScope,
-        capture_transform: Transform,
-        parent_to_surface: Transform,
+        state: SemanticCommandPlanningState,
     ) -> Result<PlannedGraphParent> {
-        let layer_transform = layer.transform.then(capture_transform)?;
-        let layer_to_surface = layer_transform.then(parent_to_surface)?;
+        let layer_transform = layer.transform.then(state.capture_transform)?;
+        let layer_to_surface = layer_transform.then(state.parent_to_surface)?;
         let is_transparent_wrapper = layer.clip.is_none()
             && layer.mask.is_none()
             && layer.backdrop.is_none()
             && (layer.opacity - 1.0).abs() < f32::EPSILON
             && layer.blend == super::layer::BlendMode::Normal;
         if is_transparent_wrapper {
-            return self.plan_commands(children, parent, scope, layer_transform, parent_to_surface);
+            return self.plan_commands(
+                children,
+                parent,
+                SemanticCommandPlanningState {
+                    capture_transform: layer_transform,
+                    ..state
+                },
+            );
         }
 
         let mut source = self.plan_layer_source(children, layer_to_surface)?;
@@ -2317,9 +2332,12 @@ impl SemanticFrameGraphPlanner {
         let source_parent = self.plan_commands(
             contribution.commands,
             source_parent,
-            SemanticVelloSpanScope::LayerSource,
-            Transform::identity(),
-            raster_transform,
+            SemanticCommandPlanningState {
+                parent_locality: CaptureParentLocality::CaptureLocal,
+                span_scope: SemanticVelloSpanScope::LayerSource,
+                capture_transform: Transform::identity(),
+                parent_to_surface: raster_transform,
+            },
         )?;
         Ok(Some(source_parent.current))
     }
@@ -2647,20 +2665,31 @@ impl SemanticFrameGraphPlanner {
     }
 }
 
-fn command_is_local_to_capture(command: &RenderCommand, has_local_parent: bool) -> bool {
+fn command_is_local_to_capture(
+    command: &RenderCommand,
+    parent_locality: CaptureParentLocality,
+) -> bool {
     let RenderCommand::Layer { layer, children } = command else {
         return true;
     };
     if layer.mask.is_some() || layer.backdrop.is_some() {
         return false;
     }
-    if layer.blend != super::layer::BlendMode::Normal && !has_local_parent {
+    if layer.blend != super::layer::BlendMode::Normal
+        && parent_locality == CaptureParentLocality::External
+    {
         return false;
     }
-    let child_has_local_parent = has_local_parent || layer.isolation != LayerIsolation::None;
+    let child_parent_locality = if parent_locality == CaptureParentLocality::CaptureLocal
+        || layer.isolation != LayerIsolation::None
+    {
+        CaptureParentLocality::CaptureLocal
+    } else {
+        CaptureParentLocality::External
+    };
     children
         .iter()
-        .all(|child| command_is_local_to_capture(child, child_has_local_parent))
+        .all(|child| command_is_local_to_capture(child, child_parent_locality))
 }
 
 fn dependencies_for(resources: &[PlannedGraphResource]) -> Vec<SemanticPassId> {

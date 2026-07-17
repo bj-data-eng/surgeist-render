@@ -9293,6 +9293,101 @@ fn direct_vello_is_the_least_powerful_plan_for_effect_free_scenes() {
 }
 
 #[test]
+fn nested_non_normal_blend_stays_in_masked_layer_source_vello_span() {
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+            .unwrap(),
+        |scene| {
+            scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+                scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+            });
+        },
+    );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the masked blend fixture must produce a complete frame plan");
+
+    assert_eq!(
+        plan.vello_spans,
+        vec![VelloSpanObservation {
+            scope: VelloSpanScopeObservation::LayerSource,
+            commands: vec![VelloCommandObservation::LocalLayer],
+            captured_before_outer_semantics: true,
+        }],
+        "capture-local blend group was treated as external to its masked layer source"
+    );
+}
+
+#[test]
+fn zero_opacity_backdrop_preserves_foreground_without_graph_boundary() {
+    let filters = FilterList::try_ops(vec![
+        FilterOp::opacity(UnitFilterAmount::try_new(0.0).unwrap()),
+        FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(1.0, -1.0),
+                FilterBlur::try_new(0.5).unwrap(),
+                Color::BLACK,
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 6.0, 4.0)).unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.stroke(
+                Shape::rect(Rect::new(2.0, 0.0, 2.0, 2.0)),
+                Stroke::try_new(1.0).unwrap(),
+                Color::BLACK,
+            );
+        });
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the zero-opacity backdrop fixture must produce a complete frame plan");
+
+    assert!(
+        plan.route == FramePlanRouteObservation::DirectVello
+            && plan.direct_commands
+                == [
+                    VelloCommandObservation::Fill,
+                    VelloCommandObservation::LocalLayer,
+                ]
+            && plan.selection_requirements.is_empty()
+            && plan.vello_spans.is_empty()
+            && plan.resource_count == 0
+            && plan.pass_count == 0,
+        "zero-opacity backdrop retained a graph boundary or erased its nonempty Vello foreground"
+    );
+}
+
+#[test]
 fn empty_masked_subtree_does_not_select_graph_or_split_vello_span() {
     let mut scene = Scene::new();
     scene
