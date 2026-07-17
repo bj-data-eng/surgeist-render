@@ -14858,6 +14858,213 @@ fn readback_transaction_maps_validation_internal_oom_and_terminal_failures() {
 }
 
 #[test]
+fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers() {
+    use super::readback::{
+        ReadbackCleanupEventForTest as Cleanup, ReadbackPhaseForTest, ReadbackStateMachineForTest,
+    };
+
+    fn state_at(phase: ReadbackPhaseForTest) -> ReadbackStateMachineForTest {
+        let mut state = ReadbackStateMachineForTest::allocated();
+        match phase {
+            ReadbackPhaseForTest::Allocated => {}
+            ReadbackPhaseForTest::CopySubmitted { submission_index } => {
+                state.copy_submitted_for_test(submission_index);
+            }
+            ReadbackPhaseForTest::MapPending => {
+                state.copy_submitted_for_test(17);
+                state.map_pending_for_test();
+            }
+            ReadbackPhaseForTest::Mapped => {
+                state.copy_submitted_for_test(17);
+                state.map_pending_for_test();
+                state.mapped_for_test();
+            }
+            ReadbackPhaseForTest::PublishedBytes
+            | ReadbackPhaseForTest::Failed
+            | ReadbackPhaseForTest::Canceled => {
+                panic!("the fixture accepts only uncertain readback phases")
+            }
+        }
+        state
+    }
+
+    let submitted = state_at(ReadbackPhaseForTest::CopySubmitted {
+        submission_index: 91,
+    });
+    assert_eq!(
+        submitted.phase_for_test(),
+        ReadbackPhaseForTest::CopySubmitted {
+            submission_index: 91,
+        },
+        "the owner must retain the exact queue submission index"
+    );
+
+    for uncertain_phase in [
+        ReadbackPhaseForTest::Allocated,
+        ReadbackPhaseForTest::CopySubmitted {
+            submission_index: 17,
+        },
+        ReadbackPhaseForTest::MapPending,
+        ReadbackPhaseForTest::Mapped,
+    ] {
+        let mut failed = state_at(uncertain_phase);
+        failed.fail_for_test();
+        assert_eq!(failed.phase_for_test(), ReadbackPhaseForTest::Failed);
+        assert_eq!(
+            failed.cleanup_events_for_test(),
+            vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped]
+        );
+        assert!(failed.staging_was_unmapped_for_test());
+        assert!(failed.staging_was_dropped_for_test());
+        assert!(!failed.staging_was_reused_for_test());
+
+        let mut canceled = state_at(uncertain_phase);
+        canceled.cancel_for_test();
+        assert_eq!(canceled.phase_for_test(), ReadbackPhaseForTest::Canceled);
+        assert_eq!(
+            canceled.cleanup_events_for_test(),
+            vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped]
+        );
+        assert!(!canceled.staging_was_reused_for_test());
+    }
+
+    let dropped = state_at(ReadbackPhaseForTest::MapPending);
+    let drop_observation = dropped.observation_for_test();
+    drop(dropped);
+    assert_eq!(
+        drop_observation.terminal_phase_for_test(),
+        Some(ReadbackPhaseForTest::Canceled)
+    );
+    assert!(drop_observation.staging_was_unmapped_for_test());
+    assert!(drop_observation.staging_was_dropped_for_test());
+    assert!(!drop_observation.staging_was_reused_for_test());
+
+    let mut incomplete = state_at(ReadbackPhaseForTest::Mapped);
+    let error = incomplete
+        .finish_mapped_for_test(PhysicalSize::new(1, 2), &[0; 256])
+        .expect_err("a missing padded row must fail through checked decoding");
+    assert_eq!(error.code(), ErrorCode::ReadbackFailed);
+    assert_eq!(incomplete.phase_for_test(), ReadbackPhaseForTest::Failed);
+    assert_eq!(
+        incomplete.cleanup_events_for_test(),
+        vec![
+            Cleanup::MappedViewDropped,
+            Cleanup::StagingUnmapped,
+            Cleanup::StagingDropped,
+        ],
+        "the mapped view must drop before staging is unmapped"
+    );
+
+    let mut mapped = vec![0; 512];
+    mapped[0..4].copy_from_slice(&[1, 2, 3, 4]);
+    mapped[256..260].copy_from_slice(&[5, 6, 7, 8]);
+    let mut published = state_at(ReadbackPhaseForTest::Mapped);
+    let image = published
+        .finish_mapped_for_test(PhysicalSize::new(1, 2), &mapped)
+        .expect("complete checked rows must publish one validated image");
+    assert_eq!(image.rgba(), &[1, 2, 3, 4, 5, 6, 7, 8]);
+    assert_eq!(
+        published.phase_for_test(),
+        ReadbackPhaseForTest::PublishedBytes
+    );
+    assert_eq!(
+        published.cleanup_events_for_test(),
+        vec![
+            Cleanup::MappedViewDropped,
+            Cleanup::StagingUnmapped,
+            Cleanup::StagingDropped,
+            Cleanup::PublishedBytes,
+        ]
+    );
+    assert!(!published.staging_was_reused_for_test());
+}
+
+#[test]
+fn readback_map_callback_publishes_once_and_wakes_latest_waker() {
+    use super::readback::ReadbackCompletionForTest;
+
+    struct WakeCount(AtomicUsize);
+
+    impl std::task::Wake for WakeCount {
+        fn wake(self: Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+
+        fn wake_by_ref(self: &Arc<Self>) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    let first_wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let latest_wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+    let first_waker = Waker::from(Arc::clone(&first_wakes));
+    let latest_waker = Waker::from(Arc::clone(&latest_wakes));
+    let completion = ReadbackCompletionForTest::new();
+    assert!(matches!(
+        completion.poll_for_test(&mut Context::from_waker(&first_waker)),
+        Poll::Pending
+    ));
+    assert!(matches!(
+        completion.poll_for_test(&mut Context::from_waker(&latest_waker)),
+        Poll::Pending
+    ));
+
+    completion.invoke_map_callback_for_test(Ok(()));
+    assert_eq!(first_wakes.0.load(Ordering::SeqCst), 0);
+    assert_eq!(latest_wakes.0.load(Ordering::SeqCst), 1);
+    completion.deliver_late_map_result_for_test(Err(wgpu::BufferAsyncError));
+    assert_eq!(completion.accepted_result_count_for_test(), 1);
+    assert_eq!(completion.discarded_result_count_for_test(), 1);
+    assert!(matches!(
+        completion.poll_for_test(&mut Context::from_waker(&latest_waker)),
+        Poll::Ready(Ok(()))
+    ));
+    completion.deliver_late_map_result_for_test(Ok(()));
+    assert_eq!(completion.accepted_result_count_for_test(), 1);
+    assert_eq!(completion.discarded_result_count_for_test(), 2);
+
+    let callback_error = ReadbackCompletionForTest::new();
+    callback_error.invoke_map_callback_for_test(Err(wgpu::BufferAsyncError));
+    let Poll::Ready(Err(error)) =
+        callback_error.poll_for_test(&mut Context::from_waker(Waker::noop()))
+    else {
+        panic!("the callback error must be consumed exactly once")
+    };
+    assert_eq!(error.code(), ErrorCode::ReadbackFailed);
+    assert!(std::error::Error::source(&error).is_some());
+
+    let canceled = ReadbackCompletionForTest::new();
+    canceled.cancel_for_test();
+    canceled.deliver_late_map_result_for_test(Ok(()));
+    assert!(canceled.is_canceled_for_test());
+    assert_eq!(canceled.accepted_result_count_for_test(), 0);
+    assert_eq!(canceled.discarded_result_count_for_test(), 1);
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let poll_completion = ReadbackCompletionForTest::new();
+        let poll_wakes = Arc::new(WakeCount(AtomicUsize::new(0)));
+        let poll_waker = Waker::from(Arc::clone(&poll_wakes));
+        assert!(matches!(
+            poll_completion.poll_for_test(&mut Context::from_waker(&poll_waker)),
+            Poll::Pending
+        ));
+        assert!(poll_completion.timeout_slice_for_test());
+        assert!(poll_completion.timeout_slice_for_test());
+        assert_eq!(poll_completion.accepted_result_count_for_test(), 0);
+        poll_completion.wrong_submission_index_for_test(9, 8);
+        assert_eq!(poll_wakes.0.load(Ordering::SeqCst), 1);
+        let Poll::Ready(Err(error)) =
+            poll_completion.poll_for_test(&mut Context::from_waker(&poll_waker))
+        else {
+            panic!("a wrong submission index must terminate readback")
+        };
+        assert_eq!(error.code(), ErrorCode::ReadbackFailed);
+        assert!(std::error::Error::source(&error).is_some());
+    }
+}
+
+#[test]
 fn uncaptured_faults_observe_active_and_released_generations() {
     let signal = DeviceSignal::new_for_test();
     let lease = GpuOperationLease::begin_for_test(&signal).unwrap();

@@ -295,7 +295,7 @@ impl Renderer {
     /// Creates a headless surface for a later asynchronous render operation.
     ///
     /// Await this operation before using the surface. Input and format failures
-    /// are reported when the future is awaited; readback remains synchronous.
+    /// are reported when the future is awaited; readback is a separate asynchronous operation.
     pub async fn create_headless(&mut self, size: Size, scale: f64) -> Result<Surface> {
         let options = SurfaceOptions {
             size,
