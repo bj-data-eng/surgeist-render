@@ -21000,20 +21000,207 @@ fn production_rust_sources_for_static_reachability() -> Vec<(String, String)> {
         .collect()
 }
 
-fn source_braced_block_from_marker<'source>(source: &'source str, marker: &str) -> &'source str {
-    let marker_offset = source
-        .find(marker)
-        .unwrap_or_else(|| panic!("static reachability marker was missing: {marker}"));
-    let block_offset = source[marker_offset..]
-        .find('{')
-        .map(|offset| marker_offset + offset)
+struct StaticSourceScanForTest {
+    code_only: String,
+    code_mask: Vec<bool>,
+}
+
+impl StaticSourceScanForTest {
+    fn new(source: &str) -> Self {
+        fn mask_non_code(code_only: &mut [u8], code_mask: &mut [bool], start: usize, end: usize) {
+            for (byte, is_code) in code_only[start..end]
+                .iter_mut()
+                .zip(&mut code_mask[start..end])
+            {
+                *is_code = false;
+                if !matches!(*byte, b'\n' | b'\r') {
+                    *byte = b' ';
+                }
+            }
+        }
+
+        fn raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+            let prefix_length = if bytes.get(start) == Some(&b'r') {
+                1
+            } else if matches!(bytes.get(start..start + 2), Some(b"br" | b"cr")) {
+                2
+            } else {
+                return None;
+            };
+            let mut delimiter = start + prefix_length;
+            while bytes.get(delimiter) == Some(&b'#') {
+                delimiter += 1;
+            }
+            if bytes.get(delimiter) != Some(&b'"') {
+                return None;
+            }
+            let hash_count = delimiter - start - prefix_length;
+            let mut cursor = delimiter + 1;
+            while cursor < bytes.len() {
+                if bytes[cursor] == b'"' {
+                    let end = cursor + 1 + hash_count;
+                    if end <= bytes.len() && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
+                    {
+                        return Some(end);
+                    }
+                }
+                cursor += 1;
+            }
+            panic!("static reachability found an unterminated raw string");
+        }
+
+        fn cooked_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+            let quote = if bytes.get(start) == Some(&b'"') {
+                start
+            } else if matches!(bytes.get(start..start + 2), Some(b"b\"" | b"c\"")) {
+                start + 1
+            } else {
+                return None;
+            };
+            let mut cursor = quote + 1;
+            while cursor < bytes.len() {
+                match bytes[cursor] {
+                    b'\\' => cursor += 2,
+                    b'"' => return Some(cursor + 1),
+                    _ => cursor += 1,
+                }
+            }
+            panic!("static reachability found an unterminated cooked string");
+        }
+
+        fn char_literal_end(source: &str, start: usize) -> Option<usize> {
+            let bytes = source.as_bytes();
+            let quote = if bytes.get(start) == Some(&b'\'') {
+                start
+            } else if bytes.get(start..start + 2) == Some(b"b'") {
+                start + 1
+            } else {
+                return None;
+            };
+            let value = quote + 1;
+            let after_value = match bytes.get(value)? {
+                b'\\' => match bytes.get(value + 1)? {
+                    b'x' => {
+                        let digits = bytes.get(value + 2..value + 4)?;
+                        if !digits.iter().all(u8::is_ascii_hexdigit) {
+                            return None;
+                        }
+                        value + 4
+                    }
+                    b'u' if bytes.get(value + 2) == Some(&b'{') => {
+                        let closing =
+                            bytes[value + 3..].iter().position(|byte| *byte == b'}')? + value + 3;
+                        closing + 1
+                    }
+                    _ => value + 2,
+                },
+                b'\'' | b'\n' | b'\r' => return None,
+                _ => value + source[value..].chars().next()?.len_utf8(),
+            };
+            (bytes.get(after_value) == Some(&b'\'')).then_some(after_value + 1)
+        }
+
+        let bytes = source.as_bytes();
+        let mut code_only = bytes.to_vec();
+        let mut code_mask = vec![true; bytes.len()];
+        let mut cursor = 0;
+        while cursor < bytes.len() {
+            if bytes.get(cursor..cursor + 2) == Some(b"//") {
+                let end = bytes[cursor + 2..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map_or(bytes.len(), |offset| cursor + 2 + offset);
+                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                cursor = end;
+                continue;
+            }
+            if bytes.get(cursor..cursor + 2) == Some(b"/*") {
+                let mut depth = 1_usize;
+                let mut end = cursor + 2;
+                while end < bytes.len() && depth != 0 {
+                    if bytes.get(end..end + 2) == Some(b"/*") {
+                        depth += 1;
+                        end += 2;
+                    } else if bytes.get(end..end + 2) == Some(b"*/") {
+                        depth -= 1;
+                        end += 2;
+                    } else {
+                        end += 1;
+                    }
+                }
+                assert_eq!(
+                    depth, 0,
+                    "static reachability found an unterminated block comment"
+                );
+                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                cursor = end;
+                continue;
+            }
+            if let Some(end) = raw_string_end(bytes, cursor) {
+                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                cursor = end;
+                continue;
+            }
+            if let Some(end) = cooked_string_end(bytes, cursor) {
+                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                cursor = end;
+                continue;
+            }
+            if let Some(end) = char_literal_end(source, cursor) {
+                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                cursor = end;
+                continue;
+            }
+            cursor += 1;
+        }
+
+        let code_only = String::from_utf8(code_only)
+            .expect("masking non-code bytes must preserve UTF-8 source boundaries");
+        debug_assert_eq!(code_only.len(), source.len());
+        Self {
+            code_only,
+            code_mask,
+        }
+    }
+}
+
+fn source_code_only_for_static_reachability(source: &str) -> String {
+    StaticSourceScanForTest::new(source).code_only
+}
+
+fn source_braced_block_from_marker(source: &str, marker: &str) -> String {
+    assert!(
+        !marker.is_empty(),
+        "static reachability marker must not be empty"
+    );
+    let source_scan = StaticSourceScanForTest::new(source);
+    let marker_scan = StaticSourceScanForTest::new(marker);
+    let marker_offsets = source
+        .match_indices(marker)
+        .filter_map(|(offset, _)| {
+            marker_scan
+                .code_mask
+                .iter()
+                .enumerate()
+                .all(|(marker_offset, marker_is_code)| {
+                    source_scan.code_mask[offset + marker_offset] == *marker_is_code
+                })
+                .then_some(offset)
+        })
+        .collect::<Vec<_>>();
+    let marker_offset = match marker_offsets.as_slice() {
+        [offset] => *offset,
+        offsets => panic!(
+            "static reachability expected exactly one executable marker, found {}: {marker}",
+            offsets.len()
+        ),
+    };
+    let code_bytes = source_scan.code_only.as_bytes();
+    let block_offset = (marker_offset..code_bytes.len())
+        .find(|offset| code_bytes[*offset] == b'{')
         .unwrap_or_else(|| panic!("static reachability marker had no body: {marker}"));
     let mut depth = 0_u32;
-    for (offset, byte) in source.as_bytes()[block_offset..]
-        .iter()
-        .copied()
-        .enumerate()
-    {
+    for (offset, byte) in code_bytes[block_offset..].iter().copied().enumerate() {
         match byte {
             b'{' => depth = depth.saturating_add(1),
             b'}' => {
@@ -21021,7 +21208,7 @@ fn source_braced_block_from_marker<'source>(source: &'source str, marker: &str) 
                     .checked_sub(1)
                     .expect("static reachability found an unmatched closing brace");
                 if depth == 0 {
-                    return &source[marker_offset..=block_offset + offset];
+                    return source_scan.code_only[marker_offset..=block_offset + offset].to_owned();
                 }
             }
             _ => {}
@@ -21031,17 +21218,74 @@ fn source_braced_block_from_marker<'source>(source: &'source str, marker: &str) 
 }
 
 #[test]
+fn source_scanner_ignores_non_code_routes_and_braces_and_rejects_duplicate_markers() {
+    let source = r####"
+fn scanner_target() {
+    // .read_render_texture_for_test( }
+    /* .read_render_texture_for_test( {}} */
+    let cooked = ".read_render_texture_for_test( }";
+    let raw = r##".read_render_texture_for_test( {"##;
+    renderer.real_download_route();
+    let reached_after_non_code_braces = true;
+}
+"####;
+    let body = source_braced_block_from_marker(source, "fn scanner_target()");
+
+    assert!(
+        body.contains("let reached_after_non_code_braces = true;"),
+        "line-comment, block-comment, cooked-string, and raw-string braces must not truncate the selected body"
+    );
+    assert_eq!(
+        body.matches(".read_render_texture_for_test(").count(),
+        0,
+        "route-shaped comments and strings must not count as executable download routes"
+    );
+    assert!(body.contains(".real_download_route("));
+
+    let duplicate_source = r#"
+fn duplicate_target() {}
+// fn duplicate_target() {}
+const DUPLICATE_TARGET_TEXT: &str = "fn duplicate_target() {}";
+fn duplicate_target() {}
+"#;
+    assert!(
+        catch_unwind(AssertUnwindSafe(|| {
+            source_braced_block_from_marker(duplicate_source, "fn duplicate_target()")
+        }))
+        .is_err(),
+        "more than one executable marker must make selection ambiguous"
+    );
+}
+
+#[test]
 fn readback_static_paths_confine_map_poll_and_copy_submission() {
     let sources = production_rust_sources_for_static_reachability();
+    let code_sources = sources
+        .iter()
+        .map(|(path, source)| {
+            (
+                path.clone(),
+                source_code_only_for_static_reachability(source),
+            )
+        })
+        .collect::<Vec<_>>();
     let source = |expected: &str| {
         sources
             .iter()
             .find_map(|(path, source)| (path == expected).then_some(source.as_str()))
             .unwrap_or_else(|| panic!("static reachability omitted {expected}"))
     };
+    let code_source = |expected: &str| {
+        code_sources
+            .iter()
+            .find_map(|(path, source)| (path == expected).then_some(source.as_str()))
+            .unwrap_or_else(|| panic!("static reachability omitted code for {expected}"))
+    };
     let readback_source = source("src/readback.rs");
     let renderer_source = source("src/renderer.rs");
-    let transaction_source = source("src/gpu_transaction.rs");
+    let readback_code = code_source("src/readback.rs");
+    let renderer_code = code_source("src/renderer.rs");
+    let transaction_code = code_source("src/gpu_transaction.rs");
 
     for marker in [
         "map_async",
@@ -21051,7 +21295,7 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         "copy_texture_to_buffer",
         "decode_padded_rows",
     ] {
-        let owners = sources
+        let owners = code_sources
             .iter()
             .filter_map(|(path, candidate)| candidate.contains(marker).then_some(path.as_str()))
             .collect::<Vec<_>>();
@@ -21063,7 +21307,7 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
     }
 
     let queue_submission = ["queue", ".submit"].concat();
-    let submission_owners = sources
+    let submission_owners = code_sources
         .iter()
         .filter_map(|(path, candidate)| {
             candidate
@@ -21077,12 +21321,12 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         "every owned queue submission must remain transaction-owned"
     );
     assert!(
-        transaction_source.matches(&queue_submission).count() >= 3,
+        transaction_code.matches(&queue_submission).count() >= 3,
         "the static submission owner must include render, readback, and internal Vello submissions"
     );
 
     for path in ["src/readback.rs", "src/backend.rs", "src/renderer.rs"] {
-        let candidate = source(path);
+        let candidate = code_source(path);
         for forbidden in [
             "wait_indefinitely",
             "std::sync::mpsc::channel",
@@ -21105,7 +21349,7 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
     assert!(native_helper.contains("submission_index: Some(submission_index.clone())"));
     assert!(native_helper.contains("timeout: Some(Duration::from_millis(50))"));
     assert_eq!(
-        readback_source.matches(&device_poll).count(),
+        readback_code.matches(&device_poll).count(),
         native_helper.matches(&device_poll).count(),
         "Device polling must be reachable only through the cfg-native helper"
     );
@@ -21117,12 +21361,12 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
     assert!(!wasm_branch.contains("PollType::"));
     assert!(!wasm_branch.contains("spawn_native_poll_helper"));
 
-    assert!(readback_source.contains("pub(crate) async fn read_texture_rgba("));
-    assert!(renderer_source.contains("pub async fn read_headless("));
-    assert!(source("src/lib.rs").contains("mod readback;"));
-    assert!(!source("src/lib.rs").contains("pub mod readback;"));
+    assert!(readback_code.contains("pub(crate) async fn read_texture_rgba("));
+    assert!(renderer_code.contains("pub async fn read_headless("));
+    assert!(code_source("src/lib.rs").contains("mod readback;"));
+    assert!(!code_source("src/lib.rs").contains("pub mod readback;"));
     let readback_entry = "read_texture_rgba(";
-    let entry_owners = sources
+    let entry_owners = code_sources
         .iter()
         .filter_map(|(path, candidate)| candidate.contains(readback_entry).then_some(path.as_str()))
         .collect::<Vec<_>>();
@@ -21168,17 +21412,18 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
     );
 
     let tests_source = include_str!("tests.rs");
+    let tests_code = source_code_only_for_static_reachability(tests_source);
     let removed_skip_helper = ["render_scene_to_headless_or_skip", "_no_adapter"].concat();
     let removed_skip_message =
         ["no GPU machines should report the", " explicit diagnostic"].concat();
-    assert!(!tests_source.contains(&removed_skip_helper));
+    assert!(!tests_code.contains(&removed_skip_helper));
     assert!(!tests_source.contains(&removed_skip_message));
     for contract_test in [
         "shader_pass_contract_only_context_reports_adapter_unavailable",
         "offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic",
     ] {
         assert!(
-            tests_source.contains(&format!("fn {contract_test}()")),
+            tests_code.contains(&format!("fn {contract_test}()")),
             "contract-only behavior must remain separate in {contract_test}"
         );
     }
