@@ -1,5 +1,5 @@
 use super::{
-    frame::LogicalBounds,
+    frame::{FrameContext, FramePlan, LogicalBounds},
     geometry::offset_radii,
     paint::PaintKind,
     scene::Command,
@@ -20,6 +20,17 @@ impl RenderCommands {
     #[must_use]
     pub(crate) fn new(commands: Vec<RenderCommand>) -> Self {
         Self { commands }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C06 T5 stages frame planning for the C06 T6 renderer gate."
+        )
+    )]
+    pub(crate) fn plan_for(self, context: FrameContext) -> Result<FramePlan> {
+        FramePlan::try_from_commands(self, context)
     }
 
     #[must_use]
@@ -170,15 +181,10 @@ pub(crate) struct RenderBackdropCapture {
     filters: FilterList,
     capture_bounds: OffscreenBounds,
     clip: Option<RenderClip>,
-    source_commands: Vec<RenderCommand>,
 }
 
 impl RenderBackdropCapture {
-    fn from_input(
-        input: &BackdropFilterInput,
-        source_commands: &[RenderCommand],
-        capabilities: Capabilities,
-    ) -> Result<Self> {
+    fn from_input(input: &BackdropFilterInput, capabilities: Capabilities) -> Result<Self> {
         input.ensure_supported_for_planning(capabilities)?;
         let capture_bounds = OffscreenBounds::try_new(input.capture_bounds().rect())?;
         let clip = input
@@ -189,7 +195,6 @@ impl RenderBackdropCapture {
             filters: input.filters().clone(),
             capture_bounds,
             clip,
-            source_commands: source_commands.to_vec(),
         })
     }
 
@@ -206,11 +211,6 @@ impl RenderBackdropCapture {
     #[must_use]
     pub(crate) const fn clip(&self) -> Option<&RenderClip> {
         self.clip.as_ref()
-    }
-
-    #[must_use]
-    pub(crate) fn source_commands(&self) -> &[RenderCommand] {
-        &self.source_commands
     }
 }
 
@@ -319,19 +319,12 @@ impl LayerPassPlan {
                 PrimitiveFamily::MasksAndClips,
                 PrimitiveOperation::MaterializedAlphaMaskExecution,
             ))?;
-            let bounds = bounds.ok_or_else(|| {
-                Error::invalid_value(
-                    "materialized masked layer bounds",
-                    "unknown",
-                    "must be explicit for resolved layer alpha masks",
-                )
-            })?;
             return Ok(Self::new(
                 LayerPassRequirement::OffscreenTexture(
                     PrimitiveOperation::MaterializedAlphaMaskExecution,
                 ),
                 LayerPassKind::OffscreenTexture,
-                Some(bounds),
+                bounds,
             ));
         }
 
@@ -528,21 +521,15 @@ fn normalize_commands_in_context(
                 if layer.backdrop_filter().is_some() && layer.transform() != Transform::identity() {
                     return Err(transformed_backdrop_capture_error());
                 }
-                let previous_siblings = normalized.clone();
                 if layer.backdrop_filter().is_some()
-                    && commands_contain_backdrop_capture(&previous_siblings)
+                    && commands_contain_backdrop_capture(&normalized)
                 {
                     return Err(repeated_top_level_backdrop_capture_error());
                 }
                 let children =
                     normalize_commands_in_context(children, capabilities, layer_depth + 1)?;
                 RenderCommand::Layer {
-                    layer: NormalizedLayer::from_authored(
-                        layer,
-                        &children,
-                        &previous_siblings,
-                        capabilities,
-                    )?,
+                    layer: NormalizedLayer::from_authored(layer, &children, capabilities)?,
                     children,
                 }
             }
@@ -838,7 +825,6 @@ impl NormalizedLayer {
     fn from_authored(
         layer: &Layer,
         children: &[RenderCommand],
-        previous_siblings: &[RenderCommand],
         capabilities: Capabilities,
     ) -> Result<Self> {
         validate_layer(layer)?;
@@ -852,10 +838,7 @@ impl NormalizedLayer {
             .transpose()?;
         let backdrop = layer
             .backdrop_filter()
-            .map(|backdrop| {
-                RenderBackdropCapture::from_input(backdrop, previous_siblings, capabilities)
-                    .map(Box::new)
-            })
+            .map(|backdrop| RenderBackdropCapture::from_input(backdrop, capabilities).map(Box::new))
             .transpose()?;
         let pass_plan = LayerPassPlan::from_authored(layer, clip.as_ref(), children, capabilities)?;
         Ok(Self {
@@ -925,6 +908,12 @@ fn clip_bounds(clip: Option<&RenderClip>) -> Result<Option<OffscreenBounds>> {
     clip.map(render_clip_bounds).transpose()
 }
 
+pub(crate) fn commands_bounds_for_planning(
+    commands: &[RenderCommand],
+) -> Result<Option<OffscreenBounds>> {
+    commands_bounds(commands)
+}
+
 fn commands_bounds(commands: &[RenderCommand]) -> Result<Option<OffscreenBounds>> {
     let mut bounds: Option<OffscreenBounds> = None;
     for command in commands {
@@ -944,7 +933,15 @@ fn command_bounds(command: &RenderCommand) -> Result<Option<OffscreenBounds>> {
         RenderCommand::Stroke { shape, stroke, .. } => stroke_shape_bounds(shape, stroke).map(Some),
         RenderCommand::Shadow { shape, shadow } => shadow_bounds(shape, shadow).map(Some),
         RenderCommand::Image { rect, .. } => OffscreenBounds::try_new(*rect).map(Some),
-        RenderCommand::TextRun { .. } => Ok(None),
+        RenderCommand::TextRun {
+            transform, bounds, ..
+        } => match bounds.kind() {
+            TextRunBoundsKind::Unspecified | TextRunBoundsKind::Empty => Ok(None),
+            TextRunBoundsKind::Ink => bounds
+                .ink_rect()
+                .map(|bounds| transform_bounds(bounds, *transform))
+                .transpose(),
+        },
         RenderCommand::Layer { layer, .. } => layer
             .pass_plan
             .bounds()

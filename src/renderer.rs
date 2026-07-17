@@ -1502,8 +1502,14 @@ impl Renderer {
             let mut materialized = Vec::with_capacity(commands.len());
             for command in commands {
                 materialized.push(
-                    self.materialize_resolved_backdrop(command, scale, format, parameters)
-                        .await?,
+                    self.materialize_resolved_backdrop(
+                        command,
+                        &materialized,
+                        scale,
+                        format,
+                        parameters,
+                    )
+                    .await?,
                 );
             }
             Ok(materialized)
@@ -1513,6 +1519,7 @@ impl Renderer {
     async fn materialize_resolved_backdrop(
         &mut self,
         command: RenderCommand,
+        previous_siblings: &[RenderCommand],
         scale: f64,
         format: Format,
         parameters: Parameters,
@@ -1531,14 +1538,9 @@ impl Renderer {
             return Ok(RenderCommand::Layer { layer, children });
         };
 
-        reject_backdrop_execution(backdrop.source_commands())?;
+        reject_backdrop_execution(previous_siblings)?;
         let source_commands = self
-            .materialize_resolved_layer_masks(
-                backdrop.source_commands().to_vec(),
-                scale,
-                format,
-                parameters,
-            )
+            .materialize_resolved_layer_masks(previous_siblings.to_vec(), scale, format, parameters)
             .await?;
         let bounds = backdrop.capture_bounds();
         let physical_size = physical_size(bounds.rect().size(), scale)?;

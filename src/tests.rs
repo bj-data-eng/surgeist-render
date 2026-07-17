@@ -8772,9 +8772,11 @@ fn logical_bounds_preserve_large_finite_translation_until_frame_scale_resolution
 }
 
 use super::frame::{
-    GraphFailureObservation, GraphOwnerCallObservation, InvalidSemanticGraphStateForTest,
-    OrderedFilterEdgeObservation, OrderedFilterIntentObservation, OrderedFilterPlanObservation,
-    OrderedFilterStepObservation,
+    BackdropDependencyObservation, FramePlanResultObservation, FramePlanRouteObservation,
+    FrameSelectionRequirementObservation, GraphFailureObservation, GraphOwnerCallObservation,
+    InvalidSemanticGraphStateForTest, OrderedFilterEdgeObservation, OrderedFilterIntentObservation,
+    OrderedFilterPlanObservation, OrderedFilterStepObservation, VelloCommandObservation,
+    VelloSpanObservation, VelloSpanScopeObservation,
 };
 
 fn observe_ordered_filter_plan(
@@ -9199,6 +9201,401 @@ fn graph_base_color_is_initialized_once_and_isolation_is_transparent() {
     assert_eq!(observed.surface_base_color, Some(Color::BLACK));
     assert!(observed.empty_results_have_no_descriptor);
     assert!(observed.resource_descriptors_are_spatially_complete);
+}
+
+fn observe_frame_plan(
+    scene: &Scene,
+    surface_size: Size,
+    surface_scale: f64,
+    antialiasing: Antialiasing,
+    base_color: Color,
+) -> FramePlanResultObservation {
+    let normalized = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the planning fixture must normalize before resolved-frame planning");
+    super::frame::frame_plan_result_observation_for_test(
+        normalized,
+        surface_size,
+        surface_scale,
+        antialiasing,
+        base_color,
+    )
+}
+
+fn add_planning_text(scene: &mut Scene, bounds: TextRunBounds) {
+    let glyphs = [TextGlyph::try_new(1, 1.0, 2.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(41).named("C06 frame planning text"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        bounds,
+    )
+    .unwrap();
+    scene.text_run(run);
+}
+
+fn opaque_planning_mask(size: PhysicalSize) -> ImageBuffer {
+    let byte_len = usize::try_from(size.width())
+        .unwrap()
+        .checked_mul(usize::try_from(size.height()).unwrap())
+        .and_then(|pixels| pixels.checked_mul(4))
+        .unwrap();
+    ImageBuffer::try_new(size, vec![255; byte_len]).unwrap()
+}
+
+fn bounded_planning_backdrop() -> Layer {
+    let filters = FilterList::try_ops(vec![FilterOp::invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap();
+    Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap()
+}
+
+#[test]
+fn direct_vello_is_the_least_powerful_plan_for_effect_free_scenes() {
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 4.0, 3.0), Color::BLACK);
+    add_planning_text(&mut scene, TextRunBounds::unspecified());
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(12.0, 8.0),
+        2.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the observation must be complete");
+
+    assert_eq!(
+        plan.route,
+        FramePlanRouteObservation::DirectVello,
+        "effect-free scene has no direct frame plan"
+    );
+    assert_eq!(plan.plan_count, 1);
+    assert!(plan.complete && plan.finite && plan.backend_free);
+    assert_eq!(plan.direct_command_count, 2);
+    assert_eq!(plan.output_device_extent, Some((24, 16)));
+    assert_eq!(plan.antialiasing, Some(Antialiasing::Msaa8));
+    assert_eq!(
+        plan.base_color,
+        Some(Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap())
+    );
+    assert!(plan.selection_requirements.is_empty());
+    assert!(result.error_code.is_none());
+}
+
+#[test]
+fn gpu_graph_is_selected_only_for_supported_custom_requirements() {
+    let mask = opaque_planning_mask(PhysicalSize::new(4, 4));
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().try_resolved_alpha_mask(mask).unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+        },
+    );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the observation must be complete");
+
+    assert_eq!(
+        plan.route,
+        FramePlanRouteObservation::GpuGraph,
+        "custom requirement has no semantic graph plan"
+    );
+    assert_eq!(
+        plan.selection_requirements,
+        vec![FrameSelectionRequirementObservation::ResolvedAlphaMask]
+    );
+    assert!(plan.resource_count > 0 && plan.pass_count > 0);
+    assert_eq!(plan.plan_count, 1);
+
+    let unsupported_layer = Layer::new()
+        .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
+        .unwrap();
+    let mut unsupported = Scene::new();
+    unsupported.layer(unsupported_layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    });
+    let error = unsupported
+        .normalize(Capabilities::CURRENT)
+        .expect_err("unsupported authored masks must retain their typed diagnostic");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ))
+    );
+}
+
+#[test]
+fn maximal_vello_spans_preserve_authored_command_order() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .stroke(
+            Shape::try_circle(Point::new(3.0, 1.0), 1.0).unwrap(),
+            Stroke::try_new(1.0).unwrap(),
+            Color::BLACK,
+        )
+        .layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+            scene.fill(Rect::new(4.0, 0.0, 2.0, 2.0), Color::BLACK);
+        })
+        .layer(
+            Layer::new()
+                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(3, 3)))
+                .unwrap(),
+            |scene| {
+                scene
+                    .fill(Rect::new(0.0, 3.0, 1.0, 1.0), Color::BLACK)
+                    .stroke(
+                        Shape::rect(Rect::new(1.0, 3.0, 1.0, 1.0)),
+                        Stroke::try_new(1.0).unwrap(),
+                        Color::BLACK,
+                    );
+            },
+        )
+        .image(
+            Image::from_rgba(Size::new(1.0, 1.0), vec![255, 255, 255, 255]).unwrap(),
+            Rect::new(6.0, 0.0, 1.0, 1.0),
+            ImageFit::Stretch,
+        )
+        .shadow(
+            Rect::new(7.0, 0.0, 1.0, 1.0),
+            Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(10.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the observation must be complete");
+    let expected = vec![
+        VelloSpanObservation {
+            scope: VelloSpanScopeObservation::CurrentParent,
+            commands: vec![
+                VelloCommandObservation::Fill,
+                VelloCommandObservation::Stroke,
+                VelloCommandObservation::LocalLayer,
+            ],
+            captured_before_outer_semantics: true,
+        },
+        VelloSpanObservation {
+            scope: VelloSpanScopeObservation::LayerSource,
+            commands: vec![
+                VelloCommandObservation::Fill,
+                VelloCommandObservation::Stroke,
+            ],
+            captured_before_outer_semantics: true,
+        },
+        VelloSpanObservation {
+            scope: VelloSpanScopeObservation::CurrentParent,
+            commands: vec![
+                VelloCommandObservation::Image,
+                VelloCommandObservation::Shadow,
+            ],
+            captured_before_outer_semantics: true,
+        },
+    ];
+
+    assert_eq!(
+        plan.vello_spans, expected,
+        "authored Vello commands are not partitioned into maximal spans"
+    );
+    assert!(plan.captures_precede_outer_semantics);
+    assert!(!plan.graph_to_vello_reentry);
+}
+
+#[test]
+fn backdrop_plan_depends_on_current_parent_not_cloned_commands() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            scene.fill(Rect::new(2.0, 0.0, 2.0, 2.0), Color::BLACK);
+        })
+        .fill(Rect::new(4.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the observation must be complete");
+
+    assert_eq!(
+        plan.backdrop_dependency,
+        BackdropDependencyObservation::CompletedCurrentParent,
+        "backdrop dependency is stored as cloned commands instead of current parent"
+    );
+    assert_eq!(plan.current_parent_backdrop_reads, 1);
+    assert!(!plan.stores_cloned_command_prefix);
+    assert!(
+        !include_str!("command.rs").contains("source_commands"),
+        "normalized command ownership retained a cloned backdrop source list"
+    );
+}
+
+#[test]
+fn graph_planning_requires_explicit_text_ink_bounds_only_for_bounded_subtrees() {
+    let mut unspecified = Scene::new();
+    unspecified.layer(bounded_planning_backdrop(), |scene| {
+        add_planning_text(scene, TextRunBounds::unspecified());
+    });
+    let unresolved = observe_frame_plan(
+        &unspecified,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert_eq!(
+        unresolved.unresolved_resource,
+        Some(UnresolvedResourceKind::TextRunInkBounds),
+        "bounded graph text lacks an exact unresolved-bounds result"
+    );
+    assert_eq!(unresolved.error_code, Some(ErrorCode::UnresolvedResource));
+    assert!(unresolved.plan.is_none());
+    assert!(!unresolved.has_partial_plan);
+
+    let mut ink = Scene::new();
+    ink.layer(bounded_planning_backdrop(), |scene| {
+        add_planning_text(
+            scene,
+            TextRunBounds::try_ink(Rect::new(1.0, 1.0, 4.0, 2.0)).unwrap(),
+        );
+    });
+    let ink_result = observe_frame_plan(
+        &ink,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    assert_eq!(
+        ink_result.plan.as_ref().map(|plan| plan.route),
+        Some(FramePlanRouteObservation::GpuGraph)
+    );
+
+    let mut empty = Scene::new();
+    empty.layer(bounded_planning_backdrop(), |scene| {
+        add_planning_text(scene, TextRunBounds::empty());
+    });
+    let empty_result = observe_frame_plan(
+        &empty,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let empty_plan = empty_result
+        .plan
+        .as_ref()
+        .expect("empty text must still permit the surrounding supported graph");
+    assert_eq!(empty_plan.empty_text_resource_count, 0);
+    assert!(
+        empty_plan
+            .vello_spans
+            .iter()
+            .all(|span| { !span.commands.contains(&VelloCommandObservation::Text) })
+    );
+}
+
+#[test]
+fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            scene.layer(
+                Layer::new()
+                    .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(8, 6)))
+                    .unwrap(),
+                |scene| {
+                    scene.fill(Rect::new(1.0, 1.0, 4.0, 3.0), Color::BLACK);
+                },
+            );
+        });
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
+    let observe = |commands| {
+        super::frame::frame_plan_result_observation_for_test(
+            commands,
+            Size::new(8.0, 6.0),
+            2.0,
+            Antialiasing::Msaa16,
+            Color::try_rgba(0.1, 0.2, 0.3, 1.0).unwrap(),
+        )
+    };
+    let first = observe(normalized.clone());
+    let plan = first.plan.as_ref();
+
+    assert!(
+        plan.is_some_and(|plan| plan.plan_count == 1 && plan.complete && plan.finite),
+        "supported scene has no finite frame plan"
+    );
+    let second = observe(normalized);
+    assert_eq!(first, second, "repeated planning must be deterministic");
+    let plan = first.plan.as_ref().unwrap();
+    assert_eq!(plan.route, FramePlanRouteObservation::GpuGraph);
+    assert!(plan.backend_free);
+    assert!(plan.resource_count > 0 && plan.pass_count > 0);
+    assert!(!plan.graph_to_vello_reentry);
+    assert!(plan.captures_precede_outer_semantics);
+    assert_eq!(
+        plan.selection_requirements,
+        vec![
+            FrameSelectionRequirementObservation::BoundedBackdrop,
+            FrameSelectionRequirementObservation::ResolvedAlphaMask,
+        ]
+    );
+
+    let mut failing = Scene::new();
+    failing.layer(bounded_planning_backdrop(), |scene| {
+        add_planning_text(scene, TextRunBounds::unspecified());
+    });
+    let failure = observe_frame_plan(
+        &failing,
+        Size::new(8.0, 6.0),
+        2.0,
+        Antialiasing::Msaa16,
+        Color::TRANSPARENT,
+    );
+    assert!(failure.plan.is_none());
+    assert!(!failure.has_partial_plan);
+    assert_eq!(
+        failure.unresolved_resource,
+        Some(UnresolvedResourceKind::TextRunInkBounds)
+    );
 }
 
 #[test]
@@ -9720,7 +10117,10 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
         .expect("backdrop capture is planned");
     assert_eq!(capture.filters(), &filters);
     assert_eq!(capture.capture_bounds().rect(), bounds.rect());
-    assert_eq!(capture.source_commands().len(), 1);
+    assert!(matches!(
+        normalized.commands[0],
+        command::RenderCommand::Fill { .. }
+    ));
     let offscreen = Capabilities::CURRENT.offscreen_pipeline();
     assert!(offscreen.supports_bounded_backdrop_capture());
     assert!(offscreen.supports_materialized_backdrop_filter_execution());
@@ -9919,16 +10319,11 @@ fn backdrop_layer_normalization_preserves_command_order_for_capture_sources() {
     let command::RenderCommand::Layer { layer, children } = &normalized.commands[1] else {
         panic!("expected backdrop layer command");
     };
-    let capture = layer
-        .backdrop
-        .as_ref()
-        .expect("backdrop capture is planned");
-
-    assert_eq!(capture.source_commands().len(), 1);
     assert!(matches!(
-        capture.source_commands()[0],
+        normalized.commands[0],
         command::RenderCommand::Fill { .. }
     ));
+    assert!(layer.backdrop.is_some());
     assert_eq!(children.len(), 1);
     assert!(matches!(
         normalized.commands[2],
@@ -10144,7 +10539,10 @@ fn sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foregrou
         command::LayerPassKind::OffscreenTexture
     );
     assert_eq!(capture.capture_bounds().rect(), bounds.rect());
-    assert_eq!(capture.source_commands().len(), 1);
+    assert!(matches!(
+        normalized.commands[0],
+        command::RenderCommand::Fill { .. }
+    ));
     assert_eq!(children.len(), 1);
     assert!(matches!(
         normalized.commands[2],

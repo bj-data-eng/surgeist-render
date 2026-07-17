@@ -1,13 +1,21 @@
 use super::{
-    error::{Error, Result},
+    command::{
+        LayerIsolation, NormalizedLayer, RenderClip, RenderCommand, RenderCommands,
+        RenderLayerMask, commands_bounds_for_planning,
+    },
+    error::{BackendErrorCode, Error, Result, UnresolvedResource, UnresolvedResourceKind},
     filter::{
         AlgorithmColorFilterRun, AlgorithmFilterPlan, AlgorithmFilterStep,
         CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS, DevicePixelConversionPolicy, FilterOutset,
         FilterRegionPlan, FilterSourceBounds,
     },
-    geometry::{Point, Rect, Transform},
+    geometry::{PhysicalSize, Point, Rect, Size, Transform},
+    paint::Color,
+    renderer::Antialiasing,
     style::{FilterBlur, FilterDropShadow, FilterList},
+    text::TextRunBoundsKind,
 };
+#[cfg(test)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
@@ -22,7 +30,10 @@ use super::{command::LayerPassPlan, filter::ColorClampBoundary, style::ColorFilt
     )
 )]
 pub(crate) struct FrameContext {
+    output_bounds: LogicalBounds,
     surface_scale: f64,
+    antialiasing: Antialiasing,
+    base_color: Color,
 }
 
 #[cfg_attr(
@@ -33,7 +44,12 @@ pub(crate) struct FrameContext {
     )
 )]
 impl FrameContext {
-    pub(crate) fn try_new(surface_scale: f64) -> Result<Self> {
+    pub(crate) fn try_new(
+        surface_size: Size,
+        surface_scale: f64,
+        antialiasing: Antialiasing,
+        base_color: Color,
+    ) -> Result<Self> {
         if !surface_scale.is_finite() || surface_scale <= 0.0 {
             return Err(Error::invalid_value(
                 "frame surface scale",
@@ -41,7 +57,30 @@ impl FrameContext {
                 "must be finite and greater than 0",
             ));
         }
-        Ok(Self { surface_scale })
+        let output_bounds = LogicalBounds::try_from_rect(
+            Rect::new(0.0, 0.0, surface_size.width(), surface_size.height()),
+            "frame output bounds",
+        )?;
+        Ok(Self {
+            output_bounds,
+            surface_scale,
+            antialiasing,
+            base_color,
+        })
+    }
+
+    #[cfg(test)]
+    fn try_for_spatial_test(surface_scale: f64) -> Result<Self> {
+        Self::try_new(
+            Size::new(1.0, 1.0),
+            surface_scale,
+            Antialiasing::Area,
+            Color::TRANSPARENT,
+        )
+    }
+
+    fn output_spatial_plan(self) -> Result<FrameSpatialPlan> {
+        self.plan_local_bounds(self.output_bounds, Transform::identity())
     }
 
     fn plan_local_bounds(
@@ -197,6 +236,147 @@ impl FrameContext {
             )),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T5 stages the resolved frame plan that C06 T6 will require before execution."
+    )
+)]
+pub(crate) enum FramePlan {
+    DirectVello(DirectVelloPlan),
+    GpuGraph(GpuRenderGraph),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct DirectVelloPlan {
+    commands: RenderCommands,
+    output_mapping: FrameSpatialPlan,
+    antialiasing: Antialiasing,
+    base_color: Color,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GraphSelectionRequirement {
+    ResolvedAlphaMask,
+    BoundedBackdrop,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T5 stages the resolved frame conversion that C06 T6 will invoke."
+    )
+)]
+impl FramePlan {
+    pub(crate) fn try_from_commands(
+        commands: RenderCommands,
+        context: FrameContext,
+    ) -> Result<Self> {
+        let selection_requirements = graph_selection_requirements(&commands.commands);
+        if selection_requirements.is_empty() {
+            return Ok(Self::DirectVello(DirectVelloPlan {
+                commands: RenderCommands::new(prune_empty_text_commands(commands.commands)),
+                output_mapping: context.output_spatial_plan()?,
+                antialiasing: context.antialiasing,
+                base_color: context.base_color,
+            }));
+        }
+
+        require_graph_text_bounds(&commands.commands, &mut Vec::new())?;
+        let output_spatial = match context.output_spatial_plan()? {
+            FrameSpatialPlan::NonEmpty(spatial) => spatial,
+            FrameSpatialPlan::Empty(_) => {
+                return Err(Error::invalid_value(
+                    "frame graph output bounds",
+                    "empty",
+                    "must be non-empty before a custom frame graph is planned",
+                ));
+            }
+        };
+        SemanticFrameGraphPlanner::build(commands, context, output_spatial, selection_requirements)
+            .map(Self::GpuGraph)
+    }
+}
+
+fn graph_selection_requirements(commands: &[RenderCommand]) -> Vec<GraphSelectionRequirement> {
+    let mut requirements = Vec::new();
+    collect_graph_selection_requirements(commands, &mut requirements);
+    requirements
+}
+
+fn collect_graph_selection_requirements(
+    commands: &[RenderCommand],
+    requirements: &mut Vec<GraphSelectionRequirement>,
+) {
+    for command in commands {
+        let RenderCommand::Layer { layer, children } = command else {
+            continue;
+        };
+        if layer.backdrop.is_some()
+            && !requirements.contains(&GraphSelectionRequirement::BoundedBackdrop)
+        {
+            requirements.push(GraphSelectionRequirement::BoundedBackdrop);
+        }
+        if layer.mask.is_some()
+            && !requirements.contains(&GraphSelectionRequirement::ResolvedAlphaMask)
+        {
+            requirements.push(GraphSelectionRequirement::ResolvedAlphaMask);
+        }
+        collect_graph_selection_requirements(children, requirements);
+    }
+}
+
+fn require_graph_text_bounds(commands: &[RenderCommand], path: &mut Vec<usize>) -> Result<()> {
+    for (index, command) in commands.iter().enumerate() {
+        path.push(index);
+        match command {
+            RenderCommand::TextRun { bounds, .. }
+                if bounds.kind() == TextRunBoundsKind::Unspecified =>
+            {
+                let identifier = path
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(".");
+                path.pop();
+                return Err(Error::unresolved_resource(UnresolvedResource::new(
+                    UnresolvedResourceKind::TextRunInkBounds,
+                    format!("normalized command {identifier}"),
+                )));
+            }
+            RenderCommand::Layer { children, .. } => {
+                require_graph_text_bounds(children, path)?;
+            }
+            RenderCommand::Fill { .. }
+            | RenderCommand::Stroke { .. }
+            | RenderCommand::Shadow { .. }
+            | RenderCommand::Image { .. }
+            | RenderCommand::TextRun { .. } => {}
+        }
+        path.pop();
+    }
+    Ok(())
+}
+
+fn prune_empty_text_commands(commands: Vec<RenderCommand>) -> Vec<RenderCommand> {
+    commands
+        .into_iter()
+        .filter_map(|command| match command {
+            RenderCommand::TextRun { bounds, .. } if bounds.kind() == TextRunBoundsKind::Empty => {
+                None
+            }
+            RenderCommand::Layer { layer, children } => {
+                let children = prune_empty_text_commands(children);
+                (!children.is_empty()).then_some(RenderCommand::Layer { layer, children })
+            }
+            command => Some(command),
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -616,6 +796,7 @@ struct NonEmptyFrameSpatialPlan {
     texel_center_mapping: TexelCenterMapping,
 }
 
+#[cfg(test)]
 static NEXT_GRAPH_GENERATION: AtomicU64 = AtomicU64::new(1);
 
 type GraphBuildResult<T> = std::result::Result<T, GraphValidationError>;
@@ -624,6 +805,9 @@ type GraphBuildResult<T> = std::result::Result<T, GraphValidationError>;
 struct GraphGeneration(u64);
 
 impl GraphGeneration {
+    const FRAME_PLAN: Self = Self(1);
+
+    #[cfg(test)]
     fn try_next() -> GraphBuildResult<Self> {
         NEXT_GRAPH_GENERATION
             .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
@@ -921,6 +1105,66 @@ enum GraphValidationError {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticVelloSpanScope {
+    CurrentParent,
+    LayerSource,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticVelloSpan {
+    capture_pass: SemanticPassId,
+    scope: SemanticVelloSpanScope,
+    commands: RenderCommands,
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+    antialiasing: Antialiasing,
+    captured_before_outer_semantics: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum SemanticCompositeKind {
+    SpanSourceOver,
+    Layer {
+        transform: Transform,
+        opacity: f32,
+        blend: super::layer::BlendMode,
+        clip: Option<Box<RenderClip>>,
+        alpha_mask: Option<SemanticResourceId>,
+    },
+    DropShadow,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticCompositePlan {
+    pass: SemanticPassId,
+    kind: SemanticCompositeKind,
+    source_captured_before_outer_semantics: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticFilterStepPlan {
+    passes: Vec<SemanticPassId>,
+    step: ResolvedFilterStep,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SemanticBackdropRead {
+    pass: SemanticPassId,
+    completed_parent: SemanticResourceId,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticImportKind {
+    ResolvedAlphaMask { physical_size: PhysicalSize },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct SemanticImportPlan {
+    resource: SemanticResourceId,
+    kind: SemanticImportKind,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 #[cfg_attr(
     not(test),
@@ -929,12 +1173,18 @@ enum GraphValidationError {
         reason = "C06 T4 stages the immutable validated graph consumed by C06 T5-T6 and C07."
     )
 )]
-struct GpuRenderGraph {
+pub(crate) struct GpuRenderGraph {
     generation: GraphGeneration,
     resources: Vec<SemanticGraphResource>,
     passes: Vec<SemanticGraphPass>,
     root_working_image: SemanticResourceId,
     final_present: SemanticPassId,
+    selection_requirements: Vec<GraphSelectionRequirement>,
+    vello_spans: Vec<SemanticVelloSpan>,
+    composites: Vec<SemanticCompositePlan>,
+    filter_steps: Vec<SemanticFilterStepPlan>,
+    backdrop_reads: Vec<SemanticBackdropRead>,
+    imports: Vec<SemanticImportPlan>,
 }
 
 #[derive(Debug)]
@@ -963,9 +1213,18 @@ struct SemanticGraphBuilder {
     )
 )]
 impl SemanticGraphBuilder {
+    #[cfg(test)]
     fn try_new() -> GraphBuildResult<Self> {
+        Self::with_generation(GraphGeneration::try_next()?)
+    }
+
+    fn for_frame_plan() -> GraphBuildResult<Self> {
+        Self::with_generation(GraphGeneration::FRAME_PLAN)
+    }
+
+    fn with_generation(generation: GraphGeneration) -> GraphBuildResult<Self> {
         Ok(Self {
-            generation: GraphGeneration::try_next()?,
+            generation,
             phase: GraphBuildPhase::RecordingConsumers,
             resources: Vec::new(),
             passes: Vec::new(),
@@ -1157,13 +1416,11 @@ impl SemanticGraphBuilder {
     ) -> GraphBuildResult<()> {
         match intent {
             SemanticPassIntent::ClearRoot { initialization } => {
-                if !matches!(
+                if matches!(
                     initialization,
                     WorkingImageInitialization::SurfaceBaseColor(_)
-                ) {
-                    return Err(GraphValidationError::RootMustUseSurfaceBase);
-                }
-                if self.surface_base_initializations != 0 {
+                ) && self.surface_base_initializations != 0
+                {
                     return Err(GraphValidationError::RepeatedSurfaceBaseInitialization);
                 }
                 if !dependencies.is_empty() || !reads.is_empty() {
@@ -1173,10 +1430,26 @@ impl SemanticGraphBuilder {
                     return Err(GraphValidationError::InvalidClearRootResult);
                 };
                 let resource_index = self.validate_resource_id(resource)?;
-                if self.resources.get(resource_index).is_none_or(|resource| {
-                    resource.descriptor.role != SemanticResourceRole::RootWorkingImage
-                }) {
+                let Some(resource) = self.resources.get(resource_index) else {
                     return Err(GraphValidationError::InvalidClearRootResult);
+                };
+                match (initialization, resource.descriptor.role) {
+                    (
+                        WorkingImageInitialization::SurfaceBaseColor(_),
+                        SemanticResourceRole::RootWorkingImage,
+                    )
+                    | (
+                        WorkingImageInitialization::Transparent,
+                        SemanticResourceRole::IsolationWorkingImage,
+                    ) => {}
+                    (WorkingImageInitialization::Transparent, _)
+                    | (
+                        WorkingImageInitialization::SurfaceBaseColor(_),
+                        SemanticResourceRole::IsolationWorkingImage,
+                    ) => return Err(GraphValidationError::RootMustUseSurfaceBase),
+                    (WorkingImageInitialization::SurfaceBaseColor(_), _) => {
+                        return Err(GraphValidationError::InvalidClearRootResult);
+                    }
                 }
             }
             SemanticPassIntent::VelloCapture { initialization } => {
@@ -1253,6 +1526,14 @@ impl SemanticGraphBuilder {
                     return Err(GraphValidationError::InvalidPassResultRole);
                 }
             }
+        }
+        Ok(())
+    }
+
+    fn seal_recorded_read_counts(&mut self) -> GraphBuildResult<()> {
+        self.require_recording_phase()?;
+        for resource in &mut self.resources {
+            resource.descriptor.expected_reads = resource.recorded_reads;
         }
         Ok(())
     }
@@ -1479,6 +1760,12 @@ impl SemanticGraphBuilder {
             passes: self.passes,
             root_working_image,
             final_present,
+            selection_requirements: Vec::new(),
+            vello_spans: Vec::new(),
+            composites: Vec::new(),
+            filter_steps: Vec::new(),
+            backdrop_reads: Vec::new(),
+            imports: Vec::new(),
         })
     }
 
@@ -1535,6 +1822,750 @@ impl SemanticGraphBuilder {
         }
         Ok(index)
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PlannedGraphResource {
+    id: SemanticResourceId,
+    producer: Option<SemanticPassId>,
+    logical_bounds: NonEmptyLogicalBounds,
+    spatial: NonEmptyFrameSpatialPlan,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct PlannedGraphParent {
+    current: PlannedGraphResource,
+    spatial: NonEmptyFrameSpatialPlan,
+}
+
+struct SemanticFrameGraphPlanner {
+    context: FrameContext,
+    builder: SemanticGraphBuilder,
+    selection_requirements: Vec<GraphSelectionRequirement>,
+    vello_spans: Vec<SemanticVelloSpan>,
+    composites: Vec<SemanticCompositePlan>,
+    filter_steps: Vec<SemanticFilterStepPlan>,
+    backdrop_reads: Vec<SemanticBackdropRead>,
+    imports: Vec<SemanticImportPlan>,
+}
+
+impl SemanticFrameGraphPlanner {
+    fn build(
+        commands: RenderCommands,
+        context: FrameContext,
+        output_spatial: NonEmptyFrameSpatialPlan,
+        selection_requirements: Vec<GraphSelectionRequirement>,
+    ) -> Result<GpuRenderGraph> {
+        let mut planner = Self {
+            context,
+            builder: graph_build(SemanticGraphBuilder::for_frame_plan())?,
+            selection_requirements,
+            vello_spans: Vec::new(),
+            composites: Vec::new(),
+            filter_steps: Vec::new(),
+            backdrop_reads: Vec::new(),
+            imports: Vec::new(),
+        };
+        let root_id = graph_build(planner.builder.declare_resource(
+            SemanticResourceDescriptor::new(
+                SemanticResourceRole::RootWorkingImage,
+                output_spatial,
+                0,
+            ),
+        ))?;
+        let clear_root = graph_build(planner.builder.declare_pass(
+            SemanticPassIntent::ClearRoot {
+                initialization: WorkingImageInitialization::SurfaceBaseColor(context.base_color),
+            },
+            Vec::new(),
+            Vec::new(),
+            SemanticPassResult::Resource(root_id),
+        ))?;
+        let root = PlannedGraphResource {
+            id: root_id,
+            producer: Some(clear_root),
+            logical_bounds: output_spatial.logical_bounds,
+            spatial: output_spatial,
+        };
+        let parent = PlannedGraphParent {
+            current: root,
+            spatial: output_spatial,
+        };
+        let parent = planner.plan_commands(
+            commands.commands,
+            parent,
+            SemanticVelloSpanScope::CurrentParent,
+            Transform::identity(),
+            Transform::identity(),
+        )?;
+        let present = graph_build(planner.builder.declare_pass(
+            SemanticPassIntent::Present,
+            dependencies_for(&[parent.current]),
+            vec![parent.current.id],
+            SemanticPassResult::Empty,
+        ))?;
+        debug_assert_eq!(
+            planner.builder.final_present,
+            Some(present),
+            "the declared present must be the graph's terminal pass"
+        );
+
+        graph_build(planner.builder.seal_recorded_read_counts())?;
+        graph_build(planner.builder.begin_scheduling())?;
+        let scheduled = planner
+            .builder
+            .passes
+            .iter()
+            .map(|pass| pass.id)
+            .collect::<Vec<_>>();
+        for pass in scheduled {
+            graph_build(planner.builder.schedule_pass(pass))?;
+        }
+        let mut graph = graph_build(planner.builder.finish())?;
+        graph.selection_requirements = planner.selection_requirements;
+        graph.vello_spans = planner.vello_spans;
+        graph.composites = planner.composites;
+        graph.filter_steps = planner.filter_steps;
+        graph.backdrop_reads = planner.backdrop_reads;
+        graph.imports = planner.imports;
+        graph_build(validate_semantic_frame_graph(&graph))?;
+        Ok(graph)
+    }
+
+    fn plan_commands(
+        &mut self,
+        commands: Vec<RenderCommand>,
+        mut parent: PlannedGraphParent,
+        scope: SemanticVelloSpanScope,
+        capture_transform: Transform,
+        parent_to_surface: Transform,
+    ) -> Result<PlannedGraphParent> {
+        let mut span = Vec::new();
+        for command in commands {
+            if is_empty_text_command(&command) {
+                continue;
+            }
+            if command_is_local_to_capture(&command, false) {
+                span.push(command);
+                continue;
+            }
+
+            parent =
+                self.flush_vello_span(span, parent, scope, capture_transform, parent_to_surface)?;
+            span = Vec::new();
+            let RenderCommand::Layer { layer, children } = command else {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "frame partition classified a non-layer command as a custom boundary",
+                ));
+            };
+            parent = self.plan_external_layer(
+                layer,
+                children,
+                parent,
+                scope,
+                capture_transform,
+                parent_to_surface,
+            )?;
+        }
+        self.flush_vello_span(span, parent, scope, capture_transform, parent_to_surface)
+    }
+
+    fn flush_vello_span(
+        &mut self,
+        commands: Vec<RenderCommand>,
+        parent: PlannedGraphParent,
+        scope: SemanticVelloSpanScope,
+        capture_transform: Transform,
+        parent_to_surface: Transform,
+    ) -> Result<PlannedGraphParent> {
+        let commands = prune_empty_text_commands(commands);
+        if commands.is_empty() {
+            return Ok(parent);
+        }
+        let Some(bounds) = commands_bounds_for_planning(&commands)? else {
+            return Ok(parent);
+        };
+        let logical_bounds = LogicalBounds::try_from_rect(bounds.rect(), "Vello span bounds")?;
+        let raster_transform = capture_transform.then(parent_to_surface)?;
+        let spatial = match self
+            .context
+            .plan_local_bounds(logical_bounds, raster_transform)?
+        {
+            FrameSpatialPlan::Empty(_) => return Ok(parent),
+            FrameSpatialPlan::NonEmpty(spatial) => spatial,
+        };
+        let capture_resource = graph_build(self.builder.declare_resource(
+            SemanticResourceDescriptor::new(SemanticResourceRole::CaptureWorkingImage, spatial, 0),
+        ))?;
+        let capture_pass = graph_build(self.builder.declare_pass(
+            SemanticPassIntent::VelloCapture {
+                initialization: WorkingImageInitialization::Transparent,
+            },
+            Vec::new(),
+            Vec::new(),
+            SemanticPassResult::Resource(capture_resource),
+        ))?;
+        let commands = RenderCommands::new(commands);
+        self.vello_spans.push(SemanticVelloSpan {
+            capture_pass,
+            scope,
+            commands,
+            capture_transform,
+            parent_to_surface,
+            antialiasing: self.context.antialiasing,
+            captured_before_outer_semantics: true,
+        });
+        let capture = PlannedGraphResource {
+            id: capture_resource,
+            producer: Some(capture_pass),
+            logical_bounds: spatial.logical_bounds,
+            spatial,
+        };
+        let canonical = self.declare_unary_resource_pass(
+            capture,
+            SemanticResourceRole::FilterIntermediate,
+            spatial,
+            SemanticPassIntent::CanonicalizeCapture,
+        )?;
+        self.composite_into_parent(
+            parent,
+            canonical,
+            &[],
+            SemanticCompositeKind::SpanSourceOver,
+            true,
+        )
+    }
+
+    fn plan_external_layer(
+        &mut self,
+        layer: NormalizedLayer,
+        children: Vec<RenderCommand>,
+        parent: PlannedGraphParent,
+        scope: SemanticVelloSpanScope,
+        capture_transform: Transform,
+        parent_to_surface: Transform,
+    ) -> Result<PlannedGraphParent> {
+        let layer_transform = layer.transform.then(capture_transform)?;
+        let layer_to_surface = layer_transform.then(parent_to_surface)?;
+        let is_transparent_wrapper = layer.clip.is_none()
+            && layer.mask.is_none()
+            && layer.backdrop.is_none()
+            && (layer.opacity - 1.0).abs() < f32::EPSILON
+            && layer.blend == super::layer::BlendMode::Normal;
+        if is_transparent_wrapper {
+            return self.plan_commands(children, parent, scope, layer_transform, parent_to_surface);
+        }
+
+        let planned_source_bounds = if layer.backdrop.is_some() {
+            None
+        } else {
+            layer.pass_plan.bounds()
+        };
+        let mut source =
+            self.plan_layer_source(children, layer_to_surface, planned_source_bounds)?;
+        if let Some(backdrop) = layer.backdrop.as_deref() {
+            source = self.plan_backdrop_group(backdrop, source, parent, layer_to_surface)?;
+        }
+        let Some(source) = source else {
+            return Ok(parent);
+        };
+
+        let alpha_mask = layer
+            .mask
+            .as_ref()
+            .map(|mask| self.import_alpha_mask(mask, source))
+            .transpose()?;
+        self.composite_into_parent(
+            parent,
+            source,
+            alpha_mask.as_slice(),
+            SemanticCompositeKind::Layer {
+                transform: layer_transform,
+                opacity: layer.opacity,
+                blend: layer.blend,
+                clip: layer.clip.map(Box::new),
+                alpha_mask: alpha_mask.map(|mask| mask.id),
+            },
+            true,
+        )
+    }
+
+    fn plan_layer_source(
+        &mut self,
+        children: Vec<RenderCommand>,
+        raster_transform: Transform,
+        planned_bounds: Option<super::command::OffscreenBounds>,
+    ) -> Result<Option<PlannedGraphResource>> {
+        let children = prune_empty_text_commands(children);
+        if children.is_empty() {
+            return Ok(None);
+        }
+        let bounds = match planned_bounds {
+            Some(bounds) => bounds,
+            None => {
+                let Some(bounds) = commands_bounds_for_planning(&children)? else {
+                    return Ok(None);
+                };
+                bounds
+            }
+        };
+        let logical_bounds = LogicalBounds::try_from_rect(bounds.rect(), "layer source bounds")?;
+        let spatial = match self
+            .context
+            .plan_local_bounds(logical_bounds, raster_transform)?
+        {
+            FrameSpatialPlan::Empty(_) => return Ok(None),
+            FrameSpatialPlan::NonEmpty(spatial) => spatial,
+        };
+        let source_parent = self.declare_transparent_parent(spatial)?;
+        let source_parent = self.plan_commands(
+            children,
+            source_parent,
+            SemanticVelloSpanScope::LayerSource,
+            Transform::identity(),
+            raster_transform,
+        )?;
+        Ok(Some(source_parent.current))
+    }
+
+    fn plan_backdrop_group(
+        &mut self,
+        backdrop: &super::command::RenderBackdropCapture,
+        foreground: Option<PlannedGraphResource>,
+        parent: PlannedGraphParent,
+        raster_transform: Transform,
+    ) -> Result<Option<PlannedGraphResource>> {
+        let capture_bounds = LogicalBounds::try_from_rect(
+            backdrop.capture_bounds().rect(),
+            "backdrop capture bounds",
+        )?;
+        let capture_spatial = match self
+            .context
+            .plan_local_bounds(capture_bounds, raster_transform)?
+        {
+            FrameSpatialPlan::Empty(_) => return Ok(foreground),
+            FrameSpatialPlan::NonEmpty(spatial) => spatial,
+        };
+        let copied_id = graph_build(self.builder.declare_resource(
+            SemanticResourceDescriptor::new(SemanticResourceRole::BackdropCopy, capture_spatial, 0),
+        ))?;
+        let copy_pass = graph_build(self.builder.declare_pass(
+            SemanticPassIntent::CopyBackdrop,
+            dependencies_for(&[parent.current]),
+            vec![parent.current.id],
+            SemanticPassResult::Resource(copied_id),
+        ))?;
+        self.backdrop_reads.push(SemanticBackdropRead {
+            pass: copy_pass,
+            completed_parent: parent.current.id,
+        });
+        let copied = PlannedGraphResource {
+            id: copied_id,
+            producer: Some(copy_pass),
+            logical_bounds: capture_spatial.logical_bounds,
+            spatial: capture_spatial,
+        };
+        let filtered = self.apply_filter_list(
+            copied,
+            backdrop.filters(),
+            FilterSourceRole::Backdrop,
+            raster_transform,
+        )?;
+
+        let group_bounds = match foreground {
+            Some(foreground) => filtered.logical_bounds.try_union(
+                foreground.logical_bounds,
+                "backdrop foreground group bounds",
+            )?,
+            None => filtered.logical_bounds,
+        };
+        let group_spatial = match self
+            .context
+            .plan_local_bounds(LogicalBounds::NonEmpty(group_bounds), raster_transform)?
+        {
+            FrameSpatialPlan::Empty(_) => return Ok(None),
+            FrameSpatialPlan::NonEmpty(spatial) => spatial,
+        };
+        let mut group = self.declare_transparent_parent(group_spatial)?;
+        group = self.composite_into_parent(
+            group,
+            filtered,
+            &[],
+            SemanticCompositeKind::Layer {
+                transform: Transform::identity(),
+                opacity: 1.0,
+                blend: super::layer::BlendMode::Normal,
+                clip: backdrop.clip().cloned().map(Box::new),
+                alpha_mask: None,
+            },
+            true,
+        )?;
+        if let Some(foreground) = foreground {
+            group = self.composite_into_parent(
+                group,
+                foreground,
+                &[],
+                SemanticCompositeKind::SpanSourceOver,
+                true,
+            )?;
+        }
+        Ok(Some(group.current))
+    }
+
+    fn apply_filter_list(
+        &mut self,
+        mut source: PlannedGraphResource,
+        filters: &FilterList,
+        source_role: FilterSourceRole,
+        raster_transform: Transform,
+    ) -> Result<PlannedGraphResource> {
+        let plan = self.context.plan_filter_list(
+            LogicalBounds::NonEmpty(source.logical_bounds),
+            raster_transform,
+            filters,
+            source_role,
+        )?;
+        let ResolvedFrameFilterPlan::NonEmpty(plan) = plan else {
+            return Ok(source);
+        };
+
+        for step in plan.steps {
+            let mut passes = Vec::new();
+            match step.operation_intent {
+                ResolvedFilterOperationIntent::ColorRun(_) => {
+                    source = self.declare_unary_resource_pass(
+                        source,
+                        SemanticResourceRole::FilterIntermediate,
+                        step.spatial_mapping.result,
+                        SemanticPassIntent::ColorFilter,
+                    )?;
+                    passes.push(planned_resource_producer(source)?);
+                }
+                ResolvedFilterOperationIntent::Blur(_) => {
+                    let horizontal = self.declare_unary_resource_pass(
+                        source,
+                        SemanticResourceRole::FilterIntermediate,
+                        step.spatial_mapping.result,
+                        SemanticPassIntent::BlurHorizontal {
+                            input: BlurInput::Rgba,
+                        },
+                    )?;
+                    passes.push(planned_resource_producer(horizontal)?);
+                    source = self.declare_unary_resource_pass(
+                        horizontal,
+                        SemanticResourceRole::FilterIntermediate,
+                        step.spatial_mapping.result,
+                        SemanticPassIntent::BlurVertical {
+                            input: BlurInput::Rgba,
+                        },
+                    )?;
+                    passes.push(planned_resource_producer(source)?);
+                }
+                ResolvedFilterOperationIntent::DropShadow(_) => {
+                    let horizontal = self.declare_unary_resource_pass(
+                        source,
+                        SemanticResourceRole::FilterIntermediate,
+                        step.spatial_mapping.result,
+                        SemanticPassIntent::BlurHorizontal {
+                            input: BlurInput::SourceAlpha,
+                        },
+                    )?;
+                    passes.push(planned_resource_producer(horizontal)?);
+                    let vertical = self.declare_unary_resource_pass(
+                        horizontal,
+                        SemanticResourceRole::FilterIntermediate,
+                        step.spatial_mapping.result,
+                        SemanticPassIntent::BlurVertical {
+                            input: BlurInput::SourceAlpha,
+                        },
+                    )?;
+                    passes.push(planned_resource_producer(vertical)?);
+                    let shadow = self.declare_unary_resource_pass(
+                        vertical,
+                        SemanticResourceRole::ShadowImage,
+                        step.spatial_mapping.result,
+                        SemanticPassIntent::DropShadowColorize,
+                    )?;
+                    passes.push(planned_resource_producer(shadow)?);
+                    let result_id = graph_build(self.builder.declare_resource(
+                        SemanticResourceDescriptor::new(
+                            SemanticResourceRole::CompositeResult,
+                            step.spatial_mapping.result,
+                            0,
+                        ),
+                    ))?;
+                    let merge = graph_build(self.builder.declare_pass(
+                        SemanticPassIntent::Composite,
+                        dependencies_for(&[source, shadow]),
+                        vec![source.id, shadow.id],
+                        SemanticPassResult::Resource(result_id),
+                    ))?;
+                    passes.push(merge);
+                    self.composites.push(SemanticCompositePlan {
+                        pass: merge,
+                        kind: SemanticCompositeKind::DropShadow,
+                        source_captured_before_outer_semantics: true,
+                    });
+                    source = PlannedGraphResource {
+                        id: result_id,
+                        producer: Some(merge),
+                        logical_bounds: step.result_bounds,
+                        spatial: step.spatial_mapping.result,
+                    };
+                }
+            }
+            self.filter_steps
+                .push(SemanticFilterStepPlan { passes, step });
+        }
+        Ok(source)
+    }
+
+    fn declare_transparent_parent(
+        &mut self,
+        spatial: NonEmptyFrameSpatialPlan,
+    ) -> Result<PlannedGraphParent> {
+        let resource = graph_build(self.builder.declare_resource(
+            SemanticResourceDescriptor::new(
+                SemanticResourceRole::IsolationWorkingImage,
+                spatial,
+                0,
+            ),
+        ))?;
+        let clear = graph_build(self.builder.declare_pass(
+            SemanticPassIntent::ClearRoot {
+                initialization: WorkingImageInitialization::Transparent,
+            },
+            Vec::new(),
+            Vec::new(),
+            SemanticPassResult::Resource(resource),
+        ))?;
+        Ok(PlannedGraphParent {
+            current: PlannedGraphResource {
+                id: resource,
+                producer: Some(clear),
+                logical_bounds: spatial.logical_bounds,
+                spatial,
+            },
+            spatial,
+        })
+    }
+
+    fn import_alpha_mask(
+        &mut self,
+        mask: &RenderLayerMask,
+        source: PlannedGraphResource,
+    ) -> Result<PlannedGraphResource> {
+        let physical_size = mask.alpha_mask().size();
+        let expected = source.spatial.device_extent;
+        if physical_size != PhysicalSize::new(expected.width, expected.height) {
+            return Err(Error::invalid_value(
+                "resolved layer alpha mask size",
+                format!("{}x{}", physical_size.width(), physical_size.height()),
+                "must match the offscreen layer bounds in device pixels",
+            ));
+        }
+        let resource = graph_build(
+            self.builder
+                .import_resource(SemanticResourceDescriptor::new(
+                    SemanticResourceRole::ImportedImage,
+                    source.spatial,
+                    0,
+                )),
+        )?;
+        self.imports.push(SemanticImportPlan {
+            resource,
+            kind: SemanticImportKind::ResolvedAlphaMask { physical_size },
+        });
+        Ok(PlannedGraphResource {
+            id: resource,
+            producer: None,
+            logical_bounds: source.logical_bounds,
+            spatial: source.spatial,
+        })
+    }
+
+    fn declare_unary_resource_pass(
+        &mut self,
+        source: PlannedGraphResource,
+        role: SemanticResourceRole,
+        spatial: NonEmptyFrameSpatialPlan,
+        intent: SemanticPassIntent,
+    ) -> Result<PlannedGraphResource> {
+        let resource = graph_build(
+            self.builder
+                .declare_resource(SemanticResourceDescriptor::new(role, spatial, 0)),
+        )?;
+        let pass = graph_build(self.builder.declare_pass(
+            intent,
+            dependencies_for(&[source]),
+            vec![source.id],
+            SemanticPassResult::Resource(resource),
+        ))?;
+        Ok(PlannedGraphResource {
+            id: resource,
+            producer: Some(pass),
+            logical_bounds: spatial.logical_bounds,
+            spatial,
+        })
+    }
+
+    fn composite_into_parent(
+        &mut self,
+        parent: PlannedGraphParent,
+        source: PlannedGraphResource,
+        additional_sources: &[PlannedGraphResource],
+        kind: SemanticCompositeKind,
+        source_captured_before_outer_semantics: bool,
+    ) -> Result<PlannedGraphParent> {
+        let mut sources = Vec::with_capacity(additional_sources.len() + 2);
+        sources.push(parent.current);
+        sources.push(source);
+        sources.extend_from_slice(additional_sources);
+        let resource = graph_build(self.builder.declare_resource(
+            SemanticResourceDescriptor::new(
+                SemanticResourceRole::CompositeResult,
+                parent.spatial,
+                0,
+            ),
+        ))?;
+        let pass = graph_build(self.builder.declare_pass(
+            SemanticPassIntent::Composite,
+            dependencies_for(&sources),
+            sources.iter().map(|source| source.id).collect(),
+            SemanticPassResult::Resource(resource),
+        ))?;
+        self.composites.push(SemanticCompositePlan {
+            pass,
+            kind,
+            source_captured_before_outer_semantics,
+        });
+        Ok(PlannedGraphParent {
+            current: PlannedGraphResource {
+                id: resource,
+                producer: Some(pass),
+                logical_bounds: parent.spatial.logical_bounds,
+                spatial: parent.spatial,
+            },
+            spatial: parent.spatial,
+        })
+    }
+}
+
+fn is_empty_text_command(command: &RenderCommand) -> bool {
+    matches!(
+        command,
+        RenderCommand::TextRun { bounds, .. }
+            if bounds.kind() == TextRunBoundsKind::Empty
+    )
+}
+
+fn command_is_local_to_capture(command: &RenderCommand, has_local_parent: bool) -> bool {
+    let RenderCommand::Layer { layer, children } = command else {
+        return true;
+    };
+    if layer.mask.is_some() || layer.backdrop.is_some() {
+        return false;
+    }
+    if layer.blend != super::layer::BlendMode::Normal && !has_local_parent {
+        return false;
+    }
+    let child_has_local_parent = has_local_parent || layer.isolation != LayerIsolation::None;
+    children
+        .iter()
+        .all(|child| command_is_local_to_capture(child, child_has_local_parent))
+}
+
+fn dependencies_for(resources: &[PlannedGraphResource]) -> Vec<SemanticPassId> {
+    let mut dependencies = Vec::new();
+    for producer in resources.iter().filter_map(|resource| resource.producer) {
+        if !dependencies.contains(&producer) {
+            dependencies.push(producer);
+        }
+    }
+    dependencies
+}
+
+fn planned_resource_producer(resource: PlannedGraphResource) -> Result<SemanticPassId> {
+    resource.producer.ok_or_else(|| {
+        Error::new(
+            BackendErrorCode::RenderFailed,
+            "a planned graph result has no producing pass",
+        )
+    })
+}
+
+fn graph_build<T>(result: GraphBuildResult<T>) -> Result<T> {
+    result.map_err(|error| {
+        Error::new(
+            BackendErrorCode::RenderFailed,
+            format!("semantic frame graph validation failed: {error:?}"),
+        )
+    })
+}
+
+fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
+    for span in &graph.vello_spans {
+        let pass = graph
+            .passes
+            .iter()
+            .find(|pass| pass.id == span.capture_pass)
+            .ok_or(GraphValidationError::UnknownPass(span.capture_pass))?;
+        let SemanticPassResult::Resource(capture) = pass.result else {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        };
+        if !matches!(
+            pass.intent,
+            SemanticPassIntent::VelloCapture {
+                initialization: WorkingImageInitialization::Transparent
+            }
+        ) || !pass.reads.is_empty()
+            || !span.captured_before_outer_semantics
+        {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        }
+        let canonical_consumers = graph
+            .passes
+            .iter()
+            .filter(|candidate| {
+                candidate.intent == SemanticPassIntent::CanonicalizeCapture
+                    && candidate.reads == [capture]
+            })
+            .count();
+        if canonical_consumers != 1 {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        }
+    }
+    for backdrop in &graph.backdrop_reads {
+        let pass = graph
+            .passes
+            .iter()
+            .find(|pass| pass.id == backdrop.pass)
+            .ok_or(GraphValidationError::UnknownPass(backdrop.pass))?;
+        if pass.intent != SemanticPassIntent::CopyBackdrop
+            || pass.reads != [backdrop.completed_parent]
+        {
+            return Err(GraphValidationError::InvalidPassArity);
+        }
+    }
+    for import in &graph.imports {
+        let resource = graph
+            .resources
+            .iter()
+            .find(|resource| resource.id == import.resource)
+            .ok_or(GraphValidationError::UnknownResource(import.resource))?;
+        if resource.descriptor.role != SemanticResourceRole::ImportedImage
+            || resource.producer != Some(SemanticResourceProducer::Imported)
+        {
+            return Err(GraphValidationError::InvalidImportedResourceRole);
+        }
+    }
+    if graph.passes.iter().any(|pass| {
+        matches!(pass.intent, SemanticPassIntent::VelloCapture { .. }) && !pass.reads.is_empty()
+    }) {
+        return Err(GraphValidationError::InvalidCaptureResult);
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1775,7 +2806,7 @@ pub(crate) fn ordered_filter_plan_for_test(
     } else {
         FilterSourceRole::Ordinary
     };
-    let plan = FrameContext::try_new(surface_scale)?.plan_filter_list(
+    let plan = FrameContext::try_for_spatial_test(surface_scale)?.plan_filter_list(
         source_bounds,
         transform,
         filters,
@@ -1934,8 +2965,8 @@ pub(crate) fn spatial_primitives_for_test(
     texel: (u32, u32),
 ) -> Result<SpatialPrimitivesForTest> {
     let logical_bounds = LogicalBounds::try_from_rect(rect, "frame logical bounds")?;
-    let plan =
-        FrameContext::try_new(surface_scale)?.plan_local_bounds(logical_bounds, transform)?;
+    let plan = FrameContext::try_for_spatial_test(surface_scale)?
+        .plan_local_bounds(logical_bounds, transform)?;
     let logical_rect = logical_bounds.rect();
     let logical_bounds = Some([
         logical_rect.x(),
@@ -2166,7 +3197,7 @@ fn graph_probe_descriptor(
         "semantic graph probe bounds",
     )
     .map_err(|_| SemanticGraphProbeError::SpatialSetup)?;
-    let spatial = FrameContext::try_new(2.0)
+    let spatial = FrameContext::try_for_spatial_test(2.0)
         .and_then(|context| context.plan_local_bounds(logical_bounds, Transform::identity()))
         .map_err(|_| SemanticGraphProbeError::SpatialSetup)?;
     let FrameSpatialPlan::NonEmpty(spatial) = spatial else {
@@ -2947,4 +3978,333 @@ pub(crate) fn semantic_graph_base_initialization_observation_for_test(
         empty_results_have_no_descriptor,
         resource_descriptors_are_spatially_complete,
     })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FramePlanRouteObservation {
+    DirectVello,
+    GpuGraph,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FrameSelectionRequirementObservation {
+    ResolvedAlphaMask,
+    BoundedBackdrop,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelloSpanScopeObservation {
+    CurrentParent,
+    LayerSource,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum VelloCommandObservation {
+    Fill,
+    Stroke,
+    Shadow,
+    Image,
+    Text,
+    LocalLayer,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct VelloSpanObservation {
+    pub(crate) scope: VelloSpanScopeObservation,
+    pub(crate) commands: Vec<VelloCommandObservation>,
+    pub(crate) captured_before_outer_semantics: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum BackdropDependencyObservation {
+    None,
+    CompletedCurrentParent,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FramePlanObservation {
+    pub(crate) route: FramePlanRouteObservation,
+    pub(crate) plan_count: usize,
+    pub(crate) complete: bool,
+    pub(crate) finite: bool,
+    pub(crate) backend_free: bool,
+    pub(crate) direct_command_count: usize,
+    pub(crate) output_device_extent: Option<(u32, u32)>,
+    pub(crate) antialiasing: Option<super::renderer::Antialiasing>,
+    pub(crate) base_color: Option<super::paint::Color>,
+    pub(crate) selection_requirements: Vec<FrameSelectionRequirementObservation>,
+    pub(crate) vello_spans: Vec<VelloSpanObservation>,
+    pub(crate) backdrop_dependency: BackdropDependencyObservation,
+    pub(crate) current_parent_backdrop_reads: usize,
+    pub(crate) stores_cloned_command_prefix: bool,
+    pub(crate) captures_precede_outer_semantics: bool,
+    pub(crate) graph_to_vello_reentry: bool,
+    pub(crate) empty_text_resource_count: usize,
+    pub(crate) resource_count: usize,
+    pub(crate) pass_count: usize,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FramePlanResultObservation {
+    pub(crate) plan: Option<FramePlanObservation>,
+    pub(crate) error_code: Option<super::error::ErrorCode>,
+    pub(crate) unresolved_resource: Option<super::error::UnresolvedResourceKind>,
+    pub(crate) has_partial_plan: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn frame_plan_result_observation_for_test(
+    commands: super::command::RenderCommands,
+    surface_size: super::geometry::Size,
+    surface_scale: f64,
+    antialiasing: super::renderer::Antialiasing,
+    base_color: super::paint::Color,
+) -> FramePlanResultObservation {
+    let result = FrameContext::try_new(surface_size, surface_scale, antialiasing, base_color)
+        .and_then(|context| commands.plan_for(context));
+    match result {
+        Ok(FramePlan::DirectVello(plan)) => FramePlanResultObservation {
+            plan: Some(observe_direct_frame_plan(plan)),
+            error_code: None,
+            unresolved_resource: None,
+            has_partial_plan: false,
+        },
+        Ok(FramePlan::GpuGraph(graph)) => FramePlanResultObservation {
+            plan: Some(observe_graph_frame_plan(graph)),
+            error_code: None,
+            unresolved_resource: None,
+            has_partial_plan: false,
+        },
+        Err(error) => FramePlanResultObservation {
+            plan: None,
+            error_code: Some(error.code()),
+            unresolved_resource: error
+                .unresolved_resource_diagnostic()
+                .map(UnresolvedResource::kind),
+            has_partial_plan: false,
+        },
+    }
+}
+
+#[cfg(test)]
+fn observe_direct_frame_plan(plan: DirectVelloPlan) -> FramePlanObservation {
+    let output_device_extent = match plan.output_mapping {
+        FrameSpatialPlan::Empty(_) => None,
+        FrameSpatialPlan::NonEmpty(mapping) => {
+            Some((mapping.device_extent.width, mapping.device_extent.height))
+        }
+    };
+    FramePlanObservation {
+        route: FramePlanRouteObservation::DirectVello,
+        plan_count: 1,
+        complete: true,
+        finite: frame_spatial_plan_is_finite(plan.output_mapping),
+        backend_free: true,
+        direct_command_count: plan.commands.commands.len(),
+        output_device_extent,
+        antialiasing: Some(plan.antialiasing),
+        base_color: Some(plan.base_color),
+        selection_requirements: Vec::new(),
+        vello_spans: Vec::new(),
+        backdrop_dependency: BackdropDependencyObservation::None,
+        current_parent_backdrop_reads: 0,
+        stores_cloned_command_prefix: false,
+        captures_precede_outer_semantics: true,
+        graph_to_vello_reentry: false,
+        empty_text_resource_count: count_empty_text_commands(&plan.commands.commands),
+        resource_count: 0,
+        pass_count: 0,
+    }
+}
+
+#[cfg(test)]
+fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
+    let root_descriptor = graph
+        .resources
+        .iter()
+        .find(|resource| resource.id == graph.root_working_image)
+        .map(|resource| resource.descriptor);
+    let selection_requirements = graph
+        .selection_requirements
+        .iter()
+        .map(|requirement| match requirement {
+            GraphSelectionRequirement::ResolvedAlphaMask => {
+                FrameSelectionRequirementObservation::ResolvedAlphaMask
+            }
+            GraphSelectionRequirement::BoundedBackdrop => {
+                FrameSelectionRequirementObservation::BoundedBackdrop
+            }
+        })
+        .collect();
+    let vello_spans = graph
+        .vello_spans
+        .iter()
+        .map(|span| VelloSpanObservation {
+            scope: match span.scope {
+                SemanticVelloSpanScope::CurrentParent => VelloSpanScopeObservation::CurrentParent,
+                SemanticVelloSpanScope::LayerSource => VelloSpanScopeObservation::LayerSource,
+            },
+            commands: span
+                .commands
+                .commands
+                .iter()
+                .map(observe_vello_command)
+                .collect(),
+            captured_before_outer_semantics: span.captured_before_outer_semantics,
+        })
+        .collect();
+    let complete = graph.passes.iter().all(|pass| pass.scheduled)
+        && graph.resources.iter().all(|resource| {
+            resource.producer.is_some()
+                && resource.remaining_reads == Some(0)
+                && resource.releasable_after.is_some()
+        })
+        && graph
+            .passes
+            .last()
+            .is_some_and(|pass| pass.id == graph.final_present)
+        && validate_semantic_frame_graph(&graph).is_ok();
+    let finite = graph
+        .resources
+        .iter()
+        .all(|resource| semantic_resource_descriptor_is_finite(resource.descriptor))
+        && graph.vello_spans.iter().all(|span| {
+            span.capture_transform
+                .as_array()
+                .into_iter()
+                .all(f64::is_finite)
+                && span
+                    .parent_to_surface
+                    .as_array()
+                    .into_iter()
+                    .all(f64::is_finite)
+        });
+    let graph_to_vello_reentry = graph.passes.iter().any(|pass| {
+        matches!(pass.intent, SemanticPassIntent::VelloCapture { .. }) && !pass.reads.is_empty()
+    });
+    let empty_text_resource_count = graph
+        .vello_spans
+        .iter()
+        .map(|span| count_empty_text_commands(&span.commands.commands))
+        .sum();
+    let captures_precede_outer_semantics = graph
+        .vello_spans
+        .iter()
+        .all(|span| span.captured_before_outer_semantics)
+        && graph
+            .composites
+            .iter()
+            .all(|composite| composite.source_captured_before_outer_semantics);
+    let antialiasing = graph.vello_spans.first().map(|span| span.antialiasing);
+    let base_color = graph.passes.iter().find_map(|pass| match pass.intent {
+        SemanticPassIntent::ClearRoot {
+            initialization: WorkingImageInitialization::SurfaceBaseColor(color),
+        } => Some(color),
+        _ => None,
+    });
+
+    FramePlanObservation {
+        route: FramePlanRouteObservation::GpuGraph,
+        plan_count: 1,
+        complete,
+        finite,
+        backend_free: true,
+        direct_command_count: 0,
+        output_device_extent: root_descriptor.map(|descriptor| {
+            (
+                descriptor.device_extent.width,
+                descriptor.device_extent.height,
+            )
+        }),
+        antialiasing,
+        base_color,
+        selection_requirements,
+        vello_spans,
+        backdrop_dependency: if graph.backdrop_reads.is_empty() {
+            BackdropDependencyObservation::None
+        } else {
+            BackdropDependencyObservation::CompletedCurrentParent
+        },
+        current_parent_backdrop_reads: graph.backdrop_reads.len(),
+        stores_cloned_command_prefix: false,
+        captures_precede_outer_semantics,
+        graph_to_vello_reentry,
+        empty_text_resource_count,
+        resource_count: graph.resources.len(),
+        pass_count: graph.passes.len(),
+    }
+}
+
+#[cfg(test)]
+fn frame_spatial_plan_is_finite(plan: FrameSpatialPlan) -> bool {
+    match plan {
+        FrameSpatialPlan::Empty(plan) => logical_rect_is_finite(plan.logical_bounds.rect()),
+        FrameSpatialPlan::NonEmpty(plan) => semantic_spatial_plan_is_finite(plan),
+    }
+}
+
+#[cfg(test)]
+fn semantic_resource_descriptor_is_finite(descriptor: SemanticResourceDescriptor) -> bool {
+    logical_rect_is_finite(descriptor.logical_bounds.rect())
+        && descriptor.device_extent.width > 0
+        && descriptor.device_extent.height > 0
+        && descriptor.texel_center_mapping.origin.x().is_finite()
+        && descriptor.texel_center_mapping.origin.y().is_finite()
+        && descriptor
+            .texel_center_mapping
+            .raster_scale
+            .get()
+            .is_finite()
+}
+
+#[cfg(test)]
+fn semantic_spatial_plan_is_finite(plan: NonEmptyFrameSpatialPlan) -> bool {
+    semantic_resource_descriptor_is_finite(SemanticResourceDescriptor::new(
+        SemanticResourceRole::CaptureWorkingImage,
+        plan,
+        0,
+    ))
+}
+
+#[cfg(test)]
+fn logical_rect_is_finite(rect: Rect) -> bool {
+    [rect.x(), rect.y(), rect.width(), rect.height()]
+        .into_iter()
+        .all(f64::is_finite)
+}
+
+#[cfg(test)]
+fn count_empty_text_commands(commands: &[RenderCommand]) -> usize {
+    commands
+        .iter()
+        .map(|command| match command {
+            RenderCommand::TextRun { bounds, .. } if bounds.kind() == TextRunBoundsKind::Empty => 1,
+            RenderCommand::Layer { children, .. } => count_empty_text_commands(children),
+            RenderCommand::Fill { .. }
+            | RenderCommand::Stroke { .. }
+            | RenderCommand::Shadow { .. }
+            | RenderCommand::Image { .. }
+            | RenderCommand::TextRun { .. } => 0,
+        })
+        .sum()
+}
+
+#[cfg(test)]
+fn observe_vello_command(command: &super::command::RenderCommand) -> VelloCommandObservation {
+    match command {
+        super::command::RenderCommand::Fill { .. } => VelloCommandObservation::Fill,
+        super::command::RenderCommand::Stroke { .. } => VelloCommandObservation::Stroke,
+        super::command::RenderCommand::Shadow { .. } => VelloCommandObservation::Shadow,
+        super::command::RenderCommand::Image { .. } => VelloCommandObservation::Image,
+        super::command::RenderCommand::TextRun { .. } => VelloCommandObservation::Text,
+        super::command::RenderCommand::Layer { .. } => VelloCommandObservation::LocalLayer,
+    }
 }
