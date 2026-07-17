@@ -1,7 +1,7 @@
 # GPU Render Pipeline C06 Frame Spatial And Filter Planning
 
 ## Header
-- Cycle: `C06`; owner: `surgeist-render`; status: `reviewed`.
+- Cycle: `C06`; owner: `surgeist-render`; status: `in_progress`.
 - Cycle base and published prerequisite: `d5e4c2a0c1fe879d98b6cabdf86a667e4277be0f` (C05).
 - Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S15, S17, S19, planning portions of S20 and S22, S28, and C06-applicable S31-S32 evidence; inherited S07 resolved-frame phases, S10 bounded-text behavior, S13 typed unresolved/runtime diagnostics, and applicable S36-S37 feature/dependency/verification rules apply where those sections define a named C06 invariant or gate.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at `c1a203393b2549603c0a0d5698099f55018abe2e`, normalized SHA-256 `70b345be31ac5bf4fcae72e2d3c5901c8e04ad0b2c26080851bd2c50d7150cde`, entry `C06 Frame Spatial And Filter Planning`.
