@@ -8772,8 +8772,8 @@ fn logical_bounds_preserve_large_finite_translation_until_frame_scale_resolution
 }
 
 use super::frame::{
-    OrderedFilterEdgeObservation, OrderedFilterIntentObservation, OrderedFilterPlanObservation,
-    OrderedFilterStepObservation,
+    GraphFailureObservation, InvalidSemanticGraphStateForTest, OrderedFilterEdgeObservation,
+    OrderedFilterIntentObservation, OrderedFilterPlanObservation, OrderedFilterStepObservation,
 };
 
 fn observe_ordered_filter_plan(
@@ -8987,6 +8987,171 @@ fn color_filter_fusion_preserves_each_source_clamp() {
         observed.steps[0].edge,
         OrderedFilterEdgeObservation::NoSampling
     );
+}
+
+fn bounded_offscreen_pass_plan_for_graph_probe() -> command::LayerPassPlan {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(-2.0, 3.0, 8.0, 6.0)).unwrap();
+    let backdrop = BackdropFilterInput::try_new(filters, bounds, None).unwrap();
+    let layer = Layer::new().try_backdrop_filter(backdrop).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    });
+
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
+    let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
+        panic!("expected one normalized offscreen layer");
+    };
+    layer.pass_plan
+}
+
+#[test]
+fn graph_builder_rejects_forward_stale_and_read_write_aliases() {
+    let pass_plan = bounded_offscreen_pass_plan_for_graph_probe();
+    let edge_observation =
+        super::frame::semantic_graph_edge_lifetime_observation_for_test(pass_plan)
+            .expect("the semantic graph probe must construct its stable spatial primitives");
+    assert!(edge_observation.observes_bounded_offscreen_pass);
+
+    let expected = [
+        (
+            InvalidSemanticGraphStateForTest::StaleResourceIdentity,
+            GraphFailureObservation::WrongResourceGeneration,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::StalePassIdentity,
+            GraphFailureObservation::WrongPassGeneration,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::UnknownResourceIdentity,
+            GraphFailureObservation::UnknownResource,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::UnknownPassIdentity,
+            GraphFailureObservation::UnknownPass,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::ReleasedResourceIdentity,
+            GraphFailureObservation::ReleasedResource,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::ForwardDependency,
+            GraphFailureObservation::ForwardDependency,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::ForwardRead,
+            GraphFailureObservation::ForwardRead,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::ReadWriteAlias,
+            GraphFailureObservation::ReadWriteAlias,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::DuplicateProducer,
+            GraphFailureObservation::DuplicateProducer,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::DeclaredReadCountMismatch,
+            GraphFailureObservation::DeclaredReadCountMismatch,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::OrphanResult,
+            GraphFailureObservation::OrphanResult,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::MissingRootWorkingImage,
+            GraphFailureObservation::MissingRootWorkingImage,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::DuplicateRootWorkingImage,
+            GraphFailureObservation::DuplicateRootWorkingImage,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::MissingFinalPresent,
+            GraphFailureObservation::MissingFinalPresent,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::DuplicateFinalPresent,
+            GraphFailureObservation::DuplicateFinalPresent,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::NonTransparentCaptureBase,
+            GraphFailureObservation::NonTransparentCaptureBase,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::RepeatedSurfaceBaseInitialization,
+            GraphFailureObservation::RepeatedSurfaceBaseInitialization,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::MissingProducerDependency,
+            GraphFailureObservation::MissingProducerDependency,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::ScheduleBeforeConsumersAreSealed,
+            GraphFailureObservation::ConsumersNotSealed,
+        ),
+        (
+            InvalidSemanticGraphStateForTest::DeclareConsumerAfterConsumersAreSealed,
+            GraphFailureObservation::ConsumersAlreadySealed,
+        ),
+    ];
+    let observed = expected.map(|(state, _)| {
+        (
+            state,
+            super::frame::invalid_semantic_graph_state_for_test(state)
+                .expect("each stable invalid state must produce one typed graph failure"),
+        )
+    });
+
+    assert_eq!(
+        observed, expected,
+        "no closed graph validator rejected the invalid edge sequence"
+    );
+    assert!(edge_observation.every_result_has_one_owner);
+    assert!(edge_observation.every_read_names_its_producer);
+}
+
+#[test]
+fn drop_shadow_source_fanout_lives_through_both_consumers() {
+    let observed = super::frame::semantic_graph_edge_lifetime_observation_for_test(
+        bounded_offscreen_pass_plan_for_graph_probe(),
+    )
+    .expect("the drop-shadow lifetime graph must validate");
+    assert!(observed.observes_bounded_offscreen_pass);
+    assert!(
+        observed.source_expected_reads == 2
+            && observed.remaining_before_first_consumer == 2
+            && observed.remaining_after_alpha_consumer == 1
+            && observed.remaining_before_source_over == 1
+            && observed.remaining_after_source_over == 0
+            && observed.released_after_source_over
+            && observed.post_release_read_rejected,
+        "drop-shadow source has no two-consumer lifetime"
+    );
+    assert!(observed.every_result_has_one_owner);
+    assert!(observed.every_read_names_its_producer);
+}
+
+#[test]
+fn graph_base_color_is_initialized_once_and_isolation_is_transparent() {
+    let observed = super::frame::semantic_graph_base_initialization_observation_for_test(
+        bounded_offscreen_pass_plan_for_graph_probe(),
+    )
+    .expect("the initialization graph must validate");
+    assert!(observed.observes_bounded_offscreen_pass);
+    assert!(
+        observed.surface_base_initializations == 1
+            && observed.isolation_working_images == 1
+            && observed.captures_are_transparent,
+        "surface base and isolation clears are not modeled exactly once"
+    );
+    assert_eq!(observed.root_working_images, 1);
+    assert_eq!(observed.final_present_intents, 1);
+    assert_eq!(observed.surface_base_color, Some(Color::BLACK));
+    assert!(observed.empty_results_have_no_descriptor);
+    assert!(observed.resource_descriptors_are_spatially_complete);
 }
 
 #[test]

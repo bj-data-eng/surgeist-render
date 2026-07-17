@@ -8,9 +8,10 @@ use super::{
     geometry::{Point, Rect, Transform},
     style::{FilterBlur, FilterDropShadow, FilterList},
 };
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[cfg(test)]
-use super::{filter::ColorClampBoundary, style::ColorFilterOp};
+use super::{command::LayerPassPlan, filter::ColorClampBoundary, style::ColorFilterOp};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(
@@ -615,6 +616,874 @@ struct NonEmptyFrameSpatialPlan {
     texel_center_mapping: TexelCenterMapping,
 }
 
+static NEXT_GRAPH_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+type GraphBuildResult<T> = std::result::Result<T, GraphValidationError>;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct GraphGeneration(u64);
+
+impl GraphGeneration {
+    fn try_next() -> GraphBuildResult<Self> {
+        NEXT_GRAPH_GENERATION
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |generation| {
+                generation.checked_add(1)
+            })
+            .map(Self)
+            .map_err(|_| GraphValidationError::GenerationExhausted)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct ResourceIndex(u32);
+
+impl ResourceIndex {
+    fn try_from_len(len: usize) -> GraphBuildResult<Self> {
+        u32::try_from(len)
+            .map(Self)
+            .map_err(|_| GraphValidationError::ResourceIdentityExhausted)
+    }
+
+    fn as_usize(self) -> GraphBuildResult<usize> {
+        usize::try_from(self.0).map_err(|_| GraphValidationError::UnknownResourceIndex)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct PassIndex(u32);
+
+impl PassIndex {
+    fn try_from_len(len: usize) -> GraphBuildResult<Self> {
+        u32::try_from(len)
+            .map(Self)
+            .map_err(|_| GraphValidationError::PassIdentityExhausted)
+    }
+
+    fn as_usize(self) -> GraphBuildResult<usize> {
+        usize::try_from(self.0).map_err(|_| GraphValidationError::UnknownPassIndex)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SemanticResourceId {
+    generation: GraphGeneration,
+    index: ResourceIndex,
+}
+
+impl SemanticResourceId {
+    const fn new(generation: GraphGeneration, index: ResourceIndex) -> Self {
+        Self { generation, index }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SemanticPassId {
+    generation: GraphGeneration,
+    index: PassIndex,
+}
+
+impl SemanticPassId {
+    const fn new(generation: GraphGeneration, index: PassIndex) -> Self {
+        Self { generation, index }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages semantic resource roles for C06 T5-T6 graph planning."
+    )
+)]
+enum SemanticResourceRole {
+    RootWorkingImage,
+    CaptureWorkingImage,
+    IsolationWorkingImage,
+    ImportedImage,
+    BackdropCopy,
+    FilterIntermediate,
+    ShadowImage,
+    CompositeResult,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SemanticResourceDescriptor {
+    role: SemanticResourceRole,
+    logical_bounds: NonEmptyLogicalBounds,
+    device_origin: SignedDeviceOrigin,
+    device_extent: PositiveDeviceExtent,
+    texel_center_mapping: TexelCenterMapping,
+    expected_reads: u32,
+}
+
+impl SemanticResourceDescriptor {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C06 T4 resource descriptors are constructed by the staged C06 planner tests."
+        )
+    )]
+    const fn new(
+        role: SemanticResourceRole,
+        spatial: NonEmptyFrameSpatialPlan,
+        expected_reads: u32,
+    ) -> Self {
+        Self {
+            role,
+            logical_bounds: spatial.logical_bounds,
+            device_origin: spatial.device_origin,
+            device_extent: spatial.device_extent,
+            texel_center_mapping: spatial.texel_center_mapping,
+            expected_reads,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages root and transparent initialization intents for C06 T5-T6."
+    )
+)]
+enum WorkingImageInitialization {
+    SurfaceBaseColor(super::paint::Color),
+    Transparent,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages RGBA and SourceAlpha blur intent for C06 T5-T6."
+    )
+)]
+enum BlurInput {
+    Rgba,
+    SourceAlpha,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages the finite semantic pass vocabulary for C06 T5-T6."
+    )
+)]
+enum SemanticPassIntent {
+    ClearRoot {
+        initialization: WorkingImageInitialization,
+    },
+    VelloCapture {
+        initialization: WorkingImageInitialization,
+    },
+    CanonicalizeCapture,
+    CopyBackdrop,
+    ColorFilter,
+    BlurHorizontal {
+        input: BlurInput,
+    },
+    BlurVertical {
+        input: BlurInput,
+    },
+    DropShadowColorize,
+    Composite,
+    Present,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages empty and resource-bearing semantic results for C06 T5-T6."
+    )
+)]
+enum SemanticPassResult {
+    Empty,
+    Resource(SemanticResourceId),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticResourceProducer {
+    Imported,
+    Pass(SemanticPassId),
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticGraphResource {
+    id: SemanticResourceId,
+    descriptor: SemanticResourceDescriptor,
+    producer: Option<SemanticResourceProducer>,
+    recorded_reads: u32,
+    remaining_reads: Option<u32>,
+    releasable_after: Option<SemanticPassId>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticGraphPass {
+    id: SemanticPassId,
+    intent: SemanticPassIntent,
+    dependencies: Vec<SemanticPassId>,
+    reads: Vec<SemanticResourceId>,
+    result: SemanticPassResult,
+    scheduled: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GraphBuildPhase {
+    RecordingConsumers,
+    Scheduling,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 typed graph failures are consumed by the staged C06 planner tests."
+    )
+)]
+enum GraphValidationError {
+    GenerationExhausted,
+    ResourceIdentityExhausted,
+    PassIdentityExhausted,
+    UnknownResourceIndex,
+    UnknownPassIndex,
+    WrongResourceGeneration {
+        expected: GraphGeneration,
+        actual: GraphGeneration,
+    },
+    WrongPassGeneration {
+        expected: GraphGeneration,
+        actual: GraphGeneration,
+    },
+    UnknownResource(SemanticResourceId),
+    UnknownPass(SemanticPassId),
+    ReleasedResource(SemanticResourceId),
+    ForwardDependency(SemanticPassId),
+    ForwardRead(SemanticResourceId),
+    ReadWriteAlias(SemanticResourceId),
+    DuplicateProducer(SemanticResourceId),
+    DuplicateDependency(SemanticPassId),
+    DuplicateRead(SemanticResourceId),
+    MissingProducerDependency {
+        resource: SemanticResourceId,
+        producer: SemanticPassId,
+    },
+    ReadCountOverflow(SemanticResourceId),
+    DeclaredReadCountMismatch {
+        resource: SemanticResourceId,
+        declared: u32,
+        recorded: u32,
+    },
+    ResourceWithoutProducer(SemanticResourceId),
+    OrphanResult(SemanticResourceId),
+    MissingRootWorkingImage,
+    DuplicateRootWorkingImage,
+    MissingFinalPresent,
+    DuplicateFinalPresent,
+    MissingSurfaceBaseInitialization,
+    RepeatedSurfaceBaseInitialization,
+    RootMustUseSurfaceBase,
+    NonTransparentCaptureBase,
+    InvalidClearRootResult,
+    InvalidCaptureResult,
+    InvalidImportedResourceRole,
+    InvalidPassArity,
+    InvalidPassResultRole,
+    InvalidPresentIntent,
+    RootProducedByNonClearPass,
+    ConsumersNotSealed,
+    ConsumersAlreadySealed,
+    PassAlreadyScheduled(SemanticPassId),
+    UnscheduledDependency {
+        pass: SemanticPassId,
+        dependency: SemanticPassId,
+    },
+    UnscheduledProducer {
+        resource: SemanticResourceId,
+        producer: SemanticPassId,
+    },
+    UnscheduledPass(SemanticPassId),
+    UnscheduledReads {
+        resource: SemanticResourceId,
+        remaining: u32,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages the immutable validated graph consumed by C06 T5-T6 and C07."
+    )
+)]
+struct GpuRenderGraph {
+    generation: GraphGeneration,
+    resources: Vec<SemanticGraphResource>,
+    passes: Vec<SemanticGraphPass>,
+    root_working_image: SemanticResourceId,
+    final_present: SemanticPassId,
+}
+
+#[derive(Debug)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages the private graph builder that C06 T5-T6 will invoke."
+    )
+)]
+struct SemanticGraphBuilder {
+    generation: GraphGeneration,
+    phase: GraphBuildPhase,
+    resources: Vec<SemanticGraphResource>,
+    passes: Vec<SemanticGraphPass>,
+    root_working_image: Option<SemanticResourceId>,
+    final_present: Option<SemanticPassId>,
+    surface_base_initializations: u32,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T4 stages the private graph builder that C06 T5-T6 will invoke."
+    )
+)]
+impl SemanticGraphBuilder {
+    fn try_new() -> GraphBuildResult<Self> {
+        Ok(Self {
+            generation: GraphGeneration::try_next()?,
+            phase: GraphBuildPhase::RecordingConsumers,
+            resources: Vec::new(),
+            passes: Vec::new(),
+            root_working_image: None,
+            final_present: None,
+            surface_base_initializations: 0,
+        })
+    }
+
+    fn declare_resource(
+        &mut self,
+        descriptor: SemanticResourceDescriptor,
+    ) -> GraphBuildResult<SemanticResourceId> {
+        self.insert_resource(descriptor, None)
+    }
+
+    fn import_resource(
+        &mut self,
+        descriptor: SemanticResourceDescriptor,
+    ) -> GraphBuildResult<SemanticResourceId> {
+        if descriptor.role != SemanticResourceRole::ImportedImage {
+            return Err(GraphValidationError::InvalidImportedResourceRole);
+        }
+        self.insert_resource(descriptor, Some(SemanticResourceProducer::Imported))
+    }
+
+    fn insert_resource(
+        &mut self,
+        descriptor: SemanticResourceDescriptor,
+        producer: Option<SemanticResourceProducer>,
+    ) -> GraphBuildResult<SemanticResourceId> {
+        self.require_recording_phase()?;
+        if descriptor.role == SemanticResourceRole::RootWorkingImage
+            && self.root_working_image.is_some()
+        {
+            return Err(GraphValidationError::DuplicateRootWorkingImage);
+        }
+
+        let id = SemanticResourceId::new(
+            self.generation,
+            ResourceIndex::try_from_len(self.resources.len())?,
+        );
+        self.resources.push(SemanticGraphResource {
+            id,
+            descriptor,
+            producer,
+            recorded_reads: 0,
+            remaining_reads: None,
+            releasable_after: None,
+        });
+        if descriptor.role == SemanticResourceRole::RootWorkingImage {
+            self.root_working_image = Some(id);
+        }
+        Ok(id)
+    }
+
+    fn declare_pass(
+        &mut self,
+        intent: SemanticPassIntent,
+        dependencies: Vec<SemanticPassId>,
+        reads: Vec<SemanticResourceId>,
+        result: SemanticPassResult,
+    ) -> GraphBuildResult<SemanticPassId> {
+        self.require_recording_phase()?;
+        let id = SemanticPassId::new(self.generation, PassIndex::try_from_len(self.passes.len())?);
+
+        let mut seen_dependencies = Vec::with_capacity(dependencies.len());
+        for dependency in &dependencies {
+            if seen_dependencies.contains(dependency) {
+                return Err(GraphValidationError::DuplicateDependency(*dependency));
+            }
+            self.validate_recorded_dependency(*dependency)?;
+            seen_dependencies.push(*dependency);
+        }
+
+        let mut read_indices = Vec::with_capacity(reads.len());
+        let mut seen_reads = Vec::with_capacity(reads.len());
+        for resource in &reads {
+            if seen_reads.contains(resource) {
+                return Err(GraphValidationError::DuplicateRead(*resource));
+            }
+            let resource_index = self.validate_resource_id(*resource)?;
+            let graph_resource = self
+                .resources
+                .get(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*resource))?;
+            match graph_resource.producer {
+                Some(SemanticResourceProducer::Imported) => {}
+                Some(SemanticResourceProducer::Pass(producer)) => {
+                    if !dependencies.contains(&producer) {
+                        return Err(GraphValidationError::MissingProducerDependency {
+                            resource: *resource,
+                            producer,
+                        });
+                    }
+                }
+                None => return Err(GraphValidationError::ForwardRead(*resource)),
+            }
+            graph_resource
+                .recorded_reads
+                .checked_add(1)
+                .ok_or(GraphValidationError::ReadCountOverflow(*resource))?;
+            seen_reads.push(*resource);
+            read_indices.push(resource_index);
+        }
+
+        let result_index = match result {
+            SemanticPassResult::Empty => None,
+            SemanticPassResult::Resource(resource) => {
+                let resource_index = self.validate_resource_id(resource)?;
+                if reads.contains(&resource) {
+                    return Err(GraphValidationError::ReadWriteAlias(resource));
+                }
+                if self
+                    .resources
+                    .get(resource_index)
+                    .and_then(|resource| resource.producer)
+                    .is_some()
+                {
+                    return Err(GraphValidationError::DuplicateProducer(resource));
+                }
+                Some(resource_index)
+            }
+        };
+
+        self.validate_pass_shape(intent, &dependencies, &reads, result)?;
+
+        let initializes_surface = matches!(
+            intent,
+            SemanticPassIntent::ClearRoot {
+                initialization: WorkingImageInitialization::SurfaceBaseColor(_)
+            }
+        );
+        let is_present = intent == SemanticPassIntent::Present;
+        let mut resources = self.resources.clone();
+        if let Some(resource_index) = result_index {
+            let resource = resources.get_mut(resource_index).ok_or(match result {
+                SemanticPassResult::Resource(resource) => {
+                    GraphValidationError::UnknownResource(resource)
+                }
+                SemanticPassResult::Empty => GraphValidationError::UnknownResourceIndex,
+            })?;
+            resource.producer = Some(SemanticResourceProducer::Pass(id));
+        }
+        for (resource, resource_index) in reads.iter().zip(read_indices) {
+            let graph_resource = resources
+                .get_mut(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*resource))?;
+            graph_resource.recorded_reads = graph_resource
+                .recorded_reads
+                .checked_add(1)
+                .ok_or(GraphValidationError::ReadCountOverflow(*resource))?;
+        }
+
+        self.resources = resources;
+        self.passes.push(SemanticGraphPass {
+            id,
+            intent,
+            dependencies,
+            reads,
+            result,
+            scheduled: false,
+        });
+        if initializes_surface {
+            self.surface_base_initializations = 1;
+        }
+        if is_present {
+            self.final_present = Some(id);
+        }
+        Ok(id)
+    }
+
+    fn validate_pass_shape(
+        &self,
+        intent: SemanticPassIntent,
+        dependencies: &[SemanticPassId],
+        reads: &[SemanticResourceId],
+        result: SemanticPassResult,
+    ) -> GraphBuildResult<()> {
+        match intent {
+            SemanticPassIntent::ClearRoot { initialization } => {
+                if !matches!(
+                    initialization,
+                    WorkingImageInitialization::SurfaceBaseColor(_)
+                ) {
+                    return Err(GraphValidationError::RootMustUseSurfaceBase);
+                }
+                if self.surface_base_initializations != 0 {
+                    return Err(GraphValidationError::RepeatedSurfaceBaseInitialization);
+                }
+                if !dependencies.is_empty() || !reads.is_empty() {
+                    return Err(GraphValidationError::InvalidClearRootResult);
+                }
+                let SemanticPassResult::Resource(resource) = result else {
+                    return Err(GraphValidationError::InvalidClearRootResult);
+                };
+                let resource_index = self.validate_resource_id(resource)?;
+                if self.resources.get(resource_index).is_none_or(|resource| {
+                    resource.descriptor.role != SemanticResourceRole::RootWorkingImage
+                }) {
+                    return Err(GraphValidationError::InvalidClearRootResult);
+                }
+            }
+            SemanticPassIntent::VelloCapture { initialization } => {
+                if initialization != WorkingImageInitialization::Transparent {
+                    return Err(GraphValidationError::NonTransparentCaptureBase);
+                }
+                if !reads.is_empty() {
+                    return Err(GraphValidationError::InvalidCaptureResult);
+                }
+                if let SemanticPassResult::Resource(resource) = result {
+                    let resource_index = self.validate_resource_id(resource)?;
+                    if self.resources.get(resource_index).is_none_or(|resource| {
+                        !matches!(
+                            resource.descriptor.role,
+                            SemanticResourceRole::CaptureWorkingImage
+                                | SemanticResourceRole::IsolationWorkingImage
+                        )
+                    }) {
+                        return Err(GraphValidationError::InvalidCaptureResult);
+                    }
+                }
+            }
+            SemanticPassIntent::Present => {
+                if self.final_present.is_some() {
+                    return Err(GraphValidationError::DuplicateFinalPresent);
+                }
+                if reads.len() != 1 || result != SemanticPassResult::Empty {
+                    return Err(GraphValidationError::InvalidPresentIntent);
+                }
+            }
+            SemanticPassIntent::CanonicalizeCapture
+            | SemanticPassIntent::CopyBackdrop
+            | SemanticPassIntent::ColorFilter
+            | SemanticPassIntent::BlurHorizontal { .. }
+            | SemanticPassIntent::BlurVertical { .. }
+            | SemanticPassIntent::DropShadowColorize
+            | SemanticPassIntent::Composite => {
+                let SemanticPassResult::Resource(resource) = result else {
+                    if reads.is_empty() {
+                        return Ok(());
+                    }
+                    return Err(GraphValidationError::InvalidPassArity);
+                };
+                let reads_are_valid = if intent == SemanticPassIntent::Composite {
+                    reads.len() >= 2
+                } else {
+                    reads.len() == 1
+                };
+                if !reads_are_valid {
+                    return Err(GraphValidationError::InvalidPassArity);
+                }
+                let expected_role = match intent {
+                    SemanticPassIntent::CopyBackdrop => SemanticResourceRole::BackdropCopy,
+                    SemanticPassIntent::DropShadowColorize => SemanticResourceRole::ShadowImage,
+                    SemanticPassIntent::Composite => SemanticResourceRole::CompositeResult,
+                    SemanticPassIntent::CanonicalizeCapture
+                    | SemanticPassIntent::ColorFilter
+                    | SemanticPassIntent::BlurHorizontal { .. }
+                    | SemanticPassIntent::BlurVertical { .. } => {
+                        SemanticResourceRole::FilterIntermediate
+                    }
+                    SemanticPassIntent::ClearRoot { .. }
+                    | SemanticPassIntent::VelloCapture { .. }
+                    | SemanticPassIntent::Present => {
+                        return Err(GraphValidationError::InvalidPassResultRole);
+                    }
+                };
+                let resource_index = self.validate_resource_id(resource)?;
+                if self
+                    .resources
+                    .get(resource_index)
+                    .is_none_or(|resource| resource.descriptor.role != expected_role)
+                {
+                    return Err(GraphValidationError::InvalidPassResultRole);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_scheduling(&mut self) -> GraphBuildResult<()> {
+        self.require_recording_phase()?;
+        let root = self
+            .root_working_image
+            .ok_or(GraphValidationError::MissingRootWorkingImage)?;
+        self.final_present
+            .ok_or(GraphValidationError::MissingFinalPresent)?;
+        if self.surface_base_initializations == 0 {
+            return Err(GraphValidationError::MissingSurfaceBaseInitialization);
+        }
+        if self.surface_base_initializations != 1 {
+            return Err(GraphValidationError::RepeatedSurfaceBaseInitialization);
+        }
+
+        for resource in &self.resources {
+            let producer = resource
+                .producer
+                .ok_or(GraphValidationError::ResourceWithoutProducer(resource.id))?;
+            if resource.id == root
+                && !matches!(producer, SemanticResourceProducer::Pass(pass) if self
+                    .passes
+                    .get(pass.index.as_usize()?)
+                    .is_some_and(|pass| matches!(pass.intent, SemanticPassIntent::ClearRoot { .. })))
+            {
+                return Err(GraphValidationError::RootProducedByNonClearPass);
+            }
+            if resource.descriptor.expected_reads != resource.recorded_reads {
+                return Err(GraphValidationError::DeclaredReadCountMismatch {
+                    resource: resource.id,
+                    declared: resource.descriptor.expected_reads,
+                    recorded: resource.recorded_reads,
+                });
+            }
+            if resource.recorded_reads == 0 {
+                return Err(GraphValidationError::OrphanResult(resource.id));
+            }
+        }
+
+        for pass in &self.passes {
+            if let SemanticPassIntent::VelloCapture { initialization } = pass.intent
+                && initialization != WorkingImageInitialization::Transparent
+            {
+                return Err(GraphValidationError::NonTransparentCaptureBase);
+            }
+        }
+
+        for resource in &mut self.resources {
+            resource.remaining_reads = Some(resource.descriptor.expected_reads);
+        }
+        self.phase = GraphBuildPhase::Scheduling;
+        Ok(())
+    }
+
+    fn schedule_pass(&mut self, id: SemanticPassId) -> GraphBuildResult<()> {
+        if self.phase != GraphBuildPhase::Scheduling {
+            return Err(GraphValidationError::ConsumersNotSealed);
+        }
+        let pass_index = self.validate_existing_pass_id(id)?;
+        let pass = self
+            .passes
+            .get(pass_index)
+            .ok_or(GraphValidationError::UnknownPass(id))?;
+        if pass.scheduled {
+            return Err(GraphValidationError::PassAlreadyScheduled(id));
+        }
+        for dependency in &pass.dependencies {
+            let dependency_index = self.validate_existing_pass_id(*dependency)?;
+            if self
+                .passes
+                .get(dependency_index)
+                .is_none_or(|dependency| !dependency.scheduled)
+            {
+                return Err(GraphValidationError::UnscheduledDependency {
+                    pass: id,
+                    dependency: *dependency,
+                });
+            }
+        }
+
+        let mut read_indices = Vec::with_capacity(pass.reads.len());
+        for resource in &pass.reads {
+            let resource_index = self.validate_resource_id(*resource)?;
+            let graph_resource = self
+                .resources
+                .get(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*resource))?;
+            match graph_resource.producer {
+                Some(SemanticResourceProducer::Imported) => {}
+                Some(SemanticResourceProducer::Pass(producer)) => {
+                    let producer_index = self.validate_existing_pass_id(producer)?;
+                    if self
+                        .passes
+                        .get(producer_index)
+                        .is_none_or(|producer| !producer.scheduled)
+                    {
+                        return Err(GraphValidationError::UnscheduledProducer {
+                            resource: *resource,
+                            producer,
+                        });
+                    }
+                }
+                None => return Err(GraphValidationError::ForwardRead(*resource)),
+            }
+            match graph_resource.remaining_reads {
+                Some(0) => return Err(GraphValidationError::ReleasedResource(*resource)),
+                Some(_) => {}
+                None => return Err(GraphValidationError::ConsumersNotSealed),
+            }
+            read_indices.push(resource_index);
+        }
+
+        let mut resources = self.resources.clone();
+        for (resource, resource_index) in pass.reads.iter().zip(read_indices) {
+            let graph_resource = resources
+                .get_mut(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*resource))?;
+            let remaining = graph_resource
+                .remaining_reads
+                .and_then(|remaining| remaining.checked_sub(1))
+                .ok_or(GraphValidationError::ReleasedResource(*resource))?;
+            graph_resource.remaining_reads = Some(remaining);
+            if remaining == 0 {
+                graph_resource.releasable_after = Some(id);
+            }
+        }
+        let mut passes = self.passes.clone();
+        let scheduled_pass = passes
+            .get_mut(pass_index)
+            .ok_or(GraphValidationError::UnknownPass(id))?;
+        scheduled_pass.scheduled = true;
+        self.resources = resources;
+        self.passes = passes;
+        Ok(())
+    }
+
+    fn ensure_resource_readable(&self, resource: SemanticResourceId) -> GraphBuildResult<()> {
+        if self.phase != GraphBuildPhase::Scheduling {
+            return Err(GraphValidationError::ConsumersNotSealed);
+        }
+        let resource_index = self.validate_resource_id(resource)?;
+        match self
+            .resources
+            .get(resource_index)
+            .ok_or(GraphValidationError::UnknownResource(resource))?
+            .remaining_reads
+        {
+            Some(0) => Err(GraphValidationError::ReleasedResource(resource)),
+            Some(_) => Ok(()),
+            None => Err(GraphValidationError::ConsumersNotSealed),
+        }
+    }
+
+    fn finish(self) -> GraphBuildResult<GpuRenderGraph> {
+        if self.phase != GraphBuildPhase::Scheduling {
+            return Err(GraphValidationError::ConsumersNotSealed);
+        }
+        for pass in &self.passes {
+            if !pass.scheduled {
+                return Err(GraphValidationError::UnscheduledPass(pass.id));
+            }
+        }
+        for resource in &self.resources {
+            match resource.remaining_reads {
+                Some(0) if resource.releasable_after.is_some() => {}
+                Some(remaining) => {
+                    return Err(GraphValidationError::UnscheduledReads {
+                        resource: resource.id,
+                        remaining,
+                    });
+                }
+                None => return Err(GraphValidationError::ConsumersNotSealed),
+            }
+        }
+        let root_working_image = self
+            .root_working_image
+            .ok_or(GraphValidationError::MissingRootWorkingImage)?;
+        let final_present = self
+            .final_present
+            .ok_or(GraphValidationError::MissingFinalPresent)?;
+        Ok(GpuRenderGraph {
+            generation: self.generation,
+            resources: self.resources,
+            passes: self.passes,
+            root_working_image,
+            final_present,
+        })
+    }
+
+    fn require_recording_phase(&self) -> GraphBuildResult<()> {
+        match self.phase {
+            GraphBuildPhase::RecordingConsumers => Ok(()),
+            GraphBuildPhase::Scheduling => Err(GraphValidationError::ConsumersAlreadySealed),
+        }
+    }
+
+    fn validate_resource_id(&self, id: SemanticResourceId) -> GraphBuildResult<usize> {
+        if id.generation != self.generation {
+            return Err(GraphValidationError::WrongResourceGeneration {
+                expected: self.generation,
+                actual: id.generation,
+            });
+        }
+        let index = id.index.as_usize()?;
+        if self.resources.get(index).is_none() {
+            return Err(GraphValidationError::UnknownResource(id));
+        }
+        Ok(index)
+    }
+
+    fn validate_recorded_dependency(&self, id: SemanticPassId) -> GraphBuildResult<usize> {
+        if id.generation != self.generation {
+            return Err(GraphValidationError::WrongPassGeneration {
+                expected: self.generation,
+                actual: id.generation,
+            });
+        }
+        let index = id.index.as_usize()?;
+        if index == self.passes.len() {
+            return Err(GraphValidationError::ForwardDependency(id));
+        }
+        if self.passes.get(index).is_none() {
+            return Err(GraphValidationError::UnknownPass(id));
+        }
+        Ok(index)
+    }
+
+    fn validate_existing_pass_id(&self, id: SemanticPassId) -> GraphBuildResult<usize> {
+        if id.generation != self.generation {
+            return Err(GraphValidationError::WrongPassGeneration {
+                expected: self.generation,
+                actual: id.generation,
+            });
+        }
+        let index = id.index.as_usize()?;
+        if self.passes.get(index).is_none() {
+            return Err(GraphValidationError::UnknownPass(id));
+        }
+        Ok(index)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct LinearTransformMetrics {
     largest_singular_value: f64,
@@ -1049,4 +1918,857 @@ pub(crate) fn spatial_primitives_for_test(
             })
         }
     }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum InvalidSemanticGraphStateForTest {
+    StaleResourceIdentity,
+    StalePassIdentity,
+    UnknownResourceIdentity,
+    UnknownPassIdentity,
+    ReleasedResourceIdentity,
+    ForwardDependency,
+    ForwardRead,
+    ReadWriteAlias,
+    DuplicateProducer,
+    DeclaredReadCountMismatch,
+    OrphanResult,
+    MissingRootWorkingImage,
+    DuplicateRootWorkingImage,
+    MissingFinalPresent,
+    DuplicateFinalPresent,
+    NonTransparentCaptureBase,
+    RepeatedSurfaceBaseInitialization,
+    MissingProducerDependency,
+    ScheduleBeforeConsumersAreSealed,
+    DeclareConsumerAfterConsumersAreSealed,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GraphFailureObservation {
+    WrongResourceGeneration,
+    WrongPassGeneration,
+    UnknownResource,
+    UnknownPass,
+    ReleasedResource,
+    ForwardDependency,
+    ForwardRead,
+    ReadWriteAlias,
+    DuplicateProducer,
+    DeclaredReadCountMismatch,
+    OrphanResult,
+    MissingRootWorkingImage,
+    DuplicateRootWorkingImage,
+    MissingFinalPresent,
+    DuplicateFinalPresent,
+    NonTransparentCaptureBase,
+    RepeatedSurfaceBaseInitialization,
+    MissingProducerDependency,
+    ConsumersNotSealed,
+    ConsumersAlreadySealed,
+    OtherTypedFailure,
+}
+
+#[cfg(test)]
+impl From<GraphValidationError> for GraphFailureObservation {
+    fn from(error: GraphValidationError) -> Self {
+        match error {
+            GraphValidationError::WrongResourceGeneration { .. } => Self::WrongResourceGeneration,
+            GraphValidationError::WrongPassGeneration { .. } => Self::WrongPassGeneration,
+            GraphValidationError::UnknownResource(_)
+            | GraphValidationError::UnknownResourceIndex => Self::UnknownResource,
+            GraphValidationError::UnknownPass(_) | GraphValidationError::UnknownPassIndex => {
+                Self::UnknownPass
+            }
+            GraphValidationError::ReleasedResource(_) => Self::ReleasedResource,
+            GraphValidationError::ForwardDependency(_) => Self::ForwardDependency,
+            GraphValidationError::ForwardRead(_) => Self::ForwardRead,
+            GraphValidationError::ReadWriteAlias(_) => Self::ReadWriteAlias,
+            GraphValidationError::DuplicateProducer(_) => Self::DuplicateProducer,
+            GraphValidationError::DeclaredReadCountMismatch { .. } => {
+                Self::DeclaredReadCountMismatch
+            }
+            GraphValidationError::OrphanResult(_) => Self::OrphanResult,
+            GraphValidationError::MissingRootWorkingImage => Self::MissingRootWorkingImage,
+            GraphValidationError::DuplicateRootWorkingImage => Self::DuplicateRootWorkingImage,
+            GraphValidationError::MissingFinalPresent => Self::MissingFinalPresent,
+            GraphValidationError::DuplicateFinalPresent => Self::DuplicateFinalPresent,
+            GraphValidationError::NonTransparentCaptureBase => Self::NonTransparentCaptureBase,
+            GraphValidationError::RepeatedSurfaceBaseInitialization => {
+                Self::RepeatedSurfaceBaseInitialization
+            }
+            GraphValidationError::MissingProducerDependency { .. } => {
+                Self::MissingProducerDependency
+            }
+            GraphValidationError::ConsumersNotSealed => Self::ConsumersNotSealed,
+            GraphValidationError::ConsumersAlreadySealed => Self::ConsumersAlreadySealed,
+            GraphValidationError::GenerationExhausted
+            | GraphValidationError::ResourceIdentityExhausted
+            | GraphValidationError::PassIdentityExhausted
+            | GraphValidationError::DuplicateDependency(_)
+            | GraphValidationError::DuplicateRead(_)
+            | GraphValidationError::ReadCountOverflow(_)
+            | GraphValidationError::ResourceWithoutProducer(_)
+            | GraphValidationError::MissingSurfaceBaseInitialization
+            | GraphValidationError::RootMustUseSurfaceBase
+            | GraphValidationError::InvalidClearRootResult
+            | GraphValidationError::InvalidCaptureResult
+            | GraphValidationError::InvalidImportedResourceRole
+            | GraphValidationError::InvalidPassArity
+            | GraphValidationError::InvalidPassResultRole
+            | GraphValidationError::InvalidPresentIntent
+            | GraphValidationError::RootProducedByNonClearPass
+            | GraphValidationError::PassAlreadyScheduled(_)
+            | GraphValidationError::UnscheduledDependency { .. }
+            | GraphValidationError::UnscheduledProducer { .. }
+            | GraphValidationError::UnscheduledPass(_)
+            | GraphValidationError::UnscheduledReads { .. } => Self::OtherTypedFailure,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SemanticGraphProbeError {
+    SpatialSetup,
+    UnexpectedGraphFailure(GraphFailureObservation),
+    ExpectedRejectionMissing,
+    ObservationUnavailable,
+}
+
+#[cfg(test)]
+type SemanticGraphProbeResult<T> = std::result::Result<T, SemanticGraphProbeError>;
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GraphEdgeLifetimeObservation {
+    pub(crate) observes_bounded_offscreen_pass: bool,
+    pub(crate) source_expected_reads: u32,
+    pub(crate) remaining_before_first_consumer: u32,
+    pub(crate) remaining_after_alpha_consumer: u32,
+    pub(crate) remaining_before_source_over: u32,
+    pub(crate) remaining_after_source_over: u32,
+    pub(crate) released_after_source_over: bool,
+    pub(crate) post_release_read_rejected: bool,
+    pub(crate) every_result_has_one_owner: bool,
+    pub(crate) every_read_names_its_producer: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GraphBaseInitializationObservation {
+    pub(crate) observes_bounded_offscreen_pass: bool,
+    pub(crate) root_working_images: usize,
+    pub(crate) final_present_intents: usize,
+    pub(crate) surface_base_initializations: usize,
+    pub(crate) surface_base_color: Option<super::paint::Color>,
+    pub(crate) isolation_working_images: usize,
+    pub(crate) captures_are_transparent: bool,
+    pub(crate) empty_results_have_no_descriptor: bool,
+    pub(crate) resource_descriptors_are_spatially_complete: bool,
+}
+
+#[cfg(test)]
+fn graph_probe_descriptor(
+    role: SemanticResourceRole,
+    expected_reads: u32,
+) -> SemanticGraphProbeResult<SemanticResourceDescriptor> {
+    let logical_bounds = LogicalBounds::try_from_rect(
+        Rect::new(-2.0, 3.0, 8.0, 6.0),
+        "semantic graph probe bounds",
+    )
+    .map_err(|_| SemanticGraphProbeError::SpatialSetup)?;
+    let spatial = FrameContext::try_new(2.0)
+        .and_then(|context| context.plan_local_bounds(logical_bounds, Transform::identity()))
+        .map_err(|_| SemanticGraphProbeError::SpatialSetup)?;
+    let FrameSpatialPlan::NonEmpty(spatial) = spatial else {
+        return Err(SemanticGraphProbeError::SpatialSetup);
+    };
+    Ok(SemanticResourceDescriptor::new(
+        role,
+        spatial,
+        expected_reads,
+    ))
+}
+
+#[cfg(test)]
+fn graph_probe_builder() -> SemanticGraphProbeResult<SemanticGraphBuilder> {
+    SemanticGraphBuilder::try_new().map_err(|error| {
+        SemanticGraphProbeError::UnexpectedGraphFailure(GraphFailureObservation::from(error))
+    })
+}
+
+#[cfg(test)]
+fn graph_probe_value<T>(result: GraphBuildResult<T>) -> SemanticGraphProbeResult<T> {
+    result.map_err(|error| {
+        SemanticGraphProbeError::UnexpectedGraphFailure(GraphFailureObservation::from(error))
+    })
+}
+
+#[cfg(test)]
+fn graph_probe_failure<T>(
+    result: GraphBuildResult<T>,
+) -> SemanticGraphProbeResult<GraphFailureObservation> {
+    match result {
+        Ok(_) => Err(SemanticGraphProbeError::ExpectedRejectionMissing),
+        Err(error) => Ok(GraphFailureObservation::from(error)),
+    }
+}
+
+#[cfg(test)]
+fn declare_probe_root(
+    builder: &mut SemanticGraphBuilder,
+    expected_reads: u32,
+) -> SemanticGraphProbeResult<(SemanticResourceId, SemanticPassId)> {
+    let root = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::RootWorkingImage,
+        expected_reads,
+    )?))?;
+    let clear = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::ClearRoot {
+            initialization: WorkingImageInitialization::SurfaceBaseColor(
+                super::paint::Color::BLACK,
+            ),
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Resource(root),
+    ))?;
+    Ok((root, clear))
+}
+
+#[cfg(test)]
+fn declare_probe_capture(
+    builder: &mut SemanticGraphBuilder,
+    role: SemanticResourceRole,
+    expected_reads: u32,
+) -> SemanticGraphProbeResult<(SemanticResourceId, SemanticPassId)> {
+    let resource =
+        graph_probe_value(builder.declare_resource(graph_probe_descriptor(role, expected_reads)?))?;
+    let pass = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::VelloCapture {
+            initialization: WorkingImageInitialization::Transparent,
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Resource(resource),
+    ))?;
+    Ok((resource, pass))
+}
+
+#[cfg(test)]
+fn declare_probe_present(
+    builder: &mut SemanticGraphBuilder,
+    resource: SemanticResourceId,
+    producer: SemanticPassId,
+) -> SemanticGraphProbeResult<SemanticPassId> {
+    graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::Present,
+        vec![producer],
+        vec![resource],
+        SemanticPassResult::Empty,
+    ))
+}
+
+#[cfg(test)]
+pub(crate) fn invalid_semantic_graph_state_for_test(
+    state: InvalidSemanticGraphStateForTest,
+) -> SemanticGraphProbeResult<GraphFailureObservation> {
+    match state {
+        InvalidSemanticGraphStateForTest::StaleResourceIdentity => {
+            let mut first = graph_probe_builder()?;
+            let stale = graph_probe_value(first.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::FilterIntermediate,
+                1,
+            )?))?;
+            let mut second = graph_probe_builder()?;
+            let result = graph_probe_value(second.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::FilterIntermediate,
+                1,
+            )?))?;
+            graph_probe_failure(second.declare_pass(
+                SemanticPassIntent::ColorFilter,
+                Vec::new(),
+                vec![stale],
+                SemanticPassResult::Resource(result),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::StalePassIdentity => {
+            let mut first = graph_probe_builder()?;
+            let (_, stale) = declare_probe_root(&mut first, 1)?;
+            let mut second = graph_probe_builder()?;
+            graph_probe_failure(second.declare_pass(
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::Transparent,
+                },
+                vec![stale],
+                Vec::new(),
+                SemanticPassResult::Empty,
+            ))
+        }
+        InvalidSemanticGraphStateForTest::UnknownResourceIdentity => {
+            let mut builder = graph_probe_builder()?;
+            let unknown = SemanticResourceId::new(builder.generation, ResourceIndex(7));
+            let result = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::FilterIntermediate,
+                1,
+            )?))?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::ColorFilter,
+                Vec::new(),
+                vec![unknown],
+                SemanticPassResult::Resource(result),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::UnknownPassIdentity => {
+            let mut builder = graph_probe_builder()?;
+            let unknown = SemanticPassId::new(builder.generation, PassIndex(1));
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::Transparent,
+                },
+                vec![unknown],
+                Vec::new(),
+                SemanticPassResult::Empty,
+            ))
+        }
+        InvalidSemanticGraphStateForTest::ReleasedResourceIdentity => {
+            let mut builder = graph_probe_builder()?;
+            let (root, clear) = declare_probe_root(&mut builder, 1)?;
+            let present = declare_probe_present(&mut builder, root, clear)?;
+            graph_probe_value(builder.begin_scheduling())?;
+            graph_probe_value(builder.schedule_pass(clear))?;
+            graph_probe_value(builder.schedule_pass(present))?;
+            graph_probe_failure(builder.ensure_resource_readable(root))
+        }
+        InvalidSemanticGraphStateForTest::ForwardDependency => {
+            let mut builder = graph_probe_builder()?;
+            let future = SemanticPassId::new(builder.generation, PassIndex(0));
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::Transparent,
+                },
+                vec![future],
+                Vec::new(),
+                SemanticPassResult::Empty,
+            ))
+        }
+        InvalidSemanticGraphStateForTest::ForwardRead => {
+            let mut builder = graph_probe_builder()?;
+            let source = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::FilterIntermediate,
+                1,
+            )?))?;
+            let result = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::FilterIntermediate,
+                1,
+            )?))?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::ColorFilter,
+                Vec::new(),
+                vec![source],
+                SemanticPassResult::Resource(result),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::ReadWriteAlias => {
+            let mut builder = graph_probe_builder()?;
+            let (root, clear) = declare_probe_root(&mut builder, 1)?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::ColorFilter,
+                vec![clear],
+                vec![root],
+                SemanticPassResult::Resource(root),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::DuplicateProducer => {
+            let mut builder = graph_probe_builder()?;
+            let (capture, _) =
+                declare_probe_capture(&mut builder, SemanticResourceRole::CaptureWorkingImage, 1)?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::ColorFilter,
+                Vec::new(),
+                Vec::new(),
+                SemanticPassResult::Resource(capture),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::DeclaredReadCountMismatch => {
+            let mut builder = graph_probe_builder()?;
+            let (root, clear) = declare_probe_root(&mut builder, 2)?;
+            declare_probe_present(&mut builder, root, clear)?;
+            graph_probe_failure(builder.begin_scheduling())
+        }
+        InvalidSemanticGraphStateForTest::OrphanResult => {
+            let mut builder = graph_probe_builder()?;
+            let (root, clear) = declare_probe_root(&mut builder, 1)?;
+            declare_probe_capture(&mut builder, SemanticResourceRole::CaptureWorkingImage, 0)?;
+            declare_probe_present(&mut builder, root, clear)?;
+            graph_probe_failure(builder.begin_scheduling())
+        }
+        InvalidSemanticGraphStateForTest::MissingRootWorkingImage => {
+            let mut builder = graph_probe_builder()?;
+            let (capture, producer) =
+                declare_probe_capture(&mut builder, SemanticResourceRole::CaptureWorkingImage, 1)?;
+            declare_probe_present(&mut builder, capture, producer)?;
+            graph_probe_failure(builder.begin_scheduling())
+        }
+        InvalidSemanticGraphStateForTest::DuplicateRootWorkingImage => {
+            let mut builder = graph_probe_builder()?;
+            graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::RootWorkingImage,
+                1,
+            )?))?;
+            graph_probe_failure(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::RootWorkingImage,
+                1,
+            )?))
+        }
+        InvalidSemanticGraphStateForTest::MissingFinalPresent => {
+            let mut builder = graph_probe_builder()?;
+            declare_probe_root(&mut builder, 0)?;
+            graph_probe_failure(builder.begin_scheduling())
+        }
+        InvalidSemanticGraphStateForTest::DuplicateFinalPresent => {
+            let mut builder = graph_probe_builder()?;
+            let (root, clear) = declare_probe_root(&mut builder, 2)?;
+            declare_probe_present(&mut builder, root, clear)?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::Present,
+                vec![clear],
+                vec![root],
+                SemanticPassResult::Empty,
+            ))
+        }
+        InvalidSemanticGraphStateForTest::NonTransparentCaptureBase => {
+            let mut builder = graph_probe_builder()?;
+            let capture = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::IsolationWorkingImage,
+                1,
+            )?))?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::SurfaceBaseColor(
+                        super::paint::Color::BLACK,
+                    ),
+                },
+                Vec::new(),
+                Vec::new(),
+                SemanticPassResult::Resource(capture),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::RepeatedSurfaceBaseInitialization => {
+            let mut builder = graph_probe_builder()?;
+            declare_probe_root(&mut builder, 1)?;
+            let isolation = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+                SemanticResourceRole::IsolationWorkingImage,
+                1,
+            )?))?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::ClearRoot {
+                    initialization: WorkingImageInitialization::SurfaceBaseColor(
+                        super::paint::Color::BLACK,
+                    ),
+                },
+                Vec::new(),
+                Vec::new(),
+                SemanticPassResult::Resource(isolation),
+            ))
+        }
+        InvalidSemanticGraphStateForTest::MissingProducerDependency => {
+            let mut builder = graph_probe_builder()?;
+            let (root, _) = declare_probe_root(&mut builder, 1)?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::Present,
+                Vec::new(),
+                vec![root],
+                SemanticPassResult::Empty,
+            ))
+        }
+        InvalidSemanticGraphStateForTest::ScheduleBeforeConsumersAreSealed => {
+            let mut builder = graph_probe_builder()?;
+            let (_, clear) = declare_probe_root(&mut builder, 1)?;
+            graph_probe_failure(builder.schedule_pass(clear))
+        }
+        InvalidSemanticGraphStateForTest::DeclareConsumerAfterConsumersAreSealed => {
+            let mut builder = graph_probe_builder()?;
+            let (root, clear) = declare_probe_root(&mut builder, 1)?;
+            declare_probe_present(&mut builder, root, clear)?;
+            graph_probe_value(builder.begin_scheduling())?;
+            graph_probe_failure(builder.declare_pass(
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::Transparent,
+                },
+                Vec::new(),
+                Vec::new(),
+                SemanticPassResult::Empty,
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+struct CompletedDropShadowGraphProbe {
+    graph: GpuRenderGraph,
+    source: SemanticResourceId,
+    source_over: SemanticPassId,
+    source_expected_reads: u32,
+    remaining_before_first_consumer: u32,
+    remaining_after_alpha_consumer: u32,
+    remaining_before_source_over: u32,
+    remaining_after_source_over: u32,
+    post_release_read_rejected: bool,
+}
+
+#[cfg(test)]
+fn remaining_reads_for_probe(
+    builder: &SemanticGraphBuilder,
+    resource: SemanticResourceId,
+) -> SemanticGraphProbeResult<u32> {
+    let resource_index = graph_probe_value(builder.validate_resource_id(resource))?;
+    builder
+        .resources
+        .get(resource_index)
+        .and_then(|resource| resource.remaining_reads)
+        .ok_or(SemanticGraphProbeError::ObservationUnavailable)
+}
+
+#[cfg(test)]
+fn build_drop_shadow_graph_probe() -> SemanticGraphProbeResult<CompletedDropShadowGraphProbe> {
+    let mut builder = graph_probe_builder()?;
+    let (root, clear_root) = declare_probe_root(&mut builder, 1)?;
+    graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::VelloCapture {
+            initialization: WorkingImageInitialization::Transparent,
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Empty,
+    ))?;
+    let (source, capture) =
+        declare_probe_capture(&mut builder, SemanticResourceRole::IsolationWorkingImage, 2)?;
+    let (canonical_source, canonical_capture) =
+        declare_probe_capture(&mut builder, SemanticResourceRole::CaptureWorkingImage, 1)?;
+    let canonical = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::FilterIntermediate,
+        1,
+    )?))?;
+    let canonicalize = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::CanonicalizeCapture,
+        vec![canonical_capture],
+        vec![canonical_source],
+        SemanticPassResult::Resource(canonical),
+    ))?;
+    let backdrop = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::BackdropCopy,
+        1,
+    )?))?;
+    let copy_backdrop = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::CopyBackdrop,
+        vec![canonicalize],
+        vec![canonical],
+        SemanticPassResult::Resource(backdrop),
+    ))?;
+    let rgba_blurred = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::FilterIntermediate,
+        1,
+    )?))?;
+    let rgba_blur = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::BlurHorizontal {
+            input: BlurInput::Rgba,
+        },
+        vec![copy_backdrop],
+        vec![backdrop],
+        SemanticPassResult::Resource(rgba_blurred),
+    ))?;
+    let imported = graph_probe_value(builder.import_resource(graph_probe_descriptor(
+        SemanticResourceRole::ImportedImage,
+        1,
+    )?))?;
+    let horizontal = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::FilterIntermediate,
+        1,
+    )?))?;
+    let blur_horizontal = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::BlurHorizontal {
+            input: BlurInput::SourceAlpha,
+        },
+        vec![capture],
+        vec![source],
+        SemanticPassResult::Resource(horizontal),
+    ))?;
+    let vertical = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::FilterIntermediate,
+        1,
+    )?))?;
+    let blur_vertical = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::BlurVertical {
+            input: BlurInput::SourceAlpha,
+        },
+        vec![blur_horizontal],
+        vec![horizontal],
+        SemanticPassResult::Resource(vertical),
+    ))?;
+    let shadow = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::ShadowImage,
+        1,
+    )?))?;
+    let colorize = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::DropShadowColorize,
+        vec![blur_vertical],
+        vec![vertical],
+        SemanticPassResult::Resource(shadow),
+    ))?;
+    let composed = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::CompositeResult,
+        1,
+    )?))?;
+    let source_over = graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::Composite,
+        vec![clear_root, capture, colorize, rgba_blur],
+        vec![root, source, shadow, imported, rgba_blurred],
+        SemanticPassResult::Resource(composed),
+    ))?;
+    let present = declare_probe_present(&mut builder, composed, source_over)?;
+
+    graph_probe_value(builder.begin_scheduling())?;
+    let source_expected_reads = builder
+        .resources
+        .get(graph_probe_value(builder.validate_resource_id(source))?)
+        .map(|resource| resource.descriptor.expected_reads)
+        .ok_or(SemanticGraphProbeError::ObservationUnavailable)?;
+    graph_probe_value(builder.schedule_pass(clear_root))?;
+    let empty_capture = builder
+        .passes
+        .iter()
+        .find(|pass| {
+            matches!(pass.intent, SemanticPassIntent::VelloCapture { .. })
+                && pass.result == SemanticPassResult::Empty
+        })
+        .map(|pass| pass.id)
+        .ok_or(SemanticGraphProbeError::ObservationUnavailable)?;
+    graph_probe_value(builder.schedule_pass(empty_capture))?;
+    graph_probe_value(builder.schedule_pass(capture))?;
+    graph_probe_value(builder.schedule_pass(canonical_capture))?;
+    graph_probe_value(builder.schedule_pass(canonicalize))?;
+    graph_probe_value(builder.schedule_pass(copy_backdrop))?;
+    graph_probe_value(builder.schedule_pass(rgba_blur))?;
+    let remaining_before_first_consumer = remaining_reads_for_probe(&builder, source)?;
+    graph_probe_value(builder.schedule_pass(blur_horizontal))?;
+    let remaining_after_alpha_consumer = remaining_reads_for_probe(&builder, source)?;
+    graph_probe_value(builder.schedule_pass(blur_vertical))?;
+    graph_probe_value(builder.schedule_pass(colorize))?;
+    let remaining_before_source_over = remaining_reads_for_probe(&builder, source)?;
+    graph_probe_value(builder.schedule_pass(source_over))?;
+    let remaining_after_source_over = remaining_reads_for_probe(&builder, source)?;
+    let post_release_read_rejected = matches!(
+        builder.ensure_resource_readable(source),
+        Err(GraphValidationError::ReleasedResource(released)) if released == source
+    );
+    graph_probe_value(builder.schedule_pass(present))?;
+    let graph = graph_probe_value(builder.finish())?;
+
+    Ok(CompletedDropShadowGraphProbe {
+        graph,
+        source,
+        source_over,
+        source_expected_reads,
+        remaining_before_first_consumer,
+        remaining_after_alpha_consumer,
+        remaining_before_source_over,
+        remaining_after_source_over,
+        post_release_read_rejected,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_graph_edge_lifetime_observation_for_test(
+    pass_plan: LayerPassPlan,
+) -> SemanticGraphProbeResult<GraphEdgeLifetimeObservation> {
+    let probe = build_drop_shadow_graph_probe()?;
+    let source_index = ResourceIndex::as_usize(probe.source.index)
+        .map_err(|_| SemanticGraphProbeError::ObservationUnavailable)?;
+    let released_after_source_over = probe
+        .graph
+        .resources
+        .get(source_index)
+        .is_some_and(|resource| resource.releasable_after == Some(probe.source_over));
+    let every_result_has_one_owner =
+        probe
+            .graph
+            .resources
+            .iter()
+            .all(|resource| match resource.producer {
+                Some(SemanticResourceProducer::Imported) => {
+                    resource.id.generation == probe.graph.generation
+                }
+                Some(SemanticResourceProducer::Pass(producer)) => {
+                    resource.id.generation == probe.graph.generation
+                        && producer.generation == probe.graph.generation
+                        && probe
+                            .graph
+                            .passes
+                            .iter()
+                            .filter(|pass| pass.result == SemanticPassResult::Resource(resource.id))
+                            .count()
+                            == 1
+                        && probe.graph.passes.iter().any(|pass| pass.id == producer)
+                }
+                None => false,
+            });
+    let every_read_names_its_producer = probe.graph.passes.iter().all(|pass| {
+        pass.reads.iter().all(|read| {
+            let Ok(index) = read.index.as_usize() else {
+                return false;
+            };
+            probe
+                .graph
+                .resources
+                .get(index)
+                .is_some_and(|resource| match resource.producer {
+                    Some(SemanticResourceProducer::Imported) => true,
+                    Some(SemanticResourceProducer::Pass(producer)) => {
+                        pass.dependencies.contains(&producer)
+                    }
+                    None => false,
+                })
+        })
+    });
+
+    Ok(GraphEdgeLifetimeObservation {
+        observes_bounded_offscreen_pass: pass_plan.requires_offscreen_texture()
+            && pass_plan.bounds().is_some(),
+        source_expected_reads: probe.source_expected_reads,
+        remaining_before_first_consumer: probe.remaining_before_first_consumer,
+        remaining_after_alpha_consumer: probe.remaining_after_alpha_consumer,
+        remaining_before_source_over: probe.remaining_before_source_over,
+        remaining_after_source_over: probe.remaining_after_source_over,
+        released_after_source_over,
+        post_release_read_rejected: probe.post_release_read_rejected,
+        every_result_has_one_owner,
+        every_read_names_its_producer,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn semantic_graph_base_initialization_observation_for_test(
+    pass_plan: LayerPassPlan,
+) -> SemanticGraphProbeResult<GraphBaseInitializationObservation> {
+    let probe = build_drop_shadow_graph_probe()?;
+    let root_working_images = probe
+        .graph
+        .resources
+        .iter()
+        .filter(|resource| {
+            resource.descriptor.role == SemanticResourceRole::RootWorkingImage
+                && resource.id == probe.graph.root_working_image
+        })
+        .count();
+    let final_present_intents = probe
+        .graph
+        .passes
+        .iter()
+        .filter(|pass| {
+            pass.intent == SemanticPassIntent::Present && pass.id == probe.graph.final_present
+        })
+        .count();
+    let surface_base_initializations = probe
+        .graph
+        .passes
+        .iter()
+        .filter(|pass| {
+            matches!(
+                pass.intent,
+                SemanticPassIntent::ClearRoot {
+                    initialization: WorkingImageInitialization::SurfaceBaseColor(_)
+                }
+            )
+        })
+        .count();
+    let surface_base_color = probe
+        .graph
+        .passes
+        .iter()
+        .find_map(|pass| match pass.intent {
+            SemanticPassIntent::ClearRoot {
+                initialization: WorkingImageInitialization::SurfaceBaseColor(color),
+            } => Some(color),
+            SemanticPassIntent::ClearRoot {
+                initialization: WorkingImageInitialization::Transparent,
+            }
+            | SemanticPassIntent::VelloCapture { .. }
+            | SemanticPassIntent::CanonicalizeCapture
+            | SemanticPassIntent::CopyBackdrop
+            | SemanticPassIntent::ColorFilter
+            | SemanticPassIntent::BlurHorizontal { .. }
+            | SemanticPassIntent::BlurVertical { .. }
+            | SemanticPassIntent::DropShadowColorize
+            | SemanticPassIntent::Composite
+            | SemanticPassIntent::Present => None,
+        });
+    let isolation_working_images = probe
+        .graph
+        .resources
+        .iter()
+        .filter(|resource| resource.descriptor.role == SemanticResourceRole::IsolationWorkingImage)
+        .count();
+    let captures_are_transparent = probe.graph.passes.iter().all(|pass| {
+        !matches!(pass.intent, SemanticPassIntent::VelloCapture { .. })
+            || matches!(
+                pass.intent,
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::Transparent
+                }
+            )
+    });
+    let pass_resource_results = probe
+        .graph
+        .passes
+        .iter()
+        .filter(|pass| matches!(pass.result, SemanticPassResult::Resource(_)))
+        .count();
+    let imported_resources = probe
+        .graph
+        .resources
+        .iter()
+        .filter(|resource| resource.producer == Some(SemanticResourceProducer::Imported))
+        .count();
+    let empty_result_count = probe
+        .graph
+        .passes
+        .iter()
+        .filter(|pass| pass.result == SemanticPassResult::Empty)
+        .count();
+    let empty_results_have_no_descriptor = empty_result_count > 1
+        && probe.graph.resources.len() == pass_resource_results + imported_resources;
+    let resource_descriptors_are_spatially_complete =
+        probe.graph.resources.iter().all(|resource| {
+            let logical = resource.descriptor.logical_bounds.rect();
+            let mapped_first_texel = resource
+                .descriptor
+                .texel_center_mapping
+                .point_for(0, 0)
+                .ok();
+            logical == Rect::new(-2.0, 3.0, 8.0, 6.0)
+                && resource.descriptor.device_origin == SignedDeviceOrigin::new(-4, 6)
+                && resource.descriptor.device_extent
+                    == PositiveDeviceExtent {
+                        width: 16,
+                        height: 12,
+                    }
+                && mapped_first_texel == Some(Point::new(-1.75, 3.25))
+        });
+
+    Ok(GraphBaseInitializationObservation {
+        observes_bounded_offscreen_pass: pass_plan.requires_offscreen_texture()
+            && pass_plan.bounds().is_some(),
+        root_working_images,
+        final_present_intents,
+        surface_base_initializations,
+        surface_base_color,
+        isolation_working_images,
+        captures_are_transparent,
+        empty_results_have_no_descriptor,
+        resource_descriptors_are_spatially_complete,
+    })
 }
