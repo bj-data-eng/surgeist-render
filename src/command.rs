@@ -1020,12 +1020,23 @@ fn shadow_bounds(shape: &ShadowShape, shadow: &RenderShadow) -> Option<Offscreen
         base.width(),
         base.height(),
     );
-    let blur = FilterBlur::try_new(shadow.blur).ok()?;
-    let blur_support = BlurPolicy::vello_outer_shadow_compatibility()
-        .support_radius(blur)
-        .ok()?;
+    let blur_support = super::filter::vello_outer_shadow_support_radius(shadow.blur).ok()?;
     let support = shadow.spread + blur_support;
     OffscreenBounds::try_new(geometry::expand_rect(offset, support)).ok()
+}
+
+#[cfg(test)]
+pub(crate) fn outer_box_shadow_bounds_for_test(command: &RenderCommand) -> Option<Rect> {
+    match command {
+        RenderCommand::Shadow { shape, shadow } => {
+            shadow_bounds(shape, shadow).map(OffscreenBounds::rect)
+        }
+        RenderCommand::Fill { .. }
+        | RenderCommand::Stroke { .. }
+        | RenderCommand::Image { .. }
+        | RenderCommand::TextRun { .. }
+        | RenderCommand::Layer { .. } => None,
+    }
 }
 
 fn transform_bounds(rect: Rect, transform: Transform) -> Option<OffscreenBounds> {

@@ -498,7 +498,7 @@ fn plan_clipped_materialized_blur_output_size(
 #[cfg_attr(not(test), allow(dead_code))]
 fn plan_clipped_materialized_drop_shadow_output_size(
     size: PhysicalSize,
-    shadow: &super::Shadow,
+    shadow: &super::FilterDropShadow,
     policy: BlurPolicy,
 ) -> Result<PhysicalSize> {
     let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));

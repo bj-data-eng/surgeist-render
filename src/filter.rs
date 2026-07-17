@@ -1,9 +1,9 @@
 use super::{
-    Error, PrimitiveFamily, PrimitiveOperation, Rect, Result, Shadow, ShadowKind,
-    UnsupportedPrimitive,
+    Error, Rect, Result,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     style::{
-        ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterList, FilterOpKind, UnitFilterAmount,
+        ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow, FilterList, FilterOpKind,
+        UnitFilterAmount,
     },
 };
 
@@ -182,24 +182,9 @@ impl FilterOutset {
         Self::try_uniform(policy.support_radius(blur)?)
     }
 
-    pub fn from_drop_shadow(shadow: &Shadow, policy: BlurPolicy) -> Result<Self> {
-        if shadow.kind() == ShadowKind::Inset {
-            return Err(Error::unsupported_render_primitive(
-                UnsupportedPrimitive::new(
-                    PrimitiveFamily::Shadows,
-                    PrimitiveOperation::InsetBoxShadow,
-                ),
-            ));
-        }
-        if shadow.spread() != 0.0 {
-            return Err(Error::invalid_value(
-                "filter drop-shadow spread",
-                shadow.spread(),
-                "must be zero for CSS drop-shadow filter planning",
-            ));
-        }
-        let blur = FilterBlur::try_new(shadow.blur())?;
-        let support = policy.support_radius(blur)?;
+    /// Computes the signed logical outsets for an executable filter drop shadow.
+    pub fn from_drop_shadow(shadow: &FilterDropShadow, policy: BlurPolicy) -> Result<Self> {
+        let support = policy.support_radius(shadow.blur())?;
         let offset = shadow.offset();
         Self::try_new(
             (support - offset.x()).max(0.0),
@@ -399,18 +384,6 @@ impl BlurPolicy {
         .expect("default CSS filter blur policy is valid")
     }
 
-    pub(crate) fn vello_outer_shadow_compatibility() -> Self {
-        Self::try_new(
-            BlurRadiusInterpretation::VelloShadowBlurRadiusAsDiameter,
-            KernelSupportRadius::try_standard_deviation_multiple(DEFAULT_KERNEL_STD_DEV_MULTIPLE)
-                .expect("default kernel support radius is valid"),
-            LargeBlurRadiusPolicy::try_reject_above(DEFAULT_MAX_BLUR_RADIUS)
-                .expect("default large-radius policy is valid"),
-            TransparentEdgeSamplingPolicy::TransparentBlack,
-        )
-        .expect("default Vello shadow blur policy is valid")
-    }
-
     #[must_use]
     pub const fn radius_interpretation(self) -> BlurRadiusInterpretation {
         self.radius_interpretation
@@ -441,6 +414,30 @@ impl BlurPolicy {
         let radius = self.large_radius.resolve_radius(blur.radius())?;
         Ok(self.radius_interpretation.standard_deviation(radius))
     }
+}
+
+pub(crate) fn vello_outer_shadow_support_radius(blur_radius: f64) -> Result<f64> {
+    if !blur_radius.is_finite() || blur_radius < 0.0 {
+        return Err(Error::invalid_value(
+            "shadow blur",
+            blur_radius,
+            "must be finite and non-negative",
+        ));
+    }
+    let standard_deviation =
+        BlurRadiusInterpretation::VelloShadowBlurRadiusAsDiameter.standard_deviation(blur_radius);
+    let support = KernelSupportRadius {
+        standard_deviation_multiple: DEFAULT_KERNEL_STD_DEV_MULTIPLE,
+    }
+    .support_radius(standard_deviation);
+    if !support.is_finite() {
+        return Err(Error::invalid_value(
+            "box shadow blur support",
+            blur_radius,
+            "must produce finite Vello-compatible support",
+        ));
+    }
+    Ok(support)
 }
 
 /// Outward device-pixel conversion policy for planned filter execution regions.
@@ -631,7 +628,7 @@ impl MaterializedImageFilterPipeline {
                 }
                 FilterOpKind::DropShadow(shadow) => {
                     flush_materialized_color_run(&mut steps, &mut color_run)?;
-                    steps.push(MaterializedImageFilterStep::DropShadow(shadow.clone()));
+                    steps.push(MaterializedImageFilterStep::DropShadow(*shadow));
                 }
                 FilterOpKind::Brightness(amount) => {
                     color_run.push(ColorFilterOp::Brightness(*amount));
@@ -674,7 +671,8 @@ impl MaterializedImageFilterPipeline {
 pub enum MaterializedImageFilterStep {
     ColorFilters(CompiledColorFilterPipeline),
     Blur(FilterBlur),
-    DropShadow(Shadow),
+    /// Executes an intrinsically valid solid-color filter drop shadow.
+    DropShadow(FilterDropShadow),
 }
 
 impl FilterList {

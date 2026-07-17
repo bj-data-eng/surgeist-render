@@ -5719,9 +5719,12 @@ fn materialized_drop_shadow_uses_alpha_mask_not_source_bounds() {
         ],
     )
     .unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
-        Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-    )])
+    let filters = FilterList::try_ops(vec![
+        FilterOp::try_drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        )
+        .unwrap(),
+    ])
     .unwrap();
 
     let filtered =
@@ -5751,9 +5754,12 @@ fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
         ],
     )
     .unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
-        Shadow::try_new(Point::new(1.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
-    )])
+    let filters = FilterList::try_ops(vec![
+        FilterOp::try_drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
+        )
+        .unwrap(),
+    ])
     .unwrap();
 
     let filtered =
@@ -5774,9 +5780,12 @@ fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
 #[test]
 fn materialized_drop_shadow_composites_shadow_behind_source() {
     let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 128]).unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
-        Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-    )])
+    let filters = FilterList::try_ops(vec![
+        FilterOp::try_drop_shadow(
+            Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        )
+        .unwrap(),
+    ])
     .unwrap();
 
     let filtered =
@@ -5795,9 +5804,12 @@ fn filtered_image_paint_executes_drop_shadow_with_matching_materialized_image() 
         Arc::<[u8]>::from([255, 0, 0, 255, 0, 0, 0, 0]),
     )
     .unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
-        Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-    )])
+    let filters = FilterList::try_ops(vec![
+        FilterOp::try_drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        )
+        .unwrap(),
+    ])
     .unwrap();
     let paint = FilteredImagePaint::try_new(
         ResolvedImageResource::try_new(image.id(), image.size()).unwrap(),
@@ -5843,9 +5855,12 @@ fn filtered_image_paint_executes_drop_shadow_with_matching_materialized_image() 
 #[test]
 fn resource_only_drop_shadow_filtered_image_paint_stays_rejected() {
     let resource = ResolvedImageResource::try_new(ImageId::new(41), Size::new(2.0, 1.0)).unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
-        Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-    )])
+    let filters = FilterList::try_ops(vec![
+        FilterOp::try_drop_shadow(
+            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
+        )
+        .unwrap(),
+    ])
     .unwrap();
     let paint = FilteredImagePaint::try_new(resource, filters).unwrap();
 
@@ -5867,9 +5882,10 @@ fn materialized_filters_after_drop_shadow_apply_to_composed_output() {
     let source =
         ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let filters = FilterList::try_ops(vec![
-        FilterOp::drop_shadow(
+        FilterOp::try_drop_shadow(
             Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-        ),
+        )
+        .unwrap(),
         FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
     ])
     .unwrap();
@@ -5889,9 +5905,10 @@ fn materialized_filters_before_drop_shadow_shape_current_alpha_mask() {
         ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let filters = FilterList::try_ops(vec![
         FilterOp::opacity(UnitFilterAmount::try_new(0.5).unwrap()),
-        FilterOp::drop_shadow(
+        FilterOp::try_drop_shadow(
             Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-        ),
+        )
+        .unwrap(),
     ])
     .unwrap();
 
@@ -5906,17 +5923,10 @@ fn materialized_filters_before_drop_shadow_shape_current_alpha_mask() {
 
 #[test]
 fn css_drop_shadow_rejects_non_zero_spread() {
-    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 255]).unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+    let error = FilterOp::try_drop_shadow(
         Shadow::try_new(Point::new(0.0, 0.0), 0.0, 1.0, Color::BLACK).unwrap(),
-    )])
-    .unwrap();
-
-    let error =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
-            .unwrap()
-            .execute_to_image_buffer()
-            .expect_err("CSS drop-shadow must not silently treat spread like box-shadow spread");
+    )
+    .expect_err("CSS drop-shadow must not silently treat spread like box-shadow spread");
 
     assert_eq!(
         error.invalid_value_diagnostic().map(InvalidValue::field),
@@ -5925,19 +5935,11 @@ fn css_drop_shadow_rejects_non_zero_spread() {
 }
 
 #[test]
-fn materialized_drop_shadow_rejects_inset_shadow_with_typed_diagnostic() {
-    let source =
-        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+fn css_drop_shadow_rejects_inset_shadow_with_typed_diagnostic() {
+    let error = FilterOp::try_drop_shadow(
         Shadow::try_inset(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-    )])
-    .unwrap();
-
-    let error =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
-            .unwrap()
-            .execute_to_image_buffer()
-            .expect_err("CSS drop-shadow must not execute inset shadows as outer alpha shadows");
+    )
+    .expect_err("CSS drop-shadow must not execute inset shadows as outer alpha shadows");
 
     assert_eq!(
         error.unsupported_primitive(),
@@ -5950,7 +5952,6 @@ fn materialized_drop_shadow_rejects_inset_shadow_with_typed_diagnostic() {
 
 #[test]
 fn css_drop_shadow_rejects_non_solid_shadow_paint() {
-    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 255]).unwrap();
     let gradient = Gradient::try_linear(
         Point::new(0.0, 0.0),
         Point::new(1.0, 0.0),
@@ -5960,16 +5961,10 @@ fn css_drop_shadow_rejects_non_solid_shadow_paint() {
         ],
     )
     .unwrap();
-    let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
+    let error = FilterOp::try_drop_shadow(
         Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Paint::gradient(gradient)).unwrap(),
-    )])
-    .unwrap();
-
-    let error =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
-            .unwrap()
-            .execute_to_image_buffer()
-            .expect_err("CSS drop-shadow currently requires a solid shadow paint");
+    )
+    .expect_err("CSS drop-shadow currently requires a solid shadow paint");
 
     assert_eq!(
         error.unsupported_primitive(),
@@ -6040,9 +6035,10 @@ fn sequence11_filtered_image_executes_nonzero_blur_then_drop_shadow_with_materia
     .unwrap();
     let filters = FilterList::try_ops(vec![
         FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
-        FilterOp::drop_shadow(
+        FilterOp::try_drop_shadow(
             Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-        ),
+        )
+        .unwrap(),
     ])
     .unwrap();
     let paint = FilteredImagePaint::try_new(
@@ -6081,7 +6077,10 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         Rect::new(8.0, 8.0, 11.0, 11.0)
     );
 
-    let shadow = Shadow::try_new(Point::new(2.0, -1.0), 4.0, 0.0, Color::BLACK).unwrap();
+    let shadow = FilterDropShadow::try_from_shadow(
+        Shadow::try_new(Point::new(2.0, -1.0), 4.0, 0.0, Color::BLACK).unwrap(),
+    )
+    .unwrap();
     let shadow_outset =
         FilterOutset::from_drop_shadow(&shadow, BlurPolicy::css_filter_default()).unwrap();
     assert_eq!(shadow_outset.left(), 8.0);
@@ -6093,15 +6092,17 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let color_before_pixel = FilterList::try_ops(vec![
         FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
-        FilterOp::drop_shadow(
+        FilterOp::try_drop_shadow(
             Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-        ),
+        )
+        .unwrap(),
     ])
     .unwrap();
     let pixel_before_color = FilterList::try_ops(vec![
-        FilterOp::drop_shadow(
+        FilterOp::try_drop_shadow(
             Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-        ),
+        )
+        .unwrap(),
         FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
     ])
     .unwrap();
@@ -6349,7 +6350,8 @@ fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
     let image_buffer =
         ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![100, 150, 200, 255]).unwrap();
     let shadow = Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
-    let drop_shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
+    let drop_shadow =
+        FilterList::try_ops(vec![FilterOp::try_drop_shadow(shadow).unwrap()]).unwrap();
 
     let drop_shadow_output = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &drop_shadow,
@@ -8516,14 +8518,81 @@ fn filter_none_has_no_executable_color_pipeline() {
 }
 
 #[test]
+fn drop_shadow_model_cannot_express_inset_spread_or_non_solid_paint() {
+    fn assert_model_traits<T: Clone + Copy + std::fmt::Debug + PartialEq>() {}
+
+    assert_model_traits::<FilterDropShadow>();
+    let offset = Point::try_new(1.0, 2.0).unwrap();
+    let blur = FilterBlur::try_new(3.0).unwrap();
+    let direct = FilterDropShadow::try_new(offset, blur, Color::BLACK).unwrap();
+    assert_eq!(direct.offset(), offset);
+    assert_eq!(direct.blur(), blur);
+    assert_eq!(direct.color(), Color::BLACK);
+    assert!(FilterDropShadow::try_new(Point::new(f64::NAN, 0.0), blur, Color::BLACK).is_err());
+
+    let gradient = Gradient::try_linear(
+        Point::new(0.0, 0.0),
+        Point::new(1.0, 0.0),
+        vec![
+            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
+            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
+        ],
+    )
+    .unwrap();
+    let invalid_shadows = [
+        Shadow::try_inset(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap(),
+        Shadow::try_new(Point::new(1.0, 2.0), 3.0, 1.0, Color::BLACK).unwrap(),
+        Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Paint::gradient(gradient)).unwrap(),
+    ];
+
+    assert!(
+        invalid_shadows
+            .into_iter()
+            .all(|shadow| !style::filter_drop_shadow_payload_accepts_shadow_for_test(shadow)),
+        "broad filter drop-shadow payload remains constructible"
+    );
+}
+
+#[test]
+fn filter_blur_rejects_values_above_256_without_clamping() {
+    let next_above_256 = f64::from_bits(256.0_f64.to_bits() + 1);
+
+    assert_eq!(FilterBlur::try_new(256.0).unwrap().radius(), 256.0);
+    assert!(
+        FilterBlur::try_new(next_above_256).is_err(),
+        "next representable value above 256 was accepted"
+    );
+}
+
+#[test]
+fn box_shadow_bounds_do_not_reuse_capped_css_filter_blur() {
+    let mut scene = Scene::new();
+    scene.shadow(
+        Rect::new(10.0, 20.0, 30.0, 40.0),
+        Shadow::try_new(Point::new(3.0, -2.0), 512.0, 4.0, Color::BLACK).unwrap(),
+    );
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
+    let bounds = command::outer_box_shadow_bounds_for_test(&normalized.commands[0]);
+
+    assert!(
+        bounds.is_some(),
+        "box-shadow bounds still depend on CSS FilterBlur validation"
+    );
+    assert_finite_positive_rect(bounds.unwrap());
+}
+
+#[test]
 fn materialized_image_filter_classifier_preserves_mixed_filter_order() {
-    let shadow = Shadow::try_new(Point::new(2.0, 3.0), 4.0, 0.0, Color::BLACK).unwrap();
+    let shadow = FilterDropShadow::try_from_shadow(
+        Shadow::try_new(Point::new(2.0, 3.0), 4.0, 0.0, Color::BLACK).unwrap(),
+    )
+    .unwrap();
     let list = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(1.2).unwrap()),
         FilterOp::contrast(FilterAmount::try_new(0.8).unwrap()),
         FilterOp::blur(FilterBlur::try_new(4.0).unwrap()),
         FilterOp::opacity(UnitFilterAmount::try_new(0.75).unwrap()),
-        FilterOp::drop_shadow(shadow.clone()),
+        FilterOp::drop_shadow(shadow),
         FilterOp::sepia(UnitFilterAmount::try_new(0.25).unwrap()),
     ])
     .unwrap();
@@ -8577,10 +8646,13 @@ fn filter_none_has_no_materialized_image_filter_pipeline() {
 
 #[test]
 fn materialized_image_filter_classifier_accepts_blur_and_drop_shadow() {
-    let shadow = Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap();
+    let shadow = FilterDropShadow::try_from_shadow(
+        Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap(),
+    )
+    .unwrap();
     let list = FilterList::try_ops(vec![
         FilterOp::blur(FilterBlur::try_new(2.0).unwrap()),
-        FilterOp::drop_shadow(shadow.clone()),
+        FilterOp::drop_shadow(shadow),
     ])
     .unwrap();
 
@@ -8666,7 +8738,10 @@ fn filter_blur_region_inflates_bounds_deterministically() {
 #[test]
 fn drop_shadow_outset_combines_offset_and_blur_support() {
     let source = FilterSourceBounds::try_new(Rect::new(10.0, 10.0, 20.0, 10.0)).unwrap();
-    let shadow = Shadow::try_new(Point::new(3.0, -2.0), 2.0, 0.0, Color::BLACK).unwrap();
+    let shadow = FilterDropShadow::try_from_shadow(
+        Shadow::try_new(Point::new(3.0, -2.0), 2.0, 0.0, Color::BLACK).unwrap(),
+    )
+    .unwrap();
     let outset = FilterOutset::from_drop_shadow(&shadow, BlurPolicy::css_filter_default()).unwrap();
 
     let plan = FilterRegionPlan::try_new(source, outset, None).unwrap();
@@ -8679,10 +8754,10 @@ fn drop_shadow_outset_combines_offset_and_blur_support() {
 }
 
 #[test]
-fn drop_shadow_outset_rejects_inset_shadow_with_typed_diagnostic() {
+fn filter_drop_shadow_conversion_rejects_inset_shadow_with_typed_diagnostic() {
     let shadow = Shadow::try_inset(Point::new(3.0, -2.0), 2.0, 0.0, Color::BLACK).unwrap();
-    let error = FilterOutset::from_drop_shadow(&shadow, BlurPolicy::css_filter_default())
-        .expect_err("CSS drop-shadow outset planning does not support inset shadows");
+    let error = FilterDropShadow::try_from_shadow(shadow)
+        .expect_err("CSS drop-shadow conversion does not support inset shadows");
 
     assert_eq!(
         error.unsupported_primitive(),
@@ -8827,7 +8902,10 @@ fn filter_color_pipeline_rejects_blur_with_typed_diagnostic() {
 
 #[test]
 fn filter_color_pipeline_rejects_drop_shadow_with_typed_diagnostic() {
-    let shadow = Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap();
+    let shadow = FilterDropShadow::try_from_shadow(
+        Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap(),
+    )
+    .unwrap();
     let list = FilterList::try_ops(vec![
         FilterOp::saturate(FilterAmount::try_new(1.0).unwrap()),
         FilterOp::drop_shadow(shadow),

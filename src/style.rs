@@ -4,16 +4,18 @@ use super::{
     PrimitiveFamily, PrimitiveOperation, Radii, Rect, Result, Shadow, Shape, Size,
     SymbolicColorPolicy, Transform, UnresolvedResource, UnresolvedResourceKind,
     UnsupportedPrimitive,
+    paint::PaintKind,
     shape::ShapeKind,
     validation::{
-        validate_finite_f64, validate_non_negative_f64, validate_paint, validate_path,
-        validate_shape, validate_size,
+        validate_color, validate_finite_f64, validate_non_negative_f64, validate_paint,
+        validate_path, validate_point, validate_shape, validate_size,
     },
 };
 use kurbo::Shape as KurboShape;
 
 const MAX_IMAGE_REPEAT_TILES: usize = 1_000_000;
 const MAX_IMAGE_REPEAT_TILES_RULE: &str = "must not exceed 1000000";
+const MAX_FILTER_BLUR_RADIUS: f64 = 256.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StyleColor {
@@ -1407,6 +1409,86 @@ fn validate_backdrop_clip(clip: Option<&ClipInput>) -> Result<()> {
     clip.ensure_supported(Capabilities::CURRENT)
 }
 
+/// An executable CSS filter drop shadow.
+///
+/// This normalized payload contains only an outer, zero-spread, solid-color
+/// shadow. Offsets and blur are measured in logical pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FilterDropShadow {
+    offset: Point,
+    blur: FilterBlur,
+    color: Color,
+}
+
+impl FilterDropShadow {
+    /// Creates an executable drop shadow from already-separated filter values.
+    ///
+    /// The offset and color must be finite. `blur` has already been validated
+    /// against the CSS filter-blur range by [`FilterBlur::try_new`].
+    pub fn try_new(offset: Point, blur: FilterBlur, color: Color) -> Result<Self> {
+        validate_point(offset, "filter drop-shadow offset")?;
+        validate_color(color, "filter drop-shadow color")?;
+        Ok(Self {
+            offset,
+            blur,
+            color,
+        })
+    }
+
+    /// Converts a broad authored shadow into the executable filter form.
+    ///
+    /// Inset shadows, nonzero spread, non-solid paint, and blur outside the CSS
+    /// filter range retain their existing typed diagnostics.
+    pub fn try_from_shadow(shadow: Shadow) -> Result<Self> {
+        if shadow.kind() == super::ShadowKind::Inset {
+            return Err(Error::unsupported_render_primitive(
+                UnsupportedPrimitive::new(
+                    PrimitiveFamily::Shadows,
+                    PrimitiveOperation::InsetBoxShadow,
+                ),
+            ));
+        }
+        if shadow.spread() != 0.0 {
+            return Err(Error::invalid_value(
+                "filter drop-shadow spread",
+                shadow.spread(),
+                "must be zero for CSS drop-shadow filter planning",
+            ));
+        }
+        let color = match shadow.paint().kind() {
+            PaintKind::Color(color) => *color,
+            PaintKind::Gradient(_) | PaintKind::Image(_) => {
+                return Err(Error::unsupported_render_primitive(
+                    UnsupportedPrimitive::new(
+                        PrimitiveFamily::PaintSources,
+                        PrimitiveOperation::NonSolidShadowPaint,
+                    ),
+                ));
+            }
+        };
+        let blur = FilterBlur::try_new(shadow.blur())?;
+        Self::try_new(shadow.offset(), blur, color)
+    }
+
+    /// Returns the continuous logical-pixel offset.
+    #[must_use]
+    pub const fn offset(self) -> Point {
+        self.offset
+    }
+
+    /// Returns the validated CSS Gaussian standard deviation.
+    #[must_use]
+    pub const fn blur(self) -> FilterBlur {
+        self.blur
+    }
+
+    /// Returns the solid shadow color.
+    #[must_use]
+    pub const fn color(self) -> Color {
+        self.color
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FilterOp {
     kind: FilterOpKind,
@@ -1423,7 +1505,8 @@ pub enum FilterOpKind {
     Opacity(UnitFilterAmount),
     Saturate(FilterAmount),
     Sepia(UnitFilterAmount),
-    DropShadow(Shadow),
+    /// An intrinsically valid executable filter drop shadow.
+    DropShadow(FilterDropShadow),
 }
 
 impl FilterOp {
@@ -1490,11 +1573,19 @@ impl FilterOp {
         }
     }
 
+    /// Creates a filter operation from an executable drop-shadow payload.
     #[must_use]
-    pub const fn drop_shadow(shadow: Shadow) -> Self {
+    pub const fn drop_shadow(shadow: FilterDropShadow) -> Self {
         Self {
             kind: FilterOpKind::DropShadow(shadow),
         }
+    }
+
+    /// Converts a broad authored shadow into a filter drop-shadow operation.
+    pub fn try_drop_shadow(shadow: Shadow) -> Result<Self> {
+        Ok(Self::drop_shadow(FilterDropShadow::try_from_shadow(
+            shadow,
+        )?))
     }
 
     #[must_use]
@@ -1503,23 +1594,33 @@ impl FilterOp {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn filter_drop_shadow_payload_accepts_shadow_for_test(shadow: Shadow) -> bool {
+    FilterOp::try_drop_shadow(shadow).is_ok()
+}
+
+/// A CSS filter blur standard deviation in logical pixels.
+///
+/// Valid values are finite and lie in the closed interval `[0, 256]`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilterBlur {
     radius: f64,
 }
 
 impl FilterBlur {
+    /// Creates a validated CSS filter blur without clamping.
     pub fn try_new(radius: f64) -> Result<Self> {
-        if !radius.is_finite() || radius < 0.0 {
+        if !radius.is_finite() || !(0.0..=MAX_FILTER_BLUR_RADIUS).contains(&radius) {
             return Err(Error::invalid_value(
                 "filter blur radius",
                 radius,
-                "must be finite and non-negative",
+                "must be finite and between 0 and 256",
             ));
         }
         Ok(Self { radius })
     }
 
+    /// Returns the Gaussian standard deviation in logical pixels.
     #[must_use]
     pub const fn radius(self) -> f64 {
         self.radius

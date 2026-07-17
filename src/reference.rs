@@ -1,12 +1,10 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::{
-    Error, PhysicalSize, PrimitiveFamily, PrimitiveOperation, Result, Shadow, ShadowKind,
-    UnsupportedPrimitive,
+    Error, PhysicalSize, Result,
     filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
     layer::BlendMode,
-    paint::PaintKind,
-    style::{ColorFilterOp, ColorFilterPipeline, FilterBlur},
+    style::{ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow},
 };
 
 const LUMA_RED: f64 = 0.213;
@@ -511,32 +509,18 @@ impl ReferencePremultipliedRgba8Buffer {
         }
     }
 
-    pub(crate) fn apply_drop_shadow(&self, shadow: &Shadow, policy: BlurPolicy) -> Result<Self> {
-        if shadow.kind() == ShadowKind::Inset {
-            return Err(Error::unsupported_render_primitive(
-                UnsupportedPrimitive::new(
-                    PrimitiveFamily::Shadows,
-                    PrimitiveOperation::InsetBoxShadow,
-                ),
-            ));
-        }
-        if shadow.spread() != 0.0 {
-            return Err(Error::invalid_value(
-                "filter drop-shadow spread",
-                shadow.spread(),
-                "must be zero for CSS drop-shadow filter execution",
-            ));
-        }
-
-        let color = solid_shadow_color(shadow)?;
+    pub(crate) fn apply_drop_shadow(
+        &self,
+        shadow: &FilterDropShadow,
+        policy: BlurPolicy,
+    ) -> Result<Self> {
         let shifted_alpha = self.offset_alpha_mask(shadow)?;
-        let blurred_alpha =
-            shifted_alpha.apply_blur(FilterBlur::try_new(shadow.blur())?, policy)?;
-        let shadow = blurred_alpha.colorize_alpha_mask(color)?;
+        let blurred_alpha = shifted_alpha.apply_blur(shadow.blur(), policy)?;
+        let shadow = blurred_alpha.colorize_alpha_mask(shadow.color())?;
         self.source_over(&shadow)
     }
 
-    fn offset_alpha_mask(&self, shadow: &Shadow) -> Result<Self> {
+    fn offset_alpha_mask(&self, shadow: &FilterDropShadow) -> Result<Self> {
         let offset = shadow.offset();
         let offset_policy =
             MaterializedDropShadowOffsetQuantizationPolicy::materialized_cpu_reference();
@@ -750,18 +734,6 @@ impl MaterializedDropShadowOffsetQuantizationPolicy {
             ));
         }
         Ok(rounded as i32)
-    }
-}
-
-fn solid_shadow_color(shadow: &Shadow) -> Result<super::Color> {
-    match shadow.paint().kind() {
-        PaintKind::Color(color) => Ok(*color),
-        PaintKind::Gradient(_) | PaintKind::Image(_) => Err(Error::unsupported_render_primitive(
-            UnsupportedPrimitive::new(
-                PrimitiveFamily::PaintSources,
-                PrimitiveOperation::NonSolidShadowPaint,
-            ),
-        )),
     }
 }
 
