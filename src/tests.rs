@@ -20885,25 +20885,303 @@ fn render_path_submits_without_map_or_cpu_wait() {
         "the observed submission must carry the internal raster resource lease"
     );
 
-    let backend_source = include_str!("backend.rs");
+    let production_render_sources = [
+        ("src/backend.rs", include_str!("backend.rs")),
+        ("src/gpu_transaction.rs", include_str!("gpu_transaction.rs")),
+        ("src/renderer.rs", include_str!("renderer.rs")),
+        ("src/shader.rs", include_str!("shader.rs")),
+        (
+            "src/vello_engine/encoder.rs",
+            include_str!("vello_engine/encoder.rs"),
+        ),
+        (
+            "src/vello_engine/glyph.rs",
+            include_str!("vello_engine/glyph.rs"),
+        ),
+        (
+            "src/vello_engine/mod.rs",
+            include_str!("vello_engine/mod.rs"),
+        ),
+        (
+            "src/vello_engine/raster.rs",
+            include_str!("vello_engine/raster.rs"),
+        ),
+        (
+            "src/vello_engine/recording.rs",
+            include_str!("vello_engine/recording.rs"),
+        ),
+        (
+            "src/vello_engine/resources.rs",
+            include_str!("vello_engine/resources.rs"),
+        ),
+        (
+            "src/vello_engine/scene.rs",
+            include_str!("vello_engine/scene.rs"),
+        ),
+        (
+            "src/vello_engine/shaders.rs",
+            include_str!("vello_engine/shaders.rs"),
+        ),
+    ];
+    for (path, source) in production_render_sources {
+        for forbidden in [
+            "map_async",
+            "MAP_READ",
+            "PollType::Wait",
+            "get_mapped_range",
+            "wait_indefinitely",
+            "pollster::block_on",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "production render path {path} must not contain {forbidden}"
+            );
+        }
+    }
     let renderer_source = include_str!("renderer.rs");
-    let engine_source = include_str!("vello_engine/encoder.rs");
-    assert!(
-        !backend_source.contains("pollster::block_on")
-            && !renderer_source.contains("pollster::block_on"),
-        "production render modules must not block an async host with pollster"
-    );
     assert!(
         !renderer_source.contains("render_vello_surface"),
         "Renderer::render must route production raster work through the transaction-owned internal pass"
     );
-    assert!(
-        !renderer_source.contains("map_async")
-            && !renderer_source.contains(".poll(")
-            && !engine_source.contains("map_async")
-            && !engine_source.contains(".poll("),
-        "production raster encoding must not map, poll, or wait on the CPU"
+}
+
+fn production_rust_sources_for_static_reachability() -> Vec<(String, String)> {
+    fn collect_rust_paths(directory: &std::path::Path, paths: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(directory).unwrap_or_else(|error| {
+            panic!(
+                "static reachability could not read {}: {error}",
+                directory.display()
+            )
+        });
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|error| panic!("static reachability entry failed: {error}"))
+                .path();
+            if path.is_dir() {
+                collect_rust_paths(&path, paths);
+            } else if path.extension().is_some_and(|extension| extension == "rs")
+                && path.file_name().is_none_or(|name| name != "tests.rs")
+            {
+                paths.push(path);
+            }
+        }
+    }
+
+    let manifest_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut paths = Vec::new();
+    collect_rust_paths(&manifest_directory.join("src"), &mut paths);
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let relative = path
+                .strip_prefix(&manifest_directory)
+                .expect("every static-reachability source must belong to this crate")
+                .to_string_lossy()
+                .replace(std::path::MAIN_SEPARATOR, "/");
+            let source = fs::read_to_string(&path).unwrap_or_else(|error| {
+                panic!(
+                    "static reachability could not read {}: {error}",
+                    path.display()
+                )
+            });
+            (relative, source)
+        })
+        .collect()
+}
+
+fn source_braced_block_from_marker<'source>(source: &'source str, marker: &str) -> &'source str {
+    let marker_offset = source
+        .find(marker)
+        .unwrap_or_else(|| panic!("static reachability marker was missing: {marker}"));
+    let block_offset = source[marker_offset..]
+        .find('{')
+        .map(|offset| marker_offset + offset)
+        .unwrap_or_else(|| panic!("static reachability marker had no body: {marker}"));
+    let mut depth = 0_u32;
+    for (offset, byte) in source.as_bytes()[block_offset..]
+        .iter()
+        .copied()
+        .enumerate()
+    {
+        match byte {
+            b'{' => depth = depth.saturating_add(1),
+            b'}' => {
+                depth = depth
+                    .checked_sub(1)
+                    .expect("static reachability found an unmatched closing brace");
+                if depth == 0 {
+                    return &source[marker_offset..=block_offset + offset];
+                }
+            }
+            _ => {}
+        }
+    }
+    panic!("static reachability marker had an unterminated body: {marker}");
+}
+
+#[test]
+fn readback_static_paths_confine_map_poll_and_copy_submission() {
+    let sources = production_rust_sources_for_static_reachability();
+    let source = |expected: &str| {
+        sources
+            .iter()
+            .find_map(|(path, source)| (path == expected).then_some(source.as_str()))
+            .unwrap_or_else(|| panic!("static reachability omitted {expected}"))
+    };
+    let readback_source = source("src/readback.rs");
+    let renderer_source = source("src/renderer.rs");
+    let transaction_source = source("src/gpu_transaction.rs");
+
+    for marker in [
+        "map_async",
+        "MAP_READ",
+        "PollType::Wait",
+        "get_mapped_range",
+        "copy_texture_to_buffer",
+        "decode_padded_rows",
+    ] {
+        let owners = sources
+            .iter()
+            .filter_map(|(path, candidate)| candidate.contains(marker).then_some(path.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners,
+            ["src/readback.rs"],
+            "{marker} must remain confined to the private readback owner"
+        );
+    }
+
+    let queue_submission = ["queue", ".submit"].concat();
+    let submission_owners = sources
+        .iter()
+        .filter_map(|(path, candidate)| {
+            candidate
+                .contains(&queue_submission)
+                .then_some(path.as_str())
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        submission_owners,
+        ["src/gpu_transaction.rs"],
+        "every owned queue submission must remain transaction-owned"
     );
+    assert!(
+        transaction_source.matches(&queue_submission).count() >= 3,
+        "the static submission owner must include render, readback, and internal Vello submissions"
+    );
+
+    for path in ["src/readback.rs", "src/backend.rs", "src/renderer.rs"] {
+        let candidate = source(path);
+        for forbidden in [
+            "wait_indefinitely",
+            "std::sync::mpsc::channel",
+            ".recv()",
+            "pollster::block_on",
+        ] {
+            assert!(
+                !candidate.contains(forbidden),
+                "{path} must not contain the blocking readback path {forbidden}"
+            );
+        }
+    }
+
+    let native_helper_marker =
+        "#[cfg(not(target_arch = \"wasm32\"))]\nfn spawn_native_poll_helper(";
+    let native_helper = source_braced_block_from_marker(readback_source, native_helper_marker);
+    let device_poll = ["device", ".poll("].concat();
+    assert!(native_helper.contains(&device_poll));
+    assert!(native_helper.contains("wgpu::PollType::Wait {"));
+    assert!(native_helper.contains("submission_index: Some(submission_index.clone())"));
+    assert!(native_helper.contains("timeout: Some(Duration::from_millis(50))"));
+    assert_eq!(
+        readback_source.matches(&device_poll).count(),
+        native_helper.matches(&device_poll).count(),
+        "Device polling must be reachable only through the cfg-native helper"
+    );
+
+    let wasm_branch_marker = "#[cfg(target_arch = \"wasm32\")]\n        {";
+    let wasm_branch = source_braced_block_from_marker(readback_source, wasm_branch_marker);
+    assert!(wasm_branch.contains("let _ = (device, submission_index);"));
+    assert!(!wasm_branch.contains(&device_poll));
+    assert!(!wasm_branch.contains("PollType::"));
+    assert!(!wasm_branch.contains("spawn_native_poll_helper"));
+
+    assert!(readback_source.contains("pub(crate) async fn read_texture_rgba("));
+    assert!(renderer_source.contains("pub async fn read_headless("));
+    assert!(source("src/lib.rs").contains("mod readback;"));
+    assert!(!source("src/lib.rs").contains("pub mod readback;"));
+    let readback_entry = "read_texture_rgba(";
+    let entry_owners = sources
+        .iter()
+        .filter_map(|(path, candidate)| candidate.contains(readback_entry).then_some(path.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        entry_owners,
+        ["src/readback.rs", "src/renderer.rs"],
+        "all current texture downloads must enter the one private owner from Renderer"
+    );
+    for caller in [
+        "pub async fn read_headless(",
+        "pub(crate) async fn read_render_texture_for_test(",
+        "pub(crate) async fn scoped_clear_fill_probe_for_test(",
+        "async fn materialize_resolved_backdrop(",
+        "async fn materialize_resolved_layer_mask(",
+    ] {
+        assert!(
+            source_braced_block_from_marker(renderer_source, caller).contains(readback_entry),
+            "{caller} must route its texture download through the private readback owner"
+        );
+    }
+
+    let image_buffer =
+        source_braced_block_from_marker(source("src/image.rs"), "pub struct ImageBuffer");
+    assert!(image_buffer.contains("\n    size: PhysicalSize,"));
+    assert!(image_buffer.contains("\n    rgba: Vec<u8>,"));
+    assert!(
+        !image_buffer.contains("\n    pub "),
+        "ImageBuffer fields must remain private"
+    );
+
+    let tests_source = include_str!("tests.rs");
+    let removed_skip_helper = ["render_scene_to_headless_or_skip", "_no_adapter"].concat();
+    let removed_skip_message =
+        ["no GPU machines should report the", " explicit diagnostic"].concat();
+    assert!(!tests_source.contains(&removed_skip_helper));
+    assert!(!tests_source.contains(&removed_skip_message));
+    for contract_test in [
+        "shader_pass_contract_only_context_reports_adapter_unavailable",
+        "offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic",
+    ] {
+        assert!(
+            tests_source.contains(&format!("fn {contract_test}()")),
+            "contract-only behavior must remain separate in {contract_test}"
+        );
+    }
+    for required_host_test in [
+        "offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available",
+        "offscreen_reuses_resources_across_repeated_bounded_requests",
+        "shader_clear_fill_pass_encodes_when_gpu_context_is_available",
+        "render_materializes_bounded_backdrop_capture_from_prior_siblings",
+        "render_backdrop_filter_order_is_preserved",
+        "render_backdrop_clip_limits_filtered_image_to_requested_region",
+        "render_backdrop_foreground_composites_over_filtered_backdrop",
+        "sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foreground_order",
+        "sequence13_backdrop_filter_chain_preserves_order_and_clipping",
+        "ahem_font_data_renders_ascent_and_descent_glyph_bands",
+    ] {
+        let body =
+            source_braced_block_from_marker(tests_source, &format!("fn {required_host_test}()"));
+        assert!(
+            !body.contains("return;"),
+            "required-host test {required_host_test} must not pass by returning early"
+        );
+    }
+    let required_headless_marker = ["fn render_scene_to_required_", "headless("].concat();
+    let required_headless_helper =
+        source_braced_block_from_marker(tests_source, &required_headless_marker);
+    assert!(!required_headless_helper.contains("return;"));
+    assert!(required_headless_helper.contains(".expect("));
 }
 
 #[test]
