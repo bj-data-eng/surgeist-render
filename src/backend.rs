@@ -959,18 +959,16 @@ impl Backend {
     pub(crate) async fn configure_presented_surface(
         &mut self,
         identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
         surface: &PresentedSurface,
         physical_size: PhysicalSize,
         present_mode: wgpu::PresentMode,
     ) -> Result<PresentedConfigurationDraft> {
-        let transaction = self.begin_gpu_operation(
-            identity,
-            GpuOperationStage::Configure,
-            RuntimeOperation::SurfaceRendering,
-        )?;
+        let transaction =
+            self.begin_gpu_operation(identity, GpuOperationStage::Configure, operation)?;
         let ready = self.ready_state_mut(
             identity,
-            RuntimeOperation::SurfaceRendering,
+            operation,
             BackendErrorCode::SurfaceConfigureFailed,
             "presented device resources are unavailable before configuration",
         )?;
@@ -1002,7 +1000,7 @@ impl Backend {
                 .expect("the Configure test must observe the draft checkpoint");
             std::future::pending::<()>().await;
         }
-        let result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+        let result = transaction.finish(operation).await;
         #[cfg(all(test, feature = "render-window"))]
         if let Some(PresentedConfigureControlForTest::Fail {
             scope_resolution_observed,

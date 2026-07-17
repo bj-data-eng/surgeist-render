@@ -120,17 +120,24 @@ impl Surface {
         state: SurfaceState,
         lifecycle: PresentedLifecycle,
     ) -> PresentedResumeAction {
-        if state == SurfaceState::Available && matches!(lifecycle, PresentedLifecycle::Ready { .. })
-        {
-            PresentedResumeAction::NoOp
-        } else if state == SurfaceState::Available
-            && matches!(lifecycle, PresentedLifecycle::ResizePending { .. })
-        {
-            PresentedResumeAction::ConfigureExisting
-        } else if matches!(lifecycle, PresentedLifecycle::Lost) {
-            PresentedResumeAction::Recreate
-        } else {
-            PresentedResumeAction::Configure
+        match (state, lifecycle) {
+            (
+                SurfaceState::Available,
+                PresentedLifecycle::Ready { .. }
+                | PresentedLifecycle::NonRenderable { .. }
+                | PresentedLifecycle::Occluded { .. },
+            ) => PresentedResumeAction::NoOp,
+            (SurfaceState::Available, PresentedLifecycle::ResizePending { .. }) => {
+                PresentedResumeAction::ConfigureExisting
+            }
+            (_, PresentedLifecycle::Lost) => PresentedResumeAction::Recreate,
+            (
+                SurfaceState::Suspended,
+                PresentedLifecycle::Ready { .. }
+                | PresentedLifecycle::ResizePending { .. }
+                | PresentedLifecycle::NonRenderable { .. }
+                | PresentedLifecycle::Occluded { .. },
+            ) => PresentedResumeAction::Configure,
         }
     }
 

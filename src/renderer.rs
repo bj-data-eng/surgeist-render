@@ -113,9 +113,26 @@ impl Renderer {
         options: SurfaceOptions,
     ) -> Result<Surface> {
         validate_surface_options(options)?;
+        self.create_surface_with_configuration_operation(
+            attachment,
+            options,
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await
+    }
+
+    async fn create_surface_with_configuration_operation(
+        &mut self,
+        attachment: Attachment,
+        options: SurfaceOptions,
+        configuration_operation: RuntimeOperation,
+    ) -> Result<Surface> {
         match attachment {
             Attachment::Headless => self.create_headless_surface(options).await,
-            Attachment::WebCanvas(canvas) => self.create_web_canvas_surface(canvas, options).await,
+            Attachment::WebCanvas(canvas) => {
+                self.create_web_canvas_surface(canvas, options, configuration_operation)
+                    .await
+            }
             #[cfg(feature = "render-window")]
             Attachment::Window(handle) => {
                 let Some(backend) = self.backend.as_mut() else {
@@ -143,7 +160,7 @@ impl Renderer {
                     },
                     self.identity.clone(),
                 );
-                self.configure_presented_surface_if_needed(&mut created)
+                self.configure_presented_surface_if_needed(&mut created, configuration_operation)
                     .await?;
                 Ok(created)
             }
@@ -155,6 +172,7 @@ impl Renderer {
         &mut self,
         canvas: WebCanvas,
         options: SurfaceOptions,
+        configuration_operation: RuntimeOperation,
     ) -> Result<Surface> {
         let Some(html_canvas) = canvas.html_canvas() else {
             return Err(Error::new(
@@ -188,7 +206,7 @@ impl Renderer {
             },
             self.identity.clone(),
         );
-        self.configure_presented_surface_if_needed(&mut created)
+        self.configure_presented_surface_if_needed(&mut created, configuration_operation)
             .await?;
         Ok(created)
     }
@@ -198,6 +216,7 @@ impl Renderer {
         &mut self,
         canvas: WebCanvas,
         _options: SurfaceOptions,
+        _configuration_operation: RuntimeOperation,
     ) -> Result<Surface> {
         let _ = canvas;
         Capabilities::CURRENT.ensure_supported(UnsupportedPrimitive::new(
@@ -289,7 +308,11 @@ impl Renderer {
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     ))]
-    async fn configure_presented_surface_if_needed(&mut self, surface: &mut Surface) -> Result<()> {
+    async fn configure_presented_surface_if_needed(
+        &mut self,
+        surface: &mut Surface,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
         let (device_identity, native, requested_physical_size, present_mode, needs_configuration) =
             match &surface.backend {
                 SurfaceBackend::Presented {
@@ -312,7 +335,7 @@ impl Renderer {
         }
         let backend = self.backend.as_mut().ok_or_else(|| {
             Error::runtime_unavailable(
-                RuntimeOperation::SurfaceRendering,
+                operation,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
                 "no compatible wgpu adapter is available",
             )
@@ -320,25 +343,22 @@ impl Renderer {
         let draft = backend
             .configure_presented_surface(
                 device_identity,
+                operation,
                 native,
                 requested_physical_size,
                 present_mode,
             )
             .await?;
-        let publication_signal =
-            backend.publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
+        let publication_signal = backend.publication_signal(device_identity, operation)?;
         #[cfg(test)]
         inject_final_publication_loss_for_test(&publication_signal);
-        let result =
-            publication_signal.commit_if_no_terminal(RuntimeOperation::SurfaceRendering, || {
-                let SurfaceBackend::Presented { surface, state, .. } = &mut surface.backend else {
-                    unreachable!(
-                        "presented configuration must commit into the originating surface"
-                    );
-                };
-                surface.commit_configuration(draft);
-                state.commit_configuration();
-            });
+        let result = publication_signal.commit_if_no_terminal(operation, || {
+            let SurfaceBackend::Presented { surface, state, .. } = &mut surface.backend else {
+                unreachable!("presented configuration must commit into the originating surface");
+            };
+            surface.commit_configuration(draft);
+            state.commit_configuration();
+        });
         if let Err(error) = result {
             backend.observe_device_terminal(device_identity);
             return Err(error);
@@ -351,7 +371,8 @@ impl Renderer {
         &mut self,
         surface: &mut Surface,
     ) -> Result<()> {
-        self.configure_presented_surface_if_needed(surface).await
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await
     }
 
     #[cfg(not(any(
@@ -361,6 +382,7 @@ impl Renderer {
     async fn configure_presented_surface_if_needed(
         &mut self,
         _surface: &mut Surface,
+        _operation: RuntimeOperation,
     ) -> Result<()> {
         Ok(())
     }
@@ -447,7 +469,8 @@ impl Renderer {
         surface.ensure_renderable()?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
 
-        self.configure_presented_surface_if_needed(surface).await?;
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
 
         let Some(device_identity) = surface.device_identity() else {
             return Err(Error::runtime_unavailable(
@@ -523,7 +546,11 @@ impl Renderer {
         };
         let frame = match frame {
             Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
-                self.configure_presented_surface_if_needed(surface).await?;
+                self.configure_presented_surface_if_needed(
+                    surface,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await?;
                 return Err(error);
             }
             Err(error) => return Err(error),
@@ -596,7 +623,11 @@ impl Renderer {
                 match action {
                     super::surface::PresentedResumeAction::NoOp => Ok(()),
                     super::surface::PresentedResumeAction::ConfigureExisting => {
-                        self.configure_presented_surface_if_needed(surface).await
+                        self.configure_presented_surface_if_needed(
+                            surface,
+                            RuntimeOperation::SurfaceResume,
+                        )
+                        .await
                     }
                     super::surface::PresentedResumeAction::Configure => {
                         let resizing = state.lifecycle().resize_state();
@@ -615,12 +646,21 @@ impl Renderer {
                             if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
                                 state.set_resizing(resizing);
                             }
-                            self.configure_presented_surface_if_needed(&mut next)
-                                .await?;
+                            self.configure_presented_surface_if_needed(
+                                &mut next,
+                                RuntimeOperation::SurfaceResume,
+                            )
+                            .await?;
                             *surface = next;
                             return Ok(());
                         }
-                        let mut next = self.create_surface(attachment, surface.options).await?;
+                        let mut next = self
+                            .create_surface_with_configuration_operation(
+                                attachment,
+                                surface.options,
+                                RuntimeOperation::SurfaceResume,
+                            )
+                            .await?;
                         next.last_parameters = surface.last_parameters;
                         next.renderer_identity = surface.renderer_identity.clone();
                         if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
@@ -646,12 +686,21 @@ impl Renderer {
                             if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
                                 state.set_resizing(resizing);
                             }
-                            self.configure_presented_surface_if_needed(&mut next)
-                                .await?;
+                            self.configure_presented_surface_if_needed(
+                                &mut next,
+                                RuntimeOperation::SurfaceResume,
+                            )
+                            .await?;
                             *surface = next;
                             return Ok(());
                         }
-                        let mut next = self.create_surface(attachment, surface.options).await?;
+                        let mut next = self
+                            .create_surface_with_configuration_operation(
+                                attachment,
+                                surface.options,
+                                RuntimeOperation::SurfaceResume,
+                            )
+                            .await?;
                         next.last_parameters = surface.last_parameters;
                         if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
                             state.set_resizing(resizing);

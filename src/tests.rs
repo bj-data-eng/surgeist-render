@@ -15281,7 +15281,7 @@ fn presented_configuration_test_seam_is_test_only() {
     assert_eq!(
         renderer_source
             .matches(
-                "#[cfg(all(test, feature = \"render-window\"))]\n    pub(crate) async fn configure_presented_surface_for_test(\n        &mut self,\n        surface: &mut Surface,\n    ) -> Result<()> {\n        self.configure_presented_surface_if_needed(surface).await\n    }"
+                "#[cfg(all(test, feature = \"render-window\"))]\n    pub(crate) async fn configure_presented_surface_for_test(\n        &mut self,\n        surface: &mut Surface,\n    ) -> Result<()> {\n        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)\n            .await\n    }"
             )
             .count(),
         1,
@@ -15947,6 +15947,351 @@ fn available_resize_pending_resume_retains_installed_attachment_and_target() {
     assert_eq!(
         renderer.default_device_active_operation_generation_for_test(),
         None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn available_nonrenderable_resume_retains_installed_attachment_and_target() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("available nonrenderable resume coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let installed_attachment = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let installed_target = presented_target_identity_for_test(&surface);
+    let installed_resource = presented_resource_id_for_test(&surface)
+        .expect("the fixture must begin with a committed target bundle");
+    let installed_observation = presented_observation_handle_for_test(&surface);
+
+    surface.resize(Size::new(0.0, 2.0), 1.0).unwrap();
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert_eq!(surface.physical_size(), PhysicalSize::new(0, 2));
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::NonRenderable {
+            physical_size,
+            resizing: ResizeState::Idle,
+        } if physical_size == PhysicalSize::new(0, 2)
+    ));
+
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("different-nonrenderable-resume-candidate"),
+    ))
+    .expect("available nonrenderable resume must be an idempotent compatible success");
+
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("available resume must retain the installed attachment kind"),
+        },
+        installed_attachment
+    );
+    assert_eq!(
+        presented_target_identity_for_test(&surface),
+        installed_target,
+        "available nonrenderable resume must retain the installed host target"
+    );
+    assert_eq!(
+        presented_resource_id_for_test(&surface),
+        Some(installed_resource),
+        "available nonrenderable resume must retain the installed target resources"
+    );
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert_eq!(surface.physical_size(), PhysicalSize::new(0, 2));
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::NonRenderable { .. }
+    ));
+    assert_eq!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::NonRenderable,
+        })
+    );
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("the retained zero-area surface must remain nonrenderable");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::NonRenderable,
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "an idempotent available resume and rejected render must start no GPU transaction"
+    );
+
+    surface.resize(Size::new(2.0, 2.0), 1.0).unwrap();
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Ready { .. }
+    ));
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("restoring the installed extent must render through the retained target");
+    let observation = installed_observation.snapshot_for_test();
+    assert_eq!(observation.acquire_count_for_test(), 1);
+    assert_eq!(observation.present_count_for_test(), 1);
+    assert_eq!(observation.discarded_count_for_test(), 0);
+    assert_eq!(
+        presented_target_identity_for_test(&surface),
+        installed_target
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn available_occluded_resume_retains_installed_attachment_and_target() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("available occluded resume coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let installed_attachment = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let installed_target = presented_target_identity_for_test(&surface);
+    let installed_resource = presented_resource_id_for_test(&surface)
+        .expect("the fixture must begin with a committed target bundle");
+    let installed_observation = presented_observation_handle_for_test(&surface);
+
+    set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Occluded);
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("the synthetic occlusion must enter the private occluded lifecycle");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Occluded,
+    );
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Occluded { .. }
+    ));
+
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("different-occluded-resume-candidate"),
+    ))
+    .expect("available occluded resume may remain occluded on its installed target");
+
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("available resume must retain the installed attachment kind"),
+        },
+        installed_attachment
+    );
+    assert_eq!(
+        presented_target_identity_for_test(&surface),
+        installed_target,
+        "available occluded resume must retain the installed host target"
+    );
+    assert_eq!(
+        presented_resource_id_for_test(&surface),
+        Some(installed_resource),
+        "available occluded resume must retain the installed target resources"
+    );
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Occluded { .. }
+    ));
+    assert_eq!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::Occluded,
+        })
+    );
+    let observation_before_rejected_render = installed_observation.snapshot_for_test();
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("an occluded surface must remain unavailable until explicit recovery");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Occluded,
+    );
+    assert_eq!(
+        installed_observation.snapshot_for_test(),
+        observation_before_rejected_render,
+        "an occluded render rejection must not attempt another acquire"
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "an idempotent available resume and rejected render must start no GPU transaction"
+    );
+
+    surface.resize(Size::new(2.0, 2.0), 1.0).unwrap();
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Ready { .. }
+    ));
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("same-extent recovery must render through the retained target");
+    let observation = installed_observation.snapshot_for_test();
+    assert_eq!(observation.acquire_count_for_test(), 1);
+    assert_eq!(observation.present_count_for_test(), 1);
+    assert_eq!(observation.discarded_count_for_test(), 0);
+    assert_eq!(
+        presented_target_identity_for_test(&surface),
+        installed_target
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn available_resize_pending_resume_terminal_loss_before_publication_uses_surface_resume() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("pending resume attribution coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+        .expect("the fixture must establish public frame state before the resume race");
+    surface.resize(Size::new(3.0, 2.0), 1.0).unwrap();
+
+    let attachment_before = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let target_before = presented_target_identity_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let physical_size_before = surface.physical_size();
+    let state_before = surface.state();
+    let parameters_before = surface.last_parameters;
+    let stats_before = renderer.stats();
+    let observation_before = presented_observation_for_test(&surface);
+
+    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    let error = pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("different-pending-resume-candidate"),
+    ))
+    .expect_err("terminal loss before resume publication must abort the pending configuration");
+    drop(loss);
+
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("failed resume must retain the installed attachment kind"),
+        },
+        attachment_before
+    );
+    assert_eq!(presented_target_identity_for_test(&surface), target_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
+    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(surface.state(), state_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(presented_observation_for_test(&surface), observation_before);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "the completed configure transaction must clear its active generation before publication"
+    );
+    assert_eq!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::DeviceLost {
+            reason: DeviceLossReason::Unknown,
+        })
+    );
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceResume,
+        DeviceLossReason::Unknown,
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn lost_recreation_resume_terminal_loss_before_publication_uses_surface_resume() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("lost recreation attribution coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+        .expect("the fixture must establish public frame state before surface loss");
+    set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Lost);
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("the synthetic acquire loss must require explicit recreation");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Lost,
+    );
+
+    let attachment_before = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let target_before = presented_target_identity_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let physical_size_before = surface.physical_size();
+    let state_before = surface.state();
+    let parameters_before = surface.last_parameters;
+    let stats_before = renderer.stats();
+    let observation_before = presented_observation_for_test(&surface);
+
+    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    let error = pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("different-lost-recreation-candidate"),
+    ))
+    .expect_err("terminal loss before resume publication must abort replacement installation");
+    drop(loss);
+
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("failed recreation must retain the installed attachment kind"),
+        },
+        attachment_before
+    );
+    assert_eq!(presented_target_identity_for_test(&surface), target_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
+    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
+    assert_eq!(lifecycle_before, PresentedLifecycle::Lost);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(surface.state(), state_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(presented_observation_for_test(&surface), observation_before);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "the completed recreation configure transaction must clear its active generation"
+    );
+    assert_eq!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::DeviceLost {
+            reason: DeviceLossReason::Unknown,
+        })
+    );
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceResume,
+        DeviceLossReason::Unknown,
     );
 }
 
