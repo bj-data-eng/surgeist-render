@@ -839,6 +839,7 @@ struct SemanticGraphPass {
 enum GraphBuildPhase {
     RecordingConsumers,
     Scheduling,
+    FinalPresentScheduled,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -888,6 +889,7 @@ enum GraphValidationError {
     DuplicateRootWorkingImage,
     MissingFinalPresent,
     DuplicateFinalPresent,
+    DeclarationAfterFinalPresent,
     MissingSurfaceBaseInitialization,
     RepeatedSurfaceBaseInitialization,
     RootMustUseSurfaceBase,
@@ -902,6 +904,8 @@ enum GraphValidationError {
     ConsumersNotSealed,
     ConsumersAlreadySealed,
     PassAlreadyScheduled(SemanticPassId),
+    PresentScheduledBeforeOtherPasses(SemanticPassId),
+    SchedulingAfterFinalPresent,
     UnscheduledDependency {
         pass: SemanticPassId,
         dependency: SemanticPassId,
@@ -994,6 +998,9 @@ impl SemanticGraphBuilder {
         producer: Option<SemanticResourceProducer>,
     ) -> GraphBuildResult<SemanticResourceId> {
         self.require_recording_phase()?;
+        if self.final_present.is_some() {
+            return Err(GraphValidationError::DeclarationAfterFinalPresent);
+        }
         if descriptor.role == SemanticResourceRole::RootWorkingImage
             && self.root_working_image.is_some()
         {
@@ -1026,6 +1033,13 @@ impl SemanticGraphBuilder {
         result: SemanticPassResult,
     ) -> GraphBuildResult<SemanticPassId> {
         self.require_recording_phase()?;
+        if self.final_present.is_some() {
+            return if intent == SemanticPassIntent::Present {
+                Err(GraphValidationError::DuplicateFinalPresent)
+            } else {
+                Err(GraphValidationError::DeclarationAfterFinalPresent)
+            };
+        }
         let id = SemanticPassId::new(self.generation, PassIndex::try_from_len(self.passes.len())?);
 
         let mut seen_dependencies = Vec::with_capacity(dependencies.len());
@@ -1297,8 +1311,14 @@ impl SemanticGraphBuilder {
     }
 
     fn schedule_pass(&mut self, id: SemanticPassId) -> GraphBuildResult<()> {
-        if self.phase != GraphBuildPhase::Scheduling {
-            return Err(GraphValidationError::ConsumersNotSealed);
+        match self.phase {
+            GraphBuildPhase::RecordingConsumers => {
+                return Err(GraphValidationError::ConsumersNotSealed);
+            }
+            GraphBuildPhase::Scheduling => {}
+            GraphBuildPhase::FinalPresentScheduled => {
+                return Err(GraphValidationError::SchedulingAfterFinalPresent);
+            }
         }
         let pass_index = self.validate_existing_pass_id(id)?;
         let pass = self
@@ -1307,6 +1327,31 @@ impl SemanticGraphBuilder {
             .ok_or(GraphValidationError::UnknownPass(id))?;
         if pass.scheduled {
             return Err(GraphValidationError::PassAlreadyScheduled(id));
+        }
+        let is_present = pass.intent == SemanticPassIntent::Present;
+        if is_present {
+            if let Some(unscheduled) = self
+                .passes
+                .iter()
+                .find(|candidate| candidate.id != id && !candidate.scheduled)
+            {
+                return Err(GraphValidationError::PresentScheduledBeforeOtherPasses(
+                    unscheduled.id,
+                ));
+            }
+            for resource in &self.resources {
+                let required_by_present = u32::from(pass.reads.contains(&resource.id));
+                match resource.remaining_reads {
+                    Some(remaining) if remaining == required_by_present => {}
+                    Some(remaining) => {
+                        return Err(GraphValidationError::UnscheduledReads {
+                            resource: resource.id,
+                            remaining,
+                        });
+                    }
+                    None => return Err(GraphValidationError::ConsumersNotSealed),
+                }
+            }
         }
         for dependency in &pass.dependencies {
             let dependency_index = self.validate_existing_pass_id(*dependency)?;
@@ -1375,11 +1420,14 @@ impl SemanticGraphBuilder {
         scheduled_pass.scheduled = true;
         self.resources = resources;
         self.passes = passes;
+        if is_present {
+            self.phase = GraphBuildPhase::FinalPresentScheduled;
+        }
         Ok(())
     }
 
     fn ensure_resource_readable(&self, resource: SemanticResourceId) -> GraphBuildResult<()> {
-        if self.phase != GraphBuildPhase::Scheduling {
+        if self.phase == GraphBuildPhase::RecordingConsumers {
             return Err(GraphValidationError::ConsumersNotSealed);
         }
         let resource_index = self.validate_resource_id(resource)?;
@@ -1396,7 +1444,7 @@ impl SemanticGraphBuilder {
     }
 
     fn finish(self) -> GraphBuildResult<GpuRenderGraph> {
-        if self.phase != GraphBuildPhase::Scheduling {
+        if self.phase == GraphBuildPhase::RecordingConsumers {
             return Err(GraphValidationError::ConsumersNotSealed);
         }
         for pass in &self.passes {
@@ -1422,6 +1470,9 @@ impl SemanticGraphBuilder {
         let final_present = self
             .final_present
             .ok_or(GraphValidationError::MissingFinalPresent)?;
+        if self.phase != GraphBuildPhase::FinalPresentScheduled {
+            return Err(GraphValidationError::UnscheduledPass(final_present));
+        }
         Ok(GpuRenderGraph {
             generation: self.generation,
             resources: self.resources,
@@ -1434,7 +1485,9 @@ impl SemanticGraphBuilder {
     fn require_recording_phase(&self) -> GraphBuildResult<()> {
         match self.phase {
             GraphBuildPhase::RecordingConsumers => Ok(()),
-            GraphBuildPhase::Scheduling => Err(GraphValidationError::ConsumersAlreadySealed),
+            GraphBuildPhase::Scheduling | GraphBuildPhase::FinalPresentScheduled => {
+                Err(GraphValidationError::ConsumersAlreadySealed)
+            }
         }
     }
 
@@ -1968,7 +2021,33 @@ pub(crate) enum GraphFailureObservation {
     MissingProducerDependency,
     ConsumersNotSealed,
     ConsumersAlreadySealed,
+    DeclarationAfterFinalPresent,
+    PresentScheduledBeforeOtherPasses,
+    SchedulingAfterFinalPresent,
     OtherTypedFailure,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum GraphOwnerCallObservation {
+    Accepted,
+    Rejected(GraphFailureObservation),
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FinalPresentDeclarationObservation {
+    pub(crate) declaration_after_present: GraphOwnerCallObservation,
+    pub(crate) completed_after_declaration_attempt: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct FinalPresentSchedulingObservation {
+    pub(crate) early_present: GraphOwnerCallObservation,
+    pub(crate) completed_after_early_present_attempt: bool,
+    pub(crate) scheduling_after_present: GraphOwnerCallObservation,
+    pub(crate) completed_after_post_present_attempt: bool,
 }
 
 #[cfg(test)]
@@ -2004,6 +2083,13 @@ impl From<GraphValidationError> for GraphFailureObservation {
             }
             GraphValidationError::ConsumersNotSealed => Self::ConsumersNotSealed,
             GraphValidationError::ConsumersAlreadySealed => Self::ConsumersAlreadySealed,
+            GraphValidationError::DeclarationAfterFinalPresent => {
+                Self::DeclarationAfterFinalPresent
+            }
+            GraphValidationError::PresentScheduledBeforeOtherPasses(_) => {
+                Self::PresentScheduledBeforeOtherPasses
+            }
+            GraphValidationError::SchedulingAfterFinalPresent => Self::SchedulingAfterFinalPresent,
             GraphValidationError::GenerationExhausted
             | GraphValidationError::ResourceIdentityExhausted
             | GraphValidationError::PassIdentityExhausted
@@ -2118,6 +2204,14 @@ fn graph_probe_failure<T>(
 }
 
 #[cfg(test)]
+fn graph_owner_call_observation<T>(result: GraphBuildResult<T>) -> GraphOwnerCallObservation {
+    match result {
+        Ok(_) => GraphOwnerCallObservation::Accepted,
+        Err(error) => GraphOwnerCallObservation::Rejected(GraphFailureObservation::from(error)),
+    }
+}
+
+#[cfg(test)]
 fn declare_probe_root(
     builder: &mut SemanticGraphBuilder,
     expected_reads: u32,
@@ -2170,6 +2264,88 @@ fn declare_probe_present(
         vec![resource],
         SemanticPassResult::Empty,
     ))
+}
+
+#[cfg(test)]
+pub(crate) fn final_present_declaration_observation_for_test()
+-> SemanticGraphProbeResult<FinalPresentDeclarationObservation> {
+    let mut builder = graph_probe_builder()?;
+    let (root, clear) = declare_probe_root(&mut builder, 1)?;
+    let present = declare_probe_present(&mut builder, root, clear)?;
+
+    let declaration = builder.declare_pass(
+        SemanticPassIntent::VelloCapture {
+            initialization: WorkingImageInitialization::Transparent,
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Empty,
+    );
+    let declared_pass = declaration.as_ref().ok().copied();
+    let declaration_after_present = graph_owner_call_observation(declaration);
+    graph_probe_value(builder.begin_scheduling())?;
+    graph_probe_value(builder.schedule_pass(clear))?;
+    if let Some(declared_pass) = declared_pass {
+        graph_probe_value(builder.schedule_pass(declared_pass))?;
+    }
+    graph_probe_value(builder.schedule_pass(present))?;
+    let completed_after_declaration_attempt = builder.finish().is_ok();
+
+    Ok(FinalPresentDeclarationObservation {
+        declaration_after_present,
+        completed_after_declaration_attempt,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn final_present_scheduling_observation_for_test()
+-> SemanticGraphProbeResult<FinalPresentSchedulingObservation> {
+    let mut early_builder = graph_probe_builder()?;
+    let (early_root, early_clear) = declare_probe_root(&mut early_builder, 1)?;
+    let early_independent = graph_probe_value(early_builder.declare_pass(
+        SemanticPassIntent::VelloCapture {
+            initialization: WorkingImageInitialization::Transparent,
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Empty,
+    ))?;
+    let early_present_id = declare_probe_present(&mut early_builder, early_root, early_clear)?;
+    graph_probe_value(early_builder.begin_scheduling())?;
+    graph_probe_value(early_builder.schedule_pass(early_clear))?;
+    let early_present = graph_owner_call_observation(early_builder.schedule_pass(early_present_id));
+    graph_probe_value(early_builder.schedule_pass(early_independent))?;
+    if matches!(early_present, GraphOwnerCallObservation::Rejected(_)) {
+        graph_probe_value(early_builder.schedule_pass(early_present_id))?;
+    }
+    let completed_after_early_present_attempt = early_builder.finish().is_ok();
+
+    let mut terminal_builder = graph_probe_builder()?;
+    let (terminal_root, terminal_clear) = declare_probe_root(&mut terminal_builder, 1)?;
+    let terminal_independent = graph_probe_value(terminal_builder.declare_pass(
+        SemanticPassIntent::VelloCapture {
+            initialization: WorkingImageInitialization::Transparent,
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Empty,
+    ))?;
+    let terminal_present =
+        declare_probe_present(&mut terminal_builder, terminal_root, terminal_clear)?;
+    graph_probe_value(terminal_builder.begin_scheduling())?;
+    graph_probe_value(terminal_builder.schedule_pass(terminal_clear))?;
+    graph_probe_value(terminal_builder.schedule_pass(terminal_independent))?;
+    graph_probe_value(terminal_builder.schedule_pass(terminal_present))?;
+    let scheduling_after_present =
+        graph_owner_call_observation(terminal_builder.schedule_pass(terminal_clear));
+    let completed_after_post_present_attempt = terminal_builder.finish().is_ok();
+
+    Ok(FinalPresentSchedulingObservation {
+        early_present,
+        completed_after_early_present_attempt,
+        scheduling_after_present,
+        completed_after_post_present_attempt,
+    })
 }
 
 #[cfg(test)]

@@ -8772,8 +8772,9 @@ fn logical_bounds_preserve_large_finite_translation_until_frame_scale_resolution
 }
 
 use super::frame::{
-    GraphFailureObservation, InvalidSemanticGraphStateForTest, OrderedFilterEdgeObservation,
-    OrderedFilterIntentObservation, OrderedFilterPlanObservation, OrderedFilterStepObservation,
+    GraphFailureObservation, GraphOwnerCallObservation, InvalidSemanticGraphStateForTest,
+    OrderedFilterEdgeObservation, OrderedFilterIntentObservation, OrderedFilterPlanObservation,
+    OrderedFilterStepObservation,
 };
 
 fn observe_ordered_filter_plan(
@@ -9111,6 +9112,52 @@ fn graph_builder_rejects_forward_stale_and_read_write_aliases() {
     );
     assert!(edge_observation.every_result_has_one_owner);
     assert!(edge_observation.every_read_names_its_producer);
+}
+
+#[test]
+fn graph_builder_rejects_declaration_after_final_present() {
+    let observed = super::frame::final_present_declaration_observation_for_test()
+        .expect("the terminal declaration probe must reach the graph owner");
+
+    assert_eq!(
+        (
+            observed.declaration_after_present,
+            observed.completed_after_declaration_attempt,
+        ),
+        (
+            GraphOwnerCallObservation::Rejected(
+                GraphFailureObservation::DeclarationAfterFinalPresent,
+            ),
+            true,
+        ),
+        "graph declaration after final present was accepted"
+    );
+}
+
+#[test]
+fn graph_builder_rejects_scheduling_after_final_present() {
+    let observed = super::frame::final_present_scheduling_observation_for_test()
+        .expect("the terminal scheduling probe must reach the graph owner");
+
+    assert_eq!(
+        (
+            observed.early_present,
+            observed.completed_after_early_present_attempt,
+            observed.scheduling_after_present,
+            observed.completed_after_post_present_attempt,
+        ),
+        (
+            GraphOwnerCallObservation::Rejected(
+                GraphFailureObservation::PresentScheduledBeforeOtherPasses,
+            ),
+            true,
+            GraphOwnerCallObservation::Rejected(
+                GraphFailureObservation::SchedulingAfterFinalPresent,
+            ),
+            true,
+        ),
+        "graph scheduling after final present was accepted"
+    );
 }
 
 #[test]
