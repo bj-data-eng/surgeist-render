@@ -1,4 +1,5 @@
 use super::{
+    frame::LogicalBounds,
     geometry::offset_radii,
     paint::PaintKind,
     scene::Command,
@@ -243,18 +244,24 @@ pub(crate) enum LayerPassKind {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct OffscreenBounds {
-    rect: Rect,
+    logical_bounds: LogicalBounds,
 }
 
 impl OffscreenBounds {
     pub(crate) fn try_new(rect: Rect) -> Result<Self> {
-        validate_rect(rect, "offscreen layer bounds")?;
-        Ok(Self { rect })
+        Ok(Self {
+            logical_bounds: LogicalBounds::try_from_rect(rect, "offscreen layer bounds")?,
+        })
+    }
+
+    #[must_use]
+    const fn from_logical(logical_bounds: LogicalBounds) -> Self {
+        Self { logical_bounds }
     }
 
     #[must_use]
     pub(crate) const fn rect(self) -> Rect {
-        self.rect
+        self.logical_bounds.rect()
     }
 }
 
@@ -295,7 +302,10 @@ impl LayerPassPlan {
                 Some(bounds),
             ));
         }
-        let bounds = clip_bounds(clip).or_else(|| commands_bounds(children));
+        let bounds = match clip_bounds(clip)? {
+            Some(bounds) => Some(bounds),
+            None => commands_bounds(children)?,
+        };
 
         let has_clip = clip.is_some();
         let has_resolved_mask = layer.resolved_alpha_mask().is_some();
@@ -911,85 +921,88 @@ fn unsupported_layer_effect(layer: &Layer) -> Option<UnsupportedPrimitive> {
     None
 }
 
-fn clip_bounds(clip: Option<&RenderClip>) -> Option<OffscreenBounds> {
-    clip.and_then(render_clip_bounds)
+fn clip_bounds(clip: Option<&RenderClip>) -> Result<Option<OffscreenBounds>> {
+    clip.map(render_clip_bounds).transpose()
 }
 
-fn commands_bounds(commands: &[RenderCommand]) -> Option<OffscreenBounds> {
-    commands
-        .iter()
-        .filter_map(command_bounds)
-        .reduce(union_bounds)
+fn commands_bounds(commands: &[RenderCommand]) -> Result<Option<OffscreenBounds>> {
+    let mut bounds: Option<OffscreenBounds> = None;
+    for command in commands {
+        if let Some(command_bounds) = command_bounds(command)? {
+            bounds = Some(match bounds {
+                Some(bounds) => union_bounds(bounds, command_bounds)?,
+                None => command_bounds,
+            });
+        }
+    }
+    Ok(bounds)
 }
 
-fn command_bounds(command: &RenderCommand) -> Option<OffscreenBounds> {
+fn command_bounds(command: &RenderCommand) -> Result<Option<OffscreenBounds>> {
     match command {
-        RenderCommand::Fill { shape, .. } => render_shape_bounds(shape),
-        RenderCommand::Stroke { shape, stroke, .. } => stroke_shape_bounds(shape, stroke),
-        RenderCommand::Shadow { shape, shadow } => shadow_bounds(shape, shadow),
-        RenderCommand::Image { rect, .. } => OffscreenBounds::try_new(*rect).ok(),
-        RenderCommand::TextRun { .. } => None,
+        RenderCommand::Fill { shape, .. } => render_shape_bounds(shape).map(Some),
+        RenderCommand::Stroke { shape, stroke, .. } => stroke_shape_bounds(shape, stroke).map(Some),
+        RenderCommand::Shadow { shape, shadow } => shadow_bounds(shape, shadow).map(Some),
+        RenderCommand::Image { rect, .. } => OffscreenBounds::try_new(*rect).map(Some),
+        RenderCommand::TextRun { .. } => Ok(None),
         RenderCommand::Layer { layer, .. } => layer
             .pass_plan
             .bounds()
-            .and_then(|bounds| transform_bounds(bounds.rect(), layer.transform)),
+            .map(|bounds| transform_bounds(bounds.rect(), layer.transform))
+            .transpose(),
     }
 }
 
-fn render_shape_bounds(shape: &RenderShape) -> Option<OffscreenBounds> {
+fn render_shape_bounds(shape: &RenderShape) -> Result<OffscreenBounds> {
     match shape {
         RenderShape::Rect(rect) | RenderShape::RoundedRect { rect, .. } => {
-            OffscreenBounds::try_new(*rect).ok()
+            OffscreenBounds::try_new(*rect)
         }
         RenderShape::Circle { center, radius } => OffscreenBounds::try_new(Rect::new(
             center.x() - radius,
             center.y() - radius,
             radius * 2.0,
             radius * 2.0,
-        ))
-        .ok(),
+        )),
         RenderShape::Ellipse { center, radii } => OffscreenBounds::try_new(Rect::new(
             center.x() - radii.width(),
             center.y() - radii.height(),
             radii.width() * 2.0,
             radii.height() * 2.0,
-        ))
-        .ok(),
+        )),
         RenderShape::Path(path) => kurbo_bounds(path.to_kurbo().bounding_box()),
     }
 }
 
-fn render_clip_bounds(clip: &RenderClip) -> Option<OffscreenBounds> {
+fn render_clip_bounds(clip: &RenderClip) -> Result<OffscreenBounds> {
     let bounds = match clip.geometry() {
         RenderClipGeometry::Rect(rect) | RenderClipGeometry::RoundedRect { rect, .. } => {
-            OffscreenBounds::try_new(*rect).ok()
+            OffscreenBounds::try_new(*rect)?
         }
         RenderClipGeometry::Circle { center, radius } => OffscreenBounds::try_new(Rect::new(
             center.x() - radius,
             center.y() - radius,
             radius * 2.0,
             radius * 2.0,
-        ))
-        .ok(),
+        ))?,
         RenderClipGeometry::Ellipse { center, radii } => OffscreenBounds::try_new(Rect::new(
             center.x() - radii.width(),
             center.y() - radii.height(),
             radii.width() * 2.0,
             radii.height() * 2.0,
-        ))
-        .ok(),
-        RenderClipGeometry::Path { path, .. } => kurbo_bounds(path.to_kurbo().bounding_box()),
-    }?;
+        ))?,
+        RenderClipGeometry::Path { path, .. } => kurbo_bounds(path.to_kurbo().bounding_box())?,
+    };
     match clip.coordinate_space() {
         Some(coordinate_space) => transform_bounds(bounds.rect(), coordinate_space.transform()),
-        None => Some(bounds),
+        None => Ok(bounds),
     }
 }
 
 fn stroke_shape_bounds(
     shape: &RenderStrokeShape,
     stroke: &RenderStroke,
-) -> Option<OffscreenBounds> {
+) -> Result<OffscreenBounds> {
     let half_width = stroke.width * 0.5;
     let (bounds, inflate) = match shape {
         RenderStrokeShape::Rect(rect) => (*rect, half_width),
@@ -1004,7 +1017,7 @@ fn stroke_shape_bounds(
     kurbo_bounds(bounds.inflate(inflate, inflate))
 }
 
-fn shadow_bounds(shape: &ShadowShape, shadow: &RenderShadow) -> Option<OffscreenBounds> {
+fn shadow_bounds(shape: &ShadowShape, shadow: &RenderShadow) -> Result<OffscreenBounds> {
     let base = match shape {
         ShadowShape::Rect(rect) | ShadowShape::RoundedRect { rect, .. } => *rect,
         ShadowShape::Circle { center, radius } => Rect::new(
@@ -1020,80 +1033,47 @@ fn shadow_bounds(shape: &ShadowShape, shadow: &RenderShadow) -> Option<Offscreen
         base.width(),
         base.height(),
     );
-    let blur_support = super::filter::vello_outer_shadow_support_radius(shadow.blur).ok()?;
+    let blur_support = super::filter::vello_outer_shadow_support_radius(shadow.blur)?;
     let support = shadow.spread + blur_support;
-    OffscreenBounds::try_new(geometry::expand_rect(offset, support)).ok()
+    if !support.is_finite() {
+        return Err(Error::invalid_value(
+            "box shadow support",
+            support,
+            "must be finite",
+        ));
+    }
+    OffscreenBounds::try_new(geometry::expand_rect(offset, support))
 }
 
 #[cfg(test)]
-pub(crate) fn outer_box_shadow_bounds_for_test(command: &RenderCommand) -> Option<Rect> {
+pub(crate) fn outer_box_shadow_bounds_for_test(command: &RenderCommand) -> Result<Option<Rect>> {
     match command {
-        RenderCommand::Shadow { shape, shadow } => {
-            shadow_bounds(shape, shadow).map(OffscreenBounds::rect)
-        }
+        RenderCommand::Shadow { shape, shadow } => shadow_bounds(shape, shadow)
+            .map(OffscreenBounds::rect)
+            .map(Some),
         RenderCommand::Fill { .. }
         | RenderCommand::Stroke { .. }
         | RenderCommand::Image { .. }
         | RenderCommand::TextRun { .. }
-        | RenderCommand::Layer { .. } => None,
+        | RenderCommand::Layer { .. } => Ok(None),
     }
 }
 
-fn transform_bounds(rect: Rect, transform: Transform) -> Option<OffscreenBounds> {
-    let [a, b, c, d, e, f] = transform.as_array();
-    let max = rect.max();
-    let corners = [
-        (rect.x(), rect.y()),
-        (max.x(), rect.y()),
-        (max.x(), max.y()),
-        (rect.x(), max.y()),
-    ];
-    let mut min_x = f64::INFINITY;
-    let mut min_y = f64::INFINITY;
-    let mut max_x = f64::NEG_INFINITY;
-    let mut max_y = f64::NEG_INFINITY;
-    for (x, y) in corners {
-        let transformed_x = a * x + c * y + e;
-        let transformed_y = b * x + d * y + f;
-        if !transformed_x.is_finite() || !transformed_y.is_finite() {
-            return None;
-        }
-        min_x = min_x.min(transformed_x);
-        min_y = min_y.min(transformed_y);
-        max_x = max_x.max(transformed_x);
-        max_y = max_y.max(transformed_y);
-    }
-    OffscreenBounds::try_new(Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)).ok()
+fn transform_bounds(rect: Rect, transform: Transform) -> Result<OffscreenBounds> {
+    let logical_bounds = LogicalBounds::try_from_rect(rect, "command bounds")?
+        .try_transform(transform, "command transformed bounds")?;
+    Ok(OffscreenBounds::from_logical(logical_bounds))
 }
 
-fn union_bounds(a: OffscreenBounds, b: OffscreenBounds) -> OffscreenBounds {
-    let a = a.rect();
-    let b = b.rect();
-    let a_max = a.max();
-    let b_max = b.max();
-    let min_x = a.x().min(b.x());
-    let min_y = a.y().min(b.y());
-    let max_x = a_max.x().max(b_max.x());
-    let max_y = a_max.y().max(b_max.y());
-    OffscreenBounds::try_new(Rect::new(min_x, min_y, max_x - min_x, max_y - min_y))
-        .expect("union of valid finite bounds remains valid")
-}
-
-fn kurbo_bounds(bounds: kurbo::Rect) -> Option<OffscreenBounds> {
-    if !bounds.x0.is_finite()
-        || !bounds.y0.is_finite()
-        || !bounds.x1.is_finite()
-        || !bounds.y1.is_finite()
-    {
-        return None;
-    }
-    OffscreenBounds::try_new(Rect::new(
-        bounds.x0,
-        bounds.y0,
-        bounds.width(),
-        bounds.height(),
+fn union_bounds(a: OffscreenBounds, b: OffscreenBounds) -> Result<OffscreenBounds> {
+    Ok(OffscreenBounds::from_logical(
+        a.logical_bounds
+            .union(b.logical_bounds, "command bounds union")?,
     ))
-    .ok()
+}
+
+fn kurbo_bounds(bounds: kurbo::Rect) -> Result<OffscreenBounds> {
+    OffscreenBounds::try_new(Rect::try_from(bounds)?)
 }
 
 fn solid_shadow_color(paint: &Paint, capabilities: Capabilities) -> Result<Color> {

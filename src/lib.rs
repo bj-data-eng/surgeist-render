@@ -13,6 +13,7 @@ mod command;
 mod encode;
 mod error;
 mod filter;
+mod frame;
 mod geometry;
 mod gpu_transaction;
 mod image;

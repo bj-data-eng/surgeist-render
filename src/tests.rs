@@ -8572,13 +8572,160 @@ fn box_shadow_bounds_do_not_reuse_capped_css_filter_blur() {
         Shadow::try_new(Point::new(3.0, -2.0), 512.0, 4.0, Color::BLACK).unwrap(),
     );
     let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
-    let bounds = command::outer_box_shadow_bounds_for_test(&normalized.commands[0]);
+    let bounds = command::outer_box_shadow_bounds_for_test(&normalized.commands[0]).unwrap();
 
     assert!(
         bounds.is_some(),
         "box-shadow bounds still depend on CSS FilterBlur validation"
     );
     assert_finite_positive_rect(bounds.unwrap());
+}
+
+#[derive(Debug)]
+struct SpatialPrimitiveObservation {
+    logical_and_device_phases_are_distinct: bool,
+    logical_bounds: Option<[f64; 4]>,
+    device_origin: Option<(i32, i32)>,
+    device_extent: Option<(u32, u32)>,
+    raster_scale: f64,
+    texel_center: Option<(f64, f64)>,
+    is_empty: bool,
+}
+
+fn observe_spatial_primitives(
+    rect: Rect,
+    transform: Transform,
+    surface_scale: f64,
+    texel: (u32, u32),
+) -> Result<SpatialPrimitiveObservation> {
+    let observed =
+        super::frame::spatial_primitives_for_test(rect, transform, surface_scale, texel)?;
+    Ok(SpatialPrimitiveObservation {
+        logical_and_device_phases_are_distinct: observed.logical_and_device_phases_are_distinct,
+        logical_bounds: observed.logical_bounds,
+        device_origin: observed.device_origin,
+        device_extent: observed.device_extent,
+        raster_scale: observed.raster_scale,
+        texel_center: observed.texel_center,
+        is_empty: observed.is_empty,
+    })
+}
+
+#[test]
+fn signed_device_bounds_floor_minima_and_ceil_maxima() {
+    let rect = Rect::new(-1.25, 2.125, 3.5, 4.25);
+    let observed = observe_spatial_primitives(rect, Transform::identity(), 2.0, (0, 0)).unwrap();
+
+    assert!(
+        observed.logical_and_device_phases_are_distinct,
+        "logical and device spatial phases remain collapsed"
+    );
+    assert_eq!(observed.logical_bounds, Some([-1.25, 2.125, 3.5, 4.25]));
+    assert_eq!(observed.device_origin, Some((-3, 4)));
+    assert_eq!(observed.device_extent, Some((8, 9)));
+
+    let largest_extent = observe_spatial_primitives(
+        Rect::new(f64::from(i32::MIN), 0.0, f64::from(u32::MAX), 1.0),
+        Transform::identity(),
+        1.0,
+        (0, 0),
+    )
+    .unwrap();
+    assert_eq!(largest_extent.device_origin, Some((i32::MIN, 0)));
+    assert_eq!(largest_extent.device_extent, Some((u32::MAX, 1)));
+
+    for (rect, scale) in [
+        (Rect::new(f64::NAN, 0.0, 1.0, 1.0), 1.0),
+        (Rect::new(f64::MAX, 0.0, f64::MAX, 1.0), 1.0),
+        (Rect::new(f64::from(i32::MAX), 0.0, 1.0, 1.0), 2.0),
+        (
+            Rect::new(f64::from(i32::MIN), 0.0, f64::from(u32::MAX) + 1.0, 1.0),
+            1.0,
+        ),
+    ] {
+        let error = observe_spatial_primitives(rect, Transform::identity(), scale, (0, 0))
+            .expect_err("overflowing spatial values must be rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(error.invalid_value_diagnostic().is_some());
+    }
+}
+
+#[test]
+fn negative_and_fractional_origins_preserve_texel_center_mapping() {
+    let observed = observe_spatial_primitives(
+        Rect::new(-1.25, -0.75, 2.0, 1.5),
+        Transform::identity(),
+        2.0,
+        (2, 3),
+    )
+    .unwrap();
+
+    assert_eq!(
+        observed.texel_center,
+        Some((-0.25, 0.75)),
+        "texel-center mapping is absent"
+    );
+    assert_eq!(observed.device_origin, Some((-3, -2)));
+    assert_eq!(observed.device_extent, Some((5, 4)));
+}
+
+#[test]
+fn largest_singular_value_raster_scale_preserves_local_effect_space() {
+    let transform = Transform::try_new([2.0, 1.0, 1.0, 3.0, 4.0, -2.0]).unwrap();
+    let observed =
+        observe_spatial_primitives(Rect::new(-1.0, 2.0, 4.0, 3.0), transform, 1.25, (0, 0))
+            .unwrap();
+    let expected = ((5.0_f64 + 5.0_f64.sqrt()) * 0.5) * 1.25;
+
+    assert!(
+        (observed.raster_scale - expected).abs() <= f64::EPSILON * expected,
+        "local raster scale does not use the largest singular value"
+    );
+    assert_eq!(observed.device_origin, Some((-5, 9)));
+    assert_eq!(observed.device_extent, Some((19, 14)));
+
+    let error = observe_spatial_primitives(
+        Rect::new(0.0, 0.0, 1.0, 1.0),
+        Transform::identity(),
+        f64::INFINITY,
+        (0, 0),
+    )
+    .expect_err("non-finite surface scale must be rejected");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert!(error.invalid_value_diagnostic().is_some());
+
+    let huge_transform = Transform::try_new([f64::MAX, 0.0, 0.0, f64::MAX, 0.0, 0.0]).unwrap();
+    let error =
+        observe_spatial_primitives(Rect::new(0.0, 0.0, 1.0, 1.0), huge_transform, 2.0, (0, 0))
+            .expect_err("overflowing local raster scale must be rejected");
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert!(error.invalid_value_diagnostic().is_some());
+}
+
+#[test]
+fn zero_singular_value_produces_an_empty_plan() {
+    let zero_transform = Transform::scale(0.0, 0.0).unwrap();
+    let observed =
+        observe_spatial_primitives(Rect::new(-2.0, 3.0, 4.0, 5.0), zero_transform, 2.0, (0, 0))
+            .unwrap();
+
+    assert!(
+        observed.is_empty,
+        "degenerate spatial output was erased instead of represented as empty"
+    );
+    assert_eq!(observed.device_origin, None);
+    assert_eq!(observed.device_extent, None);
+
+    let degenerate_bounds = observe_spatial_primitives(
+        Rect::new(1.0, 2.0, 0.0, 3.0),
+        Transform::identity(),
+        2.0,
+        (0, 0),
+    )
+    .unwrap();
+    assert!(degenerate_bounds.is_empty);
+    assert_eq!(degenerate_bounds.device_origin, None);
+    assert_eq!(degenerate_bounds.device_extent, None);
 }
 
 #[test]
