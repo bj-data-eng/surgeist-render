@@ -360,6 +360,7 @@ impl DisplayFreePresentedSurfaceObservationForTest {
 
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) struct DisplayFreePresentedSurfaceStateForTest {
+    target_identity: u64,
     next_outcome: PresentedAcquireOutcomeForTest,
     observation: DisplayFreePresentedSurfaceObservationForTest,
 }
@@ -450,6 +451,8 @@ impl PresentedSurface {
         Self {
             target: PresentedSurfaceTarget::DisplayFreeHostEffectForTest(Arc::new(Mutex::new(
                 DisplayFreePresentedSurfaceStateForTest {
+                    target_identity: NEXT_DISPLAY_FREE_PRESENTED_TARGET_ID
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                     next_outcome: PresentedAcquireOutcomeForTest::Success,
                     observation: DisplayFreePresentedSurfaceObservationForTest::default(),
                 },
@@ -590,6 +593,17 @@ impl PresentedSurface {
             panic!("only the display-free presented fixture exposes presentation observations");
         };
         DisplayFreePresentedSurfaceObservationHandleForTest(Arc::clone(state))
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn target_identity_for_test(&self) -> u64 {
+        let PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) = &self.target else {
+            panic!("only the display-free presented fixture exposes its target identity");
+        };
+        state
+            .lock()
+            .expect("display-free presentation fixture state must remain available")
+            .target_identity
     }
 
     pub(crate) fn commit_configuration(&mut self, draft: PresentedConfigurationDraft) {
@@ -739,6 +753,10 @@ fn presented_configuration(
 
 #[cfg(all(test, feature = "render-window"))]
 static NEXT_PRESENTED_RESOURCE_ID: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(1);
+
+#[cfg(all(test, feature = "render-window"))]
+static NEXT_DISPLAY_FREE_PRESENTED_TARGET_ID: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(1);
 
 pub(crate) enum HeadlessResources {

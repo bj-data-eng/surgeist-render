@@ -15716,6 +15716,8 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
     let mut second = configured_display_free_presented_surface_for_test(&mut renderer);
     let first_initial = presented_resource_id_for_test(&first).unwrap();
     let second_initial = presented_resource_id_for_test(&second).unwrap();
+    let first_target_initial = presented_target_identity_for_test(&first);
+    let second_target_initial = presented_target_identity_for_test(&second);
 
     first.resize(Size::new(1.0, 1.0), 2.0).unwrap();
     assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
@@ -15756,6 +15758,7 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
     let parameters_before = first.last_parameters;
     let stats_before = renderer.stats();
     let observation_before = presented_observation_for_test(&first);
+    let old_target_observation = presented_observation_handle_for_test(&first);
     let failure = ScopedPresentedConfigureControlForTest::failing();
     let error = pollster::block_on(renderer.resume_surface(
         &mut first,
@@ -15776,6 +15779,10 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
     assert_eq!(first.state(), SurfaceState::Suspended);
     assert_eq!(presented_lifecycle_for_test(&first), lifecycle_before);
     assert_eq!(presented_resource_id_for_test(&first), Some(first_initial));
+    assert_eq!(
+        presented_target_identity_for_test(&first),
+        first_target_initial
+    );
     assert_eq!(first.last_parameters, parameters_before);
     assert_eq!(renderer.stats(), stats_before);
     assert_eq!(presented_observation_for_test(&first), observation_before);
@@ -15789,17 +15796,46 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
         Some(second_initial),
         "a failed resume must not disturb another surface's committed target"
     );
+    assert_eq!(
+        presented_target_identity_for_test(&second),
+        second_target_initial,
+        "a failed resume must not disturb another surface's host target"
+    );
 
-    pollster::block_on(renderer.resume_surface(
-        &mut first,
-        Attachment::from_web_canvas("display-free-presented-test-target"),
-    ))
-    .expect("resume must configure only the first surface's pending physical target");
+    let resumed_attachment = "display-free-resumed-target";
+    pollster::block_on(
+        renderer.resume_surface(&mut first, Attachment::from_web_canvas(resumed_attachment)),
+    )
+    .expect("resume must atomically install and configure the replacement host target");
     let first_resized = presented_resource_id_for_test(&first).unwrap();
     assert_ne!(first_resized, first_initial);
+    let first_target_resumed = presented_target_identity_for_test(&first);
+    assert_ne!(first_target_resumed, first_target_initial);
+    assert_eq!(
+        match &first.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("the resumed display-free surface must retain a web-canvas attachment"),
+        },
+        resumed_attachment
+    );
+    let resumed_target_observation = presented_observation_handle_for_test(&first);
+    assert_eq!(
+        old_target_observation.snapshot_for_test(),
+        observation_before
+    );
     assert_eq!(
         presented_resource_id_for_test(&second),
         Some(second_initial)
+    );
+    assert_eq!(
+        presented_target_identity_for_test(&second),
+        second_target_initial,
+        "resuming the first surface must not replace the other surface's host target"
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "a committed resume configuration must return its active generation"
     );
 
     pollster::block_on(renderer.resume_surface(
@@ -15811,6 +15847,17 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
 
     pollster::block_on(renderer.render(&mut first, &Scene::new(), Parameters::default()))
         .expect("the resized surface must render with its own committed target");
+    assert_eq!(
+        old_target_observation.snapshot_for_test(),
+        observation_before
+    );
+    assert_eq!(
+        resumed_target_observation
+            .snapshot_for_test()
+            .acquire_count_for_test(),
+        1,
+        "the replacement host target must receive the resumed surface's frame"
+    );
     pollster::block_on(renderer.render(&mut second, &Scene::new(), Parameters::default()))
         .expect("the untouched surface must retain and render with its own target");
 }
@@ -15905,6 +15952,14 @@ fn presented_resource_id_for_test(surface: &Surface) -> Option<u64> {
         SurfaceBackend::Presented { surface, .. } => surface
             .committed()
             .map(|resources| resources.resource_id_for_test()),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+fn presented_target_identity_for_test(surface: &Surface) -> u64 {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.target_identity_for_test(),
         _ => panic!("the fixture must retain a presented surface backend"),
     }
 }

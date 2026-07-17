@@ -596,9 +596,34 @@ impl Renderer {
                 match action {
                     super::surface::PresentedResumeAction::NoOp => Ok(()),
                     super::surface::PresentedResumeAction::Configure => {
-                        self.configure_presented_surface_if_needed(surface).await?;
-                        surface.attachment = attachment;
-                        surface.state = SurfaceState::Available;
+                        let resizing = state.lifecycle().resize_state();
+                        #[cfg(all(test, feature = "render-window"))]
+                        if surface.is_display_free_presented_for_test() {
+                            let device_identity = surface.device_identity().expect(
+                                "a display-free presented surface must retain its device identity",
+                            );
+                            let mut next = self.display_free_presented_surface_on_device_for_test(
+                                surface.options,
+                                device_identity,
+                                attachment,
+                            )?;
+                            next.last_parameters = surface.last_parameters;
+                            next.renderer_identity = surface.renderer_identity.clone();
+                            if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+                                state.set_resizing(resizing);
+                            }
+                            self.configure_presented_surface_if_needed(&mut next)
+                                .await?;
+                            *surface = next;
+                            return Ok(());
+                        }
+                        let mut next = self.create_surface(attachment, surface.options).await?;
+                        next.last_parameters = surface.last_parameters;
+                        next.renderer_identity = surface.renderer_identity.clone();
+                        if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+                            state.set_resizing(resizing);
+                        }
+                        *surface = next;
                         Ok(())
                     }
                     super::surface::PresentedResumeAction::Recreate => {
