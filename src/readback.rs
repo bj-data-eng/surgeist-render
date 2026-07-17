@@ -180,9 +180,103 @@ impl<I> ReadbackLifecycle<I> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadbackStagingDisposition {
+    Idle,
+    MapPending,
+    MappedActive,
+    Released,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ReadbackStagingCleanupAction {
+    Drop,
+    UnmapThenDrop,
+    None,
+}
+
+struct ReadbackStagingMapState {
+    disposition: Mutex<ReadbackStagingDisposition>,
+}
+
+impl ReadbackStagingMapState {
+    fn idle() -> Self {
+        Self {
+            disposition: Mutex::new(ReadbackStagingDisposition::Idle),
+        }
+    }
+
+    fn map_pending(&self) {
+        let mut disposition = self
+            .disposition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert_eq!(
+            *disposition,
+            ReadbackStagingDisposition::Idle,
+            "a readback map request requires known-idle staging"
+        );
+        *disposition = ReadbackStagingDisposition::MapPending;
+    }
+
+    fn map_callback_completed(&self, succeeded: bool) {
+        let mut disposition = self
+            .disposition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match *disposition {
+            ReadbackStagingDisposition::MapPending => {
+                *disposition = if succeeded {
+                    ReadbackStagingDisposition::MappedActive
+                } else {
+                    ReadbackStagingDisposition::Idle
+                };
+            }
+            ReadbackStagingDisposition::Released => {}
+            ReadbackStagingDisposition::Idle | ReadbackStagingDisposition::MappedActive => {
+                panic!("a readback map request callback may complete only once")
+            }
+        }
+    }
+
+    fn assert_mapped_active(&self) {
+        assert_eq!(
+            *self
+                .disposition
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            ReadbackStagingDisposition::MappedActive,
+            "map callback success must make staging actively mapped"
+        );
+    }
+
+    fn take_cleanup_action(&self) -> ReadbackStagingCleanupAction {
+        let mut disposition = self
+            .disposition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match std::mem::replace(&mut *disposition, ReadbackStagingDisposition::Released) {
+            ReadbackStagingDisposition::Idle => ReadbackStagingCleanupAction::Drop,
+            ReadbackStagingDisposition::MapPending | ReadbackStagingDisposition::MappedActive => {
+                ReadbackStagingCleanupAction::UnmapThenDrop
+            }
+            ReadbackStagingDisposition::Released => ReadbackStagingCleanupAction::None,
+        }
+    }
+
+    #[cfg(test)]
+    fn disposition_for_test(&self) -> ReadbackStagingDisposition {
+        *self
+            .disposition
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
 struct ReadbackOwner {
     lifecycle: ReadbackLifecycle<wgpu::SubmissionIndex>,
     staging: Option<wgpu::Buffer>,
+    staging_map: Arc<ReadbackStagingMapState>,
     layout: ReadbackLayout,
     physical_size: PhysicalSize,
 }
@@ -196,6 +290,7 @@ impl ReadbackOwner {
         Self {
             lifecycle: ReadbackLifecycle::allocated(),
             staging: Some(staging),
+            staging_map: Arc::new(ReadbackStagingMapState::idle()),
             layout,
             physical_size,
         }
@@ -213,10 +308,16 @@ impl ReadbackOwner {
 
     fn map_pending(&mut self) {
         self.lifecycle.map_pending();
+        self.staging_map.map_pending();
     }
 
     fn mapped(&mut self) {
+        self.staging_map.assert_mapped_active();
         self.lifecycle.mapped();
+    }
+
+    fn staging_map(&self) -> Arc<ReadbackStagingMapState> {
+        Arc::clone(&self.staging_map)
     }
 
     fn mapped_range(&self) -> Range<wgpu::BufferAddress> {
@@ -254,9 +355,24 @@ impl ReadbackOwner {
     }
 
     fn release_staging(&mut self) {
-        if let Some(staging) = self.staging.take() {
-            staging.unmap();
-            drop(staging);
+        let action = self.staging_map.take_cleanup_action();
+        let Some(staging) = self.staging.take() else {
+            assert_eq!(
+                action,
+                ReadbackStagingCleanupAction::None,
+                "readback staging cleanup action must be consumed with ownership"
+            );
+            return;
+        };
+        match action {
+            ReadbackStagingCleanupAction::Drop => drop(staging),
+            ReadbackStagingCleanupAction::UnmapThenDrop => {
+                staging.unmap();
+                drop(staging);
+            }
+            ReadbackStagingCleanupAction::None => {
+                unreachable!("owned readback staging cannot already be released")
+            }
         }
     }
 }
@@ -388,8 +504,12 @@ impl ReadbackCompletion {
 
 fn map_completion_callback(
     completion: Arc<ReadbackCompletion>,
+    staging_map: Arc<ReadbackStagingMapState>,
 ) -> impl FnOnce(std::result::Result<(), wgpu::BufferAsyncError>) + 'static {
-    move |result| completion.complete(ReadbackCompletionResult::Map(result))
+    move |result| {
+        staging_map.map_callback_completed(result.is_ok());
+        completion.complete(ReadbackCompletionResult::Map(result));
+    }
 }
 
 fn completion_result(result: ReadbackCompletionResult) -> Result<()> {
@@ -473,9 +593,10 @@ impl ReadbackMapFuture {
     ) -> Result<Self> {
         let completion = Arc::new(ReadbackCompletion::new());
         owner.map_pending();
+        let staging_map = owner.staging_map();
         owner.staging().slice(owner.mapped_range()).map_async(
             wgpu::MapMode::Read,
-            map_completion_callback(Arc::clone(&completion)),
+            map_completion_callback(Arc::clone(&completion), staging_map),
         );
 
         #[cfg(not(target_arch = "wasm32"))]
@@ -690,6 +811,27 @@ pub(crate) enum ReadbackPhaseForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ReadbackStagingDispositionForTest {
+    Idle,
+    MapPending,
+    MappedActive,
+    Released,
+}
+
+#[cfg(test)]
+impl From<ReadbackStagingDisposition> for ReadbackStagingDispositionForTest {
+    fn from(disposition: ReadbackStagingDisposition) -> Self {
+        match disposition {
+            ReadbackStagingDisposition::Idle => Self::Idle,
+            ReadbackStagingDisposition::MapPending => Self::MapPending,
+            ReadbackStagingDisposition::MappedActive => Self::MappedActive,
+            ReadbackStagingDisposition::Released => Self::Released,
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReadbackCleanupEventForTest {
     MappedViewDropped,
     StagingUnmapped,
@@ -701,16 +843,26 @@ pub(crate) enum ReadbackCleanupEventForTest {
 #[derive(Default)]
 struct ReadbackStateMachineObservationStateForTest {
     terminal_phase: Option<ReadbackPhaseForTest>,
-    staging_unmapped: bool,
-    staging_dropped: bool,
-    staging_reused: bool,
     cleanup_events: Vec<ReadbackCleanupEventForTest>,
 }
 
 #[cfg(test)]
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub(crate) struct ReadbackStateMachineObservationForTest {
     state: Arc<Mutex<ReadbackStateMachineObservationStateForTest>>,
+    staging_map: Arc<ReadbackStagingMapState>,
+}
+
+#[cfg(test)]
+impl Default for ReadbackStateMachineObservationForTest {
+    fn default() -> Self {
+        Self {
+            state: Arc::new(Mutex::new(
+                ReadbackStateMachineObservationStateForTest::default(),
+            )),
+            staging_map: Arc::new(ReadbackStagingMapState::idle()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -722,25 +874,8 @@ impl ReadbackStateMachineObservationForTest {
             .terminal_phase
     }
 
-    pub(crate) fn staging_was_unmapped_for_test(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .staging_unmapped
-    }
-
-    pub(crate) fn staging_was_dropped_for_test(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .staging_dropped
-    }
-
-    pub(crate) fn staging_was_reused_for_test(&self) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .staging_reused
+    pub(crate) fn staging_disposition_for_test(&self) -> ReadbackStagingDispositionForTest {
+        self.staging_map.disposition_for_test().into()
     }
 
     pub(crate) fn cleanup_events_for_test(&self) -> Vec<ReadbackCleanupEventForTest> {
@@ -789,9 +924,19 @@ impl ReadbackStateMachineForTest {
 
     pub(crate) fn map_pending_for_test(&mut self) {
         self.lifecycle.map_pending();
+        self.observation.staging_map.map_pending();
+    }
+
+    pub(crate) fn map_callback_succeeded_for_test(&self) {
+        self.observation.staging_map.map_callback_completed(true);
+    }
+
+    pub(crate) fn map_callback_failed_for_test(&self) {
+        self.observation.staging_map.map_callback_completed(false);
     }
 
     pub(crate) fn mapped_for_test(&mut self) {
+        self.observation.staging_map.assert_mapped_active();
         self.lifecycle.mapped();
     }
 
@@ -855,16 +1000,8 @@ impl ReadbackStateMachineForTest {
         }
     }
 
-    pub(crate) fn staging_was_unmapped_for_test(&self) -> bool {
-        self.observation.staging_was_unmapped_for_test()
-    }
-
-    pub(crate) fn staging_was_dropped_for_test(&self) -> bool {
-        self.observation.staging_was_dropped_for_test()
-    }
-
-    pub(crate) fn staging_was_reused_for_test(&self) -> bool {
-        self.observation.staging_was_reused_for_test()
+    pub(crate) fn staging_disposition_for_test(&self) -> ReadbackStagingDispositionForTest {
+        self.observation.staging_disposition_for_test()
     }
 
     pub(crate) fn cleanup_events_for_test(&self) -> Vec<ReadbackCleanupEventForTest> {
@@ -876,20 +1013,27 @@ impl ReadbackStateMachineForTest {
     }
 
     fn release_staging_for_test(&mut self) {
+        let action = self.observation.staging_map.take_cleanup_action();
         let mut observation = self
             .observation
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if !observation.staging_dropped {
-            observation.staging_unmapped = true;
-            observation
-                .cleanup_events
-                .push(ReadbackCleanupEventForTest::StagingUnmapped);
-            observation.staging_dropped = true;
-            observation
-                .cleanup_events
-                .push(ReadbackCleanupEventForTest::StagingDropped);
+        match action {
+            ReadbackStagingCleanupAction::Drop => {
+                observation
+                    .cleanup_events
+                    .push(ReadbackCleanupEventForTest::StagingDropped);
+            }
+            ReadbackStagingCleanupAction::UnmapThenDrop => {
+                observation
+                    .cleanup_events
+                    .push(ReadbackCleanupEventForTest::StagingUnmapped);
+                observation
+                    .cleanup_events
+                    .push(ReadbackCleanupEventForTest::StagingDropped);
+            }
+            ReadbackStagingCleanupAction::None => {}
         }
     }
 
@@ -912,13 +1056,17 @@ impl Drop for ReadbackStateMachineForTest {
 #[cfg(test)]
 pub(crate) struct ReadbackCompletionForTest {
     completion: Arc<ReadbackCompletion>,
+    staging_map: Arc<ReadbackStagingMapState>,
 }
 
 #[cfg(test)]
 impl ReadbackCompletionForTest {
     pub(crate) fn new() -> Self {
+        let staging_map = Arc::new(ReadbackStagingMapState::idle());
+        staging_map.map_pending();
         Self {
             completion: Arc::new(ReadbackCompletion::new()),
+            staging_map,
         }
     }
 
@@ -930,7 +1078,9 @@ impl ReadbackCompletionForTest {
         &self,
         result: std::result::Result<(), wgpu::BufferAsyncError>,
     ) {
-        map_completion_callback(Arc::clone(&self.completion))(result);
+        map_completion_callback(Arc::clone(&self.completion), Arc::clone(&self.staging_map))(
+            result,
+        );
     }
 
     pub(crate) fn deliver_late_map_result_for_test(

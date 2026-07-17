@@ -14860,7 +14860,8 @@ fn readback_transaction_maps_validation_internal_oom_and_terminal_failures() {
 #[test]
 fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers() {
     use super::readback::{
-        ReadbackCleanupEventForTest as Cleanup, ReadbackPhaseForTest, ReadbackStateMachineForTest,
+        ReadbackCleanupEventForTest as Cleanup, ReadbackPhaseForTest,
+        ReadbackStagingDispositionForTest as StagingDisposition, ReadbackStateMachineForTest,
     };
 
     fn state_at(phase: ReadbackPhaseForTest) -> ReadbackStateMachineForTest {
@@ -14877,6 +14878,7 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
             ReadbackPhaseForTest::Mapped => {
                 state.copy_submitted_for_test(17);
                 state.map_pending_for_test();
+                state.map_callback_succeeded_for_test();
                 state.mapped_for_test();
             }
             ReadbackPhaseForTest::PublishedBytes
@@ -14899,34 +14901,153 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         "the owner must retain the exact queue submission index"
     );
 
-    for uncertain_phase in [
+    for idle_phase in [
         ReadbackPhaseForTest::Allocated,
         ReadbackPhaseForTest::CopySubmitted {
             submission_index: 17,
         },
-        ReadbackPhaseForTest::MapPending,
-        ReadbackPhaseForTest::Mapped,
     ] {
-        let mut failed = state_at(uncertain_phase);
+        let mut failed = state_at(idle_phase);
         failed.fail_for_test();
         assert_eq!(failed.phase_for_test(), ReadbackPhaseForTest::Failed);
         assert_eq!(
             failed.cleanup_events_for_test(),
-            vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped]
+            vec![Cleanup::StagingDropped],
+            "pre-map failure must drop idle staging without invalid unmap"
         );
-        assert!(failed.staging_was_unmapped_for_test());
-        assert!(failed.staging_was_dropped_for_test());
-        assert!(!failed.staging_was_reused_for_test());
+        assert_eq!(
+            failed.staging_disposition_for_test(),
+            StagingDisposition::Released
+        );
+        failed.cancel_for_test();
+        assert_eq!(
+            failed.cleanup_events_for_test(),
+            vec![Cleanup::StagingDropped],
+            "terminal cleanup must consume staging ownership exactly once"
+        );
+        assert_eq!(
+            failed.staging_disposition_for_test(),
+            StagingDisposition::Released
+        );
 
-        let mut canceled = state_at(uncertain_phase);
+        let mut canceled = state_at(idle_phase);
         canceled.cancel_for_test();
         assert_eq!(canceled.phase_for_test(), ReadbackPhaseForTest::Canceled);
         assert_eq!(
             canceled.cleanup_events_for_test(),
-            vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped]
+            vec![Cleanup::StagingDropped],
+            "pre-map cancellation must drop idle staging without invalid unmap"
         );
-        assert!(!canceled.staging_was_reused_for_test());
+        canceled.fail_for_test();
+        assert_eq!(
+            canceled.cleanup_events_for_test(),
+            vec![Cleanup::StagingDropped],
+            "terminal cleanup must consume staging ownership exactly once"
+        );
+        assert_eq!(
+            canceled.staging_disposition_for_test(),
+            StagingDisposition::Released
+        );
     }
+
+    let mut pending_failure = state_at(ReadbackPhaseForTest::MapPending);
+    assert_eq!(
+        pending_failure.staging_disposition_for_test(),
+        StagingDisposition::MapPending
+    );
+    pending_failure.fail_for_test();
+    assert_eq!(
+        pending_failure.phase_for_test(),
+        ReadbackPhaseForTest::Failed
+    );
+    assert_eq!(
+        pending_failure.cleanup_events_for_test(),
+        vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped],
+        "wrong-index or other pending-map failure must abort the request before dropping staging"
+    );
+    assert_eq!(
+        pending_failure.staging_disposition_for_test(),
+        StagingDisposition::Released
+    );
+    pending_failure.map_callback_succeeded_for_test();
+    pending_failure.cancel_for_test();
+    assert_eq!(
+        pending_failure.staging_disposition_for_test(),
+        StagingDisposition::Released,
+        "a late callback cannot reacquire released staging"
+    );
+    assert_eq!(
+        pending_failure.cleanup_events_for_test(),
+        vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped],
+        "late delivery and second terminal cleanup cannot act on staging again"
+    );
+
+    let mut pending_cancellation = state_at(ReadbackPhaseForTest::MapPending);
+    pending_cancellation.cancel_for_test();
+    assert_eq!(
+        pending_cancellation.phase_for_test(),
+        ReadbackPhaseForTest::Canceled
+    );
+    assert_eq!(
+        pending_cancellation.cleanup_events_for_test(),
+        vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped],
+        "pending-map cancellation must abort the request before dropping staging"
+    );
+    assert_eq!(
+        pending_cancellation.staging_disposition_for_test(),
+        StagingDisposition::Released
+    );
+
+    for terminal_phase in [ReadbackPhaseForTest::Failed, ReadbackPhaseForTest::Canceled] {
+        let mut callback_error = state_at(ReadbackPhaseForTest::MapPending);
+        callback_error.map_callback_failed_for_test();
+        assert_eq!(
+            callback_error.phase_for_test(),
+            ReadbackPhaseForTest::MapPending,
+            "callback delivery must not overwrite the lifecycle before the owner consumes it"
+        );
+        assert_eq!(
+            callback_error.staging_disposition_for_test(),
+            StagingDisposition::Idle,
+            "a map callback error returns physical staging to known idle"
+        );
+        match terminal_phase {
+            ReadbackPhaseForTest::Failed => callback_error.fail_for_test(),
+            ReadbackPhaseForTest::Canceled => callback_error.cancel_for_test(),
+            _ => unreachable!("the fixture selects only terminal cleanup phases"),
+        }
+        assert_eq!(callback_error.phase_for_test(), terminal_phase);
+        assert_eq!(
+            callback_error.cleanup_events_for_test(),
+            vec![Cleanup::StagingDropped],
+            "callback-error-idle cleanup must not call unmap"
+        );
+        assert_eq!(
+            callback_error.staging_disposition_for_test(),
+            StagingDisposition::Released
+        );
+    }
+
+    let mut callback_success_cancellation = state_at(ReadbackPhaseForTest::MapPending);
+    callback_success_cancellation.map_callback_succeeded_for_test();
+    assert_eq!(
+        callback_success_cancellation.phase_for_test(),
+        ReadbackPhaseForTest::MapPending
+    );
+    assert_eq!(
+        callback_success_cancellation.staging_disposition_for_test(),
+        StagingDisposition::MappedActive
+    );
+    callback_success_cancellation.cancel_for_test();
+    assert_eq!(
+        callback_success_cancellation.phase_for_test(),
+        ReadbackPhaseForTest::Canceled
+    );
+    assert_eq!(
+        callback_success_cancellation.cleanup_events_for_test(),
+        vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped],
+        "cancellation racing callback success must unmap active staging before drop"
+    );
 
     let dropped = state_at(ReadbackPhaseForTest::MapPending);
     let drop_observation = dropped.observation_for_test();
@@ -14935,9 +15056,14 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         drop_observation.terminal_phase_for_test(),
         Some(ReadbackPhaseForTest::Canceled)
     );
-    assert!(drop_observation.staging_was_unmapped_for_test());
-    assert!(drop_observation.staging_was_dropped_for_test());
-    assert!(!drop_observation.staging_was_reused_for_test());
+    assert_eq!(
+        drop_observation.cleanup_events_for_test(),
+        vec![Cleanup::StagingUnmapped, Cleanup::StagingDropped]
+    );
+    assert_eq!(
+        drop_observation.staging_disposition_for_test(),
+        StagingDisposition::Released
+    );
 
     let mut incomplete = state_at(ReadbackPhaseForTest::Mapped);
     let error = incomplete
@@ -14945,6 +15071,10 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         .expect_err("a missing padded row must fail through checked decoding");
     assert_eq!(error.code(), ErrorCode::ReadbackFailed);
     assert_eq!(incomplete.phase_for_test(), ReadbackPhaseForTest::Failed);
+    assert_eq!(
+        incomplete.staging_disposition_for_test(),
+        StagingDisposition::Released
+    );
     assert_eq!(
         incomplete.cleanup_events_for_test(),
         vec![
@@ -14976,7 +15106,10 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
             Cleanup::PublishedBytes,
         ]
     );
-    assert!(!published.staging_was_reused_for_test());
+    assert_eq!(
+        published.staging_disposition_for_test(),
+        StagingDisposition::Released
+    );
 }
 
 #[test]
