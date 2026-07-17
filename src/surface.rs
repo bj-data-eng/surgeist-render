@@ -123,6 +123,10 @@ impl Surface {
         if state == SurfaceState::Available && matches!(lifecycle, PresentedLifecycle::Ready { .. })
         {
             PresentedResumeAction::NoOp
+        } else if state == SurfaceState::Available
+            && matches!(lifecycle, PresentedLifecycle::ResizePending { .. })
+        {
+            PresentedResumeAction::ConfigureExisting
         } else if matches!(lifecycle, PresentedLifecycle::Lost) {
             PresentedResumeAction::Recreate
         } else {
@@ -869,8 +873,11 @@ impl PresentedSurfaceState {
         committed_physical_size: Option<PhysicalSize>,
         next: PhysicalSize,
     ) {
-        let resizing = self.lifecycle.resize_state();
         self.requested_physical_size = next;
+        if matches!(self.lifecycle, PresentedLifecycle::Lost) {
+            return;
+        }
+        let resizing = self.lifecycle.resize_state();
         self.lifecycle = if next.width() == 0 || next.height() == 0 {
             PresentedLifecycle::NonRenderable {
                 physical_size: next,
@@ -926,6 +933,7 @@ impl PresentedSurfaceState {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum PresentedResumeAction {
     NoOp,
+    ConfigureExisting,
     Configure,
     Recreate,
 }

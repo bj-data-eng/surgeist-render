@@ -595,6 +595,9 @@ impl Renderer {
                 surface.ensure_attachment_compatible(&attachment)?;
                 match action {
                     super::surface::PresentedResumeAction::NoOp => Ok(()),
+                    super::surface::PresentedResumeAction::ConfigureExisting => {
+                        self.configure_presented_surface_if_needed(surface).await
+                    }
                     super::surface::PresentedResumeAction::Configure => {
                         let resizing = state.lifecycle().resize_state();
                         #[cfg(all(test, feature = "render-window"))]

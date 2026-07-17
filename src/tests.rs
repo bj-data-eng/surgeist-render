@@ -15726,6 +15726,232 @@ fn surface_loss_can_resume_but_device_loss_requires_a_new_renderer() {
 
 #[cfg(feature = "render-window")]
 #[test]
+fn presented_resize_preserves_lost_recovery_gate_for_same_and_changed_extents() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("lost-resize coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let committed_resource = presented_resource_id_for_test(&surface)
+        .expect("the fixture must begin with a committed target bundle");
+    let committed_target = presented_target_identity_for_test(&surface);
+
+    set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Lost);
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("acquire loss must close the surface recovery gate");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Lost,
+    );
+    assert_eq!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Lost
+    );
+
+    let stats_before = renderer.stats();
+    let parameters_before = surface.last_parameters;
+    let observation_before = presented_observation_for_test(&surface);
+
+    surface.resize(Size::new(1.0, 1.0), 2.0).unwrap();
+    let same_physical_size = surface.physical_size();
+    let same_lifecycle = presented_lifecycle_for_test(&surface);
+    let same_capabilities = renderer.runtime_capabilities(&surface);
+    let same_render = pollster::block_on(renderer.render(
+        &mut surface,
+        &Scene::new(),
+        Parameters {
+            base_color: Color::BLACK,
+            debug: true,
+        },
+    ));
+    let same_resource = presented_resource_id_for_test(&surface);
+    let same_target = presented_target_identity_for_test(&surface);
+    let same_observation = presented_observation_for_test(&surface);
+    let same_stats = renderer.stats();
+    let same_parameters = surface.last_parameters;
+    let same_active_generation = renderer.default_device_active_operation_generation_for_test();
+
+    surface.resize(Size::new(3.0, 2.0), 1.0).unwrap();
+    let changed_physical_size = surface.physical_size();
+    let changed_lifecycle = presented_lifecycle_for_test(&surface);
+    let changed_capabilities = renderer.runtime_capabilities(&surface);
+    let changed_render = pollster::block_on(renderer.render(
+        &mut surface,
+        &Scene::new(),
+        Parameters {
+            base_color: Color::BLACK,
+            debug: true,
+        },
+    ));
+    let changed_resource = presented_resource_id_for_test(&surface);
+    let changed_target = presented_target_identity_for_test(&surface);
+    let changed_observation = presented_observation_for_test(&surface);
+    let changed_stats = renderer.stats();
+    let changed_parameters = surface.last_parameters;
+    let changed_active_generation = renderer.default_device_active_operation_generation_for_test();
+
+    assert_eq!(
+        [same_lifecycle, changed_lifecycle],
+        [PresentedLifecycle::Lost, PresentedLifecycle::Lost],
+        "same- and changed-extent resize must not bypass explicit lost-surface recovery"
+    );
+    assert_eq!(same_physical_size, PhysicalSize::new(2, 2));
+    assert_eq!(changed_physical_size, PhysicalSize::new(3, 2));
+    let lost_capabilities =
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+            state: RenderSurfaceAvailability::Lost,
+        });
+    assert_eq!(same_capabilities, lost_capabilities);
+    assert_eq!(changed_capabilities, lost_capabilities);
+    for result in [same_render, changed_render] {
+        let error = result.expect_err("resize must not make a lost surface renderable");
+        assert_surface_unavailable(
+            error,
+            RuntimeOperation::SurfaceRendering,
+            RenderSurfaceAvailability::Lost,
+        );
+    }
+    assert_eq!(
+        [same_resource, changed_resource],
+        [Some(committed_resource), Some(committed_resource)],
+        "resize while lost must not publish a replacement configuration"
+    );
+    assert_eq!([same_target, changed_target], [committed_target; 2]);
+    assert_eq!(
+        [same_observation, changed_observation],
+        [observation_before; 2],
+        "rejected lost-surface renders must not acquire or present a frame"
+    );
+    assert_eq!([same_stats, changed_stats], [stats_before; 2]);
+    assert_eq!(
+        [same_parameters, changed_parameters],
+        [parameters_before; 2]
+    );
+    assert_eq!(
+        [same_active_generation, changed_active_generation],
+        [None; 2]
+    );
+
+    let replacement_attachment = "lost-resize-replacement";
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas(replacement_attachment),
+    ))
+    .expect("explicit resume must recover at the final requested extent");
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert_eq!(surface.physical_size(), PhysicalSize::new(3, 2));
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Ready { .. }
+    ));
+    let committed_physical_size = match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.committed_physical_size(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    };
+    assert_eq!(committed_physical_size, Some(PhysicalSize::new(3, 2)));
+    assert_ne!(
+        presented_resource_id_for_test(&surface),
+        Some(committed_resource)
+    );
+    assert_ne!(
+        presented_target_identity_for_test(&surface),
+        committed_target
+    );
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("lost recovery must install a compatible presented attachment"),
+        },
+        replacement_attachment
+    );
+    assert!(matches!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Available(_)
+    ));
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the explicitly resumed surface must render on its ready device");
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn available_resize_pending_resume_retains_installed_attachment_and_target() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("available-resume coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let installed_attachment = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let installed_target = presented_target_identity_for_test(&surface);
+    let installed_resource = presented_resource_id_for_test(&surface)
+        .expect("the fixture must begin with a committed target bundle");
+    let installed_observation = presented_observation_handle_for_test(&surface);
+
+    surface.resize(Size::new(3.0, 2.0), 1.0).unwrap();
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("compatible-resume-candidate"),
+    ))
+    .expect("available resume must configure the pending extent on the installed target");
+
+    let attachment_after = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id(),
+        _ => panic!("available resume must retain the installed attachment kind"),
+    };
+    assert_eq!(
+        (
+            attachment_after,
+            presented_target_identity_for_test(&surface)
+        ),
+        (installed_attachment.as_str(), installed_target),
+        "available pending resume must retain the installed attachment and target identities"
+    );
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert_eq!(surface.physical_size(), PhysicalSize::new(3, 2));
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Ready { .. }
+    ));
+    let configured_resource = presented_resource_id_for_test(&surface)
+        .expect("pending resume must commit a configured target bundle");
+    assert_ne!(configured_resource, installed_resource);
+    let committed_physical_size = match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.committed_physical_size(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    };
+    assert_eq!(committed_physical_size, Some(PhysicalSize::new(3, 2)));
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "pending configuration must return its transaction generation"
+    );
+    assert!(matches!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Available(_)
+    ));
+
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the configured existing target must remain renderable");
+    let observation = installed_observation.snapshot_for_test();
+    assert_eq!(observation.acquire_count_for_test(), 1);
+    assert_eq!(observation.present_count_for_test(), 1);
+    assert_eq!(observation.discarded_count_for_test(), 0);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
 fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("presented lifecycle coverage requires a compatible device");
