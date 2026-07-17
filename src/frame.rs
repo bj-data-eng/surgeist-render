@@ -397,6 +397,52 @@ impl SemanticSourceBounds {
         }
     }
 
+    fn try_intersect(self, other: Self, name: &'static str) -> Result<Self> {
+        match (self, other) {
+            (Self::Empty, _) | (_, Self::Empty) => Ok(Self::Empty),
+            (Self::Unspecified, _) | (_, Self::Unspecified) => Ok(Self::Unspecified),
+            (Self::NonEmpty(a), Self::NonEmpty(b)) => {
+                let a = a.rect();
+                let b = b.rect();
+                let a_max = a.max();
+                let b_max = b.max();
+                let min_x = a.x().max(b.x());
+                let min_y = a.y().max(b.y());
+                let max_x = a_max.x().min(b_max.x());
+                let max_y = a_max.y().min(b_max.y());
+                let width = checked_sub(max_x, min_x, &format!("{name} width"))?.max(0.0);
+                let height = checked_sub(max_y, min_y, &format!("{name} height"))?.max(0.0);
+                Self::try_from_rect(Rect::new(min_x, min_y, width, height))
+            }
+        }
+    }
+
+    fn try_transform(self, transform: Transform, name: &'static str) -> Result<Self> {
+        match self {
+            Self::Empty => {
+                linear_transform_is_rank_deficient(transform)?;
+                Ok(Self::Empty)
+            }
+            Self::Unspecified => {
+                if linear_transform_is_rank_deficient(transform)? {
+                    Ok(Self::Empty)
+                } else {
+                    Ok(Self::Unspecified)
+                }
+            }
+            Self::NonEmpty(bounds) => {
+                match LogicalBounds::NonEmpty(bounds).try_transform(transform, name)? {
+                    LogicalBounds::Empty(_) => Ok(Self::Empty),
+                    LogicalBounds::NonEmpty(bounds) => Ok(Self::NonEmpty(bounds)),
+                }
+            }
+        }
+    }
+
+    fn try_for_clip(clip: &RenderClip) -> Result<Self> {
+        Self::try_from_rect(clip.bounds_for_planning()?.rect())
+    }
+
     fn require_non_empty_for_graph(
         self,
         name: &'static str,
@@ -440,42 +486,98 @@ impl SemanticSourceContribution {
         command: RenderCommand,
     ) -> Result<Option<(RenderCommand, SemanticSourceBounds)>> {
         match command {
-            RenderCommand::TextRun { bounds, .. } if bounds.kind() == TextRunBoundsKind::Empty => {
-                Ok(None)
-            }
-            RenderCommand::Layer { layer, children } => {
-                let children = Self::try_from_commands(children)?;
-                let affects_parent_without_source = layer.backdrop.is_some();
-                let rank_deficient = linear_transform_is_rank_deficient(layer.transform)?;
-                if (children.commands.is_empty() || rank_deficient)
-                    && !affects_parent_without_source
+            RenderCommand::TextRun {
+                font,
+                size,
+                transform,
+                paint,
+                glyphs,
+                bounds,
+            } => {
+                let source_bounds = if glyphs.is_empty()
+                    || bounds.kind() == TextRunBoundsKind::Empty
                 {
+                    SemanticSourceBounds::Empty.try_transform(transform, "text source transform")?
+                } else if bounds.kind() == TextRunBoundsKind::Unspecified {
+                    SemanticSourceBounds::Unspecified
+                        .try_transform(transform, "text source transform")?
+                } else {
+                    let ink_bounds = bounds.ink_rect().ok_or_else(|| {
+                        Error::invalid_value(
+                            "text source bounds",
+                            "missing ink rectangle",
+                            "must carry an ink rectangle when the bounds kind is ink",
+                        )
+                    })?;
+                    SemanticSourceBounds::try_from_rect(ink_bounds)?
+                        .try_transform(transform, "text source transform")?
+                };
+                if source_bounds == SemanticSourceBounds::Empty {
+                    Ok(None)
+                } else {
+                    Ok(Some((
+                        RenderCommand::TextRun {
+                            font,
+                            size,
+                            transform,
+                            paint,
+                            glyphs,
+                            bounds,
+                        },
+                        source_bounds,
+                    )))
+                }
+            }
+            RenderCommand::Layer {
+                mut layer,
+                children,
+            } => {
+                let children = Self::try_from_commands(children)?;
+                let mut source_bounds = children.bounds;
+
+                if let Some(backdrop) = layer.backdrop.as_deref() {
+                    let mut backdrop_bounds =
+                        SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
+                    if let Some(clip) = backdrop.clip() {
+                        backdrop_bounds = backdrop_bounds.try_intersect(
+                            SemanticSourceBounds::try_for_clip(clip)?,
+                            "backdrop clip intersection",
+                        )?;
+                    }
+                    if backdrop_bounds == SemanticSourceBounds::Empty {
+                        layer.backdrop = None;
+                    } else {
+                        source_bounds = source_bounds.try_union(backdrop_bounds)?;
+                    }
+                }
+
+                if let Some(clip) = layer.clip.as_ref() {
+                    source_bounds = source_bounds.try_intersect(
+                        SemanticSourceBounds::try_for_clip(clip)?,
+                        "layer clip intersection",
+                    )?;
+                }
+                if layer.opacity <= 0.0 {
+                    source_bounds = SemanticSourceBounds::Empty;
+                }
+                source_bounds = source_bounds
+                    .try_transform(layer.transform, "semantic layer source transform")?;
+                if source_bounds == SemanticSourceBounds::Empty {
                     return Ok(None);
                 }
 
-                let child_bounds = children.bounds;
-                let command = RenderCommand::Layer {
-                    layer,
-                    children: children.commands,
-                };
-                let bounds = if child_bounds == SemanticSourceBounds::Unspecified
-                    && !affects_parent_without_source
-                {
-                    SemanticSourceBounds::Unspecified
-                } else {
-                    SemanticSourceBounds::try_for_command(&command)?
-                };
-                if bounds == SemanticSourceBounds::Empty && !affects_parent_without_source {
-                    return Ok(None);
-                }
-                let bounds = if bounds == SemanticSourceBounds::Empty {
-                    SemanticSourceBounds::Unspecified
-                } else {
-                    bounds
-                };
-                Ok(Some((command, bounds)))
+                Ok(Some((
+                    RenderCommand::Layer {
+                        layer,
+                        children: children.commands,
+                    },
+                    source_bounds,
+                )))
             }
-            command => {
+            command @ (RenderCommand::Fill { .. }
+            | RenderCommand::Stroke { .. }
+            | RenderCommand::Shadow { .. }
+            | RenderCommand::Image { .. }) => {
                 let bounds = SemanticSourceBounds::try_for_command(&command)?;
                 if bounds == SemanticSourceBounds::Empty {
                     Ok(None)
@@ -2161,13 +2263,7 @@ impl SemanticFrameGraphPlanner {
             return self.plan_commands(children, parent, scope, layer_transform, parent_to_surface);
         }
 
-        let planned_source_bounds = if layer.backdrop.is_some() {
-            None
-        } else {
-            layer.pass_plan.bounds()
-        };
-        let mut source =
-            self.plan_layer_source(children, layer_to_surface, planned_source_bounds)?;
+        let mut source = self.plan_layer_source(children, layer_to_surface)?;
         if let Some(backdrop) = layer.backdrop.as_deref() {
             source = self.plan_backdrop_group(backdrop, source, parent, layer_to_surface)?;
         }
@@ -2199,18 +2295,14 @@ impl SemanticFrameGraphPlanner {
         &mut self,
         children: Vec<RenderCommand>,
         raster_transform: Transform,
-        planned_bounds: Option<super::command::OffscreenBounds>,
     ) -> Result<Option<PlannedGraphResource>> {
         let contribution = SemanticSourceContribution::try_from_commands(children)?;
         if contribution.commands.is_empty() {
             return Ok(None);
         }
-        let source_bounds = match planned_bounds {
-            Some(bounds) => SemanticSourceBounds::try_from_rect(bounds.rect())?,
-            None => contribution.bounds,
-        };
-        let Some(logical_bounds) =
-            source_bounds.require_non_empty_for_graph("layer source bounds")?
+        let Some(logical_bounds) = contribution
+            .bounds
+            .require_non_empty_for_graph("layer source bounds")?
         else {
             return Ok(None);
         };

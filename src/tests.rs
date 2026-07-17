@@ -9431,6 +9431,107 @@ fn rank_deficient_masked_source_does_not_select_graph_or_split_vello_span() {
 }
 
 #[test]
+fn empty_stroked_path_mask_source_does_not_select_graph_or_split_vello_span() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+                .unwrap(),
+            |scene| {
+                scene.stroke(
+                    Shape::path(Path::new()),
+                    Stroke::try_new(1.0).unwrap(),
+                    Color::BLACK,
+                );
+            },
+        )
+        .stroke(
+            Shape::rect(Rect::new(3.0, 0.0, 2.0, 2.0)),
+            Stroke::try_new(1.0).unwrap(),
+            Color::BLACK,
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.unresolved_resource.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::DirectVello
+                    && plan.selection_requirements.is_empty()
+                    && plan.resource_count == 0
+                    && plan.pass_count == 0
+                    && plan.vello_spans.is_empty()
+                    && plan.direct_commands
+                        == [
+                            VelloCommandObservation::Fill,
+                            VelloCommandObservation::Stroke,
+                        ]
+            }),
+        "empty stroked path mask source selected graph or split Vello span"
+    );
+}
+
+#[test]
+fn empty_clip_short_circuits_unresolved_masked_text_bounds() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
+                .unwrap(),
+            |scene| {
+                scene.layer(
+                    Layer::new()
+                        .try_clip(Shape::rect(Rect::new(0.0, 0.0, 0.0, 4.0)))
+                        .unwrap(),
+                    |scene| add_planning_text(scene, TextRunBounds::unspecified()),
+                );
+            },
+        )
+        .stroke(
+            Shape::rect(Rect::new(3.0, 0.0, 2.0, 2.0)),
+            Stroke::try_new(1.0).unwrap(),
+            Color::BLACK,
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.unresolved_resource.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::DirectVello
+                    && plan.selection_requirements.is_empty()
+                    && plan.resource_count == 0
+                    && plan.pass_count == 0
+                    && plan.vello_spans.is_empty()
+                    && plan.direct_commands
+                        == [
+                            VelloCommandObservation::Fill,
+                            VelloCommandObservation::Stroke,
+                        ]
+            }),
+        "empty clip did not short-circuit unresolved masked text bounds"
+    );
+}
+
+#[test]
 fn gpu_graph_is_selected_only_for_supported_custom_requirements() {
     let mask = opaque_planning_mask(PhysicalSize::new(4, 4));
     let mut scene = Scene::new();

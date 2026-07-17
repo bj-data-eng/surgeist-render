@@ -700,6 +700,10 @@ impl RenderClip {
     pub(crate) const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
         self.coordinate_space
     }
+
+    pub(crate) fn bounds_for_planning(&self) -> Result<OffscreenBounds> {
+        render_clip_bounds(self)
+    }
 }
 
 impl RenderStrokeShape {
@@ -1000,6 +1004,12 @@ fn stroke_shape_bounds(
     shape: &RenderStrokeShape,
     stroke: &RenderStroke,
 ) -> Result<OffscreenBounds> {
+    if let RenderStrokeShape::Path(path) = shape
+        && path.segments().next().is_none()
+    {
+        return kurbo_bounds(path.bounding_box());
+    }
+
     let half_width = stroke.width * 0.5;
     let (bounds, inflate) = match shape {
         RenderStrokeShape::Rect(rect) => (*rect, half_width),
