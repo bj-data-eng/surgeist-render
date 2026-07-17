@@ -277,10 +277,11 @@ impl FramePlan {
         commands: RenderCommands,
         context: FrameContext,
     ) -> Result<Self> {
+        let commands = RenderCommands::new(prune_semantically_empty_commands(commands.commands));
         let selection_requirements = graph_selection_requirements(&commands.commands);
         if selection_requirements.is_empty() {
             return Ok(Self::DirectVello(DirectVelloPlan {
-                commands: RenderCommands::new(prune_empty_text_commands(commands.commands)),
+                commands,
                 output_mapping: context.output_spatial_plan()?,
                 antialiasing: context.antialiasing,
                 base_color: context.base_color,
@@ -363,7 +364,7 @@ fn require_graph_text_bounds(commands: &[RenderCommand], path: &mut Vec<usize>) 
     Ok(())
 }
 
-fn prune_empty_text_commands(commands: Vec<RenderCommand>) -> Vec<RenderCommand> {
+fn prune_semantically_empty_commands(commands: Vec<RenderCommand>) -> Vec<RenderCommand> {
     commands
         .into_iter()
         .filter_map(|command| match command {
@@ -371,8 +372,9 @@ fn prune_empty_text_commands(commands: Vec<RenderCommand>) -> Vec<RenderCommand>
                 None
             }
             RenderCommand::Layer { layer, children } => {
-                let children = prune_empty_text_commands(children);
-                (!children.is_empty()).then_some(RenderCommand::Layer { layer, children })
+                let children = prune_semantically_empty_commands(children);
+                (!children.is_empty() || layer.backdrop.is_some())
+                    .then_some(RenderCommand::Layer { layer, children })
             }
             command => Some(command),
         })
@@ -1942,9 +1944,6 @@ impl SemanticFrameGraphPlanner {
     ) -> Result<PlannedGraphParent> {
         let mut span = Vec::new();
         for command in commands {
-            if is_empty_text_command(&command) {
-                continue;
-            }
             if command_is_local_to_capture(&command, false) {
                 span.push(command);
                 continue;
@@ -1979,7 +1978,6 @@ impl SemanticFrameGraphPlanner {
         capture_transform: Transform,
         parent_to_surface: Transform,
     ) -> Result<PlannedGraphParent> {
-        let commands = prune_empty_text_commands(commands);
         if commands.is_empty() {
             return Ok(parent);
         }
@@ -2097,7 +2095,6 @@ impl SemanticFrameGraphPlanner {
         raster_transform: Transform,
         planned_bounds: Option<super::command::OffscreenBounds>,
     ) -> Result<Option<PlannedGraphResource>> {
-        let children = prune_empty_text_commands(children);
         if children.is_empty() {
             return Ok(None);
         }
@@ -2450,14 +2447,6 @@ impl SemanticFrameGraphPlanner {
             spatial: parent.spatial,
         })
     }
-}
-
-fn is_empty_text_command(command: &RenderCommand) -> bool {
-    matches!(
-        command,
-        RenderCommand::TextRun { bounds, .. }
-            if bounds.kind() == TextRunBoundsKind::Empty
-    )
 }
 
 fn command_is_local_to_capture(command: &RenderCommand, has_local_parent: bool) -> bool {
@@ -4036,6 +4025,7 @@ pub(crate) struct FramePlanObservation {
     pub(crate) finite: bool,
     pub(crate) backend_free: bool,
     pub(crate) direct_command_count: usize,
+    pub(crate) direct_commands: Vec<VelloCommandObservation>,
     pub(crate) output_device_extent: Option<(u32, u32)>,
     pub(crate) antialiasing: Option<super::renderer::Antialiasing>,
     pub(crate) base_color: Option<super::paint::Color>,
@@ -4109,6 +4099,12 @@ fn observe_direct_frame_plan(plan: DirectVelloPlan) -> FramePlanObservation {
         finite: frame_spatial_plan_is_finite(plan.output_mapping),
         backend_free: true,
         direct_command_count: plan.commands.commands.len(),
+        direct_commands: plan
+            .commands
+            .commands
+            .iter()
+            .map(observe_vello_command)
+            .collect(),
         output_device_extent,
         antialiasing: Some(plan.antialiasing),
         base_color: Some(plan.base_color),
@@ -4218,6 +4214,7 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
         finite,
         backend_free: true,
         direct_command_count: 0,
+        direct_commands: Vec::new(),
         output_device_extent: root_descriptor.map(|descriptor| {
             (
                 descriptor.device_extent.width,
