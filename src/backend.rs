@@ -55,6 +55,7 @@ thread_local! {
 #[cfg(all(test, feature = "render-window"))]
 thread_local! {
     static ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST: RefCell<Option<PresentedConfigureControlForTest>> = const { RefCell::new(None) };
+    static ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
 }
 
 #[cfg(all(test, feature = "render-window"))]
@@ -123,6 +124,30 @@ impl Drop for ScopedPresentedConfigureControlForTest {
     fn drop(&mut self) {
         ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
             *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+/// Models a replacement target that the installed device cannot present to.
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) struct ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
+    previous: bool,
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
+    pub(crate) fn active() -> Self {
+        let previous = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
+            .with(|active| active.replace(true));
+        Self { previous }
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl Drop for ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
+    fn drop(&mut self) {
+        ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous;
         });
     }
 }
@@ -335,6 +360,11 @@ impl DeviceState {
             DeviceLifecycle::Ready(ready) => Some(ready),
             DeviceLifecycle::Terminal(_) => None,
         }
+    }
+
+    fn ready_after_observing_terminal(&mut self) -> Option<&ReadyDeviceState> {
+        self.observe_terminal();
+        self.ready()
     }
 
     fn ready_mut(&mut self) -> Option<&mut ReadyDeviceState> {
@@ -733,26 +763,27 @@ impl Backend {
     }
 
     fn compatible_ready_device(
-        &self,
+        &mut self,
         preferred: Option<DeviceSlotIdentity>,
         mut supports_surface: impl FnMut(&ReadyDeviceState) -> bool,
     ) -> Option<DeviceSlotIdentity> {
         if let Some(identity) = preferred
-            && let Some(state) = self.device_states.get(identity.slot())
+            && let Some(state) = self.device_states.get_mut(identity.slot())
             && state.generation == identity.generation
-            && let Some(ready) = state.ready()
+            && let Some(ready) = state.ready_after_observing_terminal()
             && supports_surface(ready)
         {
             return Some(identity);
         }
         self.device_states
-            .iter()
+            .iter_mut()
             .enumerate()
             .find_map(|(slot, state)| {
+                let generation = state.generation;
                 state
-                    .ready()
+                    .ready_after_observing_terminal()
                     .filter(|ready| supports_surface(ready))
-                    .map(|_| DeviceSlotIdentity::new(slot, state.generation))
+                    .map(|_| DeviceSlotIdentity::new(slot, generation))
             })
     }
 
@@ -859,7 +890,23 @@ impl Backend {
         preferred: Option<DeviceSlotIdentity>,
         operation: RuntimeOperation,
     ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
-        let identity = if let Some(identity) = self.compatible_ready_device(preferred, |_| true) {
+        let incompatible_preferred = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
+            .with(|active| {
+                if !*active.borrow() {
+                    return None;
+                }
+                let identity = preferred?;
+                let state = self.device_states.get(identity.slot())?;
+                (state.generation == identity.generation)
+                    .then(|| state.ready())
+                    .flatten()
+                    .map(|ready| Arc::clone(&ready.drop_witness))
+            });
+        let identity = if let Some(identity) = self.compatible_ready_device(preferred, |ready| {
+            !incompatible_preferred
+                .as_ref()
+                .is_some_and(|incompatible| Arc::ptr_eq(incompatible, &ready.drop_witness))
+        }) {
             Some(identity)
         } else {
             self.new_device(None).await?

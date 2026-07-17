@@ -16328,6 +16328,118 @@ fn presented_resume_prefers_installed_compatible_slot_over_earlier_donor_slot() 
 
 #[cfg(feature = "render-window")]
 #[test]
+fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("terminal donor selection coverage requires a compatible device");
+    let terminal_donor_surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let terminal_donor = presented_device_identity_for_test(&terminal_donor_surface);
+    let terminal_donor_resource = presented_resource_id_for_test(&terminal_donor_surface);
+    let terminal_donor_target = presented_target_identity_for_test(&terminal_donor_surface);
+    let terminal_donor_drop_witness = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the earlier donor must begin structurally ready")
+        .drop_witness_for_test();
+
+    let installed_device = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("terminal donor selection coverage requires an installed device slot");
+    let mut surface = configured_display_free_presented_surface_on_device_for_test(
+        &mut renderer,
+        installed_device,
+        Attachment::from_web_canvas("terminal-donor-installed-target"),
+    );
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+        .expect("the installed surface must establish public frame state before replacement");
+    let installed_resource = presented_resource_id_for_test(&surface)
+        .expect("the installed surface must own committed resources");
+    let installed_target = presented_target_identity_for_test(&surface);
+    let installed_options = surface.options;
+    let installed_physical_size = surface.physical_size();
+    let installed_renderer_identity = surface.renderer_identity.clone();
+    let installed_stats = renderer.stats();
+
+    let healthy_device = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("terminal donor selection coverage requires a later healthy device slot");
+    assert_ne!(terminal_donor, installed_device);
+    assert_ne!(terminal_donor, healthy_device);
+    assert_ne!(installed_device, healthy_device);
+
+    surface.suspend().unwrap();
+    renderer.signal_device_loss_for_test(terminal_donor, DeviceLossReason::Destroyed);
+    assert!(
+        renderer
+            .device_signal_for_test(terminal_donor)
+            .expect("the terminal donor must retain its callback signal")
+            .first_terminal()
+            .is_some(),
+        "the earlier donor must record terminal loss before selection"
+    );
+    assert!(
+        !terminal_donor_drop_witness.was_dropped_for_test(),
+        "the callback signal must remain unobserved into the donor lifecycle before selection"
+    );
+
+    let incompatibility = ScopedDisplayFreePreferredDeviceIncompatibilityForTest::active();
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("terminal-donor-replacement-target"),
+    ))
+    .expect("resume must skip the terminal donor and publish through the later healthy slot");
+    drop(incompatibility);
+
+    assert!(
+        terminal_donor_drop_witness.was_dropped_for_test(),
+        "candidate selection must observe terminal loss and release the donor resources"
+    );
+    assert_eq!(presented_device_identity_for_test(&surface), healthy_device);
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert!(matches!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Ready { .. }
+    ));
+    assert_ne!(
+        presented_resource_id_for_test(&surface),
+        Some(installed_resource)
+    );
+    assert_ne!(
+        presented_target_identity_for_test(&surface),
+        installed_target
+    );
+    assert_eq!(surface.options, installed_options);
+    assert_eq!(surface.physical_size(), installed_physical_size);
+    assert!(
+        surface
+            .renderer_identity
+            .matches(&installed_renderer_identity)
+    );
+    assert_eq!(surface.last_parameters, Some(parameters));
+    assert_eq!(renderer.stats(), installed_stats);
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("the replacement must retain a web-canvas attachment"),
+        },
+        "terminal-donor-replacement-target"
+    );
+    assert_eq!(
+        presented_resource_id_for_test(&terminal_donor_surface),
+        terminal_donor_resource
+    );
+    assert_eq!(
+        presented_target_identity_for_test(&terminal_donor_surface),
+        terminal_donor_target
+    );
+    pollster::block_on(renderer.submit_scoped_wgpu_probe_for_test(installed_device))
+        .expect("replacement incompatibility must not disable the installed healthy slot");
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the resumed surface must render through the later healthy slot");
+}
+
+#[cfg(feature = "render-window")]
+#[test]
 fn available_resize_pending_resume_terminal_loss_before_publication_uses_surface_resume() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("pending resume attribution coverage requires a compatible device");
