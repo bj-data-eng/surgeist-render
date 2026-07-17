@@ -732,25 +732,54 @@ impl Backend {
         }
     }
 
+    fn compatible_ready_device(
+        &self,
+        preferred: Option<DeviceSlotIdentity>,
+        mut supports_surface: impl FnMut(&ReadyDeviceState) -> bool,
+    ) -> Option<DeviceSlotIdentity> {
+        if let Some(identity) = preferred
+            && let Some(state) = self.device_states.get(identity.slot())
+            && state.generation == identity.generation
+            && let Some(ready) = state.ready()
+            && supports_surface(ready)
+        {
+            return Some(identity);
+        }
+        self.device_states
+            .iter()
+            .enumerate()
+            .find_map(|(slot, state)| {
+                state
+                    .ready()
+                    .filter(|ready| supports_surface(ready))
+                    .map(|_| DeviceSlotIdentity::new(slot, state.generation))
+            })
+    }
+
+    async fn select_presented_device(
+        &mut self,
+        surface: &wgpu::Surface<'_>,
+        preferred: Option<DeviceSlotIdentity>,
+    ) -> Result<Option<DeviceSlotIdentity>> {
+        if let Some(identity) = self.compatible_ready_device(preferred, |ready| {
+            ready.adapter.is_surface_supported(surface)
+        }) {
+            return Ok(Some(identity));
+        }
+        self.new_device(Some(surface)).await
+    }
+
     pub(crate) async fn select_device(
         &mut self,
         compatible_surface: Option<&wgpu::Surface<'_>>,
     ) -> Result<Option<DeviceSlotIdentity>> {
-        let existing = if let Some(surface) = compatible_surface {
-            self.device_states
-                .iter()
-                .enumerate()
-                .find_map(|(slot, state)| {
-                    state
-                        .ready()
-                        .filter(|ready| ready.adapter.is_surface_supported(surface))
-                        .map(|_| DeviceSlotIdentity::new(slot, state.generation))
-                })
-        } else {
-            self.device_states
-                .first()
-                .map(|state| DeviceSlotIdentity::new(0, state.generation))
-        };
+        if let Some(surface) = compatible_surface {
+            return self.select_presented_device(surface, None).await;
+        }
+        let existing = self
+            .device_states
+            .first()
+            .map(|state| DeviceSlotIdentity::new(0, state.generation));
         if existing.is_some() {
             return Ok(existing);
         }
@@ -798,6 +827,8 @@ impl Backend {
     pub(crate) async fn create_presented_surface(
         &mut self,
         target: impl Into<wgpu::SurfaceTarget<'static>>,
+        preferred: Option<DeviceSlotIdentity>,
+        operation: RuntimeOperation,
     ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
         let surface = self
             .instance
@@ -809,16 +840,38 @@ impl Backend {
                 )
                 .with_source(source)
             })?;
-        let identity =
-            require_presented_device_identity(self.select_device(Some(&surface)).await?)?;
+        let identity = require_presented_device_identity(
+            self.select_presented_device(&surface, preferred).await?,
+        )?;
         let ready = self.ready_state_mut(
             identity,
-            RuntimeOperation::AdapterSelection,
+            operation,
             BackendErrorCode::SurfaceCreateFailed,
             "the selected presentation device is unavailable",
         )?;
         let presented = PresentedSurface::new(surface, &ready.adapter)?;
         Ok((presented, identity))
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) async fn create_display_free_presented_surface_for_test(
+        &mut self,
+        preferred: Option<DeviceSlotIdentity>,
+        operation: RuntimeOperation,
+    ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
+        let identity = if let Some(identity) = self.compatible_ready_device(preferred, |_| true) {
+            Some(identity)
+        } else {
+            self.new_device(None).await?
+        };
+        let identity = require_presented_device_identity(identity)?;
+        self.ready_state_mut(
+            identity,
+            operation,
+            BackendErrorCode::SurfaceCreateFailed,
+            "the selected presentation device is unavailable",
+        )?;
+        Ok((PresentedSurface::display_free_for_test(), identity))
     }
 
     fn ready_state_mut(

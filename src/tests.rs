@@ -3,6 +3,8 @@ use super::gpu_transaction::{
     ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
 };
 use super::renderer::ScopedFinalPublicationLossForTest;
+#[cfg(feature = "render-window")]
+use super::renderer::ScopedPresentedCreationTerminalLossForTest;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -16148,6 +16150,180 @@ fn available_occluded_resume_retains_installed_attachment_and_target() {
         renderer.default_device_active_operation_generation_for_test(),
         None
     );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn suspended_presented_replacement_terminal_loss_before_configuration_uses_surface_resume() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("suspended replacement attribution coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+        .expect("the fixture must establish public frame state before replacement");
+    surface.suspend().unwrap();
+
+    let attachment_before = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let device_before = presented_device_identity_for_test(&surface);
+    let target_before = presented_target_identity_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let physical_size_before = surface.physical_size();
+    let parameters_before = surface.last_parameters;
+    let stats_before = renderer.stats();
+    let observation_before = presented_observation_for_test(&surface);
+
+    let loss = ScopedPresentedCreationTerminalLossForTest::after_device_selection();
+    let error = pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("suspended-replacement-candidate"),
+    ))
+    .expect_err("terminal loss before replacement configuration must abort resume");
+    drop(loss);
+
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceResume,
+        DeviceLossReason::Unknown,
+    );
+    assert_eq!(surface.state(), SurfaceState::Suspended);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(presented_device_identity_for_test(&surface), device_before);
+    assert_eq!(presented_target_identity_for_test(&surface), target_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
+    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(presented_observation_for_test(&surface), observation_before);
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("failed replacement must retain the installed attachment kind"),
+        },
+        attachment_before
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "pre-configuration loss must not begin a Configure transaction"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn lost_presented_recreation_terminal_loss_before_configuration_uses_surface_resume() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("lost recreation attribution coverage requires a compatible device");
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
+        .expect("the fixture must establish public frame state before loss");
+    set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Lost);
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+            .expect_err("synthetic acquire loss must require explicit recreation");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        RenderSurfaceAvailability::Lost,
+    );
+
+    let attachment_before = match &surface.attachment {
+        Attachment::WebCanvas(canvas) => canvas.id().to_owned(),
+        _ => panic!("the display-free fixture must own a web-canvas attachment"),
+    };
+    let device_before = presented_device_identity_for_test(&surface);
+    let target_before = presented_target_identity_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let physical_size_before = surface.physical_size();
+    let parameters_before = surface.last_parameters;
+    let stats_before = renderer.stats();
+    let observation_before = presented_observation_for_test(&surface);
+
+    let loss = ScopedPresentedCreationTerminalLossForTest::after_device_selection();
+    let error = pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("lost-recreation-candidate"),
+    ))
+    .expect_err("terminal loss before recreation configuration must abort resume");
+    drop(loss);
+
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceResume,
+        DeviceLossReason::Unknown,
+    );
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(presented_device_identity_for_test(&surface), device_before);
+    assert_eq!(presented_target_identity_for_test(&surface), target_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
+    assert_eq!(
+        presented_lifecycle_for_test(&surface),
+        PresentedLifecycle::Lost
+    );
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(presented_observation_for_test(&surface), observation_before);
+    assert_eq!(
+        match &surface.attachment {
+            Attachment::WebCanvas(canvas) => canvas.id(),
+            _ => panic!("failed recreation must retain the installed attachment kind"),
+        },
+        attachment_before
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None,
+        "pre-configuration loss must not begin a Configure transaction"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_resume_prefers_installed_compatible_slot_over_earlier_donor_slot() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented selection coverage requires a compatible device");
+    let mut earlier = configured_display_free_presented_surface_for_test(&mut renderer);
+    let earlier_device = presented_device_identity_for_test(&earlier);
+    let earlier_resource = presented_resource_id_for_test(&earlier);
+    let earlier_target = presented_target_identity_for_test(&earlier);
+    let installed_device = pollster::block_on(renderer.add_donor_device_slot_for_test())
+        .expect("presented selection coverage requires a later ready device slot");
+    assert_ne!(installed_device, earlier_device);
+    let mut surface = configured_display_free_presented_surface_on_device_for_test(
+        &mut renderer,
+        installed_device,
+        Attachment::from_web_canvas("installed-slot-target"),
+    );
+    surface.suspend().unwrap();
+
+    pollster::block_on(renderer.resume_surface(
+        &mut surface,
+        Attachment::from_web_canvas("installed-slot-replacement"),
+    ))
+    .expect("resume must configure a replacement on the installed compatible slot");
+
+    assert_eq!(
+        presented_device_identity_for_test(&surface),
+        installed_device,
+        "an earlier compatible slot must not capture a surface from its installed ready slot"
+    );
+    assert_eq!(presented_resource_id_for_test(&earlier), earlier_resource);
+    assert_eq!(presented_target_identity_for_test(&earlier), earlier_target);
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the resumed surface must render through its installed device slot");
+    pollster::block_on(renderer.render(&mut earlier, &Scene::new(), Parameters::default()))
+        .expect("the earlier donor surface must retain coherent resources");
 }
 
 #[cfg(feature = "render-window")]

@@ -29,6 +29,11 @@ thread_local! {
     static ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
 }
 
+#[cfg(all(test, feature = "render-window"))]
+thread_local! {
+    static ACTIVE_PRESENTED_CREATION_LOSS_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
+}
+
 pub struct Renderer {
     identity: RendererIdentity,
     options: Options,
@@ -78,11 +83,53 @@ impl Drop for ScopedFinalPublicationLossForTest {
     }
 }
 
+/// Private control that injects loss after presented creation and before configuration.
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) struct ScopedPresentedCreationTerminalLossForTest {
+    previous: bool,
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl ScopedPresentedCreationTerminalLossForTest {
+    pub(crate) fn after_device_selection() -> Self {
+        let previous = ACTIVE_PRESENTED_CREATION_LOSS_FOR_TEST.with(|active| active.replace(true));
+        Self { previous }
+    }
+}
+
+#[cfg(all(test, feature = "render-window"))]
+impl Drop for ScopedPresentedCreationTerminalLossForTest {
+    fn drop(&mut self) {
+        ACTIVE_PRESENTED_CREATION_LOSS_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous;
+        });
+    }
+}
+
 #[cfg(test)]
 fn inject_final_publication_loss_for_test(signal: &DeviceSignal) {
     if ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| *active.borrow()) {
         signal.record_loss_for_test(DeviceLossReason::Unknown);
     }
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+fn ensure_presented_device_available_after_creation(
+    backend: &mut Backend,
+    device_identity: DeviceSlotIdentity,
+    operation: RuntimeOperation,
+) -> Result<()> {
+    #[cfg(all(test, feature = "render-window"))]
+    if ACTIVE_PRESENTED_CREATION_LOSS_FOR_TEST.with(|active| *active.borrow()) {
+        backend.signal_loss_for_test(device_identity, DeviceLossReason::Unknown);
+    }
+    if let Some(error) = backend.terminal_error(device_identity, operation) {
+        return Err(error);
+    }
+    Ok(())
 }
 
 impl Renderer {
@@ -117,6 +164,7 @@ impl Renderer {
             attachment,
             options,
             RuntimeOperation::SurfaceRendering,
+            None,
         )
         .await
     }
@@ -126,12 +174,18 @@ impl Renderer {
         attachment: Attachment,
         options: SurfaceOptions,
         configuration_operation: RuntimeOperation,
+        preferred_device: Option<DeviceSlotIdentity>,
     ) -> Result<Surface> {
         match attachment {
             Attachment::Headless => self.create_headless_surface(options).await,
             Attachment::WebCanvas(canvas) => {
-                self.create_web_canvas_surface(canvas, options, configuration_operation)
-                    .await
+                self.create_web_canvas_surface(
+                    canvas,
+                    options,
+                    configuration_operation,
+                    preferred_device,
+                )
+                .await
             }
             #[cfg(feature = "render-window")]
             Attachment::Window(handle) => {
@@ -143,13 +197,18 @@ impl Renderer {
                     ));
                 };
                 let physical_size = physical_size(options.size, options.scale)?;
-                let (surface, device_identity) =
-                    backend.create_presented_surface(handle.clone()).await?;
-                if let Some(error) =
-                    backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
-                {
-                    return Err(error);
-                }
+                let (surface, device_identity) = backend
+                    .create_presented_surface(
+                        handle.clone(),
+                        preferred_device,
+                        configuration_operation,
+                    )
+                    .await?;
+                ensure_presented_device_available_after_creation(
+                    backend,
+                    device_identity,
+                    configuration_operation,
+                )?;
                 let mut created = Surface::with_backend(
                     Attachment::Window(handle),
                     options,
@@ -173,6 +232,7 @@ impl Renderer {
         canvas: WebCanvas,
         options: SurfaceOptions,
         configuration_operation: RuntimeOperation,
+        preferred_device: Option<DeviceSlotIdentity>,
     ) -> Result<Surface> {
         let Some(html_canvas) = canvas.html_canvas() else {
             return Err(Error::new(
@@ -189,13 +249,17 @@ impl Renderer {
         };
         let physical_size = physical_size(options.size, options.scale)?;
         let (surface, device_identity) = backend
-            .create_presented_surface(wgpu::SurfaceTarget::Canvas(html_canvas))
+            .create_presented_surface(
+                wgpu::SurfaceTarget::Canvas(html_canvas),
+                preferred_device,
+                configuration_operation,
+            )
             .await?;
-        if let Some(error) =
-            backend.terminal_error(device_identity, RuntimeOperation::AdapterSelection)
-        {
-            return Err(error);
-        }
+        ensure_presented_device_available_after_creation(
+            backend,
+            device_identity,
+            configuration_operation,
+        )?;
         let mut created = Surface::with_backend(
             Attachment::WebCanvas(canvas),
             options,
@@ -217,6 +281,7 @@ impl Renderer {
         canvas: WebCanvas,
         _options: SurfaceOptions,
         _configuration_operation: RuntimeOperation,
+        _preferred_device: Option<DeviceSlotIdentity>,
     ) -> Result<Surface> {
         let _ = canvas;
         Capabilities::CURRENT.ensure_supported(UnsupportedPrimitive::new(
@@ -452,6 +517,55 @@ impl Renderer {
         ))
     }
 
+    #[cfg(all(test, feature = "render-window"))]
+    async fn create_display_free_presented_surface_with_configuration_operation_for_test(
+        &mut self,
+        attachment: Attachment,
+        options: SurfaceOptions,
+        configuration_operation: RuntimeOperation,
+        preferred_device: Option<DeviceSlotIdentity>,
+    ) -> Result<Surface> {
+        validate_surface_options(options)?;
+        if !matches!(&attachment, Attachment::WebCanvas(_)) {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceCreateFailed,
+                "the display-free presented fixture requires a web-canvas attachment",
+            ));
+        }
+        let physical_size = physical_size(options.size, options.scale)?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::AdapterSelection,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "display-free presented configuration coverage requires a renderer backend",
+            )
+        })?;
+        let (surface, device_identity) = backend
+            .create_display_free_presented_surface_for_test(
+                preferred_device,
+                configuration_operation,
+            )
+            .await?;
+        ensure_presented_device_available_after_creation(
+            backend,
+            device_identity,
+            configuration_operation,
+        )?;
+        let mut created = Surface::with_backend(
+            attachment,
+            options,
+            SurfaceBackend::Presented {
+                surface: Box::new(surface),
+                device_identity,
+                state: PresentedSurfaceState::new(physical_size, ResizeState::Idle),
+            },
+            self.identity.clone(),
+        );
+        self.configure_presented_surface_if_needed(&mut created, configuration_operation)
+            .await?;
+        Ok(created)
+    }
+
     /// Submits one render operation for an available surface.
     ///
     /// Awaiting this future returns render statistics after scene validation and
@@ -631,26 +745,24 @@ impl Renderer {
                     }
                     super::surface::PresentedResumeAction::Configure => {
                         let resizing = state.lifecycle().resize_state();
+                        let preferred_device = surface
+                            .device_identity()
+                            .expect("a presented surface must retain its device slot identity");
                         #[cfg(all(test, feature = "render-window"))]
                         if surface.is_display_free_presented_for_test() {
-                            let device_identity = surface.device_identity().expect(
-                                "a display-free presented surface must retain its device identity",
-                            );
-                            let mut next = self.display_free_presented_surface_on_device_for_test(
-                                surface.options,
-                                device_identity,
-                                attachment,
-                            )?;
+                            let mut next = self
+                                .create_display_free_presented_surface_with_configuration_operation_for_test(
+                                    attachment,
+                                    surface.options,
+                                    RuntimeOperation::SurfaceResume,
+                                    Some(preferred_device),
+                                )
+                                .await?;
                             next.last_parameters = surface.last_parameters;
                             next.renderer_identity = surface.renderer_identity.clone();
                             if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
                                 state.set_resizing(resizing);
                             }
-                            self.configure_presented_surface_if_needed(
-                                &mut next,
-                                RuntimeOperation::SurfaceResume,
-                            )
-                            .await?;
                             *surface = next;
                             return Ok(());
                         }
@@ -659,6 +771,7 @@ impl Renderer {
                                 attachment,
                                 surface.options,
                                 RuntimeOperation::SurfaceResume,
+                                Some(preferred_device),
                             )
                             .await?;
                         next.last_parameters = surface.last_parameters;
@@ -671,26 +784,24 @@ impl Renderer {
                     }
                     super::surface::PresentedResumeAction::Recreate => {
                         let resizing = state.lifecycle().resize_state();
+                        let preferred_device = surface
+                            .device_identity()
+                            .expect("a presented surface must retain its device slot identity");
                         #[cfg(all(test, feature = "render-window"))]
                         if surface.is_display_free_presented_for_test() {
-                            let device_identity = surface.device_identity().expect(
-                                "a display-free presented surface must retain its device identity",
-                            );
-                            let mut next = self.display_free_presented_surface_on_device_for_test(
-                                surface.options,
-                                device_identity,
-                                attachment,
-                            )?;
+                            let mut next = self
+                                .create_display_free_presented_surface_with_configuration_operation_for_test(
+                                    attachment,
+                                    surface.options,
+                                    RuntimeOperation::SurfaceResume,
+                                    Some(preferred_device),
+                                )
+                                .await?;
                             next.last_parameters = surface.last_parameters;
                             next.renderer_identity = surface.renderer_identity.clone();
                             if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
                                 state.set_resizing(resizing);
                             }
-                            self.configure_presented_surface_if_needed(
-                                &mut next,
-                                RuntimeOperation::SurfaceResume,
-                            )
-                            .await?;
                             *surface = next;
                             return Ok(());
                         }
@@ -699,6 +810,7 @@ impl Renderer {
                                 attachment,
                                 surface.options,
                                 RuntimeOperation::SurfaceResume,
+                                Some(preferred_device),
                             )
                             .await?;
                         next.last_parameters = surface.last_parameters;
