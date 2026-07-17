@@ -2265,8 +2265,5 @@ pub(crate) fn read_texture_rgba(
     drop(mapped);
     buffer.unmap();
 
-    Ok(ImageBuffer {
-        size: physical_size,
-        rgba,
-    })
+    ImageBuffer::try_new(physical_size, rgba)
 }

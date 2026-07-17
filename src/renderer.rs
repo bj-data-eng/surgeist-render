@@ -835,10 +835,7 @@ impl Renderer {
             SurfaceBackend::ContractOnly { physical_size }
                 if physical_size.width() == 0 || physical_size.height() == 0 =>
             {
-                return Ok(ImageBuffer {
-                    size: *physical_size,
-                    rgba: Vec::new(),
-                });
+                return ImageBuffer::try_new(*physical_size, Vec::new());
             }
             SurfaceBackend::ContractOnly { .. } => {
                 return Err(Error::runtime_unavailable(
@@ -852,10 +849,7 @@ impl Renderer {
                 resources: HeadlessResources::Empty,
                 ..
             } => {
-                return Ok(ImageBuffer {
-                    size: *physical_size,
-                    rgba: Vec::new(),
-                });
+                return ImageBuffer::try_new(*physical_size, Vec::new());
             }
             SurfaceBackend::Headless {
                 resources: HeadlessResources::Pending,
@@ -1536,12 +1530,13 @@ impl Renderer {
             &source,
         )?
         .execute_to_image_buffer()?;
+        let filtered_size = filtered.size();
         let image = Image::from_rgba(
             Size::new(
-                f64::from(filtered.size.width()),
-                f64::from(filtered.size.height()),
+                f64::from(filtered_size.width()),
+                f64::from(filtered_size.height()),
             ),
-            filtered.rgba,
+            filtered.into_rgba(),
         )?;
         let image_command = RenderCommand::Image {
             image,
@@ -1618,13 +1613,13 @@ impl Renderer {
             )
         })?;
         let physical_size = physical_size(bounds.rect().size(), scale)?;
-        if mask.alpha_mask().size != physical_size {
+        if mask.alpha_mask().size() != physical_size {
             return Err(Error::invalid_value(
                 "resolved layer alpha mask size",
                 format!(
                     "{}x{}",
-                    mask.alpha_mask().size.width(),
-                    mask.alpha_mask().size.height()
+                    mask.alpha_mask().size().width(),
+                    mask.alpha_mask().size().height()
                 ),
                 "must match the offscreen layer bounds in device pixels",
             ));
@@ -1662,12 +1657,13 @@ impl Renderer {
         rendered.release(&mut cache)?;
         let masked = ResolvedAlphaMaskExecution::try_new(&source, mask.alpha_mask())?
             .execute_to_image_buffer()?;
+        let masked_size = masked.size();
         let image = Image::from_rgba(
             Size::new(
-                f64::from(masked.size.width()),
-                f64::from(masked.size.height()),
+                f64::from(masked_size.width()),
+                f64::from(masked_size.height()),
             ),
-            masked.rgba,
+            masked.into_rgba(),
         )?;
         let image_command = RenderCommand::Image {
             image,

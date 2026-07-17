@@ -4543,33 +4543,71 @@ fn reference_alpha_masks_reject_mismatched_mask_buffer_size() {
 }
 
 #[test]
+fn image_buffer_rejects_short_long_and_overflowing_byte_lengths() {
+    let errors = [
+        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![0; 7])
+            .expect_err("short RGBA data must be rejected"),
+        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![0; 9])
+            .expect_err("long RGBA data must be rejected"),
+        ImageBuffer::try_new(PhysicalSize::new(0, 2), vec![0])
+            .expect_err("zero-area image buffers must reject nonempty RGBA data"),
+        ImageBuffer::try_new(PhysicalSize::new(u32::MAX, u32::MAX), Vec::new())
+            .expect_err("overflowing RGBA byte lengths must be rejected"),
+    ];
+
+    for error in errors {
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert!(error.invalid_value_diagnostic().is_some());
+    }
+}
+
+#[test]
+fn image_buffer_accepts_exact_and_zero_area_lengths_and_round_trips_bytes() {
+    let rgba = vec![1, 2, 3, 4, 5, 6, 7, 8];
+    let image = ImageBuffer::try_new(PhysicalSize::new(2, 1), rgba.clone()).unwrap();
+
+    assert_eq!(image.size(), PhysicalSize::new(2, 1));
+    assert_eq!(image.rgba(), rgba.as_slice());
+    assert_eq!(image.into_rgba(), rgba);
+
+    for size in [PhysicalSize::new(0, 2), PhysicalSize::new(2, 0)] {
+        let empty = ImageBuffer::try_new(size, Vec::new()).unwrap();
+        assert_eq!(empty.size(), size);
+        assert!(empty.rgba().is_empty());
+        assert!(empty.into_rgba().is_empty());
+    }
+}
+
+#[test]
 fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(3, 1),
-        rgba: vec![
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(3, 1),
+        vec![
             255, 0, 0, 255, //
             0, 255, 0, 255, //
             0, 0, 255, 255,
         ],
-    };
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(3, 1),
-        rgba: vec![
+    )
+    .unwrap();
+    let mask = ImageBuffer::try_new(
+        PhysicalSize::new(3, 1),
+        vec![
             0, 0, 0, 255, //
             0, 0, 0, 0, //
             0, 0, 0, 128,
         ],
-    };
+    )
+    .unwrap();
 
     let masked = ResolvedAlphaMaskExecution::try_new(&source, &mask)
         .unwrap()
         .execute_to_image_buffer()
         .unwrap();
 
-    assert_eq!(masked.size, source.size);
+    assert_eq!(masked.size(), source.size());
     assert_eq!(
-        masked.rgba,
-        vec![
+        masked.rgba(),
+        &[
             255, 0, 0, 255, //
             0, 0, 0, 0, //
             0, 0, 255, 128,
@@ -4579,14 +4617,8 @@ fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
 
 #[test]
 fn resolved_alpha_mask_execution_rejects_non_materialized_luminance_policy() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 0, 0, 255],
-    };
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 255, 255, 255],
-    };
+    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 255]).unwrap();
+    let mask = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 255, 255, 255]).unwrap();
 
     let error = ResolvedAlphaMaskExecution::try_new_with_mode(&source, &mask, MaskMode::Luminance)
         .expect_err("luminance masks need an explicit conversion policy before execution");
@@ -4602,14 +4634,13 @@ fn resolved_alpha_mask_execution_rejects_non_materialized_luminance_policy() {
 
 #[test]
 fn resolved_alpha_mask_execution_rejects_mismatched_buffers() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
-    };
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(1, 2),
-        rgba: vec![0, 0, 0, 255, 0, 0, 0, 255],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 0, 0, 255, 0, 255, 0, 255],
+    )
+    .unwrap();
+    let mask =
+        ImageBuffer::try_new(PhysicalSize::new(1, 2), vec![0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
 
     let error = ResolvedAlphaMaskExecution::try_new(&source, &mask)
         .expect_err("materialized alpha masks must match source buffer size");
@@ -4626,14 +4657,15 @@ fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(3, 1),
-        rgba: vec![
+    let mask = ImageBuffer::try_new(
+        PhysicalSize::new(3, 1),
+        vec![
             255, 255, 255, 255, //
             255, 255, 255, 128, //
             0, 0, 0, 0,
         ],
-    };
+    )
+    .unwrap();
     let layer = Layer::new().try_resolved_alpha_mask(mask).unwrap();
     let mut scene = Scene::new();
     scene.layer(layer, |scene| {
@@ -4657,14 +4689,16 @@ fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0)).unwrap();
-    let inner_mask = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 255, 255, 255, 255, 255, 255, 128],
-    };
-    let outer_mask = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 255, 255, 128, 255, 255, 255, 255],
-    };
+    let inner_mask = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 255, 255, 255, 255, 255, 255, 128],
+    )
+    .unwrap();
+    let outer_mask = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 255, 255, 128, 255, 255, 255, 255],
+    )
+    .unwrap();
     let mut scene = Scene::new();
     scene.layer(
         Layer::new().try_resolved_alpha_mask(outer_mask).unwrap(),
@@ -4690,10 +4724,11 @@ fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 255, 255, 255, 255, 255, 255, 255],
-    };
+    let mask = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 255, 255, 255, 255, 255, 255, 255],
+    )
+    .unwrap();
     let layer = Layer::new()
         .try_clip(Shape::rect(Rect::new(1.0, 0.0, 2.0, 1.0)))
         .unwrap()
@@ -4717,10 +4752,7 @@ fn layer_resolved_alpha_mask_composites_after_layer_transform() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(3.0, 1.0), 1.0)).unwrap();
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 255, 255, 255],
-    };
+    let mask = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 255, 255, 255]).unwrap();
     let layer = Layer::new()
         .try_transform(Transform::translation(1.0, 0.0).unwrap())
         .unwrap()
@@ -4744,10 +4776,7 @@ fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 255, 255, 128],
-    };
+    let mask = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 255, 255, 128]).unwrap();
     let layer = Layer::new()
         .try_opacity(0.5)
         .unwrap()
@@ -4769,10 +4798,7 @@ fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
 
 #[test]
 fn layer_resolved_alpha_mask_rejects_luminance_mode_without_conversion_policy() {
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 255, 255, 255],
-    };
+    let mask = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 255, 255, 255]).unwrap();
 
     let error = ResolvedLayerAlphaMask::try_new_with_mode(mask, MaskMode::Luminance)
         .expect_err("resolved layer masks do not implement luminance conversion");
@@ -5312,10 +5338,11 @@ fn compiled_color_filter_pipeline_rejects_empty_construction() {
 
 #[test]
 fn image_straight_rgba8_converts_to_premultiplied_and_back_deterministically() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(3, 1),
-        rgba: vec![90, 120, 150, 0, 64, 128, 255, 128, 255, 10, 20, 255],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(3, 1),
+        vec![90, 120, 150, 0, 64, 128, 255, 128, 255, 10, 20, 255],
+    )
+    .unwrap();
 
     let premultiplied =
         image::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
@@ -5336,10 +5363,10 @@ fn image_straight_rgba8_converts_to_premultiplied_and_back_deterministically() {
         image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&premultiplied)
             .unwrap();
 
-    assert_eq!(straight.size, PhysicalSize::new(3, 1));
+    assert_eq!(straight.size(), PhysicalSize::new(3, 1));
     assert_eq!(
-        straight.rgba,
-        vec![0, 0, 0, 0, 64, 128, 255, 128, 255, 10, 20, 255]
+        straight.rgba(),
+        &[0, 0, 0, 0, 64, 128, 255, 128, 255, 10, 20, 255]
     );
 }
 
@@ -5368,12 +5395,13 @@ fn image_color_filter_execution_applies_color_chain_to_one_pixel_image() {
 
 #[test]
 fn image_color_filter_execution_applies_color_chain_to_multi_pixel_buffer() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 2),
-        rgba: vec![
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(2, 2),
+        vec![
             64, 128, 255, 128, 10, 20, 30, 0, 100, 150, 200, 255, 20, 40, 80, 64,
         ],
-    };
+    )
+    .unwrap();
     let filters = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(0.5).unwrap()),
         FilterOp::opacity(UnitFilterAmount::try_new(0.5).unwrap()),
@@ -5386,10 +5414,10 @@ fn image_color_filter_execution_applies_color_chain_to_multi_pixel_buffer() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.size, PhysicalSize::new(2, 2));
+    assert_eq!(filtered.size(), PhysicalSize::new(2, 2));
     assert_eq!(
-        filtered.rgba,
-        vec![
+        filtered.rgba(),
+        &[
             32, 64, 128, 64, 0, 0, 0, 0, 50, 76, 100, 128, 16, 24, 40, 32,
         ]
     );
@@ -5397,10 +5425,11 @@ fn image_color_filter_execution_applies_color_chain_to_multi_pixel_buffer() {
 
 #[test]
 fn image_color_filter_execution_preserves_buffer_size_and_rgba_order() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![10, 20, 30, 40, 200, 150, 100, 255],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![10, 20, 30, 40, 200, 150, 100, 255],
+    )
+    .unwrap();
     let filters = FilterList::try_ops(vec![FilterOp::opacity(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -5412,8 +5441,8 @@ fn image_color_filter_execution_preserves_buffer_size_and_rgba_order() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.size, PhysicalSize::new(2, 1));
-    assert_eq!(filtered.rgba, vec![13, 19, 32, 40, 200, 150, 100, 255]);
+    assert_eq!(filtered.size(), PhysicalSize::new(2, 1));
+    assert_eq!(filtered.rgba(), &[13, 19, 32, 40, 200, 150, 100, 255]);
 }
 
 #[test]
@@ -5487,10 +5516,11 @@ fn image_filter_execution_blurs_one_pixel_transparent_and_opaque_images() {
 
 #[test]
 fn image_filter_execution_blurs_multi_pixel_image_with_transparent_edges() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(3, 1),
-        rgba: vec![0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(3, 1),
+        vec![0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0],
+    )
+    .unwrap();
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
 
@@ -5500,10 +5530,10 @@ fn image_filter_execution_blurs_multi_pixel_image_with_transparent_edges() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(blurred.size, PhysicalSize::new(3, 1));
+    assert_eq!(blurred.size(), PhysicalSize::new(3, 1));
     assert_eq!(
-        blurred.rgba,
-        vec![255, 0, 0, 25, 255, 0, 0, 41, 255, 0, 0, 25]
+        blurred.rgba(),
+        &[255, 0, 0, 25, 255, 0, 0, 41, 255, 0, 0, 25]
     );
 }
 
@@ -5559,10 +5589,11 @@ fn filtered_image_paint_executes_blur_with_matching_materialized_image() {
 
 #[test]
 fn materialized_image_filters_preserve_color_and_blur_order() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(3, 1),
-        rgba: vec![200, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(3, 1),
+        vec![200, 0, 0, 255, 0, 0, 0, 255, 0, 0, 0, 0],
+    )
+    .unwrap();
     let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
     let blur = FilterOp::blur(FilterBlur::try_new(1.0).unwrap());
     let color_before_blur = FilterList::try_ops(vec![brightness.clone(), blur.clone()]).unwrap();
@@ -5583,17 +5614,18 @@ fn materialized_image_filters_preserve_color_and_blur_order() {
     .execute_to_image_buffer()
     .unwrap();
 
-    assert_eq!(color_before.size, PhysicalSize::new(3, 1));
-    assert_eq!(blur_before.size, PhysicalSize::new(3, 1));
-    assert_ne!(color_before.rgba, blur_before.rgba);
+    assert_eq!(color_before.size(), PhysicalSize::new(3, 1));
+    assert_eq!(blur_before.size(), PhysicalSize::new(3, 1));
+    assert_ne!(color_before.rgba(), blur_before.rgba());
 }
 
 #[test]
 fn materialized_image_blur_keeps_output_clipped_to_source_region() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 2),
-        rgba: vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(2, 2),
+        vec![255, 255, 255, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+    )
+    .unwrap();
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(4.0).unwrap())]).unwrap();
 
@@ -5604,10 +5636,11 @@ fn materialized_image_blur_keeps_output_clipped_to_source_region() {
             .unwrap();
 
     assert_eq!(
-        blurred.size, source.size,
+        blurred.size(),
+        source.size(),
         "materialized image blur inflates for sampling but clips output to source image extent"
     );
-    assert_eq!(blurred.rgba.len(), source.rgba.len());
+    assert_eq!(blurred.rgba().len(), source.rgba().len());
 }
 
 #[test]
@@ -5664,13 +5697,14 @@ fn materialized_drop_shadow_quantizes_half_pixel_offsets_away_from_zero() {
 
 #[test]
 fn materialized_drop_shadow_uses_alpha_mask_not_source_bounds() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(3, 3),
-        rgba: vec![
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(3, 3),
+        vec![
             0, 0, 0, 0, 255, 0, 0, 255, 0, 0, 0, 0, 255, 0, 0, 255, 255, 0, 0, 255, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ],
-    };
+    )
+    .unwrap();
     let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
         Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
     )])
@@ -5682,7 +5716,7 @@ fn materialized_drop_shadow_uses_alpha_mask_not_source_bounds() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.size, PhysicalSize::new(3, 3));
+    assert_eq!(filtered.size(), PhysicalSize::new(3, 3));
     assert_eq!(pixel_rgba(&filtered, 1, 0), [255, 0, 0, 255]);
     assert_eq!(pixel_rgba(&filtered, 2, 0), [0, 0, 0, 255]);
     assert_eq!(pixel_rgba(&filtered, 2, 1), [0, 0, 0, 255]);
@@ -5695,13 +5729,14 @@ fn materialized_drop_shadow_uses_alpha_mask_not_source_bounds() {
 
 #[test]
 fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(3, 3),
-        rgba: vec![
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(3, 3),
+        vec![
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 255, 255, 255, 0, 0, 0, 0, 0, 0,
             0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
         ],
-    };
+    )
+    .unwrap();
     let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
         Shadow::try_new(Point::new(1.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
     )])
@@ -5713,8 +5748,8 @@ fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.size, source.size);
-    assert_eq!(filtered.rgba.len(), source.rgba.len());
+    assert_eq!(filtered.size(), source.size());
+    assert_eq!(filtered.rgba().len(), source.rgba().len());
     assert_eq!(pixel_rgba(&filtered, 1, 1), [255, 255, 255, 255]);
     assert!(
         pixel_alpha(&filtered, 2, 0) > 0,
@@ -5724,10 +5759,7 @@ fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
 
 #[test]
 fn materialized_drop_shadow_composites_shadow_behind_source() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 0, 0, 128],
-    };
+    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 128]).unwrap();
     let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
         Shadow::try_new(Point::new(0.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
     )])
@@ -5739,7 +5771,7 @@ fn materialized_drop_shadow_composites_shadow_behind_source() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.rgba, vec![170, 0, 0, 192]);
+    assert_eq!(filtered.rgba(), &[170, 0, 0, 192]);
 }
 
 #[test]
@@ -5818,10 +5850,8 @@ fn resource_only_drop_shadow_filtered_image_paint_stays_rejected() {
 
 #[test]
 fn materialized_filters_after_drop_shadow_apply_to_composed_output() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
-    };
+    let source =
+        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let filters = FilterList::try_ops(vec![
         FilterOp::drop_shadow(
             Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
@@ -5836,15 +5866,13 @@ fn materialized_filters_after_drop_shadow_apply_to_composed_output() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.rgba, vec![0, 255, 255, 255, 255, 255, 255, 255]);
+    assert_eq!(filtered.rgba(), &[0, 255, 255, 255, 255, 255, 255, 255]);
 }
 
 #[test]
 fn materialized_filters_before_drop_shadow_shape_current_alpha_mask() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
-    };
+    let source =
+        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let filters = FilterList::try_ops(vec![
         FilterOp::opacity(UnitFilterAmount::try_new(0.5).unwrap()),
         FilterOp::drop_shadow(
@@ -5859,15 +5887,12 @@ fn materialized_filters_before_drop_shadow_shape_current_alpha_mask() {
             .execute_to_image_buffer()
             .unwrap();
 
-    assert_eq!(filtered.rgba, vec![255, 0, 0, 128, 0, 0, 0, 128]);
+    assert_eq!(filtered.rgba(), &[255, 0, 0, 128, 0, 0, 0, 128]);
 }
 
 #[test]
 fn css_drop_shadow_rejects_non_zero_spread() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 0, 0, 255],
-    };
+    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 255]).unwrap();
     let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
         Shadow::try_new(Point::new(0.0, 0.0), 0.0, 1.0, Color::BLACK).unwrap(),
     )])
@@ -5887,10 +5912,8 @@ fn css_drop_shadow_rejects_non_zero_spread() {
 
 #[test]
 fn materialized_drop_shadow_rejects_inset_shadow_with_typed_diagnostic() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
-    };
+    let source =
+        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let filters = FilterList::try_ops(vec![FilterOp::drop_shadow(
         Shadow::try_inset(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
     )])
@@ -5913,10 +5936,7 @@ fn materialized_drop_shadow_rejects_inset_shadow_with_typed_diagnostic() {
 
 #[test]
 fn css_drop_shadow_rejects_non_solid_shadow_paint() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![255, 0, 0, 255],
-    };
+    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 255]).unwrap();
     let gradient = Gradient::try_linear(
         Point::new(0.0, 0.0),
         Point::new(1.0, 0.0),
@@ -6055,10 +6075,8 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
     assert_eq!(shadow_outset.right(), 12.0);
     assert_eq!(shadow_outset.bottom(), 9.0);
 
-    let image_buffer = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 0, 0, 255, 0, 0, 0, 0],
-    };
+    let image_buffer =
+        ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let color_before_pixel = FilterList::try_ops(vec![
         FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
         FilterOp::drop_shadow(
@@ -6088,7 +6106,8 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
     .execute_to_image_buffer()
     .unwrap();
     assert_ne!(
-        color_before.rgba, pixel_before.rgba,
+        color_before.rgba(),
+        pixel_before.rgba(),
         "mixed color and pixel-moving filters must preserve authored order"
     );
 
@@ -6244,10 +6263,11 @@ fn sequence10_matrix_color_filters_execute_with_cpu_reference_bytes() {
 
 #[test]
 fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_image() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![100, 150, 200, 255, 64, 128, 255, 128],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![100, 150, 200, 255, 64, 128, 255, 128],
+    )
+    .unwrap();
     let filters = color_filter_list([
         ColorFilterOp::Brightness(FilterAmount::try_new(1.25).unwrap()),
         ColorFilterOp::Contrast(FilterAmount::try_new(0.8).unwrap()),
@@ -6275,7 +6295,7 @@ fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_i
             .unwrap();
 
     assert_eq!(filtered, expected);
-    assert_ne!(filtered.rgba, source.rgba);
+    assert_ne!(filtered.rgba(), source.rgba());
 }
 
 #[test]
@@ -6312,10 +6332,8 @@ fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
 
 #[test]
 fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
-    let image_buffer = ImageBuffer {
-        size: PhysicalSize::new(1, 1),
-        rgba: vec![100, 150, 200, 255],
-    };
+    let image_buffer =
+        ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![100, 150, 200, 255]).unwrap();
     let shadow = Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
     let drop_shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
 
@@ -6326,7 +6344,7 @@ fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
     .unwrap()
     .execute_to_image_buffer()
     .unwrap();
-    assert_eq!(drop_shadow_output.size, image_buffer.size);
+    assert_eq!(drop_shadow_output.size(), image_buffer.size());
 
     let layer_filter_error = normalize_single_layer_error(
         Layer::new()
@@ -7379,7 +7397,7 @@ fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_b
 
     assert_eq!(first_stats.layers, 0);
     assert_eq!(second_stats.layers, 0);
-    assert_eq!(first_output.rgba, second_output.rgba);
+    assert_eq!(first_output.rgba(), second_output.rgba());
     assert!(pixel_rgba(&first_output, 0, 0)[0] > 200);
     assert!(pixel_rgba(&first_output, 3, 0)[1] > 200);
 }
@@ -9106,7 +9124,7 @@ fn render_backdrop_filter_order_is_preserved() {
         return;
     };
 
-    assert_ne!(color_first.rgba, blur_first.rgba);
+    assert_ne!(color_first.rgba(), blur_first.rgba());
 }
 
 #[test]
@@ -9521,7 +9539,8 @@ fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
         return;
     };
     assert_ne!(
-        color_first.rgba, blur_first.rgba,
+        color_first.rgba(),
+        blur_first.rgba(),
         "materialized backdrop filters must execute in authored order"
     );
 
@@ -10448,19 +10467,21 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
 
 #[test]
 fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers() {
-    let source = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 0, 0, 255, 0, 255, 0, 255],
-    };
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 255, 255, 255, 0, 0, 0, 128],
-    };
+    let source = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 0, 0, 255, 0, 255, 0, 255],
+    )
+    .unwrap();
+    let mask = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 255, 255, 255, 0, 0, 0, 128],
+    )
+    .unwrap();
     let masked = ResolvedAlphaMaskExecution::try_new(&source, &mask)
         .unwrap()
         .execute_to_image_buffer()
         .unwrap();
-    assert_eq!(masked.rgba, vec![255, 0, 0, 255, 0, 255, 0, 128]);
+    assert_eq!(masked.rgba(), &[255, 0, 0, 255, 0, 255, 0, 128]);
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
@@ -16874,8 +16895,8 @@ fn zero_size_headless_render_diagnoses_and_read_returns_empty() {
     let image = renderer
         .read_headless(&surface)
         .expect("zero-area headless readback returns a validated empty image");
-    assert_eq!(image.size, PhysicalSize::new(0, 2));
-    assert!(image.rgba.is_empty());
+    assert_eq!(image.size(), PhysicalSize::new(0, 2));
+    assert!(image.rgba().is_empty());
 }
 
 #[test]
@@ -17796,7 +17817,7 @@ fn render_scales_logical_scene_to_physical_surface() {
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
     let output = renderer.read_headless(&surface).unwrap();
 
-    assert_eq!(output.size, PhysicalSize::new(40, 40));
+    assert_eq!(output.size(), PhysicalSize::new(40, 40));
     assert!(pixel_alpha(&output, 18, 18) > 0);
     assert_eq!(pixel_alpha(&output, 22, 22), 0);
 }
@@ -18187,7 +18208,7 @@ fn builtin_shape_clips_execute_for_layer_clipping() {
         let output = renderer.read_headless(&surface).unwrap();
 
         assert!(
-            output.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0),
+            output.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0),
             "builtin shape clip should leave visible clipped content"
         );
     }
@@ -19010,7 +19031,7 @@ fn circle_shadows_lower_to_blurred_round_rect() {
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(stats.shadows, 1);
-    assert!(output.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0));
+    assert!(output.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
 }
 
 #[test]
@@ -19033,7 +19054,7 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
     let output = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(stats.shadows, 1);
-    assert!(output.rgba.chunks_exact(4).any(|pixel| pixel[3] > 0));
+    assert!(output.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
 }
 
 #[test]
@@ -19472,8 +19493,8 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         renderer
             .read_headless(&surface)
             .expect("a failed frame must retain the previous publication")
-            .rgba,
-        published.rgba,
+            .rgba(),
+        published.rgba(),
         "a failed submitted frame must not overwrite readable published pixels"
     );
 
@@ -19494,8 +19515,8 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         renderer
             .read_headless(&surface)
             .expect("a canceled frame must retain the previous publication")
-            .rgba,
-        published.rgba,
+            .rgba(),
+        published.rgba(),
         "a canceled submitted frame must not overwrite readable published pixels"
     );
 
@@ -19589,7 +19610,7 @@ fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
     assert_eq!(surface.last_parameters, prior_parameters);
     assert_eq!(renderer.uploaded_images_for_test(), prior_uploaded_images);
     assert!(
-        prior_pixels.rgba.iter().any(|channel| *channel != 0),
+        prior_pixels.rgba().iter().any(|channel| *channel != 0),
         "the preserved public frame must have established non-empty pixels before the race"
     );
 }
@@ -19655,9 +19676,9 @@ fn headless_render_can_be_read_back() {
     let image = renderer.read_headless(&surface).unwrap();
 
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
-    assert_eq!(image.size, PhysicalSize::new(4, 4));
-    assert_eq!(image.rgba.len(), 4 * 4 * 4);
-    assert!(image.rgba.iter().any(|channel| *channel != 0));
+    assert_eq!(image.size(), PhysicalSize::new(4, 4));
+    assert_eq!(image.rgba().len(), 4 * 4 * 4);
+    assert!(image.rgba().iter().any(|channel| *channel != 0));
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -20078,10 +20099,11 @@ fn materialized_mask_render_preserves_final_transaction_generation() {
         .expect("materialized-mask transaction coverage requires a renderer");
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0))
         .expect("materialized-mask transaction coverage requires a headless surface");
-    let mask = ImageBuffer {
-        size: PhysicalSize::new(2, 1),
-        rgba: vec![255, 255, 255, 255, 0, 0, 0, 128],
-    };
+    let mask = ImageBuffer::try_new(
+        PhysicalSize::new(2, 1),
+        vec![255, 255, 255, 255, 0, 0, 0, 128],
+    )
+    .unwrap();
     let mut scene = Scene::new();
     scene.layer(
         Layer::new().try_resolved_alpha_mask(mask).unwrap(),
@@ -20187,7 +20209,7 @@ fn observe_pinned_vello_characterization(
         (frame_bounds.x() * scale).floor() as u32,
         (frame_bounds.y() * scale).floor() as u32,
     ];
-    let physical_dimensions = [image.size.width(), image.size.height()];
+    let physical_dimensions = [image.size().width(), image.size().height()];
 
     assert_eq!(
         physical_dimensions,
@@ -20518,12 +20540,12 @@ fn pixel_alpha(image: &ImageBuffer, x: u32, y: u32) -> u8 {
 }
 
 fn pixel_rgba(image: &ImageBuffer, x: u32, y: u32) -> [u8; 4] {
-    let index = ((y * image.size.width() + x) * 4 + 3) as usize;
+    let index = ((y * image.size().width() + x) * 4 + 3) as usize;
     [
-        image.rgba[index - 3],
-        image.rgba[index - 2],
-        image.rgba[index - 1],
-        image.rgba[index],
+        image.rgba()[index - 3],
+        image.rgba()[index - 2],
+        image.rgba()[index - 1],
+        image.rgba()[index],
     ]
 }
 

@@ -169,13 +169,13 @@ impl ResolvedLayerAlphaMask {
                 ));
             }
         }
-        validate_image_buffer_rgba_len(alpha_mask.size, alpha_mask.rgba.len())?;
+        validate_image_buffer_rgba_len(alpha_mask.size(), alpha_mask.rgba().len())?;
         Ok(Self { alpha_mask, mode })
     }
 
     #[must_use]
     pub const fn size(&self) -> PhysicalSize {
-        self.alpha_mask.size
+        self.alpha_mask.size()
     }
 
     #[must_use]

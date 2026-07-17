@@ -141,10 +141,63 @@ pub enum ImageFit {
     None,
 }
 
+/// An intrinsically valid, tightly packed straight-alpha RGBA8 pixel buffer.
+///
+/// The byte length always equals `width * height * 4`. Zero-area buffers are
+/// represented by an empty byte vector.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImageBuffer {
-    pub size: PhysicalSize,
-    pub rgba: Vec<u8>,
+    size: PhysicalSize,
+    rgba: Vec<u8>,
+}
+
+impl ImageBuffer {
+    /// Creates an image buffer when its RGBA byte length exactly matches its size.
+    pub fn try_new(size: PhysicalSize, rgba: Vec<u8>) -> Result<Self> {
+        let expected_len = usize::try_from(size.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(size.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixel_count| pixel_count.checked_mul(4))
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "image buffer byte length",
+                    format!("{}x{} RGBA8", size.width(), size.height()),
+                    "must fit addressable memory",
+                )
+            })?;
+
+        if rgba.len() != expected_len {
+            return Err(Error::invalid_value(
+                "image buffer RGBA data length",
+                rgba.len(),
+                "must equal width multiplied by height multiplied by 4",
+            ));
+        }
+
+        Ok(Self { size, rgba })
+    }
+
+    /// Returns the physical pixel dimensions.
+    #[must_use]
+    pub const fn size(&self) -> PhysicalSize {
+        self.size
+    }
+
+    /// Returns the tightly packed straight-alpha RGBA8 bytes.
+    #[must_use]
+    pub fn rgba(&self) -> &[u8] {
+        &self.rgba
+    }
+
+    /// Consumes the buffer and returns its tightly packed RGBA8 bytes.
+    #[must_use]
+    pub fn into_rgba(self) -> Vec<u8> {
+        self.rgba
+    }
 }
 
 /// Executable boundary for an already-resolved alpha mask over materialized pixels.
@@ -180,12 +233,16 @@ impl<'a> ResolvedAlphaMaskExecution<'a> {
             }
         }
 
-        validate_image_buffer_rgba_len(source.size, source.rgba.len())?;
-        validate_image_buffer_rgba_len(alpha_mask.size, alpha_mask.rgba.len())?;
-        if source.size != alpha_mask.size {
+        validate_image_buffer_rgba_len(source.size(), source.rgba().len())?;
+        validate_image_buffer_rgba_len(alpha_mask.size(), alpha_mask.rgba().len())?;
+        if source.size() != alpha_mask.size() {
             return Err(Error::invalid_value(
                 "resolved alpha mask size",
-                format!("{}x{}", alpha_mask.size.width(), alpha_mask.size.height()),
+                format!(
+                    "{}x{}",
+                    alpha_mask.size().width(),
+                    alpha_mask.size().height()
+                ),
                 "must match source size",
             ));
         }
@@ -256,7 +313,7 @@ impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
         image_buffer: &'a ImageBuffer,
     ) -> Result<Self> {
         let pipeline = compile_materialized_image_filter_pipeline(filters)?;
-        validate_image_buffer_rgba_len(image_buffer.size, image_buffer.rgba.len())?;
+        validate_image_buffer_rgba_len(image_buffer.size(), image_buffer.rgba().len())?;
         Ok(Self {
             source: ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer),
             pipeline,
@@ -274,7 +331,8 @@ impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
         let premultiplied = straight_rgba8_image_to_premultiplied_rgba8_reference(image)?;
         let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
         let straight = premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)?;
-        let mut filtered_image = Image::from_rgba(image.size(), Arc::<[u8]>::from(straight.rgba))?;
+        let mut filtered_image =
+            Image::from_rgba(image.size(), Arc::<[u8]>::from(straight.into_rgba()))?;
         filtered_image.quality = image.quality;
         filtered_image.extend = image.extend;
         Ok(filtered_image)
@@ -311,8 +369,8 @@ pub(crate) fn straight_rgba8_image_to_premultiplied_rgba8_reference(
 pub(crate) fn straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(
     image_buffer: &ImageBuffer,
 ) -> Result<ReferencePremultipliedRgba8Buffer> {
-    validate_image_buffer_rgba_len(image_buffer.size, image_buffer.rgba.len())?;
-    straight_rgba8_bytes_to_premultiplied_rgba8_reference(image_buffer.size, &image_buffer.rgba)
+    validate_image_buffer_rgba_len(image_buffer.size(), image_buffer.rgba().len())?;
+    straight_rgba8_bytes_to_premultiplied_rgba8_reference(image_buffer.size(), image_buffer.rgba())
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -335,7 +393,7 @@ pub(crate) fn premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(
         }
     }
 
-    Ok(ImageBuffer { size, rgba })
+    ImageBuffer::try_new(size, rgba)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
