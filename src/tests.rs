@@ -15177,6 +15177,23 @@ fn headless_bgra8_remains_a_surface_create_diagnostic() {
     assert!(error.message().contains("Rgba8"));
 }
 
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_surface_without_compatible_adapter_reports_typed_adapter_unavailable() {
+    let error = require_presented_device_identity_for_test(None)
+        .expect_err("a presented surface without a compatible adapter must be rejected");
+
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    let diagnostic = error
+        .runtime_capability_unavailable_diagnostic()
+        .expect("adapter selection failure must carry its typed runtime diagnostic");
+    assert_eq!(diagnostic.operation(), RuntimeOperation::AdapterSelection);
+    assert_eq!(
+        diagnostic.reason(),
+        RuntimeCapabilityUnavailableReason::AdapterUnavailable
+    );
+}
+
 #[test]
 fn surface_operation_matrix_covers_every_kind_state_and_duplicate_transition() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();

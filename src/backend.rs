@@ -670,6 +670,29 @@ const fn map_device_loss_reason(reason: wgpu::DeviceLostReason) -> DeviceLossRea
     }
 }
 
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+fn require_presented_device_identity(
+    identity: Option<DeviceSlotIdentity>,
+) -> Result<DeviceSlotIdentity> {
+    identity.ok_or_else(|| {
+        Error::runtime_unavailable(
+            RuntimeOperation::AdapterSelection,
+            RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+            "no compatible WGPU adapter is available for the presentation surface",
+        )
+    })
+}
+
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) fn require_presented_device_identity_for_test(
+    identity: Option<DeviceSlotIdentity>,
+) -> Result<DeviceSlotIdentity> {
+    require_presented_device_identity(identity)
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceSlotIdentity {
     slot: usize,
@@ -786,12 +809,8 @@ impl Backend {
                 )
                 .with_source(source)
             })?;
-        let identity = self.select_device(Some(&surface)).await?.ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::SurfaceCreateFailed,
-                "no compatible WGPU adapter is available for the presentation surface",
-            )
-        })?;
+        let identity =
+            require_presented_device_identity(self.select_device(Some(&surface)).await?)?;
         let ready = self.ready_state_mut(
             identity,
             RuntimeOperation::AdapterSelection,
