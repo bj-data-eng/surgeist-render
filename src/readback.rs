@@ -14,8 +14,20 @@ use std::{
 #[cfg(not(target_arch = "wasm32"))]
 use std::{thread, time::Duration};
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use std::{
+    cell::RefCell,
+    sync::{Condvar, Weak},
+    time::Instant,
+};
+
 const RGBA8_BYTES_PER_PIXEL: u64 = 4;
 const COPY_BYTES_PER_ROW_ALIGNMENT: u64 = 256;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+thread_local! {
+    static ACTIVE_NATIVE_READBACK_OBSERVATION_FOR_TEST: RefCell<Option<NativeReadbackObservationForTest>> = const { RefCell::new(None) };
+}
 
 struct ReadbackLayout {
     width: u32,
@@ -273,12 +285,407 @@ impl ReadbackStagingMapState {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeReadbackPhaseForTest {
+    Allocated,
+    CopySubmitted,
+    MapPending,
+    Mapped,
+    PublishedBytes,
+    Failed,
+    Canceled,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Debug, Default)]
+struct NativeReadbackObservationStateForTest {
+    phase: Option<NativeReadbackPhaseForTest>,
+    phase_history: Vec<NativeReadbackPhaseForTest>,
+    submission_index: Option<wgpu::SubmissionIndex>,
+    staging_map: Option<Weak<ReadbackStagingMapState>>,
+    helper_started: usize,
+    helper_exited: usize,
+    callback_invoked: usize,
+    callback_released: usize,
+    callback_succeeded: Option<bool>,
+    accepted_results: usize,
+    discarded_results: usize,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct NativeReadbackConditionForTest {
+    state: Mutex<NativeReadbackObservationStateForTest>,
+    changed: Condvar,
+    hold_helper_until_canceled: bool,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone)]
+pub(crate) struct NativeReadbackObservationForTest {
+    condition: Arc<NativeReadbackConditionForTest>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl NativeReadbackObservationForTest {
+    fn new(hold_helper_until_canceled: bool) -> Self {
+        Self {
+            condition: Arc::new(NativeReadbackConditionForTest {
+                state: Mutex::new(NativeReadbackObservationStateForTest::default()),
+                changed: Condvar::new(),
+                hold_helper_until_canceled,
+            }),
+        }
+    }
+
+    fn attach_staging(&self, staging_map: &Arc<ReadbackStagingMapState>) {
+        let mut state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(
+            state.phase.is_none(),
+            "one native readback observation may attach to only one real readback"
+        );
+        state.staging_map = Some(Arc::downgrade(staging_map));
+        Self::record_phase_locked(&mut state, NativeReadbackPhaseForTest::Allocated);
+        self.condition.changed.notify_all();
+    }
+
+    fn record_copy_submitted(&self, submission_index: &wgpu::SubmissionIndex) {
+        let mut state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.submission_index = Some(submission_index.clone());
+        Self::record_phase_locked(&mut state, NativeReadbackPhaseForTest::CopySubmitted);
+        self.condition.changed.notify_all();
+    }
+
+    fn record_phase(&self, phase: NativeReadbackPhaseForTest) {
+        let mut state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        Self::record_phase_locked(&mut state, phase);
+        self.condition.changed.notify_all();
+    }
+
+    fn record_phase_locked(
+        state: &mut NativeReadbackObservationStateForTest,
+        phase: NativeReadbackPhaseForTest,
+    ) {
+        state.phase = Some(phase);
+        state.phase_history.push(phase);
+    }
+
+    fn helper_lifetime(&self) -> NativeReadbackHelperLifetimeForTest {
+        {
+            let mut state = self
+                .condition
+                .state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state.helper_started = state.helper_started.saturating_add(1);
+            self.condition.changed.notify_all();
+        }
+        NativeReadbackHelperLifetimeForTest {
+            observation: self.clone(),
+        }
+    }
+
+    fn callback_lifetime(&self) -> NativeReadbackCallbackLifetimeForTest {
+        NativeReadbackCallbackLifetimeForTest {
+            observation: self.clone(),
+        }
+    }
+
+    fn record_callback_invoked(&self, succeeded: bool) {
+        let mut state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.callback_invoked = state.callback_invoked.saturating_add(1);
+        state.callback_succeeded = Some(succeeded);
+        self.condition.changed.notify_all();
+    }
+
+    fn record_completion_counts(&self, accepted_results: usize, discarded_results: usize) {
+        let mut state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.accepted_results = accepted_results;
+        state.discarded_results = discarded_results;
+        self.condition.changed.notify_all();
+    }
+
+    fn hold_helper_until_canceled(&self) -> bool {
+        if !self.condition.hold_helper_until_canceled {
+            return false;
+        }
+        let state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _state = self
+            .condition
+            .changed
+            .wait_while(state, |state| {
+                state.phase != Some(NativeReadbackPhaseForTest::Canceled)
+            })
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        true
+    }
+
+    pub(crate) fn snapshot_for_test(&self) -> NativeReadbackObservationSnapshotForTest {
+        let state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let staging_map = state.staging_map.as_ref().and_then(Weak::upgrade);
+        NativeReadbackObservationSnapshotForTest {
+            phase: state.phase,
+            phase_history: state.phase_history.clone(),
+            submission_index: state.submission_index.clone(),
+            staging_disposition: staging_map
+                .as_ref()
+                .map(|map| ReadbackStagingDispositionForTest::from(map.disposition_for_test())),
+            staging_state_dropped: state.staging_map.is_some() && staging_map.is_none(),
+            helper_started: state.helper_started,
+            helper_exited: state.helper_exited,
+            callback_invoked: state.callback_invoked,
+            callback_released: state.callback_released,
+            callback_succeeded: state.callback_succeeded,
+            accepted_results: state.accepted_results,
+            discarded_results: state.discarded_results,
+        }
+    }
+
+    pub(crate) fn wait_for_published_cleanup_for_test(&self, deadline: Instant) -> bool {
+        self.wait_until(deadline, |state| {
+            state.phase == Some(NativeReadbackPhaseForTest::PublishedBytes)
+                && state.helper_started == 1
+                && state.helper_exited == 1
+                && state.callback_invoked == 1
+                && state.callback_released == 1
+                && state.accepted_results == 1
+                && state
+                    .staging_map
+                    .as_ref()
+                    .is_some_and(|staging| staging.upgrade().is_none())
+        })
+    }
+
+    pub(crate) fn wait_for_canceled_helper_cleanup_for_test(&self, deadline: Instant) -> bool {
+        self.wait_until(deadline, |state| {
+            state.phase == Some(NativeReadbackPhaseForTest::Canceled)
+                && state.helper_started == 1
+                && state.helper_exited == 1
+        })
+    }
+
+    pub(crate) fn wait_for_late_callback_cleanup_for_test(&self, deadline: Instant) -> bool {
+        self.wait_until(deadline, |state| {
+            state.phase == Some(NativeReadbackPhaseForTest::Canceled)
+                && state.callback_invoked == 1
+                && state.callback_released == 1
+                && state.accepted_results == 0
+                && state.discarded_results == 1
+                && state
+                    .staging_map
+                    .as_ref()
+                    .is_some_and(|staging| staging.upgrade().is_none())
+        })
+    }
+
+    fn wait_until(
+        &self,
+        deadline: Instant,
+        ready: impl Fn(&NativeReadbackObservationStateForTest) -> bool,
+    ) -> bool {
+        let mut state = self
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        loop {
+            if ready(&state) {
+                return true;
+            }
+            let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                return false;
+            };
+            let (next, timeout) = self
+                .condition
+                .changed
+                .wait_timeout(state, remaining)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            state = next;
+            if timeout.timed_out() && !ready(&state) {
+                return false;
+            }
+        }
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct NativeReadbackHelperLifetimeForTest {
+    observation: NativeReadbackObservationForTest,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl Drop for NativeReadbackHelperLifetimeForTest {
+    fn drop(&mut self) {
+        let mut state = self
+            .observation
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.helper_exited = state.helper_exited.saturating_add(1);
+        self.observation.condition.changed.notify_all();
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct NativeReadbackCallbackLifetimeForTest {
+    observation: NativeReadbackObservationForTest,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl Drop for NativeReadbackCallbackLifetimeForTest {
+    fn drop(&mut self) {
+        let mut state = self
+            .observation
+            .condition
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.callback_released = state.callback_released.saturating_add(1);
+        self.observation.condition.changed.notify_all();
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Debug)]
+pub(crate) struct NativeReadbackObservationSnapshotForTest {
+    phase: Option<NativeReadbackPhaseForTest>,
+    phase_history: Vec<NativeReadbackPhaseForTest>,
+    submission_index: Option<wgpu::SubmissionIndex>,
+    staging_disposition: Option<ReadbackStagingDispositionForTest>,
+    staging_state_dropped: bool,
+    helper_started: usize,
+    helper_exited: usize,
+    callback_invoked: usize,
+    callback_released: usize,
+    callback_succeeded: Option<bool>,
+    accepted_results: usize,
+    discarded_results: usize,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl NativeReadbackObservationSnapshotForTest {
+    pub(crate) const fn phase_for_test(&self) -> Option<NativeReadbackPhaseForTest> {
+        self.phase
+    }
+
+    pub(crate) fn phase_history_for_test(&self) -> &[NativeReadbackPhaseForTest] {
+        &self.phase_history
+    }
+
+    pub(crate) fn submission_index_for_test(&self) -> Option<wgpu::SubmissionIndex> {
+        self.submission_index.clone()
+    }
+
+    pub(crate) const fn staging_disposition_for_test(
+        &self,
+    ) -> Option<ReadbackStagingDispositionForTest> {
+        self.staging_disposition
+    }
+
+    pub(crate) const fn staging_state_dropped_for_test(&self) -> bool {
+        self.staging_state_dropped
+    }
+
+    pub(crate) const fn helper_counts_for_test(&self) -> (usize, usize) {
+        (self.helper_started, self.helper_exited)
+    }
+
+    pub(crate) const fn callback_counts_for_test(&self) -> (usize, usize) {
+        (self.callback_invoked, self.callback_released)
+    }
+
+    pub(crate) const fn callback_succeeded_for_test(&self) -> Option<bool> {
+        self.callback_succeeded
+    }
+
+    pub(crate) const fn completion_counts_for_test(&self) -> (usize, usize) {
+        (self.accepted_results, self.discarded_results)
+    }
+}
+
+/// Installs one fresh private observation on the next native production readback.
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) struct ScopedNativeReadbackObservationForTest {
+    observation: NativeReadbackObservationForTest,
+    previous: Option<NativeReadbackObservationForTest>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl ScopedNativeReadbackObservationForTest {
+    pub(crate) fn begin() -> Self {
+        Self::install(false)
+    }
+
+    pub(crate) fn hold_helper_until_canceled() -> Self {
+        Self::install(true)
+    }
+
+    fn install(hold_helper_until_canceled: bool) -> Self {
+        let observation = NativeReadbackObservationForTest::new(hold_helper_until_canceled);
+        let previous = ACTIVE_NATIVE_READBACK_OBSERVATION_FOR_TEST
+            .with(|active| active.replace(Some(observation.clone())));
+        Self {
+            observation,
+            previous,
+        }
+    }
+
+    pub(crate) fn observation_for_test(&self) -> NativeReadbackObservationForTest {
+        self.observation.clone()
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+impl Drop for ScopedNativeReadbackObservationForTest {
+    fn drop(&mut self) {
+        ACTIVE_NATIVE_READBACK_OBSERVATION_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn take_native_readback_observation_for_test() -> Option<NativeReadbackObservationForTest> {
+    ACTIVE_NATIVE_READBACK_OBSERVATION_FOR_TEST.with(|active| active.borrow_mut().take())
+}
+
 struct ReadbackOwner {
     lifecycle: ReadbackLifecycle<wgpu::SubmissionIndex>,
     staging: Option<wgpu::Buffer>,
     staging_map: Arc<ReadbackStagingMapState>,
     layout: ReadbackLayout,
     physical_size: PhysicalSize,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    observation: Option<NativeReadbackObservationForTest>,
 }
 
 impl ReadbackOwner {
@@ -293,7 +700,20 @@ impl ReadbackOwner {
             staging_map: Arc::new(ReadbackStagingMapState::idle()),
             layout,
             physical_size,
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            observation: None,
         }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn attach_observation_for_test(&mut self, observation: NativeReadbackObservationForTest) {
+        observation.attach_staging(&self.staging_map);
+        self.observation = Some(observation);
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn observation_for_test(&self) -> Option<NativeReadbackObservationForTest> {
+        self.observation.clone()
     }
 
     fn staging(&self) -> &wgpu::Buffer {
@@ -303,17 +723,29 @@ impl ReadbackOwner {
     }
 
     fn copy_submitted(&mut self, submission_index: wgpu::SubmissionIndex) {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = &self.observation {
+            observation.record_copy_submitted(&submission_index);
+        }
         self.lifecycle.copy_submitted(submission_index);
     }
 
     fn map_pending(&mut self) {
         self.lifecycle.map_pending();
         self.staging_map.map_pending();
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = &self.observation {
+            observation.record_phase(NativeReadbackPhaseForTest::MapPending);
+        }
     }
 
     fn mapped(&mut self) {
         self.staging_map.assert_mapped_active();
         self.lifecycle.mapped();
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = &self.observation {
+            observation.record_phase(NativeReadbackPhaseForTest::Mapped);
+        }
     }
 
     fn staging_map(&self) -> Arc<ReadbackStagingMapState> {
@@ -327,12 +759,20 @@ impl ReadbackOwner {
     fn fail(&mut self) {
         if self.lifecycle.fail() {
             self.release_staging();
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            if let Some(observation) = &self.observation {
+                observation.record_phase(NativeReadbackPhaseForTest::Failed);
+            }
         }
     }
 
     fn cancel(&mut self) {
         if self.lifecycle.cancel() {
             self.release_staging();
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            if let Some(observation) = &self.observation {
+                observation.record_phase(NativeReadbackPhaseForTest::Canceled);
+            }
         }
     }
 
@@ -341,10 +781,18 @@ impl ReadbackOwner {
         match ImageBuffer::try_new(self.physical_size, rgba) {
             Ok(image) => {
                 self.lifecycle.published();
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                if let Some(observation) = &self.observation {
+                    observation.record_phase(NativeReadbackPhaseForTest::PublishedBytes);
+                }
                 Ok(image)
             }
             Err(source) => {
                 self.lifecycle.fail();
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                if let Some(observation) = &self.observation {
+                    observation.record_phase(NativeReadbackPhaseForTest::Failed);
+                }
                 Err(Error::new(
                     BackendErrorCode::ReadbackFailed,
                     "decoded readback bytes did not form a valid RGBA8 image",
@@ -406,6 +854,8 @@ struct ReadbackCompletionState {
 
 struct ReadbackCompletion {
     state: Mutex<ReadbackCompletionState>,
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    observation: Option<NativeReadbackObservationForTest>,
 }
 
 impl ReadbackCompletion {
@@ -418,7 +868,18 @@ impl ReadbackCompletion {
                 #[cfg(test)]
                 discarded_results: 0,
             }),
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            observation: None,
         }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn with_observation_for_test(
+        mut self,
+        observation: Option<NativeReadbackObservationForTest>,
+    ) -> Self {
+        self.observation = observation;
+        self
     }
 
     fn complete(&self, result: ReadbackCompletionResult) {
@@ -450,6 +911,18 @@ impl ReadbackCompletion {
         if let Some(waker) = waker {
             waker.wake();
         }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn record_completion_counts_for_test(&self) {
+        let Some(observation) = &self.observation else {
+            return;
+        };
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        observation.record_completion_counts(state.accepted_results, state.discarded_results);
     }
 
     fn poll(&self, context: &mut Context<'_>) -> Poll<ReadbackCompletionResult> {
@@ -506,9 +979,22 @@ fn map_completion_callback(
     completion: Arc<ReadbackCompletion>,
     staging_map: Arc<ReadbackStagingMapState>,
 ) -> impl FnOnce(std::result::Result<(), wgpu::BufferAsyncError>) + 'static {
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    let callback_lifetime = completion
+        .observation
+        .as_ref()
+        .map(NativeReadbackObservationForTest::callback_lifetime);
     move |result| {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(callback_lifetime) = &callback_lifetime {
+            callback_lifetime
+                .observation
+                .record_callback_invoked(result.is_ok());
+        }
         staging_map.map_callback_completed(result.is_ok());
         completion.complete(ReadbackCompletionResult::Map(result));
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        completion.record_completion_counts_for_test();
     }
 }
 
@@ -562,9 +1048,22 @@ fn spawn_native_poll_helper(
     submission_index: wgpu::SubmissionIndex,
     completion: Arc<ReadbackCompletion>,
 ) -> std::io::Result<thread::JoinHandle<()>> {
+    #[cfg(test)]
+    let observation = completion.observation.clone();
     thread::Builder::new()
         .name("surgeist-readback-poll".to_owned())
         .spawn(move || {
+            #[cfg(test)]
+            let _helper_lifetime = observation
+                .as_ref()
+                .map(NativeReadbackObservationForTest::helper_lifetime);
+            #[cfg(test)]
+            if observation
+                .as_ref()
+                .is_some_and(NativeReadbackObservationForTest::hold_helper_until_canceled)
+            {
+                return;
+            }
             while completion.is_pending() {
                 let result = device.poll(wgpu::PollType::Wait {
                     submission_index: Some(submission_index.clone()),
@@ -591,6 +1090,11 @@ impl ReadbackMapFuture {
         device: wgpu::Device,
         submission_index: wgpu::SubmissionIndex,
     ) -> Result<Self> {
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        let completion = Arc::new(
+            ReadbackCompletion::new().with_observation_for_test(owner.observation_for_test()),
+        );
+        #[cfg(not(all(test, not(target_arch = "wasm32"))))]
         let completion = Arc::new(ReadbackCompletion::new());
         owner.map_pending();
         let staging_map = owner.staging_map();
@@ -688,6 +1192,9 @@ pub(crate) async fn read_texture_rgba(
         return ImageBuffer::try_new(physical_size, Vec::new());
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    let observation = take_native_readback_observation_for_test();
+
     let transaction =
         backend.begin_gpu_operation(device_identity, GpuOperationStage::Readback, operation)?;
     let layout = match ReadbackLayout::try_new(physical_size) {
@@ -712,6 +1219,10 @@ pub(crate) async fn read_texture_rgba(
             mapped_at_creation: false,
         });
         let mut owner = ReadbackOwner::allocated(buffer, layout, physical_size);
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = observation {
+            owner.attach_observation_for_test(observation);
+        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist scoped texture readback copy"),
         });

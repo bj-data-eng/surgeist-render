@@ -1,6 +1,13 @@
+#[cfg(not(target_arch = "wasm32"))]
+use super::gpu_transaction::GpuOperationSubmissionObservationForTest;
 use super::gpu_transaction::{
     GpuOperationLease, GpuOperationStage, ScopedGpuOperationPostSubmitCheckpointForTest,
     ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
+};
+#[cfg(not(target_arch = "wasm32"))]
+use super::readback::{
+    NativeReadbackObservationForTest, NativeReadbackPhaseForTest,
+    ScopedNativeReadbackObservationForTest,
 };
 use super::renderer::ScopedFinalPublicationLossForTest;
 #[cfg(feature = "render-window")]
@@ -53,6 +60,12 @@ use std::{
     sync::atomic::{AtomicUsize, Ordering},
     task::{Context, Poll, Waker},
     time::Duration,
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
+    sync::{Condvar, Mutex},
+    time::Instant,
 };
 
 use proptest::prelude::*;
@@ -15195,6 +15208,429 @@ fn readback_map_callback_publishes_once_and_wakes_latest_waker() {
         assert_eq!(error.code(), ErrorCode::ReadbackFailed);
         assert!(std::error::Error::source(&error).is_some());
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy)]
+struct NativeReadbackDiagnosticDeadlineForTest {
+    expires_at: Instant,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeReadbackDiagnosticDeadlineForTest {
+    fn begin() -> Self {
+        Self {
+            expires_at: Instant::now()
+                .checked_add(Duration::from_secs(5))
+                .expect("the native readback diagnostic deadline must be representable"),
+        }
+    }
+
+    const fn expires_at(self) -> Instant {
+        self.expires_at
+    }
+
+    fn remaining(self) -> Option<Duration> {
+        self.expires_at.checked_duration_since(Instant::now())
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeReadbackWakeConditionForTest {
+    notified: Mutex<bool>,
+    changed: Condvar,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct NativeReadbackWakeForTest {
+    condition: Arc<NativeReadbackWakeConditionForTest>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeReadbackWakeForTest {
+    fn fresh() -> Self {
+        Self {
+            condition: Arc::new(NativeReadbackWakeConditionForTest {
+                notified: Mutex::new(false),
+                changed: Condvar::new(),
+            }),
+        }
+    }
+
+    fn prepare_for_poll(&self) {
+        *self
+            .condition
+            .notified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = false;
+    }
+
+    fn wait_for_wake(
+        &self,
+        deadline: NativeReadbackDiagnosticDeadlineForTest,
+        observation: &NativeReadbackObservationForTest,
+        submission: &GpuOperationSubmissionObservationForTest,
+        device_signal: &DeviceSignal,
+    ) {
+        let notified = self
+            .condition
+            .notified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let Some(remaining) = deadline.remaining() else {
+            panic!(
+                "native readback diagnostic deadline expired: {}",
+                native_readback_diagnostic_for_test(observation, submission, device_signal)
+            );
+        };
+        let (notified, timeout) = self
+            .condition
+            .changed
+            .wait_timeout_while(notified, remaining, |notified| !*notified)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if timeout.timed_out() && !*notified {
+            panic!(
+                "native readback diagnostic deadline expired: {}",
+                native_readback_diagnostic_for_test(observation, submission, device_signal)
+            );
+        }
+    }
+
+    fn notify(&self) {
+        let mut notified = self
+            .condition
+            .notified
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *notified = true;
+        self.condition.changed.notify_all();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::task::Wake for NativeReadbackWakeForTest {
+    fn wake(self: Arc<Self>) {
+        self.notify();
+    }
+
+    fn wake_by_ref(self: &Arc<Self>) {
+        self.notify();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum NativeReadbackDriveResultForTest<T> {
+    Completed(T),
+    MapPending,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drive_native_readback_for_test<F: Future>(
+    mut future: std::pin::Pin<&mut F>,
+    stop_at_map_pending: bool,
+    deadline: NativeReadbackDiagnosticDeadlineForTest,
+    observation: &NativeReadbackObservationForTest,
+    submission: &GpuOperationSubmissionObservationForTest,
+    device_signal: &Arc<DeviceSignal>,
+) -> NativeReadbackDriveResultForTest<F::Output> {
+    let wake = Arc::new(NativeReadbackWakeForTest::fresh());
+    let waker = Waker::from(Arc::clone(&wake));
+    let mut context = Context::from_waker(&waker);
+    loop {
+        wake.prepare_for_poll();
+        match future.as_mut().poll(&mut context) {
+            Poll::Ready(output) => {
+                if stop_at_map_pending {
+                    panic!(
+                        "native readback completed before cancellation could observe MapPending: {}",
+                        native_readback_diagnostic_for_test(observation, submission, device_signal,)
+                    );
+                }
+                return NativeReadbackDriveResultForTest::Completed(output);
+            }
+            Poll::Pending => {
+                if stop_at_map_pending
+                    && observation.snapshot_for_test().phase_for_test()
+                        == Some(NativeReadbackPhaseForTest::MapPending)
+                {
+                    return NativeReadbackDriveResultForTest::MapPending;
+                }
+            }
+        }
+        wake.wait_for_wake(deadline, observation, submission, device_signal);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn native_readback_diagnostic_for_test(
+    observation: &NativeReadbackObservationForTest,
+    submission: &GpuOperationSubmissionObservationForTest,
+    device_signal: &DeviceSignal,
+) -> String {
+    format!(
+        "state={:?}; transaction_generation={:?}; active_generation_at_submit={:?}; transaction_submission_index={:?}; device_active_generation={:?}; device_terminal_signal={:?}",
+        observation.snapshot_for_test(),
+        submission.readback_transaction_generation_for_test(),
+        submission.readback_active_generation_for_test(),
+        submission.readback_submission_index_for_test(),
+        device_signal.active_generation_for_test(),
+        device_signal.first_terminal(),
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn headless_publication_texture_for_test(surface: &Surface) -> wgpu::Texture {
+    match &surface.backend {
+        SurfaceBackend::Headless {
+            resources: HeadlessResources::Ready { texture },
+            ..
+        } => texture.clone(),
+        _ => panic!("the real headless fixture must retain one readable publication"),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn native_readback_callback_progresses_and_cleans_up_with_diagnostic_deadline() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    assert!(
+        renderer.default_wgpu_device_queue().is_some(),
+        "native callback progress coverage requires an available host adapter"
+    );
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect("the callback progress fixture must publish a real headless texture");
+
+    let device_signal = renderer
+        .default_device_signal_for_test()
+        .expect("native callback progress requires a ready device signal");
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let progress_scope = ScopedNativeReadbackObservationForTest::begin();
+    let progress = progress_scope.observation_for_test();
+    let deadline = NativeReadbackDiagnosticDeadlineForTest::begin();
+    let image = {
+        let future = renderer.read_headless(&surface);
+        let mut future = std::pin::pin!(future);
+        let NativeReadbackDriveResultForTest::Completed(result) = drive_native_readback_for_test(
+            future.as_mut(),
+            false,
+            deadline,
+            &progress,
+            &submission,
+            &device_signal,
+        ) else {
+            unreachable!("the progress test drives readback through callback completion")
+        };
+        result.expect("the native callback must progress the real publication readback")
+    };
+    assert!(
+        progress.wait_for_published_cleanup_for_test(deadline.expires_at()),
+        "native readback diagnostic deadline expired while waiting for callback/helper cleanup: {}",
+        native_readback_diagnostic_for_test(&progress, &submission, &device_signal)
+    );
+
+    let snapshot = progress.snapshot_for_test();
+    assert_eq!(
+        snapshot.phase_history_for_test(),
+        &[
+            NativeReadbackPhaseForTest::Allocated,
+            NativeReadbackPhaseForTest::CopySubmitted,
+            NativeReadbackPhaseForTest::MapPending,
+            NativeReadbackPhaseForTest::Mapped,
+            NativeReadbackPhaseForTest::PublishedBytes,
+        ],
+        "the observer must report the real production lifecycle transitions"
+    );
+    assert!(snapshot.submission_index_for_test().is_some());
+    assert_eq!(snapshot.staging_disposition_for_test(), None);
+    assert!(snapshot.staging_state_dropped_for_test());
+    assert_eq!(snapshot.helper_counts_for_test(), (1, 1));
+    assert_eq!(snapshot.callback_counts_for_test(), (1, 1));
+    assert_eq!(snapshot.callback_succeeded_for_test(), Some(true));
+    assert_eq!(snapshot.completion_counts_for_test(), (1, 0));
+    assert_eq!(submission.readback_queue_submission_count_for_test(), 1);
+    assert_eq!(
+        submission.readback_transaction_generation_for_test(),
+        submission.readback_active_generation_for_test(),
+        "the observed copy must submit under its active readback generation"
+    );
+    assert!(submission.readback_scopes_resolved_for_test());
+    assert_eq!(
+        format!("{:?}", snapshot.submission_index_for_test()),
+        format!("{:?}", submission.readback_submission_index_for_test()),
+        "the lifecycle and transaction observations must retain the same real submission index"
+    );
+    assert_eq!(device_signal.active_generation_for_test(), None);
+    assert!(device_signal.first_terminal().is_none());
+    assert_eq!(image.size(), PhysicalSize::new(4, 4));
+    assert!(image.rgba().iter().any(|channel| *channel != 0));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn canceled_native_readback_discards_late_callback_without_publication_change() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    assert!(
+        renderer.default_wgpu_device_queue().is_some(),
+        "native cancellation coverage requires an available host adapter"
+    );
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let mut scene = Scene::new();
+    scene.fill(
+        Rect::new(0.0, 0.0, 4.0, 4.0),
+        Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
+    );
+    let parameters = Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    };
+    pollster::block_on(renderer.render(&mut surface, &scene, parameters))
+        .expect("the cancellation fixture must publish a real headless texture");
+    let pixels_before = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the cancellation fixture publication must be readable");
+    let publication_before = headless_publication_texture_for_test(&surface);
+    let stats_before = renderer.stats();
+    let renderer_options_before = renderer.options();
+    let uploaded_images_before = renderer.uploaded_images_for_test();
+    let parameters_before = surface.last_parameters;
+    let surface_state_before = surface.state();
+    let resource_state_before = surface.resource_state();
+    let physical_size_before = surface.physical_size();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the published fixture must retain its ready device resources")
+        .internal_resource_manager_observation_for_test();
+    let device_signal = renderer
+        .default_device_signal_for_test()
+        .expect("native cancellation requires a ready device signal");
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let cancellation_scope = ScopedNativeReadbackObservationForTest::hold_helper_until_canceled();
+    let cancellation = cancellation_scope.observation_for_test();
+    let deadline = NativeReadbackDiagnosticDeadlineForTest::begin();
+    {
+        let future = renderer.read_headless(&surface);
+        let mut future = std::pin::pin!(future);
+        assert!(matches!(
+            drive_native_readback_for_test(
+                future.as_mut(),
+                true,
+                deadline,
+                &cancellation,
+                &submission,
+                &device_signal,
+            ),
+            NativeReadbackDriveResultForTest::MapPending
+        ));
+        let pending = cancellation.snapshot_for_test();
+        assert_eq!(
+            pending.phase_for_test(),
+            Some(NativeReadbackPhaseForTest::MapPending)
+        );
+        assert_eq!(
+            pending.staging_disposition_for_test(),
+            Some(super::readback::ReadbackStagingDispositionForTest::MapPending)
+        );
+        assert!(pending.submission_index_for_test().is_some());
+        assert_eq!(submission.readback_queue_submission_count_for_test(), 1);
+        assert_eq!(
+            submission.readback_transaction_generation_for_test(),
+            submission.readback_active_generation_for_test(),
+            "cancellation must begin only after a real transaction-owned copy submits"
+        );
+        assert!(
+            submission.readback_scopes_resolved_for_test(),
+            "MapPending must follow clean resolution of the real copy transaction"
+        );
+        assert_eq!(
+            format!("{:?}", pending.submission_index_for_test()),
+            format!("{:?}", submission.readback_submission_index_for_test()),
+            "the pending owner must retain the exact submitted copy index"
+        );
+    }
+    assert!(
+        cancellation.wait_for_canceled_helper_cleanup_for_test(deadline.expires_at()),
+        "native readback diagnostic deadline expired while waiting for canceled helper cleanup: {}",
+        native_readback_diagnostic_for_test(&cancellation, &submission, &device_signal)
+    );
+    let canceled = cancellation.snapshot_for_test();
+    assert_eq!(
+        canceled.phase_for_test(),
+        Some(NativeReadbackPhaseForTest::Canceled)
+    );
+    assert_eq!(canceled.helper_counts_for_test(), (1, 1));
+    match canceled.completion_counts_for_test() {
+        (0, 0) => {
+            assert_eq!(
+                canceled.staging_disposition_for_test(),
+                Some(super::readback::ReadbackStagingDispositionForTest::Released),
+                "pending late-callback cleanup must retain only its released staging-state witness"
+            );
+            assert_eq!(canceled.callback_counts_for_test(), (0, 0));
+        }
+        (0, 1) => {
+            assert_eq!(canceled.staging_disposition_for_test(), None);
+            assert!(canceled.staging_state_dropped_for_test());
+            assert_eq!(canceled.callback_counts_for_test(), (1, 1));
+        }
+        counts => panic!(
+            "cancellation may only leave callback delivery pending or discard its one late result, got {counts:?}: {canceled:?}"
+        ),
+    }
+
+    drop(cancellation_scope);
+    let pixels_after = {
+        let future = renderer.read_headless(&surface);
+        let mut future = std::pin::pin!(future);
+        let NativeReadbackDriveResultForTest::Completed(result) = drive_native_readback_for_test(
+            future.as_mut(),
+            false,
+            deadline,
+            &cancellation,
+            &submission,
+            &device_signal,
+        ) else {
+            unreachable!("the follow-up readback drives callback cleanup to completion")
+        };
+        result.expect("the preserved publication must remain readable after cancellation")
+    };
+    assert!(
+        cancellation.wait_for_late_callback_cleanup_for_test(deadline.expires_at()),
+        "native readback diagnostic deadline expired while waiting for late callback discard: {}",
+        native_readback_diagnostic_for_test(&cancellation, &submission, &device_signal)
+    );
+    let cleaned = cancellation.snapshot_for_test();
+    assert_eq!(cleaned.helper_counts_for_test(), (1, 1));
+    assert_eq!(cleaned.callback_counts_for_test(), (1, 1));
+    assert_eq!(cleaned.completion_counts_for_test(), (0, 1));
+    assert!(cleaned.staging_state_dropped_for_test());
+
+    let publication_after = headless_publication_texture_for_test(&surface);
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("canceled readback must retain the ready device resources")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(publication_after, publication_before);
+    assert_eq!(pixels_after, pixels_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(renderer.options(), renderer_options_before);
+    assert_eq!(renderer.uploaded_images_for_test(), uploaded_images_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(surface.state(), surface_state_before);
+    assert_eq!(surface.resource_state(), resource_state_before);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(resources_after, resources_before);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+    assert!(device_signal.first_terminal().is_none());
 }
 
 #[test]
