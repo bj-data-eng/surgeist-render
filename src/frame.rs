@@ -5,10 +5,24 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T2 stages the resolved-frame planner that C06 T6 will invoke."
+    )
+)]
 pub(crate) struct FrameContext {
     surface_scale: f64,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C06 T2 stages the resolved-frame planner that C06 T6 will invoke."
+    )
+)]
 impl FrameContext {
     pub(crate) fn try_new(surface_scale: f64) -> Result<Self> {
         if !surface_scale.is_finite() || surface_scale <= 0.0 {
@@ -26,7 +40,7 @@ impl FrameContext {
         logical_bounds: LogicalBounds,
         transform: Transform,
     ) -> Result<FrameSpatialPlan> {
-        let largest_singular_value = largest_singular_value(transform)?;
+        let linear_metrics = linear_transform_metrics(transform)?;
         let logical_bounds = match logical_bounds {
             LogicalBounds::Empty(bounds) => {
                 return Ok(FrameSpatialPlan::Empty(EmptyFrameSpatialPlan {
@@ -35,7 +49,7 @@ impl FrameContext {
             }
             LogicalBounds::NonEmpty(bounds) => bounds,
         };
-        if largest_singular_value == 0.0 {
+        if linear_metrics.rank_deficient {
             return Ok(FrameSpatialPlan::Empty(EmptyFrameSpatialPlan {
                 logical_bounds: LogicalBounds::NonEmpty(logical_bounds),
             }));
@@ -43,7 +57,7 @@ impl FrameContext {
 
         let raster_scale = RasterScale::try_new(checked_mul(
             self.surface_scale,
-            largest_singular_value,
+            linear_metrics.largest_singular_value,
             "frame local raster scale",
         )?)?;
         let source = FilterSourceBounds::try_new(logical_bounds.rect())?;
@@ -110,14 +124,16 @@ impl LogicalBounds {
         }
         let width = checked_sub(max_x, min_x, &format!("{name} width"))?;
         let height = checked_sub(max_y, min_y, &format!("{name} height"))?;
-        let transformed = Self::try_from_rect(Rect::new(min_x, min_y, width, height), name)?;
-
-        // Command-owned transformed bounds have no surface context yet. A unit
-        // frame context still proves that their signed base-pixel mapping is
-        // exact and fallible; resolved-frame planning applies the real scale.
-        FrameContext::try_new(1.0)?
-            .plan_local_bounds(transformed, Transform::identity())?
-            .into_logical_bounds()
+        let transformed_rect = Rect::new(min_x, min_y, width, height);
+        let transformed = Self::try_from_rect(transformed_rect, name)?;
+        if linear_transform_is_rank_deficient(transform)?
+            && matches!(transformed, Self::NonEmpty(_))
+        {
+            return Ok(Self::Empty(EmptyLogicalBounds {
+                rect: Rect::new(min_x, min_y, 0.0, 0.0),
+            }));
+        }
+        Ok(transformed)
     }
 
     pub(crate) fn union(self, other: Self, name: &str) -> Result<Self> {
@@ -251,6 +267,13 @@ impl TexelCenterMapping {
         })
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C06 T2 records texel-center mappings for later resolved pass lowering."
+        )
+    )]
     fn point_for(self, i: u32, j: u32) -> Result<Point> {
         let x_offset = checked_div(
             checked_add(f64::from(i), 0.5, "frame texel center i")?,
@@ -275,55 +298,6 @@ enum FrameSpatialPlan {
     NonEmpty(NonEmptyFrameSpatialPlan),
 }
 
-impl FrameSpatialPlan {
-    fn into_logical_bounds(self) -> Result<LogicalBounds> {
-        match self {
-            Self::Empty(plan) => Ok(plan.logical_bounds),
-            Self::NonEmpty(plan) => {
-                if plan.device_extent.width == 0 || plan.device_extent.height == 0 {
-                    return Err(Error::invalid_value(
-                        "frame device extent",
-                        format!("{}x{}", plan.device_extent.width, plan.device_extent.height),
-                        "must have positive width and height",
-                    ));
-                }
-                if plan.texel_center_mapping.raster_scale != plan.raster_scale {
-                    return Err(Error::invalid_value(
-                        "frame texel mapping raster scale",
-                        plan.texel_center_mapping.raster_scale.get(),
-                        "must equal the planned local raster scale",
-                    ));
-                }
-                let expected_origin = Point::try_new(
-                    checked_div(
-                        f64::from(plan.device_origin.x),
-                        plan.raster_scale.get(),
-                        "frame texel mapping origin x",
-                    )?,
-                    checked_div(
-                        f64::from(plan.device_origin.y),
-                        plan.raster_scale.get(),
-                        "frame texel mapping origin y",
-                    )?,
-                )?;
-                if plan.texel_center_mapping.origin != expected_origin {
-                    return Err(Error::invalid_value(
-                        "frame texel mapping origin",
-                        format!(
-                            "({}, {})",
-                            plan.texel_center_mapping.origin.x(),
-                            plan.texel_center_mapping.origin.y()
-                        ),
-                        "must preserve the signed device origin",
-                    ));
-                }
-                plan.texel_center_mapping.point_for(0, 0)?;
-                Ok(LogicalBounds::NonEmpty(plan.logical_bounds))
-            }
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct EmptyFrameSpatialPlan {
     logical_bounds: LogicalBounds,
@@ -338,11 +312,20 @@ struct NonEmptyFrameSpatialPlan {
     texel_center_mapping: TexelCenterMapping,
 }
 
-fn largest_singular_value(transform: Transform) -> Result<f64> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct LinearTransformMetrics {
+    largest_singular_value: f64,
+    rank_deficient: bool,
+}
+
+fn linear_transform_metrics(transform: Transform) -> Result<LinearTransformMetrics> {
     let [a, b, c, d, _, _] = transform.as_array();
     let coefficient_scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
     if coefficient_scale == 0.0 {
-        return Ok(0.0);
+        return Ok(LinearTransformMetrics {
+            largest_singular_value: 0.0,
+            rank_deficient: true,
+        });
     }
 
     let a = checked_div(a, coefficient_scale, "frame transform coefficient a")?;
@@ -396,11 +379,34 @@ fn largest_singular_value(transform: Transform) -> Result<f64> {
     )?;
     let normalized = largest_eigenvalue.sqrt();
     validate_finite(normalized, "frame normalized largest singular value")?;
-    checked_mul(
+    let largest_singular_value = checked_mul(
         coefficient_scale,
         normalized,
         "frame largest singular value",
-    )
+    )?;
+    Ok(LinearTransformMetrics {
+        largest_singular_value,
+        rank_deficient: determinant == 0.0,
+    })
+}
+
+fn linear_transform_is_rank_deficient(transform: Transform) -> Result<bool> {
+    let [a, b, c, d, _, _] = transform.as_array();
+    let coefficient_scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
+    if coefficient_scale == 0.0 {
+        return Ok(true);
+    }
+
+    let a = checked_div(a, coefficient_scale, "frame transform coefficient a")?;
+    let b = checked_div(b, coefficient_scale, "frame transform coefficient b")?;
+    let c = checked_div(c, coefficient_scale, "frame transform coefficient c")?;
+    let d = checked_div(d, coefficient_scale, "frame transform coefficient d")?;
+    let determinant = checked_sub(
+        checked_mul(a, d, "frame transform normalized determinant ad")?,
+        checked_mul(b, c, "frame transform normalized determinant bc")?,
+        "frame transform normalized determinant",
+    )?;
+    Ok(determinant == 0.0)
 }
 
 fn transform_point(transform: Transform, x: f64, y: f64, name: &str) -> Result<Point> {
@@ -486,6 +492,22 @@ pub(crate) struct SpatialPrimitivesForTest {
     pub(crate) raster_scale: f64,
     pub(crate) texel_center: Option<(f64, f64)>,
     pub(crate) is_empty: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn transformed_logical_bounds_for_test(
+    rect: Rect,
+    transform: Transform,
+) -> Result<[f64; 4]> {
+    let transformed = LogicalBounds::try_from_rect(rect, "frame logical bounds")?
+        .try_transform(transform, "frame transformed logical bounds")?
+        .rect();
+    Ok([
+        transformed.x(),
+        transformed.y(),
+        transformed.width(),
+        transformed.height(),
+    ])
 }
 
 #[cfg(test)]

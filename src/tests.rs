@@ -8729,6 +8729,49 @@ fn zero_singular_value_produces_an_empty_plan() {
 }
 
 #[test]
+fn rank_deficient_transform_produces_explicit_empty_spatial_plan() {
+    let rank_deficient_transform = Transform::scale(0.0, 1.0).unwrap();
+    let observed = observe_spatial_primitives(
+        Rect::new(-2.0, 3.0, 4.0, 5.0),
+        rank_deficient_transform,
+        2.0,
+        (0, 0),
+    )
+    .unwrap();
+
+    assert!(
+        observed.is_empty,
+        "rank-deficient output was not represented as explicit Empty"
+    );
+    assert_eq!(observed.device_origin, None);
+    assert_eq!(observed.device_extent, None);
+}
+
+#[test]
+fn logical_bounds_preserve_large_finite_translation_until_frame_scale_resolution() {
+    let transformed = super::frame::transformed_logical_bounds_for_test(
+        Rect::new(0.0, 0.0, 4.0, 2.0),
+        Transform::translation(3_000_000_000.0, 0.0).unwrap(),
+    );
+
+    assert!(
+        transformed.is_ok(),
+        "finite logical transform was rejected before frame scale resolution: {transformed:?}"
+    );
+    assert_eq!(transformed.unwrap(), [3_000_000_000.0, 0.0, 4.0, 2.0]);
+
+    let resolved = observe_spatial_primitives(
+        Rect::new(3_000_000_000.0, 0.0, 4.0, 2.0),
+        Transform::identity(),
+        0.5,
+        (0, 0),
+    )
+    .unwrap();
+    assert_eq!(resolved.device_origin, Some((1_500_000_000, 0)));
+    assert_eq!(resolved.device_extent, Some((2, 1)));
+}
+
+#[test]
 fn materialized_image_filter_classifier_preserves_mixed_filter_order() {
     let shadow = FilterDropShadow::try_from_shadow(
         Shadow::try_new(Point::new(2.0, 3.0), 4.0, 0.0, Color::BLACK).unwrap(),
