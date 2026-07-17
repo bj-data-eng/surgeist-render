@@ -3713,6 +3713,7 @@ fn typed_error_codes_cannot_exist_without_their_matching_payload() {
         BackendErrorCode::SurfaceOutdated,
         BackendErrorCode::ImageUploadFailed,
         BackendErrorCode::RenderFailed,
+        BackendErrorCode::ReadbackFailed,
         BackendErrorCode::PresentFailed,
         BackendErrorCode::UnsupportedBackend,
     ];
@@ -4676,7 +4677,7 @@ fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
     });
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert!(pixel_rgba(&output, 0, 0)[0] > 200);
     assert!(pixel_alpha(&output, 0, 0) > 200);
@@ -4713,7 +4714,7 @@ fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
     );
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert!((96..=160).contains(&pixel_alpha(&output, 0, 0)));
     assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
@@ -4740,7 +4741,7 @@ fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
     });
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert!(pixel_alpha(&output, 1, 0) > 200);
@@ -4764,7 +4765,7 @@ fn layer_resolved_alpha_mask_composites_after_layer_transform() {
     });
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert!(pixel_alpha(&output, 1, 0) > 200);
@@ -4790,7 +4791,7 @@ fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
     });
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let alpha = pixel_alpha(&output, 0, 0);
 
     assert!((24..=40).contains(&alpha), "unexpected alpha {alpha}");
@@ -7127,14 +7128,9 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
     let options = renderer.options();
     let mut cache = OffscreenTextureResourceCache::new();
-    let Some(context) = renderer.default_offscreen_render_context() else {
-        let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
-            None, options, &mut cache, &scene, request,
-        ))
-        .expect_err("no GPU machines should report the explicit diagnostic");
-        assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
-        return;
-    };
+    let context = renderer
+        .default_offscreen_render_context()
+        .expect("offscreen texture rendering requires a host adapter");
 
     let output = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
@@ -7155,14 +7151,11 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
     let view_debug = format!("{:?}", output.view());
     assert!(!view_debug.is_empty());
 
-    let (device, queue) = renderer.default_wgpu_device_queue().unwrap();
-    let image = read_texture_rgba(
-        device,
-        queue,
+    let image = pollster::block_on(renderer.read_render_texture_for_test(
         output.texture(),
         output.target().descriptor().physical_size(),
-    )
-    .unwrap();
+    ))
+    .expect("offscreen texture readback requires the same host adapter");
     assert!(pixel_alpha(&image, 0, 0) > 0);
 
     output.release(&mut cache).unwrap();
@@ -7275,7 +7268,7 @@ fn offscreen_nested_layer_opacity_stays_on_direct_vello_surface_path() {
         pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let stats =
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let alpha = pixel_alpha(&output, 0, 0);
 
     assert_eq!(stats.layers, 2);
@@ -7299,14 +7292,9 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
     let options = renderer.options();
     let mut cache = OffscreenTextureResourceCache::new();
-    let Some(context) = renderer.default_offscreen_render_context() else {
-        let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
-            None, options, &mut cache, &scene, request,
-        ))
-        .expect_err("no GPU machines should report the explicit diagnostic");
-        assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
-        return;
-    };
+    let context = renderer
+        .default_offscreen_render_context()
+        .expect("offscreen texture reuse requires a host adapter");
     let first = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
@@ -7389,11 +7377,11 @@ fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_b
     let first_stats =
         pollster::block_on(renderer.render(&mut first_surface, &scene, Parameters::default()))
             .unwrap();
-    let first_output = renderer.read_headless(&first_surface).unwrap();
+    let first_output = pollster::block_on(renderer.read_headless(&first_surface)).unwrap();
     let second_stats =
         pollster::block_on(renderer.render(&mut second_surface, &scene, Parameters::default()))
             .unwrap();
-    let second_output = renderer.read_headless(&second_surface).unwrap();
+    let second_output = pollster::block_on(renderer.read_headless(&second_surface)).unwrap();
 
     assert_eq!(first_stats.layers, 0);
     assert_eq!(second_stats.layers, 0);
@@ -9048,10 +9036,7 @@ fn render_materializes_bounded_backdrop_capture_from_prior_siblings() {
     };
     assert!(layer.backdrop.is_some());
 
-    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(2.0, 1.0))
-    else {
-        return;
-    };
+    let output = render_scene_to_required_headless(&scene, Size::new(2.0, 1.0));
 
     let prior_only_backdrop = pixel_rgba(&output, 0, 0);
     assert!(
@@ -9113,16 +9098,8 @@ fn render_backdrop_filter_order_is_preserved() {
             |_| {},
         );
 
-    let Some(color_first) =
-        render_scene_to_headless_or_skip_no_adapter(&color_before_blur, Size::new(3.0, 1.0))
-    else {
-        return;
-    };
-    let Some(blur_first) =
-        render_scene_to_headless_or_skip_no_adapter(&blur_before_color, Size::new(3.0, 1.0))
-    else {
-        return;
-    };
+    let color_first = render_scene_to_required_headless(&color_before_blur, Size::new(3.0, 1.0));
+    let blur_first = render_scene_to_required_headless(&blur_before_color, Size::new(3.0, 1.0));
 
     assert_ne!(color_first.rgba(), blur_first.rgba());
 }
@@ -9150,10 +9127,7 @@ fn render_backdrop_clip_limits_filtered_image_to_requested_region() {
         )
         .layer(layer, |_| {});
 
-    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(5.0, 5.0))
-    else {
-        return;
-    };
+    let output = render_scene_to_required_headless(&scene, Size::new(5.0, 5.0));
 
     let outside_clip = pixel_rgba(&output, 0, 0);
     assert!(
@@ -9187,10 +9161,7 @@ fn render_backdrop_foreground_composites_over_filtered_backdrop() {
             scene.fill(Rect::new(1.0, 0.0, 1.0, 1.0), Color::BLACK);
         });
 
-    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(3.0, 1.0))
-    else {
-        return;
-    };
+    let output = render_scene_to_required_headless(&scene, Size::new(3.0, 1.0));
 
     let backdrop_only = pixel_rgba(&output, 0, 0);
     assert!(
@@ -9459,10 +9430,7 @@ fn sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foregrou
         command::RenderCommand::Fill { .. }
     ));
 
-    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(3.0, 1.0))
-    else {
-        return;
-    };
+    let output = render_scene_to_required_headless(&scene, Size::new(3.0, 1.0));
 
     let prior_backdrop = pixel_rgba(&output, 0, 0);
     assert!(
@@ -9528,16 +9496,8 @@ fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
             |_| {},
         );
 
-    let Some(color_first) =
-        render_scene_to_headless_or_skip_no_adapter(&color_before_blur, Size::new(3.0, 1.0))
-    else {
-        return;
-    };
-    let Some(blur_first) =
-        render_scene_to_headless_or_skip_no_adapter(&blur_before_color, Size::new(3.0, 1.0))
-    else {
-        return;
-    };
+    let color_first = render_scene_to_required_headless(&color_before_blur, Size::new(3.0, 1.0));
+    let blur_first = render_scene_to_required_headless(&blur_before_color, Size::new(3.0, 1.0));
     assert_ne!(
         color_first.rgba(),
         blur_first.rgba(),
@@ -9570,11 +9530,7 @@ fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
             Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
         )
         .layer(clipped_layer, |_| {});
-    let Some(clipped) =
-        render_scene_to_headless_or_skip_no_adapter(&clipped_scene, Size::new(5.0, 5.0))
-    else {
-        return;
-    };
+    let clipped = render_scene_to_required_headless(&clipped_scene, Size::new(5.0, 5.0));
 
     let outside_clip = pixel_rgba(&clipped, 0, 0);
     assert!(
@@ -10334,7 +10290,7 @@ fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() 
 
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("Sequence 12 shape/basic-shape clips should execute through layer clipping");
-        let output = renderer.read_headless(&surface).unwrap();
+        let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
         assert!(pixel_alpha(&output, 0, 0) > 0);
         assert_eq!(pixel_alpha(&output, 2, 0), 0);
@@ -10385,7 +10341,7 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
 
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("Sequence 12 path clips should execute with their authored fill rule");
-        outputs.push(renderer.read_headless(&surface).unwrap());
+        outputs.push(pollster::block_on(renderer.read_headless(&surface)).unwrap());
     }
 
     assert_eq!(pixel_alpha(&outputs[0], 2, 2), 0);
@@ -10496,7 +10452,7 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("Sequence 12 resolved layer alpha masks should execute");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert!(pixel_alpha(&output, 0, 0) > 200);
     assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
@@ -13799,10 +13755,7 @@ fn ahem_font_data_renders_ascent_and_descent_glyph_bands() {
         )
         .unwrap(),
     );
-    let Some(output) = render_scene_to_headless_or_skip_no_adapter(&scene, Size::new(25.0, 12.0))
-    else {
-        return;
-    };
+    let output = render_scene_to_required_headless(&scene, Size::new(25.0, 12.0));
 
     assert!(
         pixel_alpha(&output, 6, 5) > 200,
@@ -14755,7 +14708,7 @@ fn non_readback_renderer_front_door_is_async() {
             .create_headless(Size::new(1.0, 1.0), 1.0)
             .await
             .unwrap();
-        let _: Result<ImageBuffer> = renderer.read_headless(&headless);
+        let _: Result<ImageBuffer> = renderer.read_headless(&headless).await;
     });
 }
 
@@ -14804,6 +14757,104 @@ fn gpu_error_classification_table_maps_injected_validation_oom_internal_and_stag
             );
         }
     }
+}
+
+#[test]
+fn readback_transaction_maps_validation_internal_oom_and_terminal_failures() {
+    use super::gpu_transaction::ReadbackSubmission;
+
+    let _transaction_result_contract: Option<ReadbackSubmission> = None;
+    for fault in [GpuFaultKind::Validation, GpuFaultKind::Internal] {
+        let error = GpuOperationStage::Readback
+            .classify_fault_for_test(fault, "injected readback GPU error");
+        assert_eq!(error.code(), ErrorCode::ReadbackFailed);
+    }
+    assert_eq!(
+        GpuOperationStage::Readback
+            .classify_fault_for_test(GpuFaultKind::OutOfMemory, "injected readback OOM")
+            .code(),
+        ErrorCode::SurfaceOutOfMemory
+    );
+    assert_eq!(
+        Error::new(BackendErrorCode::ReadbackFailed, "readback failed").code(),
+        ErrorCode::ReadbackFailed
+    );
+
+    let lost_signal = DeviceSignal::new_for_test();
+    lost_signal.record_loss_for_test(DeviceLossReason::Destroyed);
+    let lost = lost_signal
+        .first_terminal()
+        .expect("the injected readback loss must be terminal")
+        .error(RuntimeOperation::SurfaceReadback);
+    assert_eq!(
+        lost.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::SurfaceReadback,
+                RuntimeCapabilityUnavailableReason::DeviceLost {
+                    reason: DeviceLossReason::Destroyed,
+                },
+            )
+            .unwrap()
+        )
+    );
+
+    let faulted_signal = DeviceSignal::new_for_test();
+    faulted_signal.record_uncaptured_fault_for_test(
+        GpuFaultKind::Internal,
+        "injected terminal readback fault",
+    );
+    let faulted = faulted_signal
+        .first_terminal()
+        .expect("the injected readback fault must be terminal")
+        .error(RuntimeOperation::SurfaceReadback);
+    assert_eq!(
+        faulted.runtime_capability_unavailable_diagnostic(),
+        Some(
+            &RuntimeCapabilityUnavailable::try_new(
+                RuntimeOperation::SurfaceReadback,
+                RuntimeCapabilityUnavailableReason::DeviceFaulted {
+                    kind: GpuFaultKind::Internal,
+                },
+            )
+            .unwrap()
+        )
+    );
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("readback transaction coverage requires a host adapter");
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
+    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+        .expect("the readback transaction fixture must publish a headless texture");
+    let output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the scoped readback copy must complete");
+    assert_eq!(output.size(), PhysicalSize::new(1, 1));
+
+    let submission = submission_scope.observation_for_test();
+    assert_eq!(submission.readback_queue_submission_count_for_test(), 1);
+    assert_eq!(
+        submission.readback_transaction_generation_for_test(),
+        submission.readback_active_generation_for_test(),
+        "the readback copy must submit while its transaction generation is active"
+    );
+    assert!(
+        submission.readback_scopes_resolved_for_test(),
+        "the readback copy must resolve its scopes before completing"
+    );
+    let submission_index = submission
+        .readback_submission_index_for_test()
+        .expect("the readback transaction must retain the exact queue submission index");
+    let (device, _) = renderer
+        .default_wgpu_device_queue()
+        .expect("the completed readback must retain its ready device");
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: Some(submission_index),
+            timeout: Some(Duration::from_secs(2)),
+        })
+        .expect("the retained readback submission index must name the completed copy");
 }
 
 #[test]
@@ -14896,8 +14947,7 @@ fn dropped_gpu_operation_future_aborts_draft_state_and_leases() {
         surface.resource_state(),
         SurfaceResourceState::PendingAllocation
     );
-    let error = renderer
-        .read_headless(&surface)
+    let error = pollster::block_on(renderer.read_headless(&surface))
         .expect_err("a canceled first frame must not publish readable bytes");
     assert_surface_unavailable(
         error,
@@ -16892,8 +16942,7 @@ fn zero_size_headless_render_diagnoses_and_read_returns_empty() {
         )
     );
 
-    let image = renderer
-        .read_headless(&surface)
+    let image = pollster::block_on(renderer.read_headless(&surface))
         .expect("zero-area headless readback returns a validated empty image");
     assert_eq!(image.size(), PhysicalSize::new(0, 2));
     assert!(image.rgba().is_empty());
@@ -16909,8 +16958,7 @@ fn nonzero_headless_read_before_publication_reports_uninitialized_without_map() 
         SurfaceResourceState::PendingAllocation,
         "creation must defer headless texture allocation"
     );
-    let error = renderer
-        .read_headless(&surface)
+    let error = pollster::block_on(renderer.read_headless(&surface))
         .expect_err("a nonzero headless surface has no readable publication before render");
     assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
     assert_eq!(
@@ -16995,8 +17043,7 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         RuntimeOperation::SurfaceRendering,
         SurfaceIdentityMismatchKind::ForeignRenderer,
     );
-    let error = foreign_renderer
-        .read_headless(&foreign_surface)
+    let error = pollster::block_on(foreign_renderer.read_headless(&foreign_surface))
         .expect_err("foreign readback must fail before indexing the device slot");
     assert_surface_identity_mismatch(
         error,
@@ -17041,8 +17088,7 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
         RuntimeOperation::SurfaceRendering,
         SurfaceIdentityMismatchKind::StaleDeviceGeneration,
     );
-    let error = owner
-        .read_headless(&stale_surface)
+    let error = pollster::block_on(owner.read_headless(&stale_surface))
         .expect_err("stale readback must fail before indexing the device slot");
     assert_surface_identity_mismatch(
         error,
@@ -17815,7 +17861,7 @@ fn render_scales_logical_scene_to_physical_surface() {
     scene.fill(Rect::new(0.0, 0.0, 10.0, 10.0), Color::BLACK);
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(output.size(), PhysicalSize::new(40, 40));
     assert!(pixel_alpha(&output, 18, 18) > 0);
@@ -17917,7 +17963,7 @@ fn concrete_color_paint_renders_without_color_realization() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("concrete color paint should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert!(pixel_alpha(&output, 0, 0) > 0);
 }
@@ -17960,7 +18006,7 @@ fn image_paint_lowers_to_brush() {
 
     let stats =
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(stats.fills, 1);
     assert_eq!(stats.images, 1);
@@ -17996,7 +18042,7 @@ fn cover_image_fit_clips_to_target_rect() {
     scene.image(image, Rect::new(1.0, 0.0, 2.0, 2.0), ImageFit::Cover);
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert!(pixel_alpha(&output, 1, 0) > 0);
@@ -18043,7 +18089,7 @@ fn layer_transform_moves_child_content() {
     );
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
@@ -18067,7 +18113,7 @@ fn composed_layer_transforms_render_in_order() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("composed transform should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
@@ -18091,7 +18137,7 @@ fn origin_wrapped_layer_transform_renders_about_origin() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("origin-wrapped transform should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert!(pixel_alpha(&output, 1, 1) > 0);
@@ -18117,7 +18163,7 @@ fn transformed_shape_clips_render_in_layer_space() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("transformed clip should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
@@ -18158,7 +18204,7 @@ fn path_clip_fill_rules_execute_even_odd_and_nonzero() {
     );
     pollster::block_on(renderer.render(&mut even_odd_surface, &scene, Parameters::default()))
         .expect("even-odd path clip should render");
-    let even_odd = renderer.read_headless(&even_odd_surface).unwrap();
+    let even_odd = pollster::block_on(renderer.read_headless(&even_odd_surface)).unwrap();
 
     let mut nonzero_surface =
         pollster::block_on(renderer.create_headless(Size::new(6.0, 5.0), 1.0)).unwrap();
@@ -18175,7 +18221,7 @@ fn path_clip_fill_rules_execute_even_odd_and_nonzero() {
     );
     pollster::block_on(renderer.render(&mut nonzero_surface, &scene, Parameters::default()))
         .expect("nonzero path clip should render");
-    let nonzero = renderer.read_headless(&nonzero_surface).unwrap();
+    let nonzero = pollster::block_on(renderer.read_headless(&nonzero_surface)).unwrap();
 
     assert!(pixel_alpha(&even_odd, 0, 0) > 0);
     assert_eq!(pixel_alpha(&even_odd, 2, 2), 0);
@@ -18205,7 +18251,7 @@ fn builtin_shape_clips_execute_for_layer_clipping() {
 
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("builtin shape clip should render as a layer clip");
-        let output = renderer.read_headless(&surface).unwrap();
+        let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
         assert!(
             output.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0),
@@ -18243,7 +18289,7 @@ fn nested_clips_render_only_the_intersection() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("nested clips should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
@@ -18269,7 +18315,7 @@ fn coordinate_space_tag_transform_affects_layer_clip() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("coordinate-space clip transform should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
@@ -18289,7 +18335,7 @@ fn scene_clip_convenience_still_uses_shape_layer_clips() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("existing Scene::clip convenience should keep working");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert!(pixel_alpha(&output, 1, 0) > 0);
@@ -18309,7 +18355,7 @@ fn transformed_images_render_in_layer_space() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("transformed image should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&output, 0, 0), 0);
     assert_eq!(pixel_alpha(&output, 1, 0), 0);
@@ -18585,7 +18631,7 @@ fn layer_default_is_visible() {
 
     let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("default layer should render visible content");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(stats.layers, 1);
     assert!(pixel_alpha(&output, 0, 0) > 0);
@@ -18603,7 +18649,7 @@ fn layer_opacity_isolates_child_output() {
 
     let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("opacity layer should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let [_, _, _, alpha] = pixel_rgba(&output, 0, 0);
 
     assert_eq!(stats.layers, 1);
@@ -18630,7 +18676,7 @@ fn layer_blend_isolates_child_output() {
 
     let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("blend layer should render");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let [red, green, blue, alpha] = pixel_rgba(&output, 0, 0);
 
     assert_eq!(stats.layers, 1);
@@ -18994,7 +19040,7 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
     );
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let inside = renderer.read_headless(&surface).unwrap();
+    let inside = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(pixel_alpha(&inside, 2, 6), 0);
     assert!(pixel_alpha(&inside, 3, 6) > 0);
@@ -19009,7 +19055,7 @@ fn aligned_rect_strokes_do_not_cross_source_edge() {
     );
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let outside = renderer.read_headless(&surface).unwrap();
+    let outside = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert!(pixel_alpha(&outside, 2, 6) > 0);
     assert_eq!(pixel_alpha(&outside, 4, 6), 0);
@@ -19028,7 +19074,7 @@ fn circle_shadows_lower_to_blurred_round_rect() {
 
     let stats =
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(stats.shadows, 1);
     assert!(output.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
@@ -19051,7 +19097,7 @@ fn non_uniform_rounded_rect_shadows_render_with_corner_partition() {
 
     let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("non-uniform rounded shadow should render through corner partitioning");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(stats.shadows, 1);
     assert!(output.rgba().chunks_exact(4).any(|pixel| pixel[3] > 0));
@@ -19125,7 +19171,7 @@ fn multiple_outer_shadows_render_in_authored_order() {
 
     let stats =
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let overlap = pixel_rgba(&output, 4, 4);
 
     assert_eq!(stats.shadows, 2);
@@ -19469,8 +19515,7 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
     first.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
     pollster::block_on(renderer.render(&mut surface, &first, Parameters::default()))
         .expect("the first frame must establish a readable publication");
-    let published = renderer
-        .read_headless(&surface)
+    let published = pollster::block_on(renderer.read_headless(&surface))
         .expect("the first frame publication must be readable");
 
     let mut replacement = Scene::new();
@@ -19490,8 +19535,7 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
     drop(failure);
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     assert_eq!(
-        renderer
-            .read_headless(&surface)
+        pollster::block_on(renderer.read_headless(&surface))
             .expect("a failed frame must retain the previous publication")
             .rgba(),
         published.rgba(),
@@ -19512,8 +19556,7 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
     drop(pause);
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     assert_eq!(
-        renderer
-            .read_headless(&surface)
+        pollster::block_on(renderer.read_headless(&surface))
             .expect("a canceled frame must retain the previous publication")
             .rgba(),
         published.rgba(),
@@ -19530,8 +19573,7 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         uninitialized.resource_state(),
         SurfaceResourceState::PendingAllocation
     );
-    let error = renderer
-        .read_headless(&uninitialized)
+    let error = pollster::block_on(renderer.read_headless(&uninitialized))
         .expect_err("a failed first frame must remain unreadable");
     assert_surface_unavailable(
         error,
@@ -19555,8 +19597,7 @@ fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
     };
     pollster::block_on(renderer.render(&mut surface, &first, first_parameters))
         .expect("the first frame must establish the public state to preserve");
-    let prior_pixels = renderer
-        .read_headless(&surface)
+    let prior_pixels = pollster::block_on(renderer.read_headless(&surface))
         .expect("the first frame must establish readable pixels");
     let prior_texture = match &surface.backend {
         SurfaceBackend::Headless {
@@ -19673,7 +19714,7 @@ fn headless_render_can_be_read_back() {
     scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default())).unwrap();
-    let image = renderer.read_headless(&surface).unwrap();
+    let image = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     assert_eq!(image.size(), PhysicalSize::new(4, 4));
@@ -19951,8 +19992,7 @@ fn pinned_vello_characterization_cases_are_source_readable() {
                 .expect("pinned Vello characterization requires a real headless surface");
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("pinned Vello characterization must render through the production Vello route");
-        let output = renderer
-            .read_headless(&surface)
+        let output = pollster::block_on(renderer.read_headless(&surface))
             .expect("pinned Vello characterization must read the rendered headless surface");
         observed.push(observe_pinned_vello_characterization(
             antialiasing,
@@ -19995,8 +20035,7 @@ fn internal_vello_direct_pixels_match_pinned_vello_characterization_cases() {
                 .expect("internal Vello characterization requires a real headless surface");
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
             .expect("the production internal Vello route must render every characterization row");
-        let output = renderer
-            .read_headless(&surface)
+        let output = pollster::block_on(renderer.read_headless(&surface))
             .expect("the production internal Vello route must preserve headless readback");
         let actual =
             observe_pinned_vello_characterization(expected.antialiasing, &surface, &output);
@@ -20114,7 +20153,7 @@ fn materialized_mask_render_preserves_final_transaction_generation() {
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("materialized masks must render through the production path");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let submission = submission_scope.observation_for_test();
 
     assert_eq!(
@@ -20456,38 +20495,13 @@ fn assert_transformed_placement_within(actual: AlphaSupport, expected: AlphaSupp
     );
 }
 
-fn render_scene_to_headless_or_skip_no_adapter(scene: &Scene, size: Size) -> Option<ImageBuffer> {
+fn render_scene_to_required_headless(scene: &Scene, size: Size) -> ImageBuffer {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
-    match pollster::block_on(renderer.render(&mut surface, scene, Parameters::default())) {
-        Ok(_) => {}
-        Err(error) if error.code() == ErrorCode::RuntimeCapabilityUnavailable => {
-            assert!(
-                error.message().contains("backdrop") || error.message().contains("offscreen"),
-                "adapter diagnostic should name the offscreen backdrop boundary: {}",
-                error.message()
-            );
-            return None;
-        }
-        Err(error) => panic!("render failed unexpectedly: {error:?}"),
-    }
-    match renderer.read_headless(&surface) {
-        Ok(output) => Some(output),
-        Err(error)
-            if matches!(
-                error.code(),
-                ErrorCode::RuntimeCapabilityUnavailable | ErrorCode::UnsupportedBackend
-            ) =>
-        {
-            assert!(
-                error.message().contains("headless") || error.message().contains("readback"),
-                "readback diagnostic should name the headless readback boundary: {}",
-                error.message()
-            );
-            None
-        }
-        Err(error) => panic!("headless readback failed unexpectedly: {error:?}"),
-    }
+    pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
+        .expect("required headless scene rendering needs an available host adapter");
+    pollster::block_on(renderer.read_headless(&surface))
+        .expect("required headless scene readback must complete")
 }
 
 fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {
@@ -20495,7 +20509,7 @@ fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {
         pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
     pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
         .expect("single-pixel blend scene should render through the direct Vello path");
-    let output = renderer.read_headless(&surface).unwrap();
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     pixel_rgba(&output, 0, 0)
 }
 

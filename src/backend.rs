@@ -957,6 +957,21 @@ impl Backend {
         Ok((&ready.device, &ready.queue))
     }
 
+    pub(crate) fn gpu_operation_device_queue(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        operation: RuntimeOperation,
+        stage: GpuOperationStage,
+    ) -> Result<(&wgpu::Device, &wgpu::Queue)> {
+        let ready = self.ready_state_mut(
+            identity,
+            operation,
+            stage.error_code(),
+            "GPU device resources are unavailable for the active operation",
+        )?;
+        Ok((&ready.device, &ready.queue))
+    }
+
     #[cfg(any(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
@@ -1120,13 +1135,13 @@ impl Backend {
     ) -> Result<GpuOperationTransaction> {
         let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
             Error::new(
-                BackendErrorCode::RenderFailed,
+                stage.error_code(),
                 "GPU device slot disappeared before transaction setup",
             )
         })?;
         if state.generation != identity.generation {
             return Err(Error::new(
-                BackendErrorCode::RenderFailed,
+                stage.error_code(),
                 "GPU device generation changed before transaction setup",
             ));
         }
@@ -1146,7 +1161,7 @@ impl Backend {
         let signal = Arc::clone(&state.signal);
         let ready = state.ready().ok_or_else(|| {
             Error::new(
-                BackendErrorCode::RenderFailed,
+                stage.error_code(),
                 "GPU device slot disappeared before transaction scopes",
             )
         })?;
@@ -2186,84 +2201,4 @@ pub(crate) fn create_texture(
     });
     let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
     (texture, view)
-}
-
-pub(crate) fn read_texture_rgba(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    physical_size: PhysicalSize,
-) -> Result<ImageBuffer> {
-    let width = physical_size.width().max(1);
-    let height = physical_size.height().max(1);
-    let padded_bytes_per_row = (width * 4).next_multiple_of(256);
-    let buffer_size = u64::from(padded_bytes_per_row) * u64::from(height);
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Surgeist headless readback"),
-        size: buffer_size,
-        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-        mapped_at_creation: false,
-    });
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist headless copy"),
-    });
-    encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
-        wgpu::TexelCopyBufferInfo {
-            buffer: &buffer,
-            layout: wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(padded_bytes_per_row),
-                rows_per_image: None,
-            },
-        },
-        wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        },
-    );
-    queue.submit([encoder.finish()]);
-
-    let slice = buffer.slice(..);
-    let (sender, receiver) = std::sync::mpsc::channel();
-    slice.map_async(wgpu::MapMode::Read, move |result| {
-        let _ = sender.send(result);
-    });
-    device
-        .poll(wgpu::PollType::wait_indefinitely())
-        .map_err(|source| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "failed to poll render device",
-            )
-            .with_source(source)
-        })?;
-    receiver
-        .recv()
-        .map_err(|_| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "headless readback callback dropped",
-            )
-        })?
-        .map_err(|source| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "failed to map headless readback",
-            )
-            .with_source(source)
-        })?;
-
-    let mapped = slice.get_mapped_range();
-    let row_bytes = (width * 4) as usize;
-    let mut rgba = Vec::with_capacity(row_bytes * height as usize);
-    for row in 0..height {
-        let start = (row * padded_bytes_per_row) as usize;
-        rgba.extend_from_slice(&mapped[start..start + row_bytes]);
-    }
-    drop(mapped);
-    buffer.unmap();
-
-    ImageBuffer::try_new(physical_size, rgba)
 }

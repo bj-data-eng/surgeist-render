@@ -35,12 +35,14 @@ pub(crate) enum BackendErrorCode {
     SurfaceOutdated,
     ImageUploadFailed,
     RenderFailed,
+    /// A texture readback failed during copy, mapping, or row decoding.
+    ReadbackFailed,
     PresentFailed,
     UnsupportedBackend,
 }
 
 impl BackendErrorCode {
-    const ALL: [Self; 11] = [
+    const ALL: [Self; 12] = [
         Self::DeviceCreateFailed,
         Self::RendererCreateFailed,
         Self::SurfaceCreateFailed,
@@ -50,6 +52,7 @@ impl BackendErrorCode {
         Self::SurfaceOutdated,
         Self::ImageUploadFailed,
         Self::RenderFailed,
+        Self::ReadbackFailed,
         Self::PresentFailed,
         Self::UnsupportedBackend,
     ];
@@ -65,6 +68,7 @@ impl BackendErrorCode {
             Self::SurfaceOutdated => ErrorCode::SurfaceOutdated,
             Self::ImageUploadFailed => ErrorCode::ImageUploadFailed,
             Self::RenderFailed => ErrorCode::RenderFailed,
+            Self::ReadbackFailed => ErrorCode::ReadbackFailed,
             Self::PresentFailed => ErrorCode::PresentFailed,
             Self::UnsupportedBackend => ErrorCode::UnsupportedBackend,
         }
@@ -313,6 +317,8 @@ pub enum ErrorCode {
     RuntimeCapabilityUnavailable,
     ImageUploadFailed,
     RenderFailed,
+    /// Reports failure to copy, map, or decode pixels during GPU readback.
+    ReadbackFailed,
     PresentFailed,
     UnsupportedBackend,
 }

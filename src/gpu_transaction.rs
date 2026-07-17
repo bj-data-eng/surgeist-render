@@ -30,6 +30,7 @@ thread_local! {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum GpuOperationStage {
     Render,
+    Readback,
     #[cfg(any(
         test,
         feature = "render-window",
@@ -45,9 +46,10 @@ pub(crate) enum GpuOperationStage {
 }
 
 impl GpuOperationStage {
-    const fn error_code(self) -> BackendErrorCode {
+    pub(crate) const fn error_code(self) -> BackendErrorCode {
         match self {
             Self::Render => BackendErrorCode::RenderFailed,
+            Self::Readback => BackendErrorCode::ReadbackFailed,
             #[cfg(any(
                 test,
                 feature = "render-window",
@@ -150,25 +152,48 @@ struct GpuOperationSubmissionObservationStateForTest {
     transaction_generation: Option<u64>,
     active_generation: Option<u64>,
     scopes_resolved: bool,
+    readback_queue_submission_count: usize,
+    readback_transaction_generation: Option<u64>,
+    readback_active_generation: Option<u64>,
+    readback_submission_index: Option<wgpu::SubmissionIndex>,
+    readback_scopes_resolved: bool,
 }
 
 #[cfg(test)]
 impl GpuOperationSubmissionObservationForTest {
-    fn record_submission(&self, transaction_generation: u64, active_generation: Option<u64>) {
+    fn record_submission(
+        &self,
+        transaction_generation: u64,
+        active_generation: Option<u64>,
+        readback_submission_index: Option<wgpu::SubmissionIndex>,
+    ) {
         let mut state = self
             .state
             .lock()
             .expect("GPU operation submission observation must remain available");
-        state.queue_submission_count = state.queue_submission_count.saturating_add(1);
-        state.transaction_generation = Some(transaction_generation);
-        state.active_generation = active_generation;
+        if let Some(submission_index) = readback_submission_index {
+            state.readback_queue_submission_count =
+                state.readback_queue_submission_count.saturating_add(1);
+            state.readback_transaction_generation = Some(transaction_generation);
+            state.readback_active_generation = active_generation;
+            state.readback_submission_index = Some(submission_index);
+        } else {
+            state.queue_submission_count = state.queue_submission_count.saturating_add(1);
+            state.transaction_generation = Some(transaction_generation);
+            state.active_generation = active_generation;
+        }
     }
 
-    fn record_scope_resolution(&self) {
-        self.state
+    fn record_scope_resolution(&self, readback: bool) {
+        let mut state = self
+            .state
             .lock()
-            .expect("GPU operation submission observation must remain available")
-            .scopes_resolved = true;
+            .expect("GPU operation submission observation must remain available");
+        if readback {
+            state.readback_scopes_resolved = true;
+        } else {
+            state.scopes_resolved = true;
+        }
     }
 
     pub(crate) fn queue_submission_count_for_test(&self) -> usize {
@@ -190,6 +215,42 @@ impl GpuOperationSubmissionObservationForTest {
             .lock()
             .expect("GPU operation submission observation must remain available")
             .active_generation
+    }
+
+    pub(crate) fn readback_submission_index_for_test(&self) -> Option<wgpu::SubmissionIndex> {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .readback_submission_index
+            .clone()
+    }
+
+    pub(crate) fn readback_queue_submission_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .readback_queue_submission_count
+    }
+
+    pub(crate) fn readback_transaction_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .readback_transaction_generation
+    }
+
+    pub(crate) fn readback_active_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .readback_active_generation
+    }
+
+    pub(crate) fn readback_scopes_resolved_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("GPU operation submission observation must remain available")
+            .readback_scopes_resolved
     }
 
     pub(crate) fn scopes_resolved_for_test(&self) -> bool {
@@ -308,11 +369,16 @@ impl Drop for ScopedGpuOperationPostSubmitCheckpointForTest {
 fn record_active_gpu_operation_submission_for_test(
     transaction_generation: u64,
     active_generation: Option<u64>,
+    readback_submission_index: Option<wgpu::SubmissionIndex>,
 ) -> Option<GpuOperationSubmissionObservationForTest> {
     ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
         let observation = active.borrow().clone();
         if let Some(observation) = &observation {
-            observation.record_submission(transaction_generation, active_generation);
+            observation.record_submission(
+                transaction_generation,
+                active_generation,
+                readback_submission_index,
+            );
         }
         observation
     })
@@ -630,6 +696,18 @@ pub(crate) struct VelloResourceCommitProof {
     _private: (),
 }
 
+/// Transaction-owned result of submitting one texture readback copy.
+#[must_use = "the exact readback submission index must drive map completion"]
+pub(crate) struct ReadbackSubmission {
+    submission_index: wgpu::SubmissionIndex,
+}
+
+impl ReadbackSubmission {
+    pub(crate) fn into_submission_index(self) -> wgpu::SubmissionIndex {
+        self.submission_index
+    }
+}
+
 impl<'resources> InternalVelloPayload<'resources> {
     pub(crate) fn new(
         command_buffer: wgpu::CommandBuffer,
@@ -775,6 +853,7 @@ impl GpuOperationTransaction {
         let submission_observation = record_active_gpu_operation_submission_for_test(
             self.lease.generation(),
             self.lease.active_generation_for_test(),
+            None,
         );
         host_effect();
         #[cfg(test)]
@@ -783,9 +862,34 @@ impl GpuOperationTransaction {
         let result = self.finish(operation).await;
         #[cfg(test)]
         if let Some(observation) = submission_observation {
-            observation.record_scope_resolution();
+            observation.record_scope_resolution(false);
         }
         result
+    }
+
+    /// Submits one texture-copy command and returns its exact queue submission index.
+    pub(crate) async fn submit_readback(
+        self,
+        queue: &wgpu::Queue,
+        command_buffer: wgpu::CommandBuffer,
+        operation: RuntimeOperation,
+    ) -> Result<ReadbackSubmission> {
+        let submission_index = queue.submit([command_buffer]);
+        #[cfg(test)]
+        let submission_observation = record_active_gpu_operation_submission_for_test(
+            self.lease.generation(),
+            self.lease.active_generation_for_test(),
+            Some(submission_index.clone()),
+        );
+        #[cfg(test)]
+        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
+
+        let result = self.finish(operation).await;
+        #[cfg(test)]
+        if let Some(observation) = submission_observation {
+            observation.record_scope_resolution(true);
+        }
+        result.map(|()| ReadbackSubmission { submission_index })
     }
 
     pub(crate) async fn submit_internal_vello(

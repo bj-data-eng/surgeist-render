@@ -18,6 +18,7 @@ mod gpu_transaction;
 mod image;
 mod layer;
 mod paint;
+mod readback;
 mod reference;
 mod renderer;
 mod scene;

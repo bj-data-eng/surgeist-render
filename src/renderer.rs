@@ -9,6 +9,7 @@ use super::{
     encode::encode_vello_scene,
     geometry::physical_size,
     gpu_transaction::{GpuOperationDraft, GpuOperationStage},
+    readback::read_texture_rgba,
     stats::collect_render_stats,
     surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
     validation::*,
@@ -826,7 +827,12 @@ impl Renderer {
         }
     }
 
-    pub fn read_headless(&mut self, surface: &Surface) -> Result<ImageBuffer> {
+    /// Reads the current complete publication from a headless surface.
+    ///
+    /// A zero-area available surface returns an empty validated image without GPU work. A
+    /// nonzero surface without a published frame returns its typed uninitialized diagnostic.
+    /// The returned future is not promised to be `Send`.
+    pub async fn read_headless(&mut self, surface: &Surface) -> Result<ImageBuffer> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceReadback)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceReadback)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceReadback)?;
@@ -882,9 +888,14 @@ impl Renderer {
                 "no compatible wgpu adapter is available",
             ));
         };
-        let (device, queue) =
-            backend.device_queue(device_identity, RuntimeOperation::SurfaceReadback)?;
-        read_texture_rgba(device, queue, texture, physical_size)
+        read_texture_rgba(
+            backend,
+            device_identity,
+            texture,
+            physical_size,
+            RuntimeOperation::SurfaceReadback,
+        )
+        .await
     }
 
     /// Projects immutable capabilities of the device selected by `surface`.
@@ -935,6 +946,7 @@ impl Renderer {
         RuntimeCapabilities::Available(capabilities.runtime_report(runtime_surface_format(surface)))
     }
 
+    #[cfg(test)]
     pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
         let backend = self.backend.as_mut()?;
         let device_identity = self.default_device?;
@@ -955,6 +967,36 @@ impl Renderer {
             return None;
         }
         Some(OffscreenRenderGpuContext::new(backend, device_identity))
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn read_render_texture_for_test(
+        &mut self,
+        texture: &wgpu::Texture,
+        physical_size: PhysicalSize,
+    ) -> Result<ImageBuffer> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "required render-texture readback needs an available wgpu device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "required render-texture readback needs an available wgpu backend",
+            )
+        })?;
+        read_texture_rgba(
+            backend,
+            device_identity,
+            texture,
+            physical_size,
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await
     }
 
     #[must_use]
@@ -1242,9 +1284,14 @@ impl Renderer {
         };
         backend.observe_device_terminal(device_identity);
         result?;
-        let (device, queue) =
-            backend.device_queue(device_identity, RuntimeOperation::SurfaceReadback)?;
-        read_texture_rgba(device, queue, &destination_texture, PhysicalSize::new(2, 2))
+        read_texture_rgba(
+            backend,
+            device_identity,
+            &destination_texture,
+            PhysicalSize::new(2, 2),
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await
     }
 
     #[cfg(test)]
@@ -1515,14 +1562,28 @@ impl Renderer {
         )
         .await?;
         let source = {
-            let Some((device, queue)) = self.default_wgpu_device_queue() else {
+            let Some(device_identity) = self.default_device else {
                 return Err(Error::runtime_unavailable(
                     RuntimeOperation::SurfaceRendering,
                     RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "materialized backdrop captures require an available wgpu device queue",
+                    "materialized backdrop captures require an available wgpu device",
                 ));
             };
-            read_texture_rgba(device, queue, rendered.texture(), physical_size)?
+            let Some(backend) = self.backend.as_mut() else {
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                    "materialized backdrop captures require an available wgpu backend",
+                ));
+            };
+            read_texture_rgba(
+                backend,
+                device_identity,
+                rendered.texture(),
+                physical_size,
+                RuntimeOperation::SurfaceRendering,
+            )
+            .await?
         };
         rendered.release(&mut cache)?;
         let filtered = image::ResolvedMaterializedImageFilterExecution::try_new_for_image_buffer(
@@ -1645,14 +1706,28 @@ impl Renderer {
         )
         .await?;
         let source = {
-            let Some((device, queue)) = self.default_wgpu_device_queue() else {
+            let Some(device_identity) = self.default_device else {
                 return Err(Error::runtime_unavailable(
                     RuntimeOperation::SurfaceRendering,
                     RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "resolved layer alpha masks require an available wgpu device queue",
+                    "resolved layer alpha masks require an available wgpu device",
                 ));
             };
-            read_texture_rgba(device, queue, rendered.texture(), physical_size)?
+            let Some(backend) = self.backend.as_mut() else {
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                    "resolved layer alpha masks require an available wgpu backend",
+                ));
+            };
+            read_texture_rgba(
+                backend,
+                device_identity,
+                rendered.texture(),
+                physical_size,
+                RuntimeOperation::SurfaceRendering,
+            )
+            .await?
         };
         rendered.release(&mut cache)?;
         let masked = ResolvedAlphaMaskExecution::try_new(&source, mask.alpha_mask())?
