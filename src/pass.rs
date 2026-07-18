@@ -239,49 +239,49 @@ pub(crate) fn c08_executable_subset_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c08_zero_capture_spine_is_rejected_before_preparation_for_test(
+pub(crate) fn c08_zero_capture_spine_lowered_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> bool {
-    let Ok(graph) = super::frame::forced_c08_graph_for_test(commands, context) else {
-        return false;
-    };
-    let Ok(mut lowered) = LoweredGraphPlan::try_lower_validated_graph(
+    policy: EffectQualityPolicy,
+) -> Result<LoweredGraphPlan> {
+    let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+    let working_format = capabilities.resolve_effect_working_format(policy)?;
+    let mut lowered = LoweredGraphPlan::try_lower_validated_graph(
         &graph,
-        WorkingFormat::HighPrecision,
+        working_format,
         Format::Rgba8,
         &capabilities,
-    ) else {
-        return false;
-    };
-    let Some(clear) = lowered.passes.first().cloned() else {
-        return false;
-    };
-    let Some(mut present) = lowered.passes.last().cloned() else {
-        return false;
-    };
-    let Some(mut root) = lowered
+    )?;
+    let clear = lowered
+        .passes
+        .first()
+        .cloned()
+        .ok_or_else(|| lowering_error("the C08 zero-capture fixture has no root clear"))?;
+    let mut present =
+        lowered.passes.last().cloned().ok_or_else(|| {
+            lowering_error("the C08 zero-capture fixture has no terminal present")
+        })?;
+    let mut root = lowered
         .resources
         .iter()
         .find(|resource| resource.id == lowered.root_working_image)
         .cloned()
-    else {
-        return false;
-    };
+        .ok_or_else(|| lowering_error("the C08 zero-capture fixture has no root resource"))?;
 
     root.expected_reads = 1;
     root.last_use = present.id;
     present.dependencies = vec![clear.id];
-    let Some(final_read) = present.reads.first_mut() else {
-        return false;
-    };
+    let final_read = present
+        .reads
+        .first_mut()
+        .ok_or_else(|| lowering_error("the C08 zero-capture fixture has no final read"))?;
     final_read.resource = root.id;
     present.releases = vec![root.id];
     lowered.resources = vec![root];
     lowered.passes = vec![clear, present];
 
-    C08PreparableGraph::try_from_lowered(lowered).is_err()
+    Ok(lowered)
 }
 
 #[cfg(test)]
@@ -2318,6 +2318,135 @@ struct PreparedKernelBinding {
     lease: Option<ResourceLease>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PrePreparationPassSemantics {
+    C08,
+    LaterCycle,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GraphPreparationIneligibility {
+    MalformedPassSemantics,
+    MalformedC08Shape,
+}
+
+impl GraphPreparationIneligibility {
+    fn into_error(self) -> Error {
+        match self {
+            Self::MalformedPassSemantics => preparation_error(
+                "a graph with malformed pass semantics cannot enter runtime preparation",
+            ),
+            Self::MalformedC08Shape => {
+                preparation_error("a C08-shaped graph is ineligible for runtime preparation")
+            }
+        }
+    }
+}
+
+enum PrePreparationGraphClassification {
+    ExactC08(C08PreparableGraph),
+    LaterCycleTransitional(LoweredGraphPlan),
+    Ineligible(GraphPreparationIneligibility),
+}
+
+impl PrePreparationGraphClassification {
+    fn classify(lowered: LoweredGraphPlan) -> Self {
+        let lowered = match C08PreparableGraph::try_from_lowered(lowered) {
+            Ok(preparable) => return Self::ExactC08(preparable),
+            Err(lowered) => lowered,
+        };
+        let mut contains_later_cycle_semantics = false;
+        for pass in &lowered.passes {
+            match pre_preparation_pass_semantics(&pass.kind) {
+                Ok(PrePreparationPassSemantics::C08) => {}
+                Ok(PrePreparationPassSemantics::LaterCycle) => {
+                    contains_later_cycle_semantics = true;
+                }
+                Err(ineligibility) => return Self::Ineligible(ineligibility),
+            }
+        }
+        if contains_later_cycle_semantics {
+            Self::LaterCycleTransitional(lowered)
+        } else {
+            Self::Ineligible(GraphPreparationIneligibility::MalformedC08Shape)
+        }
+    }
+}
+
+fn pre_preparation_pass_semantics(
+    kind: &RuntimePassKind,
+) -> std::result::Result<PrePreparationPassSemantics, GraphPreparationIneligibility> {
+    match kind {
+        RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::SurfaceBaseColor,
+            ..
+        }
+        | RuntimePassKind::CanonicalizeCapture
+        | RuntimePassKind::Present => Ok(PrePreparationPassSemantics::C08),
+        RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::Transparent,
+            color,
+        } if *color == Color::TRANSPARENT => Ok(PrePreparationPassSemantics::LaterCycle),
+        RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::Transparent,
+            ..
+        } => Err(GraphPreparationIneligibility::MalformedPassSemantics),
+        RuntimePassKind::VelloCapture(Some(span))
+            if !span.commands.commands.is_empty()
+                && span.captured_before_outer_semantics
+                && span
+                    .capture_transform
+                    .as_array()
+                    .iter()
+                    .all(|value| value.is_finite())
+                && span
+                    .parent_to_surface
+                    .as_array()
+                    .iter()
+                    .all(|value| value.is_finite()) =>
+        {
+            Ok(match span.scope {
+                RuntimeVelloSpanScope::CurrentParent => PrePreparationPassSemantics::C08,
+                RuntimeVelloSpanScope::LayerSource => PrePreparationPassSemantics::LaterCycle,
+            })
+        }
+        RuntimePassKind::VelloCapture(_) => {
+            Err(GraphPreparationIneligibility::MalformedPassSemantics)
+        }
+        RuntimePassKind::CopyBackdrop
+        | RuntimePassKind::ColorFilter(Some(_))
+        | RuntimePassKind::DropShadowColorize(Some(_)) => {
+            Ok(PrePreparationPassSemantics::LaterCycle)
+        }
+        RuntimePassKind::BlurHorizontal(Some(blur)) if blur.axis == RuntimeBlurAxis::Horizontal => {
+            Ok(PrePreparationPassSemantics::LaterCycle)
+        }
+        RuntimePassKind::BlurVertical(Some(blur)) if blur.axis == RuntimeBlurAxis::Vertical => {
+            Ok(PrePreparationPassSemantics::LaterCycle)
+        }
+        RuntimePassKind::ColorFilter(None)
+        | RuntimePassKind::BlurHorizontal(_)
+        | RuntimePassKind::BlurVertical(_)
+        | RuntimePassKind::DropShadowColorize(None)
+        | RuntimePassKind::Composite(None) => {
+            Err(GraphPreparationIneligibility::MalformedPassSemantics)
+        }
+        RuntimePassKind::Composite(Some(composite))
+            if composite.source_captured_before_outer_semantics =>
+        {
+            Ok(match composite.kind {
+                RuntimeCompositeKind::SpanSourceOver => PrePreparationPassSemantics::C08,
+                RuntimeCompositeKind::Layer { .. } | RuntimeCompositeKind::DropShadow => {
+                    PrePreparationPassSemantics::LaterCycle
+                }
+            })
+        }
+        RuntimePassKind::Composite(Some(_)) => {
+            Err(GraphPreparationIneligibility::MalformedPassSemantics)
+        }
+    }
+}
+
 enum GraphPreparationSource {
     C08(C08PreparableGraph),
     Transitional(LoweredGraphPlan),
@@ -2779,8 +2908,8 @@ impl<'device> PreparedGraph<'device> {
         resources: &'device ResourceManager,
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
-        match C08PreparableGraph::try_from_lowered(lowered) {
-            Ok(preparable) if pass_cache_phase.1 => {
+        match PrePreparationGraphClassification::classify(lowered) {
+            PrePreparationGraphClassification::ExactC08(preparable) if pass_cache_phase.1 => {
                 let prepared = Self::try_prepare_inner(
                     GraphPreparationSource::C08(preparable),
                     policy,
@@ -2797,7 +2926,7 @@ impl<'device> PreparedGraph<'device> {
                 }
                 Ok(prepared)
             }
-            Ok(preparable) => Self::try_prepare_c08(
+            PrePreparationGraphClassification::ExactC08(preparable) => Self::try_prepare_c08(
                 preparable,
                 policy,
                 capabilities,
@@ -2806,15 +2935,20 @@ impl<'device> PreparedGraph<'device> {
                 resources,
                 pass_cache_phase.0,
             ),
-            Err(lowered) => Self::try_prepare_inner(
-                GraphPreparationSource::Transitional(lowered),
-                policy,
-                capabilities,
-                device,
-                queue,
-                resources,
-                (pass_cache_phase.0, false),
-            ),
+            PrePreparationGraphClassification::LaterCycleTransitional(lowered) => {
+                Self::try_prepare_inner(
+                    GraphPreparationSource::Transitional(lowered),
+                    policy,
+                    capabilities,
+                    device,
+                    queue,
+                    resources,
+                    (pass_cache_phase.0, false),
+                )
+            }
+            PrePreparationGraphClassification::Ineligible(ineligibility) => {
+                Err(ineligibility.into_error())
+            }
         }
     }
 

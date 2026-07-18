@@ -10610,13 +10610,50 @@ fn c08_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
 
 #[test]
 fn c08_zero_capture_spine_is_rejected_before_preparation() {
-    let rejected = super::pass::c08_zero_capture_spine_is_rejected_before_preparation_for_test(
+    let policy = EffectQualityPolicy::AllowReducedPrecision;
+    let options = Options::default()
+        .with_effect_quality_policy(policy)
+        .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
+    let mut renderer = pollster::block_on(Renderer::new(options))
+        .expect("zero-capture C08 rejection requires a real selected WGPU device");
+    let _surface = pollster::block_on(renderer.create_headless(Size::new(16.0, 12.0), 1.0))
+        .expect("zero-capture C08 rejection requires a device-backed headless surface");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("zero-capture C08 rejection requires one ready device bundle");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let resources = ResourceManager::new(ResourceCacheBudget::new(1024 * 1024));
+    let mut pass_cache = DevicePassCache::new();
+    let _ = pass_cache.seed_sampler_for_test(ready.device_for_test());
+    let resources_before = resources.observation_for_test();
+    let pass_cache_before = pass_cache.counts_for_test();
+
+    let lowered = super::pass::c08_zero_capture_spine_lowered_for_test(
         c08_shader_commands_for_test(),
         c08_shader_frame_context_for_test(),
-        DeviceCapabilities::from_test_facts(true, true, 4_096),
+        capabilities,
+        policy,
+    )
+    .expect("the zero-capture fixture must reach validated runtime lowering");
+    let preparation = super::pass::PreparedGraph::try_prepare(
+        lowered,
+        policy,
+        &capabilities,
+        ready.device_for_test(),
+        ready.queue_for_test(),
+        &resources,
+        (&pass_cache, false),
     );
+    let rejected = preparation.is_err();
+    drop(preparation);
+    let resources_after = resources.observation_for_test();
+    let pass_cache_after = pass_cache.counts_for_test();
 
-    assert!(rejected, "zero-capture C08 spine reached preparation");
+    assert!(
+        rejected && resources_after == resources_before && pass_cache_after == pass_cache_before,
+        "zero-capture C08 spine reached preparation"
+    );
 }
 
 fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObservationForTest {
