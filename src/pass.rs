@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
     marker::PhantomData,
+    sync::Arc,
 };
 
 use super::{
@@ -235,6 +236,52 @@ pub(crate) fn c08_executable_subset_observation_for_test(
 ) -> C08ExecutableSubsetObservationForTest {
     c08_executable_subset_observation(c08_commands, later_cycle_commands, context, capabilities)
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c08_zero_capture_spine_is_rejected_before_preparation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> bool {
+    let Ok(graph) = super::frame::forced_c08_graph_for_test(commands, context) else {
+        return false;
+    };
+    let Ok(mut lowered) = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    ) else {
+        return false;
+    };
+    let Some(clear) = lowered.passes.first().cloned() else {
+        return false;
+    };
+    let Some(mut present) = lowered.passes.last().cloned() else {
+        return false;
+    };
+    let Some(mut root) = lowered
+        .resources
+        .iter()
+        .find(|resource| resource.id == lowered.root_working_image)
+        .cloned()
+    else {
+        return false;
+    };
+
+    root.expected_reads = 1;
+    root.last_use = present.id;
+    present.dependencies = vec![clear.id];
+    let Some(final_read) = present.reads.first_mut() else {
+        return false;
+    };
+    final_read.resource = root.id;
+    present.releases = vec![root.id];
+    lowered.resources = vec![root];
+    lowered.passes = vec![clear, present];
+
+    C08PreparableGraph::try_from_lowered(lowered).is_err()
 }
 
 #[cfg(test)]
@@ -1174,6 +1221,10 @@ impl LoweredGraphPlan {
             parent = composite_resource;
             parent_producer = composite.id;
             cursor = cursor.checked_add(3)?;
+        }
+
+        if captures.is_empty() {
+            return None;
         }
 
         let present = self.passes.get(cursor)?;
@@ -2303,6 +2354,20 @@ pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
     allocation_resource: ResourceIdentity,
     texture: &'prepared wgpu::Texture,
     view: &'prepared wgpu::TextureView,
+    session: Arc<()>,
+}
+
+struct C08VelloCaptureCompletionSeal;
+
+/// Opaque proof that one exact capture finished inside the active C08 encoding
+/// session. T3 intentionally has no production constructor; T4's checked Vello
+/// encoding phase owns adding the production sealing path.
+#[must_use = "a capture completion receipt must return to the owning C08 scheduler"]
+pub(crate) struct C08VelloCaptureCompletionReceipt {
+    pass: RuntimePassId,
+    target: RuntimeResourceId,
+    session: Arc<()>,
+    _seal: C08VelloCaptureCompletionSeal,
 }
 
 #[cfg_attr(
@@ -2356,6 +2421,22 @@ impl C08VelloCaptureEncodingHandoff<'_> {
     pub(crate) const fn view(&self) -> &wgpu::TextureView {
         self.view
     }
+
+    #[cfg(test)]
+    pub(crate) fn c08_capture_completion_for_t3_test(
+        self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> C08VelloCaptureCompletionReceipt {
+        encoder.insert_debug_marker(
+            "Surgeist T3 cfg(test)-only capture completion proof; not Vello encoding",
+        );
+        C08VelloCaptureCompletionReceipt {
+            pass: self.pass,
+            target: self.target,
+            session: self.session,
+            _seal: C08VelloCaptureCompletionSeal,
+        }
+    }
 }
 
 #[cfg_attr(
@@ -2406,6 +2487,14 @@ enum C08ScheduledEncodingKind {
     Present,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08CustomSpineEncodingState {
+    Ready,
+    Encoding,
+    Complete,
+    AbortOnly,
+}
+
 #[cfg_attr(
     not(test),
     expect(
@@ -2419,6 +2508,7 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) uses_exact_prepared_spatial_mapping: bool,
     pub(crate) presents_to_exact_external_output: bool,
     pub(crate) exposes_bounded_capture_handoff: bool,
+    pub(crate) validates_checked_capture_completion: bool,
     pub(crate) completes_custom_passes_after_encoding: bool,
     pub(crate) parent_and_result_are_distinct: bool,
     pub(crate) copies_full_parent_before_bounded_source_render: bool,
@@ -2646,6 +2736,7 @@ pub(crate) struct PreparedGraph<'device> {
     pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
+    c08_encoding_state: Option<C08CustomSpineEncodingState>,
     device: &'device wgpu::Device,
     queue: &'device wgpu::Queue,
     pass_cache: &'device DevicePassCache,
@@ -2798,6 +2889,9 @@ impl<'device> PreparedGraph<'device> {
         } else {
             None
         };
+        let c08_encoding_state = c08_execution
+            .as_ref()
+            .map(|_| C08CustomSpineEncodingState::Ready);
 
         Ok(Self {
             plan,
@@ -2807,6 +2901,7 @@ impl<'device> PreparedGraph<'device> {
             pass_cache_update,
             frame_scope: Some(frame_scope),
             next_pass: 0,
+            c08_encoding_state,
             device,
             queue,
             pass_cache,
@@ -2882,14 +2977,31 @@ impl<'device> PreparedGraph<'device> {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         output: C08ExternalOutputView<'_>,
-        mut encode_capture: F,
+        encode_capture: F,
     ) -> Result<C08CustomSpineEncodingSummary>
     where
         F: for<'capture> FnMut(
             C08VelloCaptureEncodingHandoff<'capture>,
             &mut wgpu::CommandEncoder,
-        ) -> Result<()>,
+        ) -> Result<C08VelloCaptureCompletionReceipt>,
     {
+        match self.c08_encoding_state {
+            Some(C08CustomSpineEncodingState::Ready) => {}
+            Some(
+                C08CustomSpineEncodingState::Encoding
+                | C08CustomSpineEncodingState::Complete
+                | C08CustomSpineEncodingState::AbortOnly,
+            ) => {
+                return Err(preparation_error(
+                    "the C08 custom encoding is one-shot; discard this prepared graph and its encoder",
+                ));
+            }
+            None => {
+                return Err(preparation_error(
+                    "the C08 custom scheduler requires validated execution facts",
+                ));
+            }
+        }
         let execution = self.c08_execution.as_ref().ok_or_else(|| {
             preparation_error("the C08 custom scheduler requires validated execution facts")
         })?;
@@ -2907,10 +3019,47 @@ impl<'device> PreparedGraph<'device> {
                 "the C08 custom scheduler requires transaction-provisional pass objects",
             ));
         }
-
         let expected_capture_count = execution.captures().len();
+        if expected_capture_count == 0 || self.next_pass != 0 {
+            return Err(preparation_error(
+                "the C08 custom scheduler requires one unstarted capture spine",
+            ));
+        }
+
+        let session = Arc::new(());
+        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Encoding);
+        let result = self.encode_c08_custom_spine_once(
+            encoder,
+            &output,
+            expected_capture_count,
+            &session,
+            encode_capture,
+        );
+        self.c08_encoding_state = Some(if result.is_ok() {
+            C08CustomSpineEncodingState::Complete
+        } else {
+            C08CustomSpineEncodingState::AbortOnly
+        });
+        result
+    }
+
+    fn encode_c08_custom_spine_once<F>(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &C08ExternalOutputView<'_>,
+        expected_capture_count: usize,
+        session: &Arc<()>,
+        mut encode_capture: F,
+    ) -> Result<C08CustomSpineEncodingSummary>
+    where
+        F: for<'capture> FnMut(
+            C08VelloCaptureEncodingHandoff<'capture>,
+            &mut wgpu::CommandEncoder,
+        ) -> Result<C08VelloCaptureCompletionReceipt>,
+    {
         let mut scheduled = Vec::with_capacity(self.plan.passes.len());
         let mut capture_count = 0_usize;
+        let mut validated_capture_receipts = 0_usize;
         let mut bounded_capture_handoffs = true;
         let mut custom_encoded = 0_usize;
         let mut custom_completed = 0_usize;
@@ -2938,11 +3087,12 @@ impl<'device> PreparedGraph<'device> {
                     clear_count = clear_count.saturating_add(1);
                     clears_full_root &= facts.full_target;
                     scheduled.push(C08ScheduledEncodingKind::ClearRoot);
-                    self.complete_pass(pass)?;
+                    self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
                 }
                 RuntimePassKind::VelloCapture(Some(_)) => {
-                    let handoff = self.c08_vello_capture_handoff(&request)?;
+                    let handoff = self.c08_vello_capture_handoff(&request, session)?;
+                    let target = handoff.target();
                     bounded_capture_handoffs &= !handoff.commands().commands.is_empty()
                         && handoff.target_extent().width() > 0
                         && handoff.target_extent().height() > 0
@@ -2959,16 +3109,17 @@ impl<'device> PreparedGraph<'device> {
                             .iter()
                             .all(|value| value.is_finite());
                     scheduled.push(C08ScheduledEncodingKind::VelloCapture);
-                    encode_capture(handoff, encoder)?;
-                    self.complete_pass(pass)?;
+                    let receipt = encode_capture(handoff, encoder)?;
+                    self.complete_c08_capture(pass, target, session, receipt)?;
                     capture_count = capture_count.saturating_add(1);
+                    validated_capture_receipts = validated_capture_receipts.saturating_add(1);
                 }
                 RuntimePassKind::CanonicalizeCapture => {
                     let facts = self.encode_c08_canonicalize(encoder, &request)?;
                     custom_encoded = custom_encoded.saturating_add(1);
                     exact_spatial &= facts.exact_spatial_uniform;
                     scheduled.push(C08ScheduledEncodingKind::CanonicalizeCapture);
-                    self.complete_pass(pass)?;
+                    self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
                 }
                 RuntimePassKind::Composite(Some(composite))
@@ -2984,16 +3135,16 @@ impl<'device> PreparedGraph<'device> {
                         facts.sampled_only_source && facts.fixed_source_over_blend;
                     preserves_signed_origin &= facts.preserved_signed_source_origin;
                     scheduled.push(C08ScheduledEncodingKind::SpanSourceOver);
-                    self.complete_pass(pass)?;
+                    self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
                 }
                 RuntimePassKind::Present => {
-                    let facts = self.encode_c08_present(encoder, &request, &output)?;
+                    let facts = self.encode_c08_present(encoder, &request, output)?;
                     custom_encoded = custom_encoded.saturating_add(1);
                     exact_spatial &= facts.exact_spatial_uniform;
                     exact_external_output |= facts.external_output_exact;
                     scheduled.push(C08ScheduledEncodingKind::Present);
-                    self.complete_pass(pass)?;
+                    self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
                 }
                 RuntimePassKind::VelloCapture(None)
@@ -3020,6 +3171,8 @@ impl<'device> PreparedGraph<'device> {
             exposes_bounded_capture_handoff: expected_capture_count > 0
                 && capture_count == expected_capture_count
                 && bounded_capture_handoffs,
+            validates_checked_capture_completion: validated_capture_receipts
+                == expected_capture_count,
             completes_custom_passes_after_encoding: custom_encoded > 0
                 && custom_completed == custom_encoded,
             parent_and_result_are_distinct: source_over_count > 0 && parent_and_result_are_distinct,
@@ -3099,6 +3252,7 @@ impl<'device> PreparedGraph<'device> {
     fn c08_vello_capture_handoff<'prepared>(
         &'prepared self,
         request: &C08PreparedPassEncodingRequest,
+        session: &Arc<()>,
     ) -> Result<C08VelloCaptureEncodingHandoff<'prepared>> {
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
@@ -3137,6 +3291,7 @@ impl<'device> PreparedGraph<'device> {
             allocation_resource: binding.allocation_resource(),
             texture: binding.texture(),
             view: binding.view(),
+            session: Arc::clone(session),
         })
     }
 
@@ -3582,6 +3737,46 @@ impl<'device> PreparedGraph<'device> {
         )
     )]
     pub(crate) fn complete_pass(&mut self, pass: RuntimePassId) -> Result<()> {
+        if self.c08_encoding_state.is_some() {
+            return Err(preparation_error(
+                "C08 pass completion belongs to its one-shot scheduler; discard an aborted graph and encoder",
+            ));
+        }
+        self.complete_pass_inner(pass)
+    }
+
+    fn complete_c08_custom_pass(&mut self, pass: RuntimePassId) -> Result<()> {
+        if self.c08_encoding_state != Some(C08CustomSpineEncodingState::Encoding) {
+            return Err(preparation_error(
+                "C08 custom-pass progress requires the active one-shot encoding session",
+            ));
+        }
+        self.complete_pass_inner(pass)
+    }
+
+    fn complete_c08_capture(
+        &mut self,
+        pass: RuntimePassId,
+        target: RuntimeResourceId,
+        session: &Arc<()>,
+        receipt: C08VelloCaptureCompletionReceipt,
+    ) -> Result<()> {
+        let request = self.require_current_pass(pass)?;
+        if self.c08_encoding_state != Some(C08CustomSpineEncodingState::Encoding)
+            || !matches!(request.runtime.kind, RuntimePassKind::VelloCapture(Some(_)))
+            || request.runtime.result != RuntimeResultBinding::Resource(target)
+            || receipt.pass != pass
+            || receipt.target != target
+            || !Arc::ptr_eq(&receipt.session, session)
+        {
+            return Err(preparation_error(
+                "C08 capture completion does not match the exact pass, target, and encoding session",
+            ));
+        }
+        self.complete_pass_inner(pass)
+    }
+
+    fn complete_pass_inner(&mut self, pass: RuntimePassId) -> Result<()> {
         let request = self.require_current_pass(pass)?;
         let resource_releases = request.runtime.releases.clone();
         let kernel_releases = request.kernel_releases.clone();

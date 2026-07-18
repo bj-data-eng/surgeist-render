@@ -10608,6 +10608,17 @@ fn c08_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
     );
 }
 
+#[test]
+fn c08_zero_capture_spine_is_rejected_before_preparation() {
+    let rejected = super::pass::c08_zero_capture_spine_is_rejected_before_preparation_for_test(
+        c08_shader_commands_for_test(),
+        c08_shader_frame_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(rejected, "zero-capture C08 spine reached preparation");
+}
+
 fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObservationForTest {
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -10638,6 +10649,7 @@ fn custom_spine_encodes_clear_canonicalize_copy_source_over_and_present_in_order
             && observed.uses_exact_prepared_spatial_mapping
             && observed.presents_to_exact_external_output
             && observed.exposes_bounded_capture_handoff
+            && observed.validates_checked_capture_completion
             && observed.completes_custom_passes_after_encoding
             && observed.keeps_cache_update_provisional
             && observed.encodes_without_submission_or_sync,
@@ -10655,6 +10667,39 @@ fn span_source_over_copies_parent_then_uses_fixed_premultiplied_blend() {
             && observed.samples_only_source_with_fixed_premultiplied_blend
             && observed.preserves_signed_source_origin,
         "normal source-over sampled or overwrote its parent incorrectly"
+    );
+}
+
+#[test]
+fn c08_capture_failure_is_abort_only_and_cannot_retry_on_new_encoder() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("C08 capture-failure coverage requires backend selection")
+        .expect("C08 capture-failure coverage requires a host adapter");
+    let observed = pollster::block_on(backend.c08_capture_failure_observation_for_test(
+        identity,
+        c08_shader_commands_for_test(),
+        c08_shader_frame_context_for_test(),
+        Format::Rgba8,
+    ))
+    .expect("C08 capture-failure coverage must reach its private observation");
+    let pass_source = include_str!("pass.rs");
+    let production_completion_is_sealed = pass_source
+        .contains("pub(crate) struct C08VelloCaptureCompletionReceipt")
+        && pass_source.contains("_seal: C08VelloCaptureCompletionSeal")
+        && pass_source.contains("T3 intentionally has no production constructor")
+        && pass_source.contains(") -> Result<C08VelloCaptureCompletionReceipt>,")
+        && !pass_source.contains(") -> Result<()>,");
+    let t3_success_proof_is_statically_test_only =
+        pass_source.contains("#[cfg(test)]\n    pub(crate) fn c08_capture_completion_for_t3_test");
+
+    assert!(
+        observed.callback_failure_is_reported
+            && observed.complete_pass_is_rejected
+            && observed.retry_on_new_encoder_is_rejected
+            && production_completion_is_sealed
+            && t3_success_proof_is_statically_test_only,
+        "failed C08 capture remained forgeable or retryable"
     );
 }
 
