@@ -22,6 +22,7 @@ mod paint;
 mod readback;
 mod reference;
 mod renderer;
+mod resource;
 mod scene;
 mod shader;
 mod shape;

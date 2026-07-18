@@ -39,6 +39,7 @@ use super::{
         MaterializedDropShadowOffsetQuantizationPolicy, PremultipliedRgba8,
         ReferencePremultipliedRgba8Buffer,
     },
+    resource::WorkingFormat,
     shader::{
         RectPassBounds, RectShaderPassDescriptor, RectShaderPassExecution, RectShaderPassKind,
         RectShaderPipelineKey, encode_clear_fill_pass,
@@ -3510,6 +3511,186 @@ fn runtime_capability_report_keeps_precision_flags_independent() {
     assert_report_traits::<RuntimeCapabilities>();
     assert_report_traits::<AvailableRuntimeCapabilities>();
     assert_report_traits::<EffectPrecisionCapabilities>();
+}
+
+#[test]
+fn precision_resolver_covers_both_high_only_reduced_only_and_neither() {
+    let required_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
+        .union(wgpu::TextureUsages::TEXTURE_BINDING)
+        .union(wgpu::TextureUsages::COPY_SRC)
+        .union(wgpu::TextureUsages::COPY_DST);
+    for (format, texture_format, bytes_per_pixel) in [
+        (
+            WorkingFormat::HighPrecision,
+            wgpu::TextureFormat::Rgba16Float,
+            8,
+        ),
+        (
+            WorkingFormat::ReducedPrecision,
+            wgpu::TextureFormat::Rgba8Unorm,
+            4,
+        ),
+    ] {
+        assert_eq!(format.texture_format(), texture_format);
+        assert_eq!(format.required_usages(), required_usages);
+        assert_eq!(
+            format.required_format_features(),
+            wgpu::TextureFormatFeatureFlags::FILTERABLE,
+        );
+        assert_eq!(format.bytes_per_pixel(), bytes_per_pixel);
+
+        let complete_features = wgpu::TextureFormatFeatures {
+            allowed_usages: required_usages,
+            flags: wgpu::TextureFormatFeatureFlags::FILTERABLE,
+        };
+        assert!(format.is_supported_by(complete_features));
+        for required_usage in [
+            wgpu::TextureUsages::RENDER_ATTACHMENT,
+            wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureUsages::COPY_SRC,
+            wgpu::TextureUsages::COPY_DST,
+        ] {
+            assert!(!format.is_supported_by(wgpu::TextureFormatFeatures {
+                allowed_usages: required_usages.difference(required_usage),
+                ..complete_features
+            }));
+        }
+        assert!(!format.is_supported_by(wgpu::TextureFormatFeatures {
+            flags: wgpu::TextureFormatFeatureFlags::empty(),
+            ..complete_features
+        }));
+    }
+
+    let cases = [
+        (
+            true,
+            true,
+            EffectQualityPolicy::RequireHighPrecision,
+            Some(WorkingFormat::HighPrecision),
+        ),
+        (
+            true,
+            true,
+            EffectQualityPolicy::AllowReducedPrecision,
+            Some(WorkingFormat::HighPrecision),
+        ),
+        (
+            true,
+            false,
+            EffectQualityPolicy::RequireHighPrecision,
+            Some(WorkingFormat::HighPrecision),
+        ),
+        (
+            true,
+            false,
+            EffectQualityPolicy::AllowReducedPrecision,
+            Some(WorkingFormat::HighPrecision),
+        ),
+        (false, true, EffectQualityPolicy::RequireHighPrecision, None),
+        (
+            false,
+            true,
+            EffectQualityPolicy::AllowReducedPrecision,
+            Some(WorkingFormat::ReducedPrecision),
+        ),
+        (
+            false,
+            false,
+            EffectQualityPolicy::RequireHighPrecision,
+            None,
+        ),
+        (
+            false,
+            false,
+            EffectQualityPolicy::AllowReducedPrecision,
+            None,
+        ),
+    ];
+
+    for (high_precision, reduced_precision, policy, expected) in cases {
+        let capabilities =
+            DeviceCapabilities::from_test_facts(high_precision, reduced_precision, 8_192);
+        let resolution = capabilities.resolve_effect_working_format(policy);
+
+        match expected {
+            Some(expected_format) => assert_eq!(
+                resolution.expect("the available format should satisfy the requested policy"),
+                expected_format,
+            ),
+            None => {
+                let error = resolution
+                    .expect_err("the unavailable format should reject the requested policy");
+                let expected_diagnostic = RuntimeCapabilityUnavailable::try_new(
+                    RuntimeOperation::EffectRendering,
+                    RuntimeCapabilityUnavailableReason::EffectFormatUnavailable { policy },
+                )
+                .unwrap();
+                assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+                assert_eq!(
+                    error.runtime_capability_unavailable_diagnostic(),
+                    Some(&expected_diagnostic),
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn effect_texture_dimension_is_rejected_before_allocation() {
+    fn validate_then_observe_allocation(
+        capabilities: &DeviceCapabilities,
+        requested: PhysicalSize,
+        allocation_observed: &mut bool,
+    ) -> Result<()> {
+        capabilities.validate_effect_texture_extent(requested)?;
+        *allocation_observed = true;
+        Ok(())
+    }
+
+    let maximum = 4_096;
+    let capabilities = DeviceCapabilities::from_test_facts(true, true, maximum);
+    for requested in [
+        PhysicalSize::new(maximum + 1, 1),
+        PhysicalSize::new(1, maximum + 1),
+        PhysicalSize::new(maximum + 1, maximum + 1),
+    ] {
+        let mut allocation_observed = false;
+        let result =
+            validate_then_observe_allocation(&capabilities, requested, &mut allocation_observed);
+
+        assert!(
+            !allocation_observed,
+            "over-limit effect extent reached allocation"
+        );
+        let error = result.expect_err("an over-limit effect extent should be rejected");
+        let expected_diagnostic = RuntimeCapabilityUnavailable::try_new(
+            RuntimeOperation::EffectTextureAllocation,
+            RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { requested, maximum },
+        )
+        .unwrap();
+        assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+        assert_eq!(
+            error.runtime_capability_unavailable_diagnostic(),
+            Some(&expected_diagnostic),
+        );
+    }
+
+    for requested in [PhysicalSize::new(1, 1), PhysicalSize::new(maximum, maximum)] {
+        let mut allocation_observed = false;
+        validate_then_observe_allocation(&capabilities, requested, &mut allocation_observed)
+            .expect("an in-limit nonempty effect extent should reach allocation");
+        assert!(allocation_observed);
+    }
+
+    for requested in [
+        PhysicalSize::new(0, 0),
+        PhysicalSize::new(0, maximum + 1),
+        PhysicalSize::new(maximum + 1, 0),
+    ] {
+        capabilities
+            .validate_effect_texture_extent(requested)
+            .expect("an empty effect extent should not require texture allocation validation");
+    }
 }
 
 #[test]

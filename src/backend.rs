@@ -2,6 +2,7 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
+use super::resource::WorkingFormat;
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(any(
     feature = "render-window",
@@ -385,19 +386,23 @@ impl DeviceState {
 pub(crate) struct DeviceCapabilities {
     high_precision: bool,
     reduced_precision: bool,
-    max_texture_dimension_2d: u32,
+    max_effect_texture_dimension_2d: u32,
 }
 
 impl DeviceCapabilities {
     fn from_device(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Self {
+        let high_precision = WorkingFormat::HighPrecision;
+        let reduced_precision = WorkingFormat::ReducedPrecision;
         Self {
             high_precision: supports_effect_texture_format(
-                adapter.get_texture_format_features(wgpu::TextureFormat::Rgba16Float),
+                high_precision,
+                adapter.get_texture_format_features(high_precision.texture_format()),
             ),
             reduced_precision: supports_effect_texture_format(
-                adapter.get_texture_format_features(wgpu::TextureFormat::Rgba8Unorm),
+                reduced_precision,
+                adapter.get_texture_format_features(reduced_precision.texture_format()),
             ),
-            max_texture_dimension_2d: device.limits().max_texture_dimension_2d,
+            max_effect_texture_dimension_2d: device.limits().max_texture_dimension_2d,
         }
     }
 
@@ -408,21 +413,74 @@ impl DeviceCapabilities {
         AvailableRuntimeCapabilities::new(
             surface_format,
             EffectPrecisionCapabilities::new(self.high_precision, self.reduced_precision),
-            self.max_texture_dimension_2d,
+            self.max_effect_texture_dimension_2d,
         )
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C07 pass lowering consumes the resolved private format after resource convergence"
+        )
+    )]
+    pub(crate) fn resolve_effect_working_format(
+        &self,
+        policy: EffectQualityPolicy,
+    ) -> Result<WorkingFormat> {
+        if self.high_precision {
+            return Ok(WorkingFormat::HighPrecision);
+        }
+        if policy == EffectQualityPolicy::AllowReducedPrecision && self.reduced_precision {
+            return Ok(WorkingFormat::ReducedPrecision);
+        }
+
+        Err(Error::runtime_unavailable(
+            RuntimeOperation::EffectRendering,
+            RuntimeCapabilityUnavailableReason::EffectFormatUnavailable { policy },
+            "the selected GPU has no effect working format permitted by the configured quality policy",
+        ))
+    }
+
+    pub(crate) fn validate_effect_texture_extent(&self, requested: PhysicalSize) -> Result<()> {
+        if requested.width() == 0 || requested.height() == 0 {
+            return Ok(());
+        }
+        let maximum = self.max_effect_texture_dimension_2d;
+        if requested.width() <= maximum && requested.height() <= maximum {
+            return Ok(());
+        }
+
+        Err(Error::runtime_unavailable(
+            RuntimeOperation::EffectTextureAllocation,
+            RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { requested, maximum },
+            format!(
+                "effect texture extent {}x{} exceeds the selected device limit of {maximum}",
+                requested.width(),
+                requested.height(),
+            ),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn from_test_facts(
+        high_precision: bool,
+        reduced_precision: bool,
+        max_effect_texture_dimension_2d: u32,
+    ) -> Self {
+        Self {
+            high_precision,
+            reduced_precision,
+            max_effect_texture_dimension_2d,
+        }
     }
 }
 
-fn supports_effect_texture_format(features: wgpu::TextureFormatFeatures) -> bool {
-    features
-        .allowed_usages
-        .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
-        && features
-            .allowed_usages
-            .contains(wgpu::TextureUsages::TEXTURE_BINDING)
-        && features
-            .flags
-            .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE)
+fn supports_effect_texture_format(
+    working_format: WorkingFormat,
+    features: wgpu::TextureFormatFeatures,
+) -> bool {
+    working_format.is_supported_by(features)
 }
 
 #[derive(Debug)]
@@ -1881,6 +1939,9 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
         ));
     };
     let resource = {
+        if let Some(capabilities) = context.backend.device_capabilities(context.device_identity) {
+            capabilities.validate_effect_texture_extent(descriptor.physical_size())?;
+        }
         let (device, _) = context
             .backend
             .device_queue(context.device_identity, RuntimeOperation::SurfaceRendering)?;
