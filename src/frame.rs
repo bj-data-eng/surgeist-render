@@ -86,9 +86,11 @@ impl FrameContext {
     fn initial_parent_contribution(self) -> SemanticSourceBounds {
         match self.output_bounds {
             LogicalBounds::NonEmpty(bounds) if self.base_color.a() > 0.0 => {
-                SemanticSourceBounds::NonEmpty(bounds)
+                SemanticSourceBounds::exact_known(bounds)
             }
-            LogicalBounds::Empty(_) | LogicalBounds::NonEmpty(_) => SemanticSourceBounds::Empty,
+            LogicalBounds::Empty(_) | LogicalBounds::NonEmpty(_) => {
+                SemanticSourceBounds::exactly_empty()
+            }
         }
     }
 
@@ -380,42 +382,88 @@ fn require_graph_text_bounds(commands: &[RenderCommand], path: &mut Vec<usize>) 
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum SemanticSourceBounds {
-    Empty,
-    NonEmpty(NonEmptyLogicalBounds),
-    Unspecified,
+struct SemanticSourceBounds {
+    known_non_empty_extent: Option<NonEmptyLogicalBounds>,
+    contains_unresolved_content: bool,
 }
 
 impl SemanticSourceBounds {
+    const fn from_parts(
+        known_non_empty_extent: Option<NonEmptyLogicalBounds>,
+        contains_unresolved_content: bool,
+    ) -> Self {
+        Self {
+            known_non_empty_extent,
+            contains_unresolved_content,
+        }
+    }
+
+    const fn exactly_empty() -> Self {
+        Self::from_parts(None, false)
+    }
+
+    const fn exact_known(bounds: NonEmptyLogicalBounds) -> Self {
+        Self::from_parts(Some(bounds), false)
+    }
+
+    const fn wholly_unresolved() -> Self {
+        Self::from_parts(None, true)
+    }
+
+    const fn is_exactly_empty(self) -> bool {
+        self.known_non_empty_extent.is_none() && !self.contains_unresolved_content
+    }
+
+    const fn known_non_empty_extent(self) -> Option<NonEmptyLogicalBounds> {
+        self.known_non_empty_extent
+    }
+
+    const fn contains_unresolved_content(self) -> bool {
+        self.contains_unresolved_content
+    }
+
+    const fn from_logical_bounds(bounds: LogicalBounds) -> Self {
+        match bounds {
+            LogicalBounds::Empty(_) => Self::exactly_empty(),
+            LogicalBounds::NonEmpty(bounds) => Self::exact_known(bounds),
+        }
+    }
+
     fn try_for_command(command: &RenderCommand) -> Result<Self> {
         match commands_bounds_for_planning(std::slice::from_ref(command))? {
             Some(bounds) => Self::try_from_rect(bounds.rect()),
-            None => Ok(Self::Unspecified),
+            None => Ok(Self::wholly_unresolved()),
         }
     }
 
     fn try_from_rect(rect: Rect) -> Result<Self> {
-        match LogicalBounds::try_from_rect(rect, "semantic source bounds")? {
-            LogicalBounds::Empty(_) => Ok(Self::Empty),
-            LogicalBounds::NonEmpty(bounds) => Ok(Self::NonEmpty(bounds)),
-        }
+        LogicalBounds::try_from_rect(rect, "semantic source bounds").map(Self::from_logical_bounds)
     }
 
     fn try_union(self, other: Self) -> Result<Self> {
-        match (self, other) {
-            (Self::Empty, bounds) | (bounds, Self::Empty) => Ok(bounds),
-            (Self::Unspecified, _) | (_, Self::Unspecified) => Ok(Self::Unspecified),
-            (Self::NonEmpty(a), Self::NonEmpty(b)) => a
-                .try_union(b, "semantic source bounds union")
-                .map(Self::NonEmpty),
-        }
+        let known_non_empty_extent = match (
+            self.known_non_empty_extent(),
+            other.known_non_empty_extent(),
+        ) {
+            (Some(a), Some(b)) => Some(a.try_union(b, "semantic source bounds union")?),
+            (Some(bounds), None) | (None, Some(bounds)) => Some(bounds),
+            (None, None) => None,
+        };
+        Ok(Self::from_parts(
+            known_non_empty_extent,
+            self.contains_unresolved_content() || other.contains_unresolved_content(),
+        ))
     }
 
     fn try_intersect(self, other: Self, name: &'static str) -> Result<Self> {
-        match (self, other) {
-            (Self::Empty, _) | (_, Self::Empty) => Ok(Self::Empty),
-            (Self::Unspecified, _) | (_, Self::Unspecified) => Ok(Self::Unspecified),
-            (Self::NonEmpty(a), Self::NonEmpty(b)) => {
+        if self.is_exactly_empty() || other.is_exactly_empty() {
+            return Ok(Self::exactly_empty());
+        }
+        let known_non_empty_extent = match (
+            self.known_non_empty_extent(),
+            other.known_non_empty_extent(),
+        ) {
+            (Some(a), Some(b)) => {
                 let a = a.rect();
                 let b = b.rect();
                 let a_max = a.max();
@@ -426,31 +474,34 @@ impl SemanticSourceBounds {
                 let max_y = a_max.y().min(b_max.y());
                 let width = checked_sub(max_x, min_x, &format!("{name} width"))?.max(0.0);
                 let height = checked_sub(max_y, min_y, &format!("{name} height"))?.max(0.0);
-                Self::try_from_rect(Rect::new(min_x, min_y, width, height))
+                Self::try_from_rect(Rect::new(min_x, min_y, width, height))?
+                    .known_non_empty_extent()
             }
-        }
+            (Some(_), None) | (None, Some(_)) | (None, None) => None,
+        };
+        Ok(Self::from_parts(
+            known_non_empty_extent,
+            self.contains_unresolved_content() || other.contains_unresolved_content(),
+        ))
     }
 
     fn try_transform(self, transform: Transform, name: &'static str) -> Result<Self> {
-        match self {
-            Self::Empty => {
-                linear_transform_is_rank_deficient(transform)?;
-                Ok(Self::Empty)
-            }
-            Self::Unspecified => {
-                if linear_transform_is_rank_deficient(transform)? {
-                    Ok(Self::Empty)
-                } else {
-                    Ok(Self::Unspecified)
-                }
-            }
-            Self::NonEmpty(bounds) => {
-                match LogicalBounds::NonEmpty(bounds).try_transform(transform, name)? {
-                    LogicalBounds::Empty(_) => Ok(Self::Empty),
-                    LogicalBounds::NonEmpty(bounds) => Ok(Self::NonEmpty(bounds)),
-                }
-            }
+        if linear_transform_is_rank_deficient(transform)? {
+            return Ok(Self::exactly_empty());
         }
+        let known_non_empty_extent = match self.known_non_empty_extent() {
+            Some(bounds) => {
+                match LogicalBounds::NonEmpty(bounds).try_transform(transform, name)? {
+                    LogicalBounds::Empty(_) => None,
+                    LogicalBounds::NonEmpty(bounds) => Some(bounds),
+                }
+            }
+            None => None,
+        };
+        Ok(Self::from_parts(
+            known_non_empty_extent,
+            self.contains_unresolved_content(),
+        ))
     }
 
     fn try_for_clip(clip: &RenderClip) -> Result<Self> {
@@ -461,15 +512,14 @@ impl SemanticSourceBounds {
         self,
         name: &'static str,
     ) -> Result<Option<NonEmptyLogicalBounds>> {
-        match self {
-            Self::Empty => Ok(None),
-            Self::NonEmpty(bounds) => Ok(Some(bounds)),
-            Self::Unspecified => Err(Error::invalid_value(
+        if self.contains_unresolved_content() {
+            return Err(Error::invalid_value(
                 name,
                 "unspecified",
                 "must be explicit before semantic graph source planning",
-            )),
+            ));
         }
+        Ok(self.known_non_empty_extent())
     }
 }
 
@@ -488,7 +538,7 @@ impl SemanticSourceContribution {
         local_to_surface: Transform,
     ) -> Result<Self> {
         let mut contributing_commands = Vec::with_capacity(commands.len());
-        let mut source_bounds = SemanticSourceBounds::Empty;
+        let mut source_bounds = SemanticSourceBounds::exactly_empty();
         let mut current_parent = initial_parent;
         for command in commands {
             let contribution =
@@ -521,24 +571,24 @@ impl SemanticSourceContribution {
                 glyphs,
                 bounds,
             } => {
-                let source_bounds = if glyphs.is_empty()
-                    || bounds.kind() == TextRunBoundsKind::Empty
-                {
-                    SemanticSourceBounds::Empty.try_transform(transform, "text source transform")?
-                } else if bounds.kind() == TextRunBoundsKind::Unspecified {
-                    SemanticSourceBounds::Unspecified
-                        .try_transform(transform, "text source transform")?
-                } else {
-                    let ink_bounds = bounds.ink_rect().ok_or_else(|| {
-                        Error::invalid_value(
-                            "text source bounds",
-                            "missing ink rectangle",
-                            "must carry an ink rectangle when the bounds kind is ink",
-                        )
-                    })?;
-                    SemanticSourceBounds::try_from_rect(ink_bounds)?
-                        .try_transform(transform, "text source transform")?
-                };
+                let source_bounds =
+                    if glyphs.is_empty() || bounds.kind() == TextRunBoundsKind::Empty {
+                        SemanticSourceBounds::exactly_empty()
+                            .try_transform(transform, "text source transform")?
+                    } else if bounds.kind() == TextRunBoundsKind::Unspecified {
+                        SemanticSourceBounds::wholly_unresolved()
+                            .try_transform(transform, "text source transform")?
+                    } else {
+                        let ink_bounds = bounds.ink_rect().ok_or_else(|| {
+                            Error::invalid_value(
+                                "text source bounds",
+                                "missing ink rectangle",
+                                "must carry an ink rectangle when the bounds kind is ink",
+                            )
+                        })?;
+                        SemanticSourceBounds::try_from_rect(ink_bounds)?
+                            .try_transform(transform, "text source transform")?
+                    };
                 SemanticCommandContribution::try_new(
                     RenderCommand::TextRun {
                         font,
@@ -559,64 +609,66 @@ impl SemanticSourceContribution {
                 let layer_to_surface = layer.transform.then(local_to_surface)?;
                 let children = Self::try_from_commands(
                     children,
-                    SemanticSourceBounds::Empty,
+                    SemanticSourceBounds::exactly_empty(),
                     context,
                     layer_to_surface,
                 )?;
                 let mut source_bounds = children.current_parent;
 
                 if let Some(backdrop) = layer.backdrop.as_deref() {
-                    let filter_plan = AlgorithmFilterPlan::from_filter_list(backdrop.filters());
-                    let capture_bounds =
-                        SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
-                    let captured_parent = current_parent
-                        .try_intersect(capture_bounds, "backdrop current-parent intersection")?;
-                    if captured_parent == SemanticSourceBounds::Empty
-                        || filter_plan.output_is_always_transparent()
+                    let algorithm_filter_plan =
+                        AlgorithmFilterPlan::from_filter_list(backdrop.filters());
+                    let capture_bounds = LogicalBounds::try_from_rect(
+                        backdrop.capture_bounds().rect(),
+                        "backdrop capture bounds",
+                    )?;
+                    let resolved_filter_plan = context.plan_filter_list(
+                        capture_bounds,
+                        layer_to_surface,
+                        backdrop.filters(),
+                        FilterSourceRole::Backdrop,
+                    )?;
+                    let mut backdrop_contribution = match resolved_filter_plan {
+                        ResolvedFrameFilterPlan::Empty(_) => SemanticSourceBounds::exactly_empty(),
+                        ResolvedFrameFilterPlan::NonEmpty(plan) => {
+                            SemanticSourceBounds::exact_known(plan.final_bounds)
+                        }
+                    };
+                    if let Some(clip) = backdrop.clip() {
+                        let clip_bounds = SemanticSourceBounds::try_for_clip(clip)?;
+                        backdrop_contribution = backdrop_contribution
+                            .try_intersect(clip_bounds, "post-filter backdrop clip intersection")?;
+                    }
+                    let captured_parent = current_parent.try_intersect(
+                        SemanticSourceBounds::from_logical_bounds(capture_bounds),
+                        "backdrop current-parent intersection",
+                    )?;
+                    if captured_parent.is_exactly_empty()
+                        || algorithm_filter_plan.output_is_always_transparent()
+                        || backdrop_contribution.is_exactly_empty()
                     {
                         layer.backdrop = None;
                     } else {
-                        let capture_bounds = LogicalBounds::try_from_rect(
-                            backdrop.capture_bounds().rect(),
-                            "backdrop capture bounds",
-                        )?;
-                        let filter_plan = context.plan_filter_list(
-                            capture_bounds,
-                            layer_to_surface,
-                            backdrop.filters(),
-                            FilterSourceRole::Backdrop,
-                        )?;
-                        let mut backdrop_contribution = match filter_plan {
-                            ResolvedFrameFilterPlan::Empty(_) => SemanticSourceBounds::Empty,
-                            ResolvedFrameFilterPlan::NonEmpty(plan) => {
-                                SemanticSourceBounds::NonEmpty(plan.final_bounds)
-                            }
-                        };
-                        if let Some(clip) = backdrop.clip() {
-                            backdrop_contribution = backdrop_contribution.try_intersect(
-                                SemanticSourceBounds::try_for_clip(clip)?,
-                                "post-filter backdrop clip intersection",
-                            )?;
-                        }
-                        if backdrop_contribution == SemanticSourceBounds::Empty {
-                            layer.backdrop = None;
-                        } else {
-                            source_bounds = source_bounds.try_union(backdrop_contribution)?;
-                        }
+                        source_bounds = source_bounds.try_union(backdrop_contribution)?;
                     }
                 }
 
-                if let (Some(mask), SemanticSourceBounds::NonEmpty(mask_source_bounds)) =
-                    (layer.mask.as_ref(), source_bounds)
+                if let Some(mask) = layer.mask.as_ref()
+                    && let Some(mask_source_bounds) = source_bounds.known_non_empty_extent()
                     && let FrameSpatialPlan::NonEmpty(spatial) = context.plan_local_bounds(
                         LogicalBounds::NonEmpty(mask_source_bounds),
                         layer_to_surface,
                     )?
                 {
-                    mask.validate_expected_physical_size(PhysicalSize::new(
+                    let known_physical_size = PhysicalSize::new(
                         spatial.device_extent.width,
                         spatial.device_extent.height,
-                    ))?;
+                    );
+                    if source_bounds.contains_unresolved_content() {
+                        mask.validate_minimum_physical_size(known_physical_size)?;
+                    } else {
+                        mask.validate_expected_physical_size(known_physical_size)?;
+                    }
                 }
 
                 if let Some(clip) = layer.clip.as_ref() {
@@ -630,10 +682,10 @@ impl SemanticSourceContribution {
                     .as_ref()
                     .is_some_and(RenderLayerMask::annihilates_source)
                 {
-                    source_bounds = SemanticSourceBounds::Empty;
+                    source_bounds = SemanticSourceBounds::exactly_empty();
                 }
                 if layer.opacity <= 0.0 {
-                    source_bounds = SemanticSourceBounds::Empty;
+                    source_bounds = SemanticSourceBounds::exactly_empty();
                 }
                 source_bounds = source_bounds
                     .try_transform(layer.transform, "semantic layer source transform")?;
@@ -670,7 +722,7 @@ impl SemanticCommandContribution {
         source_bounds: SemanticSourceBounds,
         current_parent: SemanticSourceBounds,
     ) -> Result<Self> {
-        if source_bounds == SemanticSourceBounds::Empty {
+        if source_bounds.is_exactly_empty() {
             return Ok(Self {
                 command: None,
                 source_bounds,
@@ -2308,7 +2360,7 @@ impl SemanticFrameGraphPlanner {
         let raster_transform = state.capture_transform.then(state.parent_to_surface)?;
         let contribution = SemanticSourceContribution::try_from_commands(
             commands,
-            SemanticSourceBounds::Empty,
+            SemanticSourceBounds::exactly_empty(),
             self.context,
             raster_transform,
         )?;
@@ -2456,7 +2508,7 @@ impl SemanticFrameGraphPlanner {
     ) -> Result<Option<PlannedGraphResource>> {
         let contribution = SemanticSourceContribution::try_from_commands(
             children,
-            SemanticSourceBounds::Empty,
+            SemanticSourceBounds::exactly_empty(),
             self.context,
             raster_transform,
         )?;
@@ -2535,7 +2587,7 @@ impl SemanticFrameGraphPlanner {
             raster_transform,
         )?;
 
-        let mut backdrop_contribution = SemanticSourceBounds::NonEmpty(filtered.logical_bounds);
+        let mut backdrop_contribution = SemanticSourceBounds::exact_known(filtered.logical_bounds);
         if let Some(clip) = backdrop.clip() {
             backdrop_contribution = backdrop_contribution.try_intersect(
                 SemanticSourceBounds::try_for_clip(clip)?,

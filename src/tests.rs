@@ -9531,6 +9531,53 @@ fn transparent_mismatched_resolved_alpha_mask_reports_typed_size_error() {
 }
 
 #[test]
+fn transparent_mask_smaller_than_known_mixed_source_reports_typed_size_error() {
+    let transparent_mask =
+        ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 127, 63, 0]).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_resolved_alpha_mask(transparent_mask)
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+            add_planning_text(scene, TextRunBounds::unspecified());
+        },
+    );
+    let normalized = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the mixed-source transparent-mask fixture must normalize");
+    let context = super::frame::FrameContext::try_new(
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    )
+    .expect("the mixed-source transparent-mask frame context must resolve");
+    let result = normalized.plan_for(context);
+    let observed = result.as_ref().err().map(|error| {
+        let diagnostic = error.invalid_value_diagnostic();
+        (
+            error.code(),
+            diagnostic.map(InvalidValue::field),
+            diagnostic.map(InvalidValue::value),
+            diagnostic.map(InvalidValue::invariant),
+        )
+    });
+
+    assert_eq!(
+        observed,
+        Some((
+            ErrorCode::InvalidInput,
+            Some("resolved layer alpha mask size"),
+            Some("1x1"),
+            Some("must match the offscreen layer bounds in device pixels"),
+        )),
+        "mixed source bounds discarded the known extent before transparent-mask validation"
+    );
+}
+
+#[test]
 fn bounded_blur_backdrop_over_empty_parent_is_pruned_without_erasing_foreground() {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
@@ -9657,6 +9704,61 @@ fn zero_opacity_backdrop_preserves_foreground_without_graph_boundary() {
             && plan.resource_count == 0
             && plan.pass_count == 0,
         "zero-opacity backdrop retained a graph boundary or erased its nonempty Vello foreground"
+    );
+}
+
+#[test]
+fn zero_opacity_backdrop_preserves_resolved_device_range_failure() {
+    let plan_with_opacity = |opacity| {
+        let filters = FilterList::try_ops(vec![FilterOp::opacity(
+            UnitFilterAmount::try_new(opacity).unwrap(),
+        )])
+        .unwrap();
+        let bounds =
+            BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 3_000_000_000.0, 1.0)).unwrap();
+        let backdrop = Layer::new()
+            .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+            .unwrap();
+        let mut scene = Scene::new();
+        scene
+            .fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK)
+            .layer(backdrop, |_| {});
+        let normalized = scene
+            .normalize(Capabilities::CURRENT)
+            .expect("the huge-backdrop fixture must normalize");
+        let context = super::frame::FrameContext::try_new(
+            Size::new(8.0, 8.0),
+            1.0,
+            Antialiasing::Area,
+            Color::TRANSPARENT,
+        )
+        .expect("the huge-backdrop frame context must resolve");
+        normalized.plan_for(context)
+    };
+    let transparent = plan_with_opacity(0.0);
+    let opaque = plan_with_opacity(1.0);
+    let observe = |result: &Result<_>| {
+        result.as_ref().err().map(|error| {
+            let diagnostic = error.invalid_value_diagnostic();
+            (
+                error.code(),
+                diagnostic.map(|value| value.field().to_owned()),
+                diagnostic.map(|value| value.value().to_owned()),
+                diagnostic.map(|value| value.invariant().to_owned()),
+            )
+        })
+    };
+    let expected = Some((
+        ErrorCode::InvalidInput,
+        Some("filter device bounds max x".to_owned()),
+        Some("3000000000".to_owned()),
+        Some("must fit in i32 device pixels".to_owned()),
+    ));
+
+    assert_eq!(
+        (observe(&transparent), observe(&opaque)),
+        (expected.clone(), expected),
+        "transparent backdrop pruning bypassed the resolved device-range failure"
     );
 }
 

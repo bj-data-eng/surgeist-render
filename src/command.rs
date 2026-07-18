@@ -190,13 +190,26 @@ impl RenderLayerMask {
     pub(crate) fn validate_expected_physical_size(&self, expected: PhysicalSize) -> Result<()> {
         let physical_size = self.alpha_mask.size();
         if physical_size != expected {
-            return Err(Error::invalid_value(
-                "resolved layer alpha mask size",
-                format!("{}x{}", physical_size.width(), physical_size.height()),
-                "must match the offscreen layer bounds in device pixels",
-            ));
+            return Err(self.physical_size_error());
         }
         Ok(())
+    }
+
+    pub(crate) fn validate_minimum_physical_size(&self, minimum: PhysicalSize) -> Result<()> {
+        let physical_size = self.alpha_mask.size();
+        if physical_size.width() < minimum.width() || physical_size.height() < minimum.height() {
+            return Err(self.physical_size_error());
+        }
+        Ok(())
+    }
+
+    fn physical_size_error(&self) -> Error {
+        let physical_size = self.alpha_mask.size();
+        Error::invalid_value(
+            "resolved layer alpha mask size",
+            format!("{}x{}", physical_size.width(), physical_size.height()),
+            "must match the offscreen layer bounds in device pixels",
+        )
     }
 }
 
