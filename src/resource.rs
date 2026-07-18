@@ -520,6 +520,8 @@ struct ResourceManagerState {
     resolved_leases: BTreeSet<(FrameIdentity, ResourceIdentity)>,
     entries: BTreeMap<ResourceIdentity, ResourceEntry>,
     stats: ResourceLifecycleStats,
+    #[cfg(test)]
+    payload_creation_attempts: u64,
 }
 
 impl ResourceManagerState {
@@ -574,14 +576,6 @@ impl ResourceManagerState {
             self.stats.hits = self.stats.hits.saturating_add(1);
             (resource, entry.allocation_generation, entry.payload.clone())
         } else {
-            let payload = create_payload()?;
-            if !payload.matches_key(key) {
-                return Err(Error::invalid_value(
-                    "resource payload",
-                    payload.label(),
-                    "must match its exact resource cache-key namespace",
-                ));
-            }
             let next_resource = self.next_resource.checked_add(1).ok_or_else(|| {
                 Error::invalid_value(
                     "resource identity",
@@ -596,6 +590,18 @@ impl ResourceManagerState {
                     "must fit in u64",
                 )
             })?;
+            #[cfg(test)]
+            {
+                self.payload_creation_attempts = self.payload_creation_attempts.saturating_add(1);
+            }
+            let payload = create_payload()?;
+            if !payload.matches_key(key) {
+                return Err(Error::invalid_value(
+                    "resource payload",
+                    payload.label(),
+                    "must match its exact resource cache-key namespace",
+                ));
+            }
             let resource = ResourceIdentity(next_resource);
             let allocation_generation = AllocationGeneration(1);
             self.next_resource = next_resource;
@@ -875,6 +881,8 @@ impl ResourceManager {
                 resolved_leases: BTreeSet::new(),
                 entries: BTreeMap::new(),
                 stats: ResourceLifecycleStats::default(),
+                #[cfg(test)]
+                payload_creation_attempts: 0,
             })),
         }
     }
@@ -928,6 +936,9 @@ impl ResourceManager {
             idle_count,
             leased_count: state.entries.len().saturating_sub(idle_count),
             retained_bytes: state.retained_bytes,
+            next_resource: state.next_resource,
+            entry_count: state.entries.len(),
+            payload_creation_attempts: state.payload_creation_attempts,
         }
     }
 }
@@ -1110,12 +1121,13 @@ impl FrameResourceScope {
             descriptor.texture_format(),
             descriptor.usage(),
         )?;
+        let byte_len = descriptor.checked_byte_len()?;
         let key = ResourceCacheKey::EffectTexture(descriptor.cache_key());
         lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             key,
-            descriptor.byte_len(),
+            byte_len,
             || {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(descriptor.label()),
@@ -1135,6 +1147,20 @@ impl FrameResourceScope {
                 Ok(ResourcePayload::EffectTexture { texture, view })
             },
         )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn acquire_working_effect_texture_for_test(
+        &mut self,
+        device: &wgpu::Device,
+        capabilities: &DeviceCapabilities,
+        working_format: WorkingFormat,
+        physical_size: super::PhysicalSize,
+        usage: wgpu::TextureUsages,
+    ) -> Result<ResourceLease> {
+        let descriptor =
+            EffectTextureDescriptor::try_working(working_format, physical_size, usage)?;
+        self.acquire_effect_texture(device, capabilities, descriptor)
     }
 
     #[cfg_attr(
@@ -1361,4 +1387,7 @@ pub(crate) struct ResourceManagerObservationForTest {
     pub(crate) idle_count: usize,
     pub(crate) leased_count: usize,
     pub(crate) retained_bytes: u64,
+    pub(crate) next_resource: u64,
+    pub(crate) entry_count: usize,
+    pub(crate) payload_creation_attempts: u64,
 }

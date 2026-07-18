@@ -42,7 +42,6 @@ pub(crate) struct EffectTextureDescriptor {
     texture_format: wgpu::TextureFormat,
     physical_size: PhysicalSize,
     usage: wgpu::TextureUsages,
-    byte_len: u64,
 }
 
 #[cfg_attr(
@@ -114,33 +113,16 @@ impl EffectTextureDescriptor {
                 "must contain at least one WGPU texture usage",
             ));
         }
-        let bytes_per_pixel = match texture_format {
-            wgpu::TextureFormat::Rgba16Float => 8_u64,
-            wgpu::TextureFormat::Rgba8Unorm => 4_u64,
-            _ => {
-                return Err(Error::invalid_value(
-                    "effect texture format",
-                    format!("{texture_format:?}"),
-                    "must be Rgba16Float or Rgba8Unorm",
-                ));
-            }
-        };
-        let pixel_count = u64::from(physical_size.width())
-            .checked_mul(u64::from(physical_size.height()))
-            .ok_or_else(|| {
-                Error::invalid_value(
-                    "effect texture pixel count",
-                    format!("{}x{}", physical_size.width(), physical_size.height()),
-                    "must fit in u64",
-                )
-            })?;
-        let byte_len = pixel_count.checked_mul(bytes_per_pixel).ok_or_else(|| {
-            Error::invalid_value(
-                "effect texture byte length",
-                format!("{pixel_count} pixels at {bytes_per_pixel} bytes per pixel"),
-                "must fit in u64",
-            )
-        })?;
+        if !matches!(
+            texture_format,
+            wgpu::TextureFormat::Rgba16Float | wgpu::TextureFormat::Rgba8Unorm
+        ) {
+            return Err(Error::invalid_value(
+                "effect texture format",
+                format!("{texture_format:?}"),
+                "must be Rgba16Float or Rgba8Unorm",
+            ));
+        }
 
         Ok(Self {
             role,
@@ -148,7 +130,6 @@ impl EffectTextureDescriptor {
             texture_format,
             physical_size,
             usage,
-            byte_len,
         })
     }
 
@@ -168,8 +149,38 @@ impl EffectTextureDescriptor {
         self.usage
     }
 
-    pub(crate) const fn byte_len(self) -> u64 {
-        self.byte_len
+    pub(crate) fn checked_byte_len(self) -> Result<u64> {
+        let bytes_per_pixel = match self.texture_format {
+            wgpu::TextureFormat::Rgba16Float => 8_u64,
+            wgpu::TextureFormat::Rgba8Unorm => 4_u64,
+            _ => {
+                return Err(Error::invalid_value(
+                    "effect texture format",
+                    format!("{:?}", self.texture_format),
+                    "must be Rgba16Float or Rgba8Unorm",
+                ));
+            }
+        };
+        let pixel_count = u64::from(self.physical_size.width())
+            .checked_mul(u64::from(self.physical_size.height()))
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "effect texture pixel count",
+                    format!(
+                        "{}x{}",
+                        self.physical_size.width(),
+                        self.physical_size.height()
+                    ),
+                    "must fit in u64",
+                )
+            })?;
+        pixel_count.checked_mul(bytes_per_pixel).ok_or_else(|| {
+            Error::invalid_value(
+                "effect texture byte length",
+                format!("{pixel_count} pixels at {bytes_per_pixel} bytes per pixel"),
+                "must fit in u64",
+            )
+        })
     }
 
     pub(crate) const fn cache_key(self) -> EffectTextureKey {

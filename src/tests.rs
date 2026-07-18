@@ -6963,6 +6963,120 @@ fn resource_byte_accounting_overflow_is_typed() {
 }
 
 #[test]
+fn extreme_effect_extent_reports_device_dimension_before_descriptor_byte_overflow() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("extreme effect extent coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("extreme effect extent coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let requested = PhysicalSize::new(u32::MAX, u32::MAX);
+    let maximum = 1;
+    let capabilities = DeviceCapabilities::from_test_facts(true, true, maximum);
+    let manager = ResourceManager::default();
+    let mut frame = manager.begin_frame().unwrap();
+    let observation_before = manager.observation_for_test();
+    let stats_before = manager.stats();
+
+    let error = frame
+        .acquire_working_effect_texture_for_test(
+            device,
+            &capabilities,
+            WorkingFormat::HighPrecision,
+            requested,
+            WorkingFormat::HighPrecision.required_usages(),
+        )
+        .expect_err("an extreme effect extent must be rejected by selected-device limits");
+
+    assert_eq!(
+        manager.observation_for_test(),
+        observation_before,
+        "extreme effect extent reached concrete GPU payload creation"
+    );
+    assert_eq!(manager.stats(), stats_before);
+    assert_eq!(
+        error.code(),
+        ErrorCode::RuntimeCapabilityUnavailable,
+        "extreme effect extent returned the wrong diagnostic before selected-device validation"
+    );
+    let expected = RuntimeCapabilityUnavailable::try_new(
+        RuntimeOperation::EffectTextureAllocation,
+        RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { requested, maximum },
+    )
+    .unwrap();
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(&expected)
+    );
+}
+
+#[test]
+fn retained_byte_overflow_preflights_all_concrete_payload_creation() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("concrete resource preflight coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("concrete resource preflight coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let queue = ready.queue_for_test();
+    let capabilities = DeviceCapabilities::from_device(ready.adapter_for_test(), device);
+    let working_format = capabilities
+        .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)
+        .expect("the selected test device must support one effect working format");
+    let effect_descriptor = EffectTextureDescriptor::try_working(
+        working_format,
+        PhysicalSize::new(1, 1),
+        working_format.required_usages(),
+    )
+    .unwrap();
+    let mask_buffer = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![0, 0, 0, 255]).unwrap();
+    let mask_descriptor =
+        ResolvedMaskUploadDescriptor::from_resolved_alpha_mask(&mask_buffer).unwrap();
+    let kernel_plan =
+        GaussianKernelPlan::try_new(1.0, 1.0, 2.5, GaussianKernelSamplingForm::PairedLinear)
+            .unwrap();
+    let manager = ResourceManager::default();
+    let mut retained_frame = manager.begin_frame().unwrap();
+    let _maximum = retained_frame
+        .acquire(ResourceCacheKey::VelloAtlas, u64::MAX)
+        .unwrap();
+    let mut concrete_frame = manager.begin_frame().unwrap();
+    let observation_before = manager.observation_for_test();
+    let stats_before = manager.stats();
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let errors = [
+        concrete_frame
+            .acquire_effect_texture(device, &capabilities, effect_descriptor)
+            .expect_err("effect texture retained-byte overflow must be rejected"),
+        concrete_frame
+            .acquire_resolved_mask_upload(device, queue, &capabilities, &mask_descriptor)
+            .expect_err("mask upload retained-byte overflow must be rejected"),
+        concrete_frame
+            .acquire_gaussian_kernel_buffer(device, &kernel_plan)
+            .expect_err("Gaussian buffer retained-byte overflow must be rejected"),
+    ];
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "concrete retained-byte overflow probe emitted a WGPU validation error"
+    );
+
+    for error in errors {
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+        assert_eq!(
+            error.invalid_value_diagnostic().map(InvalidValue::field),
+            Some("retained resource byte length")
+        );
+    }
+    assert_eq!(manager.stats(), stats_before);
+    assert_eq!(
+        manager.observation_for_test(),
+        observation_before,
+        "retained-byte overflow reached concrete GPU payload creation or upload"
+    );
+}
+
+#[test]
 fn resource_role_keys_keep_allocation_namespaces_distinct() {
     let capture = EffectTextureDescriptor::try_capture(
         PhysicalSize::new(2, 2),
@@ -7101,7 +7215,7 @@ fn effect_texture_keys_separate_format_extent_usage_and_role() {
     assert!(first_frame.effect_texture(&first).is_ok());
     assert_eq!(
         manager.observation_for_test().retained_bytes,
-        descriptor.byte_len()
+        descriptor.checked_byte_len().unwrap()
     );
     first_frame.release(first).unwrap();
     let first_cleanup = first_frame.finish();
@@ -7147,7 +7261,9 @@ fn effect_texture_keys_separate_format_extent_usage_and_role() {
     assert_eq!(manager.stats().allocations, allocations_before_reuse + 2);
     assert_eq!(
         manager.observation_for_test().retained_bytes,
-        descriptor.byte_len() + coverage_descriptor.byte_len() + capture_descriptor.byte_len()
+        descriptor.checked_byte_len().unwrap()
+            + coverage_descriptor.checked_byte_len().unwrap()
+            + capture_descriptor.checked_byte_len().unwrap()
     );
     second_frame.release(capture).unwrap();
     second_frame.release(coverage).unwrap();
