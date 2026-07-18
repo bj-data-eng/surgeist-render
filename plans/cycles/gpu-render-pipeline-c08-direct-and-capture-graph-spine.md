@@ -102,25 +102,25 @@ assert_no_owned_unsafe() {
     :
   else
     scan_status=$?
-    rm -f "$manifest" || return $?
+    unlink "$manifest" || return $?
     return "$scan_status"
   fi
-  test -s "$manifest" || { rm -f "$manifest" || return $?; printf 'owned Rust manifest is empty\n' >&2; return 1; }
+  test -s "$manifest" || { unlink "$manifest" || return $?; printf 'owned Rust manifest is empty\n' >&2; return 1; }
   while IFS= read -r -d '' file; do
     if output="$(rg -n --pcre2 '#\s*!?\[\s*(?:allow|expect)\s*\([^)]*\bunsafe(?:_[A-Za-z0-9_]+)?\b|#\s*\[\s*(?:unsafe\s*\(|no_mangle\b|export_name\b)|\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|\bstatic\s+mut\b|\bextern\s*(?:"[^"]*")?\s*\{' -- "$file" 2>&1)"; then
-      rm -f "$manifest" || return $?
+      unlink "$manifest" || return $?
       printf '%s\n' "$output" >&2
       return 1
     else
       scan_status=$?
       if test "$scan_status" -ne 1; then
-        rm -f "$manifest" || return $?
+        unlink "$manifest" || return $?
         printf '%s\n' "$output" >&2
         return "$scan_status"
       fi
     fi
   done <"$manifest"
-  rm -f "$manifest"
+  unlink "$manifest"
 }
 
 assert_no_match() {
