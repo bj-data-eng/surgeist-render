@@ -27,7 +27,7 @@ use super::{
         ResourceManager, WorkingFormat,
     },
     shader::{
-        BindGroupLayoutKey, DevicePassCache, PassSpatialUniformBytes,
+        BindGroupLayoutKey, DevicePassCache, PassSpatialUniformBytes, ProvisionalC08PassObjects,
         ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
         ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey, ShaderModuleKey,
         ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
@@ -2284,6 +2284,358 @@ impl GraphPreparationSource {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 consumes the explicit bounded C08 Vello-capture encoding handoff"
+    )
+)]
+pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
+    pass: RuntimePassId,
+    target: RuntimeResourceId,
+    commands: &'prepared RenderCommands,
+    initial_transform: Transform,
+    antialiasing: Antialiasing,
+    target_extent: PhysicalSize,
+    texel_origin: Point,
+    raster_scale: f64,
+    allocation_resource: ResourceIdentity,
+    texture: &'prepared wgpu::Texture,
+    view: &'prepared wgpu::TextureView,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 consumes the exact C08 Vello-capture encoding facts and target"
+    )
+)]
+impl C08VelloCaptureEncodingHandoff<'_> {
+    pub(crate) const fn pass(&self) -> RuntimePassId {
+        self.pass
+    }
+
+    pub(crate) const fn target(&self) -> RuntimeResourceId {
+        self.target
+    }
+
+    pub(crate) const fn commands(&self) -> &RenderCommands {
+        self.commands
+    }
+
+    pub(crate) const fn initial_transform(&self) -> Transform {
+        self.initial_transform
+    }
+
+    pub(crate) const fn antialiasing(&self) -> Antialiasing {
+        self.antialiasing
+    }
+
+    pub(crate) const fn target_extent(&self) -> PhysicalSize {
+        self.target_extent
+    }
+
+    pub(crate) const fn texel_origin(&self) -> Point {
+        self.texel_origin
+    }
+
+    pub(crate) const fn raster_scale(&self) -> f64 {
+        self.raster_scale
+    }
+
+    pub(crate) const fn allocation_resource(&self) -> ResourceIdentity {
+        self.allocation_resource
+    }
+
+    pub(crate) const fn texture(&self) -> &wgpu::Texture {
+        self.texture
+    }
+
+    pub(crate) const fn view(&self) -> &wgpu::TextureView {
+        self.view
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T5 supplies the exact external graph-output view to the C08 encoder"
+    )
+)]
+pub(crate) struct C08ExternalOutputView<'output> {
+    view: &'output wgpu::TextureView,
+    format: Format,
+    extent: PhysicalSize,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T5 constructs the transaction-owned C08 external output binding"
+    )
+)]
+impl<'output> C08ExternalOutputView<'output> {
+    pub(crate) fn try_new(
+        view: &'output wgpu::TextureView,
+        format: Format,
+        extent: PhysicalSize,
+    ) -> Result<Self> {
+        if extent.width() == 0 || extent.height() == 0 {
+            return Err(preparation_error(
+                "C08 external output view must have a positive exact extent",
+            ));
+        }
+        Ok(Self {
+            view,
+            format,
+            extent,
+        })
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08ScheduledEncodingKind {
+    ClearRoot,
+    VelloCapture,
+    CanonicalizeCapture,
+    SpanSourceOver,
+    Present,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 and T5 consume the completed custom-spine encoding phase"
+    )
+)]
+pub(crate) struct C08CustomSpineEncodingSummary {
+    pub(crate) encodes_custom_passes_in_order: bool,
+    pub(crate) clears_full_root_once: bool,
+    pub(crate) uses_exact_prepared_spatial_mapping: bool,
+    pub(crate) presents_to_exact_external_output: bool,
+    pub(crate) exposes_bounded_capture_handoff: bool,
+    pub(crate) completes_custom_passes_after_encoding: bool,
+    pub(crate) parent_and_result_are_distinct: bool,
+    pub(crate) copies_full_parent_before_bounded_source_render: bool,
+    pub(crate) samples_only_source_with_fixed_premultiplied_blend: bool,
+    pub(crate) preserves_signed_source_origin: bool,
+    pub(crate) keeps_cache_update_provisional: bool,
+}
+
+#[derive(Clone)]
+struct C08PreparedPassEncodingRequest {
+    id: RuntimePassId,
+    kind: RuntimePassKind,
+    reads: Vec<RuntimeReadBinding>,
+    result: RuntimeResultBinding,
+    spatial_uniform: Option<PassSpatialUniformBytes>,
+    cache_keys: Option<RuntimePassCacheKeys>,
+}
+
+impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
+    fn from(request: &RuntimePassPreparationRequest) -> Self {
+        Self {
+            id: request.runtime.id,
+            kind: request.runtime.kind.clone(),
+            reads: request.runtime.reads.clone(),
+            result: request.runtime.result,
+            spatial_uniform: request.spatial_uniform.clone(),
+            cache_keys: request.cache_keys.clone(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct C08RenderRegion {
+    viewport_x: f32,
+    viewport_y: f32,
+    viewport_width: f32,
+    viewport_height: f32,
+    scissor_x: u32,
+    scissor_y: u32,
+    scissor_width: u32,
+    scissor_height: u32,
+    unclipped_x: f64,
+    unclipped_y: f64,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct C08PassEncodingFacts {
+    full_target: bool,
+    exact_spatial_uniform: bool,
+    external_output_exact: bool,
+    parent_and_result_distinct: bool,
+    copied_full_parent_before_render: bool,
+    sampled_only_source: bool,
+    fixed_source_over_blend: bool,
+    preserved_signed_source_origin: bool,
+}
+
+struct C08SampledRenderTarget<'target> {
+    view: &'target wgpu::TextureView,
+    extent: PhysicalSize,
+    region: Option<C08RenderRegion>,
+    load: wgpu::LoadOp<wgpu::Color>,
+    label: &'static str,
+}
+
+impl C08RenderRegion {
+    fn full(extent: PhysicalSize) -> Result<Self> {
+        if extent.width() == 0 || extent.height() == 0 {
+            return Err(preparation_error(
+                "the C08 render region requires a positive target extent",
+            ));
+        }
+        let viewport_width = extent.width() as f32;
+        let viewport_height = extent.height() as f32;
+        if !viewport_width.is_finite() || !viewport_height.is_finite() {
+            return Err(preparation_error(
+                "the C08 render extent cannot be represented by WGPU viewport coordinates",
+            ));
+        }
+        Ok(Self {
+            viewport_x: 0.0,
+            viewport_y: 0.0,
+            viewport_width,
+            viewport_height,
+            scissor_x: 0,
+            scissor_y: 0,
+            scissor_width: extent.width(),
+            scissor_height: extent.height(),
+            unclipped_x: 0.0,
+            unclipped_y: 0.0,
+        })
+    }
+
+    fn bounded_source(
+        source: RuntimeSpatialDescriptor,
+        destination: RuntimeSpatialDescriptor,
+    ) -> Result<Option<Self>> {
+        let source_width = f64::from(source.device_extent.width()) / source.raster_scale;
+        let source_height = f64::from(source.device_extent.height()) / source.raster_scale;
+        let unclipped_x =
+            (source.texel_origin.x() - destination.texel_origin.x()) * destination.raster_scale;
+        let unclipped_y =
+            (source.texel_origin.y() - destination.texel_origin.y()) * destination.raster_scale;
+        let unclipped_end_x = (source.texel_origin.x() + source_width
+            - destination.texel_origin.x())
+            * destination.raster_scale;
+        let unclipped_end_y = (source.texel_origin.y() + source_height
+            - destination.texel_origin.y())
+            * destination.raster_scale;
+        if [unclipped_x, unclipped_y, unclipped_end_x, unclipped_end_y]
+            .iter()
+            .any(|value| !value.is_finite())
+        {
+            return Err(preparation_error(
+                "the C08 signed bounded render mapping is non-finite",
+            ));
+        }
+
+        let destination_width = f64::from(destination.device_extent.width());
+        let destination_height = f64::from(destination.device_extent.height());
+        let clipped_x = unclipped_x.max(0.0).min(destination_width);
+        let clipped_y = unclipped_y.max(0.0).min(destination_height);
+        let clipped_end_x = unclipped_end_x.max(0.0).min(destination_width);
+        let clipped_end_y = unclipped_end_y.max(0.0).min(destination_height);
+        if clipped_end_x <= clipped_x || clipped_end_y <= clipped_y {
+            return Ok(None);
+        }
+
+        let scissor_x = clipped_x.floor() as u32;
+        let scissor_y = clipped_y.floor() as u32;
+        let scissor_end_x = clipped_end_x.ceil() as u32;
+        let scissor_end_y = clipped_end_y.ceil() as u32;
+        let viewport_x = clipped_x as f32;
+        let viewport_y = clipped_y as f32;
+        let viewport_width = (clipped_end_x - clipped_x) as f32;
+        let viewport_height = (clipped_end_y - clipped_y) as f32;
+        if !viewport_x.is_finite()
+            || !viewport_y.is_finite()
+            || !viewport_width.is_finite()
+            || !viewport_height.is_finite()
+            || viewport_width <= 0.0
+            || viewport_height <= 0.0
+            || scissor_end_x <= scissor_x
+            || scissor_end_y <= scissor_y
+        {
+            return Err(preparation_error(
+                "the C08 bounded viewport or scissor cannot represent its signed mapping",
+            ));
+        }
+        Ok(Some(Self {
+            viewport_x,
+            viewport_y,
+            viewport_width,
+            viewport_height,
+            scissor_x,
+            scissor_y,
+            scissor_width: scissor_end_x - scissor_x,
+            scissor_height: scissor_end_y - scissor_y,
+            unclipped_x,
+            unclipped_y,
+        }))
+    }
+}
+
+fn exact_c08_read(
+    request: &C08PreparedPassEncodingRequest,
+    role: RuntimeReadRole,
+) -> Result<&RuntimeReadBinding> {
+    let mut matching = request.reads.iter().filter(|read| read.role == role);
+    let read = matching
+        .next()
+        .ok_or_else(|| preparation_error("the C08 prepared source binding is missing"))?;
+    if matching.next().is_some() {
+        return Err(preparation_error(
+            "the C08 prepared source binding is duplicated",
+        ));
+    }
+    Ok(read)
+}
+
+fn c08_scheduled_encoding_order_is_exact(
+    scheduled: &[C08ScheduledEncodingKind],
+    capture_count: usize,
+) -> bool {
+    if capture_count == 0
+        || scheduled.len() != capture_count.saturating_mul(3).saturating_add(2)
+        || scheduled.first() != Some(&C08ScheduledEncodingKind::ClearRoot)
+        || scheduled.last() != Some(&C08ScheduledEncodingKind::Present)
+    {
+        return false;
+    }
+    scheduled[1..scheduled.len() - 1]
+        .chunks_exact(3)
+        .all(|chunk| {
+            chunk
+                == [
+                    C08ScheduledEncodingKind::VelloCapture,
+                    C08ScheduledEncodingKind::CanonicalizeCapture,
+                    C08ScheduledEncodingKind::SpanSourceOver,
+                ]
+        })
+}
+
+fn c08_spatial_uniform_preserves_source_origin(
+    bytes: &PassSpatialUniformBytes,
+    source: RuntimeSpatialDescriptor,
+) -> bool {
+    let encoded_x = f32::from_le_bytes(bytes.as_bytes()[0..4].try_into().unwrap_or([0; 4]));
+    let encoded_y = f32::from_le_bytes(bytes.as_bytes()[4..8].try_into().unwrap_or([0; 4]));
+    encoded_x == source.texel_origin.x() as f32 && encoded_y == source.texel_origin.y() as f32
+}
+
+fn close_f64(left: f64, right: f64) -> bool {
+    let tolerance = f64::EPSILON * left.abs().max(right.abs()).max(1.0) * 8.0;
+    (left - right).abs() <= tolerance
+}
+
 /// One allocation-backed, generation-bound C07 handoff. Its lifetime prevents
 /// the ready device bundle from transitioning while C08 owns its frame scope.
 pub(crate) struct PreparedGraph<'device> {
@@ -2294,12 +2646,10 @@ pub(crate) struct PreparedGraph<'device> {
     pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
-    _ready_device: PhantomData<(
-        &'device wgpu::Device,
-        &'device wgpu::Queue,
-        &'device ResourceManager,
-        &'device DevicePassCache,
-    )>,
+    device: &'device wgpu::Device,
+    queue: &'device wgpu::Queue,
+    pass_cache: &'device DevicePassCache,
+    _ready_device: PhantomData<&'device ResourceManager>,
 }
 
 impl<'device> PreparedGraph<'device> {
@@ -2457,6 +2807,9 @@ impl<'device> PreparedGraph<'device> {
             pass_cache_update,
             frame_scope: Some(frame_scope),
             next_pass: 0,
+            device,
+            queue,
+            pass_cache,
             _ready_device: PhantomData,
         })
     }
@@ -2504,6 +2857,611 @@ impl<'device> PreparedGraph<'device> {
     )]
     pub(crate) const fn root_and_final(&self) -> (RuntimeResourceId, RuntimePassId) {
         (self.plan.root_working_image, self.plan.final_present)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 binds the exact prepared root extent to its external output draft"
+        )
+    )]
+    pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
+        self.resource_request(self.plan.root_working_image)
+            .map(|resource| resource.spatial.device_extent)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T4 supplies bounded Vello capture encoding while this C08 scheduler owns custom passes"
+        )
+    )]
+    pub(crate) fn encode_c08_custom_spine<F>(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: C08ExternalOutputView<'_>,
+        mut encode_capture: F,
+    ) -> Result<C08CustomSpineEncodingSummary>
+    where
+        F: for<'capture> FnMut(
+            C08VelloCaptureEncodingHandoff<'capture>,
+            &mut wgpu::CommandEncoder,
+        ) -> Result<()>,
+    {
+        let execution = self.c08_execution.as_ref().ok_or_else(|| {
+            preparation_error("the C08 custom scheduler requires validated execution facts")
+        })?;
+        if execution.working_format() != self.plan.working_format
+            || execution.output_format() != self.plan.output_format
+            || output.format != self.plan.output_format
+            || output.extent != self.output_extent()?
+        {
+            return Err(preparation_error(
+                "the C08 external output differs from the exact prepared format or extent",
+            ));
+        }
+        if self.pass_cache_update.is_none() {
+            return Err(preparation_error(
+                "the C08 custom scheduler requires transaction-provisional pass objects",
+            ));
+        }
+
+        let expected_capture_count = execution.captures().len();
+        let mut scheduled = Vec::with_capacity(self.plan.passes.len());
+        let mut capture_count = 0_usize;
+        let mut bounded_capture_handoffs = true;
+        let mut custom_encoded = 0_usize;
+        let mut custom_completed = 0_usize;
+        let mut clear_count = 0_usize;
+        let mut clears_full_root = true;
+        let mut exact_spatial = true;
+        let mut exact_external_output = false;
+        let mut source_over_count = 0_usize;
+        let mut parent_and_result_are_distinct = true;
+        let mut full_copy_before_bounded_render = true;
+        let mut samples_source_with_fixed_blend = true;
+        let mut preserves_signed_origin = true;
+
+        while let Some(request) = self
+            .plan
+            .passes
+            .get(self.next_pass)
+            .map(C08PreparedPassEncodingRequest::from)
+        {
+            let pass = request.id;
+            match &request.kind {
+                RuntimePassKind::ClearRoot { .. } => {
+                    let facts = self.encode_c08_clear_root(encoder, &request)?;
+                    custom_encoded = custom_encoded.saturating_add(1);
+                    clear_count = clear_count.saturating_add(1);
+                    clears_full_root &= facts.full_target;
+                    scheduled.push(C08ScheduledEncodingKind::ClearRoot);
+                    self.complete_pass(pass)?;
+                    custom_completed = custom_completed.saturating_add(1);
+                }
+                RuntimePassKind::VelloCapture(Some(_)) => {
+                    let handoff = self.c08_vello_capture_handoff(&request)?;
+                    bounded_capture_handoffs &= !handoff.commands().commands.is_empty()
+                        && handoff.target_extent().width() > 0
+                        && handoff.target_extent().height() > 0
+                        && handoff.texture().width() == handoff.target_extent().width()
+                        && handoff.texture().height() == handoff.target_extent().height()
+                        && handoff.texture().depth_or_array_layers() == 1
+                        && handoff.texture().mip_level_count() == 1
+                        && handoff.texture().sample_count() == 1
+                        && handoff.raster_scale().is_finite()
+                        && handoff.raster_scale() > 0.0
+                        && handoff
+                            .initial_transform()
+                            .as_array()
+                            .iter()
+                            .all(|value| value.is_finite());
+                    scheduled.push(C08ScheduledEncodingKind::VelloCapture);
+                    encode_capture(handoff, encoder)?;
+                    self.complete_pass(pass)?;
+                    capture_count = capture_count.saturating_add(1);
+                }
+                RuntimePassKind::CanonicalizeCapture => {
+                    let facts = self.encode_c08_canonicalize(encoder, &request)?;
+                    custom_encoded = custom_encoded.saturating_add(1);
+                    exact_spatial &= facts.exact_spatial_uniform;
+                    scheduled.push(C08ScheduledEncodingKind::CanonicalizeCapture);
+                    self.complete_pass(pass)?;
+                    custom_completed = custom_completed.saturating_add(1);
+                }
+                RuntimePassKind::Composite(Some(composite))
+                    if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
+                {
+                    let facts = self.encode_c08_span_source_over(encoder, &request)?;
+                    custom_encoded = custom_encoded.saturating_add(1);
+                    source_over_count = source_over_count.saturating_add(1);
+                    exact_spatial &= facts.exact_spatial_uniform;
+                    parent_and_result_are_distinct &= facts.parent_and_result_distinct;
+                    full_copy_before_bounded_render &= facts.copied_full_parent_before_render;
+                    samples_source_with_fixed_blend &=
+                        facts.sampled_only_source && facts.fixed_source_over_blend;
+                    preserves_signed_origin &= facts.preserved_signed_source_origin;
+                    scheduled.push(C08ScheduledEncodingKind::SpanSourceOver);
+                    self.complete_pass(pass)?;
+                    custom_completed = custom_completed.saturating_add(1);
+                }
+                RuntimePassKind::Present => {
+                    let facts = self.encode_c08_present(encoder, &request, &output)?;
+                    custom_encoded = custom_encoded.saturating_add(1);
+                    exact_spatial &= facts.exact_spatial_uniform;
+                    exact_external_output |= facts.external_output_exact;
+                    scheduled.push(C08ScheduledEncodingKind::Present);
+                    self.complete_pass(pass)?;
+                    custom_completed = custom_completed.saturating_add(1);
+                }
+                RuntimePassKind::VelloCapture(None)
+                | RuntimePassKind::CopyBackdrop
+                | RuntimePassKind::ColorFilter(_)
+                | RuntimePassKind::BlurHorizontal(_)
+                | RuntimePassKind::BlurVertical(_)
+                | RuntimePassKind::DropShadowColorize(_)
+                | RuntimePassKind::Composite(_) => {
+                    return Err(preparation_error(
+                        "a non-C08 pass reached the custom graph spine scheduler",
+                    ));
+                }
+            }
+        }
+
+        let encodes_custom_passes_in_order =
+            c08_scheduled_encoding_order_is_exact(&scheduled, expected_capture_count);
+        Ok(C08CustomSpineEncodingSummary {
+            encodes_custom_passes_in_order,
+            clears_full_root_once: clear_count == 1 && clears_full_root,
+            uses_exact_prepared_spatial_mapping: exact_spatial,
+            presents_to_exact_external_output: exact_external_output,
+            exposes_bounded_capture_handoff: expected_capture_count > 0
+                && capture_count == expected_capture_count
+                && bounded_capture_handoffs,
+            completes_custom_passes_after_encoding: custom_encoded > 0
+                && custom_completed == custom_encoded,
+            parent_and_result_are_distinct: source_over_count > 0 && parent_and_result_are_distinct,
+            copies_full_parent_before_bounded_source_render: source_over_count > 0
+                && full_copy_before_bounded_render,
+            samples_only_source_with_fixed_premultiplied_blend: source_over_count > 0
+                && samples_source_with_fixed_blend,
+            preserves_signed_source_origin: source_over_count > 0 && preserves_signed_origin,
+            keeps_cache_update_provisional: self.pass_cache_update.is_some(),
+        })
+    }
+
+    fn resource_request(&self, resource: RuntimeResourceId) -> Result<&RuntimeResourceRequest> {
+        self.plan
+            .resources
+            .iter()
+            .find(|request| request.runtime.id == resource)
+            .map(|request| &request.runtime)
+            .ok_or_else(|| preparation_error("the prepared C08 resource request is missing"))
+    }
+
+    fn validate_texture_binding(
+        &self,
+        binding: &PreparedTextureBinding<'_>,
+        resource: RuntimeResourceId,
+    ) -> Result<RuntimeSpatialDescriptor> {
+        let request = self.resource_request(resource)?;
+        let texture = binding.texture();
+        let expected_format = match request.format {
+            RuntimeResourceFormat::VelloCaptureRgba8Unorm
+            | RuntimeResourceFormat::ResolvedMaskRgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
+            RuntimeResourceFormat::Working(format) => format.texture_format(),
+        };
+        if binding.runtime_resource() != resource
+            || texture.width() != request.spatial.device_extent.width()
+            || texture.height() != request.spatial.device_extent.height()
+            || texture.depth_or_array_layers() != 1
+            || texture.mip_level_count() != 1
+            || texture.sample_count() != 1
+            || texture.dimension() != wgpu::TextureDimension::D2
+            || texture.format() != expected_format
+        {
+            return Err(preparation_error(
+                "the C08 prepared texture differs from its exact runtime binding",
+            ));
+        }
+        Ok(request.spatial)
+    }
+
+    fn c08_pass_objects<'prepared>(
+        &'prepared self,
+        keys: &RuntimePassCacheKeys,
+    ) -> Result<ProvisionalC08PassObjects<'prepared>> {
+        self.pass_cache_update
+            .as_ref()
+            .ok_or_else(|| preparation_error("C08 provisional pass objects are unavailable"))?
+            .encoding_objects(
+                self.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+    }
+
+    fn create_c08_spatial_uniform_buffer(&self, bytes: &PassSpatialUniformBytes) -> wgpu::Buffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Surgeist C08 pass spatial uniform"),
+            size: bytes.as_bytes().len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, bytes.as_bytes());
+        buffer
+    }
+
+    fn c08_vello_capture_handoff<'prepared>(
+        &'prepared self,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C08VelloCaptureEncodingHandoff<'prepared>> {
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error(
+                "the C08 Vello capture has no exact prepared target",
+            ));
+        };
+        let capture = self
+            .c08_execution
+            .as_ref()
+            .and_then(|execution| {
+                execution
+                    .captures()
+                    .iter()
+                    .find(|capture| capture.pass() == request.id && capture.target() == target)
+            })
+            .ok_or_else(|| preparation_error("the bounded C08 capture handoff is missing"))?;
+        let binding = self.texture_binding_for_pass(request.id, target)?;
+        let spatial = self.validate_texture_binding(&binding, target)?;
+        if spatial.device_extent != capture.target_extent()
+            || spatial.texel_origin != capture.texel_origin()
+            || spatial.raster_scale != capture.raster_scale()
+        {
+            return Err(preparation_error(
+                "the bounded C08 capture target changed after preparation",
+            ));
+        }
+        Ok(C08VelloCaptureEncodingHandoff {
+            pass: request.id,
+            target,
+            commands: capture.commands(),
+            initial_transform: capture.initial_transform(),
+            antialiasing: capture.antialiasing(),
+            target_extent: capture.target_extent(),
+            texel_origin: capture.texel_origin(),
+            raster_scale: capture.raster_scale(),
+            allocation_resource: binding.allocation_resource(),
+            texture: binding.texture(),
+            view: binding.view(),
+        })
+    }
+
+    fn encode_c08_clear_root(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C08PassEncodingFacts> {
+        let RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::SurfaceBaseColor,
+            color,
+        } = &request.kind
+        else {
+            return Err(preparation_error(
+                "the C08 root clear changed its initialization contract",
+            ));
+        };
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error("the C08 root clear has no target"));
+        };
+        if target != self.plan.root_working_image
+            || !request.reads.is_empty()
+            || request.spatial_uniform.is_some()
+            || request.cache_keys.is_some()
+        {
+            return Err(preparation_error(
+                "the C08 root clear has non-root or sampled bindings",
+            ));
+        }
+        let binding = self.texture_binding_for_pass(request.id, target)?;
+        let spatial = self.validate_texture_binding(&binding, target)?;
+        let alpha = f64::from(color.a());
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Surgeist C08 full root clear"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: binding.view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: f64::from(color.r()) * alpha,
+                            g: f64::from(color.g()) * alpha,
+                            b: f64::from(color.b()) * alpha,
+                            a: alpha,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+        }
+        Ok(C08PassEncodingFacts {
+            full_target: spatial.device_extent == self.output_extent()?,
+            ..C08PassEncodingFacts::default()
+        })
+    }
+
+    fn encode_c08_canonicalize(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C08PassEncodingFacts> {
+        let source = exact_c08_read(request, RuntimeReadRole::CaptureSource)?;
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error(
+                "the C08 canonicalization pass has no prepared result",
+            ));
+        };
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource)?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource)?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        if source_spatial != target_spatial
+            || self.resource_request(source.resource)?.format
+                != RuntimeResourceFormat::VelloCaptureRgba8Unorm
+            || self.resource_request(target)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+        {
+            return Err(preparation_error(
+                "C08 canonicalization changed its exact capture-to-working binding",
+            ));
+        }
+        let region = C08RenderRegion::full(target_spatial.device_extent)?;
+        let fixed_blend = self.encode_c08_sampled_render_pass(
+            encoder,
+            request,
+            source,
+            C08SampledRenderTarget {
+                view: target_binding.view(),
+                extent: target_spatial.device_extent,
+                region: Some(region),
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                label: "Surgeist C08 canonicalize capture",
+            },
+        )?;
+        Ok(C08PassEncodingFacts {
+            full_target: true,
+            exact_spatial_uniform: true,
+            fixed_source_over_blend: fixed_blend,
+            ..C08PassEncodingFacts::default()
+        })
+    }
+
+    fn encode_c08_span_source_over(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C08PassEncodingFacts> {
+        let parent = exact_c08_read(request, RuntimeReadRole::CompositeParent)?;
+        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error(
+                "the C08 source-over pass has no prepared result",
+            ));
+        };
+        let parent_binding = self.texture_binding_for_pass(request.id, parent.resource)?;
+        let parent_spatial = self.validate_texture_binding(&parent_binding, parent.resource)?;
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource)?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource)?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        let parent_and_result_distinct = parent.resource != target
+            && parent_binding.allocation_resource() != target_binding.allocation_resource();
+        if !parent_and_result_distinct
+            || parent_spatial != target_spatial
+            || parent_binding.texture().format() != target_binding.texture().format()
+            || self.resource_request(parent.resource)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || self.resource_request(source.resource)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || self.resource_request(target)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+        {
+            return Err(preparation_error(
+                "C08 source-over parent, source, and distinct result bindings are inconsistent",
+            ));
+        }
+
+        let copy_extent = wgpu::Extent3d {
+            width: parent_spatial.device_extent.width(),
+            height: parent_spatial.device_extent.height(),
+            depth_or_array_layers: 1,
+        };
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: parent_binding.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: target_binding.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            copy_extent,
+        );
+
+        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
+        let preserved_signed_source_origin =
+            request.spatial_uniform.as_ref().is_some_and(|bytes| {
+                c08_spatial_uniform_preserves_source_origin(bytes, source_spatial)
+                    && region.is_none_or(|region| {
+                        let expected_x = (source_spatial.texel_origin.x()
+                            - target_spatial.texel_origin.x())
+                            * target_spatial.raster_scale;
+                        let expected_y = (source_spatial.texel_origin.y()
+                            - target_spatial.texel_origin.y())
+                            * target_spatial.raster_scale;
+                        close_f64(region.unclipped_x, expected_x)
+                            && close_f64(region.unclipped_y, expected_y)
+                    })
+            });
+        let fixed_blend = self.encode_c08_sampled_render_pass(
+            encoder,
+            request,
+            source,
+            C08SampledRenderTarget {
+                view: target_binding.view(),
+                extent: target_spatial.device_extent,
+                region,
+                load: wgpu::LoadOp::Load,
+                label: "Surgeist C08 bounded span source-over",
+            },
+        )?;
+        Ok(C08PassEncodingFacts {
+            exact_spatial_uniform: true,
+            parent_and_result_distinct,
+            copied_full_parent_before_render: copy_extent.width == target_binding.texture().width()
+                && copy_extent.height == target_binding.texture().height(),
+            sampled_only_source: request.reads.len() == 2,
+            fixed_source_over_blend: fixed_blend,
+            preserved_signed_source_origin,
+            ..C08PassEncodingFacts::default()
+        })
+    }
+
+    fn encode_c08_present(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        output: &C08ExternalOutputView<'_>,
+    ) -> Result<C08PassEncodingFacts> {
+        let source = exact_c08_read(request, RuntimeReadRole::FinalWorkingImage)?;
+        if request.result != RuntimeResultBinding::Output(output.format)
+            || output.format != self.plan.output_format
+            || output.extent != self.output_extent()?
+        {
+            return Err(preparation_error(
+                "the C08 present pass changed its external output binding",
+            ));
+        }
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource)?;
+        let _ = self.validate_texture_binding(&source_binding, source.resource)?;
+        let region = C08RenderRegion::full(output.extent)?;
+        let fixed_blend = self.encode_c08_sampled_render_pass(
+            encoder,
+            request,
+            source,
+            C08SampledRenderTarget {
+                view: output.view,
+                extent: output.extent,
+                region: Some(region),
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                label: "Surgeist C08 present external output",
+            },
+        )?;
+        Ok(C08PassEncodingFacts {
+            full_target: true,
+            exact_spatial_uniform: true,
+            external_output_exact: true,
+            fixed_source_over_blend: fixed_blend,
+            ..C08PassEncodingFacts::default()
+        })
+    }
+
+    fn encode_c08_sampled_render_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        source: &RuntimeReadBinding,
+        target: C08SampledRenderTarget<'_>,
+    ) -> Result<bool> {
+        let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
+            preparation_error("the C08 sampled pass has no exact prepared spatial uniform")
+        })?;
+        let keys = request.cache_keys.as_ref().ok_or_else(|| {
+            preparation_error("the C08 sampled pass has no provisional cache keys")
+        })?;
+        if keys.samplers() != [source.sampler_key()] {
+            return Err(preparation_error(
+                "the C08 sampled pass changed its exact source sampler",
+            ));
+        }
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
+        let _ = self.validate_texture_binding(&source_binding, source.resource())?;
+        let objects = self.c08_pass_objects(keys)?;
+        objects.require_encoding_ready()?;
+        let uniform = self.create_c08_spatial_uniform_buffer(spatial);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C08 sampled pass bindings"),
+            layout: objects.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_binding.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(objects.sampler()?),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: uniform.as_entire_binding(),
+                },
+            ],
+        });
+        if let Some(region) = target.region {
+            if region.scissor_x.saturating_add(region.scissor_width) > target.extent.width()
+                || region.scissor_y.saturating_add(region.scissor_height) > target.extent.height()
+            {
+                return Err(preparation_error(
+                    "the C08 bounded render region exceeds its exact target extent",
+                ));
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(target.label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: target.load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(objects.render_pipeline());
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_viewport(
+                region.viewport_x,
+                region.viewport_y,
+                region.viewport_width,
+                region.viewport_height,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(
+                region.scissor_x,
+                region.scissor_y,
+                region.scissor_width,
+                region.scissor_height,
+            );
+            pass.draw(0..3, 0..1);
+        }
+        Ok(objects.uses_fixed_source_over_blend())
     }
 
     #[cfg_attr(

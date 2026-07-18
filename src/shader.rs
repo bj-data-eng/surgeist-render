@@ -268,6 +268,7 @@ pub(crate) struct ProvisionalDevicePassCacheUpdate {
 /// Borrowed C08 objects that are ready for later bind-group creation and pass
 /// encoding even while newly created handles remain provisional.
 pub(crate) struct ProvisionalC08PassObjects<'a> {
+    program: C08Program,
     samplers: Vec<&'a wgpu::Sampler>,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
@@ -571,11 +572,31 @@ impl ProvisionalDevicePassCacheUpdate {
             .or_else(|| cache.pipelines.get(keys.pipeline))
             .ok_or_else(|| c08_cache_error("C08 render-pipeline realization was lost"))?;
         Ok(ProvisionalC08PassObjects {
+            program: validate_c08_pass_keys(keys)?.program,
             samplers,
             layout,
             shader,
             pipeline,
         })
+    }
+
+    pub(crate) fn encoding_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalC08PassObjects<'a>> {
+        self.pass_objects(
+            cache,
+            C08PassKeyRefs {
+                samplers,
+                layout,
+                shader,
+                pipeline,
+            },
+        )
     }
 
     pub(crate) fn commit(self, cache: &mut DevicePassCache) -> Result<()> {
@@ -651,6 +672,27 @@ impl ProvisionalC08PassObjects<'_> {
             ));
         }
         Ok(())
+    }
+
+    pub(crate) fn sampler(&self) -> Result<&wgpu::Sampler> {
+        let [sampler] = self.samplers.as_slice() else {
+            return Err(c08_cache_error(
+                "C08 pass encoding requires one exact sampled-image sampler",
+            ));
+        };
+        Ok(sampler)
+    }
+
+    pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        self.layout
+    }
+
+    pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline
+    }
+
+    pub(crate) const fn uses_fixed_source_over_blend(&self) -> bool {
+        matches!(self.program, C08Program::SpanSourceOver)
     }
 
     #[cfg(test)]

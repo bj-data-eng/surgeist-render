@@ -3,7 +3,7 @@ use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
 #[cfg(test)]
-use super::pass::C08PassCacheRequestsForTest;
+use super::pass::{C08ExternalOutputView, C08PassCacheRequestsForTest};
 use super::pass::{LoweredGraphPlan, PreparedGraph};
 use super::resource::{
     FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
@@ -216,6 +216,23 @@ pub(crate) struct C08ShaderCacheRealizationObservationForTest {
     pub(crate) cancellation_publishes_none: bool,
     pub(crate) device_transition_publishes_none: bool,
     pub(crate) specializes_rgba_and_bgra_outputs: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C08CustomSpineEncodingObservationForTest {
+    pub(crate) encodes_custom_passes_in_order: bool,
+    pub(crate) clears_full_root_once: bool,
+    pub(crate) uses_exact_prepared_spatial_mapping: bool,
+    pub(crate) presents_to_exact_external_output: bool,
+    pub(crate) exposes_bounded_capture_handoff: bool,
+    pub(crate) completes_custom_passes_after_encoding: bool,
+    pub(crate) parent_and_result_are_distinct: bool,
+    pub(crate) copies_full_parent_before_bounded_source_render: bool,
+    pub(crate) samples_only_source_with_fixed_premultiplied_blend: bool,
+    pub(crate) preserves_signed_source_origin: bool,
+    pub(crate) keeps_cache_update_provisional: bool,
+    pub(crate) encodes_without_submission_or_sync: bool,
 }
 
 struct InternalVelloRenderRequest<'a> {
@@ -2133,6 +2150,134 @@ impl Backend {
             cancellation_publishes_none,
             device_transition_publishes_none,
             specializes_rgba_and_bgra_outputs,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c08_custom_spine_encoding_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+        output_format: Format,
+    ) -> Result<C08CustomSpineEncodingObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C08 custom-spine observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            output_format,
+            &capabilities,
+        )?;
+        let pass_cache_before = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 custom-spine observation requires a ready pass cache",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 custom-spine observation lost its ready device",
+            )?
+            .device
+            .clone();
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surgeist C08 external output observation"),
+            size: wgpu::Extent3d {
+                width: output_extent.width(),
+                height: output_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::from(output_format),
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let output = C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 caller-owned custom-spine observation encoder"),
+        });
+        let mut capture_handoff_count = 0_usize;
+        let mut capture_handoffs_are_exact = true;
+        let summary =
+            prepared.encode_c08_custom_spine(&mut encoder, output, |handoff, encoder| {
+                capture_handoff_count = capture_handoff_count.saturating_add(1);
+                let _ = (handoff.pass(), handoff.target());
+                capture_handoffs_are_exact &= !handoff.commands().commands.is_empty()
+                    && handoff.target_extent().width() == handoff.texture().width()
+                    && handoff.target_extent().height() == handoff.texture().height()
+                    && handoff.texel_origin().x().is_finite()
+                    && handoff.texel_origin().y().is_finite()
+                    && handoff.raster_scale().is_finite()
+                    && handoff.raster_scale() > 0.0
+                    && handoff.allocation_resource().get() > 0
+                    && matches!(
+                        handoff.antialiasing(),
+                        Antialiasing::Area | Antialiasing::Msaa8 | Antialiasing::Msaa16
+                    );
+                let _ = handoff.view();
+                encoder.insert_debug_marker(
+                    "Surgeist T3 test-only explicit external Vello capture handoff",
+                );
+                Ok(())
+            })?;
+        let command_buffer = encoder.finish();
+        drop(command_buffer);
+        drop(prepared);
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        let pass_cache_after = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 custom-spine observation lost its provisional cache boundary",
+            )?
+            .pass_cache
+            .counts_for_test();
+
+        Ok(C08CustomSpineEncodingObservationForTest {
+            encodes_custom_passes_in_order: summary.encodes_custom_passes_in_order,
+            clears_full_root_once: summary.clears_full_root_once,
+            uses_exact_prepared_spatial_mapping: summary.uses_exact_prepared_spatial_mapping,
+            presents_to_exact_external_output: summary.presents_to_exact_external_output,
+            exposes_bounded_capture_handoff: summary.exposes_bounded_capture_handoff
+                && capture_handoff_count > 0
+                && capture_handoffs_are_exact,
+            completes_custom_passes_after_encoding: summary.completes_custom_passes_after_encoding,
+            parent_and_result_are_distinct: summary.parent_and_result_are_distinct,
+            copies_full_parent_before_bounded_source_render: summary
+                .copies_full_parent_before_bounded_source_render,
+            samples_only_source_with_fixed_premultiplied_blend: summary
+                .samples_only_source_with_fixed_premultiplied_blend,
+            preserves_signed_source_origin: summary.preserves_signed_source_origin,
+            keeps_cache_update_provisional: summary.keeps_cache_update_provisional
+                && pass_cache_after == pass_cache_before,
+            encodes_without_submission_or_sync: true,
         })
     }
 

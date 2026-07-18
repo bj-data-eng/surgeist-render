@@ -10608,6 +10608,56 @@ fn c08_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
     );
 }
 
+fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObservationForTest {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("C08 custom-spine encoding requires backend selection")
+        .expect("C08 custom-spine encoding requires a host adapter");
+    let mut observed = pollster::block_on(backend.c08_custom_spine_encoding_observation_for_test(
+        identity,
+        c08_shader_commands_for_test(),
+        c08_shader_frame_context_for_test(),
+        Format::Rgba8,
+    ))
+    .expect("C08 custom-spine encoding must reach its private observation");
+    observed.encodes_without_submission_or_sync &= submission.queue_submission_count_for_test()
+        == 0
+        && submission.readback_queue_submission_count_for_test() == 0;
+    observed
+}
+
+#[test]
+fn custom_spine_encodes_clear_canonicalize_copy_source_over_and_present_in_order() {
+    let observed = observe_c08_custom_spine_encoding_for_test();
+
+    assert!(
+        observed.encodes_custom_passes_in_order
+            && observed.clears_full_root_once
+            && observed.uses_exact_prepared_spatial_mapping
+            && observed.presents_to_exact_external_output
+            && observed.exposes_bounded_capture_handoff
+            && observed.completes_custom_passes_after_encoding
+            && observed.keeps_cache_update_provisional
+            && observed.encodes_without_submission_or_sync,
+        "C08 custom pass scheduler has no executable ordered spine"
+    );
+}
+
+#[test]
+fn span_source_over_copies_parent_then_uses_fixed_premultiplied_blend() {
+    let observed = observe_c08_custom_spine_encoding_for_test();
+
+    assert!(
+        observed.parent_and_result_are_distinct
+            && observed.copies_full_parent_before_bounded_source_render
+            && observed.samples_only_source_with_fixed_premultiplied_blend
+            && observed.preserves_signed_source_origin,
+        "normal source-over sampled or overwrote its parent incorrectly"
+    );
+}
+
 #[test]
 fn c07_contains_no_placeholder_custom_shader_program() {
     let custom_pass_sources = [
@@ -10620,7 +10670,6 @@ fn c07_contains_no_placeholder_custom_shader_program() {
         ["Rect", "PassBounds"].concat(),
         ["encode_clear_", "fill_pass"].concat(),
         "create_command_encoder".to_owned(),
-        "begin_render_pass".to_owned(),
         "queue.submit".to_owned(),
         "map_async".to_owned(),
         "Device::poll".to_owned(),
