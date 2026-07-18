@@ -9735,6 +9735,61 @@ fn bounded_blur_backdrop_over_empty_parent_is_pruned_without_erasing_foreground(
 }
 
 #[test]
+fn root_output_domain_prunes_off_surface_backdrop_dependency_and_retains_partial_overlap() {
+    let observe_source_and_capture = |source: Rect, capture: Rect| {
+        let filters = FilterList::try_ops(vec![FilterOp::invert(
+            UnitFilterAmount::try_new(1.0).unwrap(),
+        )])
+        .unwrap();
+        let bounds = BackdropCaptureBounds::try_new(capture).unwrap();
+        let backdrop = Layer::new()
+            .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+            .unwrap();
+        let mut scene = Scene::new();
+        scene
+            .fill(Rect::new(1.0, 1.0, 1.0, 1.0), Color::BLACK)
+            .fill(source, Color::BLACK)
+            .layer(backdrop, |_| {});
+        observe_frame_plan(
+            &scene,
+            Size::new(8.0, 6.0),
+            1.0,
+            Antialiasing::Area,
+            Color::TRANSPARENT,
+        )
+    };
+
+    let off_surface =
+        observe_source_and_capture(Rect::new(8.0, 0.0, 2.0, 2.0), Rect::new(8.0, 0.0, 2.0, 2.0));
+    let partial_overlap =
+        observe_source_and_capture(Rect::new(7.0, 0.0, 2.0, 2.0), Rect::new(7.0, 0.0, 2.0, 2.0));
+    let off_surface = off_surface
+        .plan
+        .as_ref()
+        .expect("the off-surface backdrop fixture must produce one complete plan");
+    let partial_overlap = partial_overlap
+        .plan
+        .as_ref()
+        .expect("the partial-overlap backdrop fixture must produce one complete plan");
+
+    assert!(
+        off_surface.route == FramePlanRouteObservation::DirectVello
+            && off_surface.direct_commands == [VelloCommandObservation::Fill]
+            && off_surface.selection_requirements.is_empty()
+            && off_surface.current_parent_backdrop_reads == 0
+            && off_surface.resource_count == 0
+            && off_surface.pass_count == 0
+            && partial_overlap.route == FramePlanRouteObservation::GpuGraph
+            && partial_overlap.selection_requirements
+                == [FrameSelectionRequirementObservation::BoundedBackdrop]
+            && partial_overlap.backdrop_dependency
+                == BackdropDependencyObservation::CompletedCurrentParent
+            && partial_overlap.current_parent_backdrop_reads == 1,
+        "root output domain retained off-surface backdrop graph work or removed the partially visible control: off_surface={off_surface:?}, partial_overlap={partial_overlap:?}"
+    );
+}
+
+#[test]
 fn post_filter_backdrop_clip_retains_expanded_halo_outside_capture() {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();

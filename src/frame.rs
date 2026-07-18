@@ -291,6 +291,7 @@ impl FramePlan {
         let contribution = SemanticSourceContribution::try_from_commands(
             commands.commands,
             context.initial_parent_contribution(),
+            SemanticContributionDomain::RootOutputBounded(context.output_bounds),
             context,
             Transform::identity(),
         )?;
@@ -530,10 +531,17 @@ struct SemanticSourceContribution {
     current_parent: SemanticSourceBounds,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum SemanticContributionDomain {
+    RootOutputBounded(LogicalBounds),
+    LocalUnbounded,
+}
+
 impl SemanticSourceContribution {
     fn try_from_commands(
         commands: Vec<RenderCommand>,
         initial_parent: SemanticSourceBounds,
+        domain: SemanticContributionDomain,
         context: FrameContext,
         local_to_surface: Transform,
     ) -> Result<Self> {
@@ -541,8 +549,10 @@ impl SemanticSourceContribution {
         let mut source_bounds = SemanticSourceBounds::exactly_empty();
         let mut current_parent = initial_parent;
         for command in commands {
+            let prior_parent = current_parent;
             let contribution =
-                Self::try_from_command(command, current_parent, context, local_to_surface)?;
+                Self::try_from_command(command, prior_parent, context, local_to_surface)?
+                    .try_apply_domain(domain, prior_parent)?;
             current_parent = contribution.current_parent;
             if let Some(command) = contribution.command {
                 source_bounds = source_bounds.try_union(contribution.source_bounds)?;
@@ -610,6 +620,7 @@ impl SemanticSourceContribution {
                 let children = Self::try_from_commands(
                     children,
                     SemanticSourceBounds::exactly_empty(),
+                    SemanticContributionDomain::LocalUnbounded,
                     context,
                     layer_to_surface,
                 )?;
@@ -763,6 +774,41 @@ impl SemanticCommandContribution {
             command: Some(command),
             source_bounds,
             current_parent: current_parent.try_union(source_bounds)?,
+        })
+    }
+
+    fn try_apply_domain(
+        self,
+        domain: SemanticContributionDomain,
+        prior_parent: SemanticSourceBounds,
+    ) -> Result<Self> {
+        let SemanticContributionDomain::RootOutputBounded(output_bounds) = domain else {
+            return Ok(self);
+        };
+        let output_bounds = SemanticSourceBounds::from_logical_bounds(output_bounds);
+        let source_bounds = self.source_bounds.try_intersect(
+            output_bounds,
+            "root observable source output-domain intersection",
+        )?;
+        let current_parent = prior_parent
+            .try_intersect(
+                output_bounds,
+                "root prior-parent output-domain intersection",
+            )?
+            .try_union(source_bounds)?
+            .try_intersect(
+                output_bounds,
+                "root current-parent output-domain intersection",
+            )?;
+        let command = if source_bounds.is_exactly_empty() {
+            None
+        } else {
+            self.command
+        };
+        Ok(Self {
+            command,
+            source_bounds,
+            current_parent,
         })
     }
 }
@@ -2391,6 +2437,7 @@ impl SemanticFrameGraphPlanner {
         let contribution = SemanticSourceContribution::try_from_commands(
             commands,
             SemanticSourceBounds::exactly_empty(),
+            SemanticContributionDomain::LocalUnbounded,
             self.context,
             raster_transform,
         )?;
@@ -2541,6 +2588,7 @@ impl SemanticFrameGraphPlanner {
         let contribution = SemanticSourceContribution::try_from_commands(
             children,
             SemanticSourceBounds::exactly_empty(),
+            SemanticContributionDomain::LocalUnbounded,
             self.context,
             raster_transform,
         )?;
