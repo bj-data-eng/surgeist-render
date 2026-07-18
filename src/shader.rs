@@ -1,17 +1,260 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::gpu_transaction::GpuOperationTransaction;
 use super::{
     Color, Error, Format, Result, RuntimeCapabilityUnavailableReason, RuntimeOperation,
+    image::ResolvedMaskUploadKey,
+    resource::WorkingFormat,
     texture::{TextureDescriptor, TextureUsageIntent},
 };
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderBlendKey {
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    Plus,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderCompositeKey {
+    SpanSourceOver,
+    Layer {
+        blend: ShaderBlendKey,
+        has_clip: bool,
+        has_outer_clips: bool,
+        has_alpha_mask: bool,
+    },
+    DropShadow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderProgramKey {
+    CanonicalizeCapture,
+    CopyBackdrop,
+    ColorFilter,
+    BlurHorizontal { source_alpha: bool },
+    BlurVertical { source_alpha: bool },
+    DropShadowColorize,
+    Composite(ShaderCompositeKey),
+    Present,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderTextureFormatKey {
+    VelloCaptureRgba8Unorm,
+    WorkingHighPrecisionRgba16Float,
+    WorkingReducedPrecisionRgba8Unorm,
+    ResolvedMaskRgba8Unorm,
+    OutputRgba8Unorm,
+    OutputBgra8Unorm,
+}
+
+impl ShaderTextureFormatKey {
+    #[must_use]
+    pub(crate) const fn working(format: WorkingFormat) -> Self {
+        match format {
+            WorkingFormat::HighPrecision => Self::WorkingHighPrecisionRgba16Float,
+            WorkingFormat::ReducedPrecision => Self::WorkingReducedPrecisionRgba8Unorm,
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn output(format: Format) -> Self {
+        match format {
+            Format::Rgba8 => Self::OutputRgba8Unorm,
+            Format::Bgra8 => Self::OutputBgra8Unorm,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderBindingRoleKey {
+    CaptureSource,
+    CompletedParent,
+    FilterSource,
+    BlurredSourceAlpha,
+    CompositeParent,
+    CompositeSource,
+    AlphaMask,
+    Shadow,
+    FinalWorkingImage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderSamplingFilterKey {
+    Nearest,
+    Linear,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderSamplingEdgeKey {
+    ClampToExtent,
+    TransparentBlack,
+    SemanticBorderMirror,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderDataBindingKey {
+    SpatialUniform,
+    ColorFilterOperations,
+    GaussianKernel,
+    DropShadowParameters,
+    CompositeParameters,
+    PresentParameters,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct SamplerKey {
+    binding_role: ShaderBindingRoleKey,
+    source_format: ShaderTextureFormatKey,
+    filter: ShaderSamplingFilterKey,
+    edge: ShaderSamplingEdgeKey,
+    resolved_mask_sampling: Option<ResolvedMaskUploadKey>,
+}
+
+impl SamplerKey {
+    #[must_use]
+    pub(crate) const fn new(
+        binding_role: ShaderBindingRoleKey,
+        source_format: ShaderTextureFormatKey,
+        filter: ShaderSamplingFilterKey,
+        edge: ShaderSamplingEdgeKey,
+        resolved_mask_sampling: Option<ResolvedMaskUploadKey>,
+    ) -> Self {
+        Self {
+            binding_role,
+            source_format,
+            filter,
+            edge,
+            resolved_mask_sampling,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn facts_for_test(
+        self,
+    ) -> (
+        ShaderBindingRoleKey,
+        ShaderTextureFormatKey,
+        ShaderSamplingFilterKey,
+        ShaderSamplingEdgeKey,
+        Option<ResolvedMaskUploadKey>,
+    ) {
+        (
+            self.binding_role,
+            self.source_format,
+            self.filter,
+            self.edge,
+            self.resolved_mask_sampling,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+struct SampledTextureLayoutKey {
+    binding_role: ShaderBindingRoleKey,
+    source_format: ShaderTextureFormatKey,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct BindGroupLayoutKey {
+    program: ShaderProgramKey,
+    sampled_textures: Vec<SampledTextureLayoutKey>,
+    data_bindings: Vec<ShaderDataBindingKey>,
+}
+
+impl BindGroupLayoutKey {
+    #[must_use]
+    pub(crate) fn new(
+        program: ShaderProgramKey,
+        sampled_textures: &[(ShaderBindingRoleKey, ShaderTextureFormatKey)],
+        data_bindings: Vec<ShaderDataBindingKey>,
+    ) -> Self {
+        Self {
+            program,
+            sampled_textures: sampled_textures
+                .iter()
+                .copied()
+                .map(|(binding_role, source_format)| SampledTextureLayoutKey {
+                    binding_role,
+                    source_format,
+                })
+                .collect(),
+            data_bindings,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ShaderModuleKey {
+    program: ShaderProgramKey,
+    layout: BindGroupLayoutKey,
+    samplers: Vec<SamplerKey>,
+    working_format: Option<ShaderTextureFormatKey>,
+    output_format: Option<ShaderTextureFormatKey>,
+}
+
+impl ShaderModuleKey {
+    #[must_use]
+    pub(crate) fn new(
+        program: ShaderProgramKey,
+        layout: BindGroupLayoutKey,
+        samplers: Vec<SamplerKey>,
+        working_format: Option<ShaderTextureFormatKey>,
+        output_format: Option<ShaderTextureFormatKey>,
+    ) -> Self {
+        Self {
+            program,
+            layout,
+            samplers,
+            working_format,
+            output_format,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct RenderPipelineKey {
+    shader: ShaderModuleKey,
+    layout: BindGroupLayoutKey,
+    samplers: Vec<SamplerKey>,
+    target_format: ShaderTextureFormatKey,
+}
+
+impl RenderPipelineKey {
+    #[must_use]
+    pub(crate) fn new(
+        shader: ShaderModuleKey,
+        layout: BindGroupLayoutKey,
+        samplers: Vec<SamplerKey>,
+        target_format: ShaderTextureFormatKey,
+    ) -> Self {
+        Self {
+            shader,
+            layout,
+            samplers,
+            target_format,
+        }
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum RectShaderPassKind {
     ClearFill,
     IdentityCopy,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RectPassBounds {
     x: u32,
@@ -20,6 +263,10 @@ pub(crate) struct RectPassBounds {
     height: u32,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 impl RectPassBounds {
     pub(crate) fn try_new(
         x: u32,
@@ -121,6 +368,10 @@ impl RectPassBounds {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RectShaderPassDescriptor {
     source_label: &'static str,
@@ -131,6 +382,10 @@ pub(crate) struct RectShaderPassDescriptor {
     kind: RectShaderPassKind,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 impl RectShaderPassDescriptor {
     pub(crate) fn try_new(
         source_label: &'static str,
@@ -221,6 +476,10 @@ impl RectShaderPassDescriptor {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct RectShaderPipelineKey {
     kind: RectShaderPassKind,
@@ -230,6 +489,10 @@ pub(crate) struct RectShaderPipelineKey {
     destination_intent: TextureUsageIntent,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 impl RectShaderPipelineKey {
     #[must_use]
     pub(crate) const fn from_descriptor(descriptor: RectShaderPassDescriptor) -> Self {
@@ -243,6 +506,10 @@ impl RectShaderPipelineKey {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 #[derive(Clone, Copy)]
 pub(crate) struct RectShaderPassGpuContext<'a> {
     device: &'a wgpu::Device,
@@ -251,6 +518,10 @@ pub(crate) struct RectShaderPassGpuContext<'a> {
     destination_view: &'a wgpu::TextureView,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 impl<'a> RectShaderPassGpuContext<'a> {
     #[must_use]
     pub(crate) const fn new(
@@ -268,11 +539,19 @@ impl<'a> RectShaderPassGpuContext<'a> {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 pub(crate) enum RectShaderPassExecution<'a> {
     ContractOnly,
     Gpu(RectShaderPassGpuExecution<'a>),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 impl<'a> RectShaderPassExecution<'a> {
     #[must_use]
     pub(crate) const fn contract_only() -> Self {
@@ -291,11 +570,19 @@ impl<'a> RectShaderPassExecution<'a> {
     }
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 pub(crate) struct RectShaderPassGpuExecution<'a> {
     context: RectShaderPassGpuContext<'a>,
     transaction: GpuOperationTransaction,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 pub(crate) async fn encode_clear_fill_pass(
     execution: RectShaderPassExecution<'_>,
     descriptor: RectShaderPassDescriptor,
@@ -357,6 +644,10 @@ pub(crate) async fn encode_clear_fill_pass(
         .await
 }
 
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "T6 removes the existing rect shader probe")
+)]
 fn validate_label(name: &'static str, value: &'static str) -> Result<()> {
     if value.is_empty() {
         return Err(Error::invalid_value(name, value, "must not be empty"));

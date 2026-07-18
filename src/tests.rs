@@ -10276,6 +10276,99 @@ fn drop_shadow_source_fanout_lives_through_both_consumers() {
     assert!(observed.every_read_names_its_producer);
 }
 
+fn runtime_lowering_commands_for_test() -> command::RenderCommands {
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(-1.25, 0.75),
+                FilterBlur::try_new(0.5).unwrap(),
+                Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let masked = Layer::new()
+        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(1.0, 0.0, 0.0, 0.5).unwrap(),
+            );
+        })
+        .layer(masked, |scene| {
+            scene.fill(
+                Rect::new(0.0, 0.0, 4.0, 4.0),
+                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+            );
+        });
+    scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the runtime lowering fixture must normalize")
+}
+
+fn observe_runtime_lowering_for_test() -> super::pass::RuntimeLoweringObservationForTest {
+    super::pass::runtime_lowering_observation_for_test(
+        runtime_lowering_commands_for_test(),
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+        Format::Rgba8,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .expect("the complete semantic graph must reach runtime lowering")
+}
+
+#[test]
+fn semantic_graph_lowers_to_finite_runtime_pass_and_resource_vocabulary() {
+    let observed = observe_runtime_lowering_for_test();
+    assert!(
+        observed.has_exact_closed_vocabulary
+            && observed.preserves_backend_ready_resource_facts
+            && observed.preserves_semantic_pass_facts,
+        "semantic graph has no backend-ready closed lowering"
+    );
+}
+
+#[test]
+fn runtime_lowering_preserves_dependencies_and_last_use_releases() {
+    let observed = observe_runtime_lowering_for_test();
+    assert!(
+        observed.preserves_topological_bindings
+            && observed.preserves_exact_last_use_releases
+            && observed.rejects_inconsistent_bindings_atomically,
+        "runtime lowering changed graph order or lifetime"
+    );
+}
+
+#[test]
+fn runtime_lowering_derives_exact_sampler_layout_shader_and_pipeline_keys() {
+    let observed = observe_runtime_lowering_for_test();
+    assert!(
+        observed.has_exact_cache_keys
+            && observed.keys_separate_program_layout_sampling_and_edge
+            && observed.keys_separate_source_working_and_output_formats,
+        "lowered pass omitted its exact cache keys"
+    );
+}
+
 #[test]
 fn graph_base_color_is_initialized_once_and_isolation_is_transparent() {
     let observed = super::frame::semantic_graph_base_initialization_observation_for_test(

@@ -272,6 +272,13 @@ impl TextureDescriptor {
         self.format
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T6 removes the existing rect pipeline key that reads this intent"
+        )
+    )]
     pub(crate) const fn intent(self) -> TextureUsageIntent {
         self.intent
     }
