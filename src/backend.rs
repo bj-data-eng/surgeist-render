@@ -8,6 +8,8 @@ use super::resource::{
 };
 #[cfg(test)]
 use super::resource::{ManagerIdentity, ResourceManagerObservationForTest};
+#[cfg(test)]
+use super::shader::DevicePassCacheCountsForTest;
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(any(
     feature = "render-window",
@@ -308,8 +310,8 @@ impl ReadyDeviceStateBorrowForTest<'_> {
         self.resources.budget_for_test()
     }
 
-    pub(crate) fn device_pass_cache_is_empty_for_test(&self) -> bool {
-        self.pass_cache.is_empty()
+    pub(crate) fn device_pass_cache_counts_for_test(&self) -> DevicePassCacheCountsForTest {
+        self.pass_cache.counts_for_test()
     }
 
     pub(crate) fn drop_witness_for_test(&self) -> ReadyDeviceStateDropWitnessForTest {
@@ -319,6 +321,13 @@ impl ReadyDeviceStateBorrowForTest<'_> {
 
 #[cfg(test)]
 impl ReadyDeviceState {
+    fn seed_pass_cache_sampler_for_test(&mut self) -> DevicePassCacheCountsForTest {
+        let Self {
+            device, pass_cache, ..
+        } = self;
+        pass_cache.seed_sampler_for_test(device)
+    }
+
     fn borrow_for_test(&self) -> ReadyDeviceStateBorrowForTest<'_> {
         ReadyDeviceStateBorrowForTest {
             adapter: &self.adapter,
@@ -1747,6 +1756,21 @@ impl Backend {
             return None;
         }
         state.ready_borrow_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_device_pass_cache_sampler_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Option<DevicePassCacheCountsForTest> {
+        let state = self.device_states.get_mut(identity.slot())?;
+        if state.generation != identity.generation {
+            return None;
+        }
+        state.observe_terminal();
+        state
+            .ready_mut()
+            .map(ReadyDeviceState::seed_pass_cache_sampler_for_test)
     }
 
     #[cfg(test)]

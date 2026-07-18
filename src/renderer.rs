@@ -64,7 +64,7 @@ pub(crate) struct ResourcePreparationObservationForTest {
     pub(crate) allocation_preflight_is_atomic: bool,
     pub(crate) failure_and_drop_cleanup: bool,
     pub(crate) repeated_reuse_is_exact_and_bounded: bool,
-    pub(crate) pass_cache_remains_empty: bool,
+    pub(crate) populated_pass_cache_is_preserved: bool,
 }
 
 struct RenderPublication {
@@ -1290,6 +1290,14 @@ impl Renderer {
             output_format,
             &capabilities,
         )?;
+        let pass_cache_before = backend
+            .seed_device_pass_cache_sampler_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared before pass-cache preservation coverage",
+                )
+            })?;
 
         let preflight_before = backend
             .ready_device_state_borrow_for_test(device_identity)
@@ -1386,9 +1394,17 @@ impl Renderer {
         let failure_and_drop_cleanup = early_finish_failed
             && after_failed_finish.leased_count == 0
             && after_drop.leased_count == 0;
-        let pass_cache_remains_empty = backend
+        let pass_cache_after = backend
             .ready_device_state_borrow_for_test(device_identity)
-            .is_some_and(|ready| ready.device_pass_cache_is_empty_for_test());
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared after pass-cache preservation coverage",
+                )
+            })?
+            .device_pass_cache_counts_for_test();
+        let populated_pass_cache_is_preserved =
+            pass_cache_before.has_exactly_one_sampler() && pass_cache_after == pass_cache_before;
 
         Ok(ResourcePreparationObservationForTest {
             complete_resource_and_pass_handoff: first_exercise.complete_resource_and_pass_handoff,
@@ -1401,7 +1417,7 @@ impl Renderer {
             allocation_preflight_is_atomic,
             failure_and_drop_cleanup,
             repeated_reuse_is_exact_and_bounded,
-            pass_cache_remains_empty,
+            populated_pass_cache_is_preserved,
         })
     }
 

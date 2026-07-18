@@ -248,6 +248,26 @@ pub(crate) struct DevicePassCache {
     pipelines: HashMap<RenderPipelineKey, wgpu::RenderPipeline>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DevicePassCacheCountsForTest {
+    sampler_count: usize,
+    layout_count: usize,
+    shader_count: usize,
+    pipeline_count: usize,
+}
+
+#[cfg(test)]
+impl DevicePassCacheCountsForTest {
+    #[must_use]
+    pub(crate) const fn has_exactly_one_sampler(self) -> bool {
+        self.sampler_count == 1
+            && self.layout_count == 0
+            && self.shader_count == 0
+            && self.pipeline_count == 0
+    }
+}
+
 impl DevicePassCache {
     #[must_use]
     pub(crate) fn new() -> Self {
@@ -266,12 +286,39 @@ impl DevicePassCache {
         self.pipelines.clear();
     }
 
+    #[cfg(test)]
     #[must_use]
-    pub(crate) fn is_empty(&self) -> bool {
-        self.samplers.is_empty()
-            && self.layouts.is_empty()
-            && self.shaders.is_empty()
-            && self.pipelines.is_empty()
+    pub(crate) fn counts_for_test(&self) -> DevicePassCacheCountsForTest {
+        DevicePassCacheCountsForTest {
+            sampler_count: self.samplers.len(),
+            layout_count: self.layouts.len(),
+            shader_count: self.shaders.len(),
+            pipeline_count: self.pipelines.len(),
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) fn seed_sampler_for_test(
+        &mut self,
+        device: &wgpu::Device,
+    ) -> DevicePassCacheCountsForTest {
+        let key = SamplerKey::new(
+            ShaderBindingRoleKey::CaptureSource,
+            ShaderTextureFormatKey::VelloCaptureRgba8Unorm,
+            ShaderSamplingFilterKey::Nearest,
+            ShaderSamplingEdgeKey::ClampToExtent,
+            None,
+        );
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("surgeist-render pass-cache preservation test sampler"),
+            ..Default::default()
+        });
+        assert!(
+            self.samplers.insert(key, sampler).is_none(),
+            "the fixed pass-cache preservation sampler key must be vacant"
+        );
+        self.counts_for_test()
     }
 }
 

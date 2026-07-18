@@ -708,13 +708,7 @@ impl RuntimeGraphPreparationPlan {
         policy: EffectQualityPolicy,
         capabilities: &DeviceCapabilities,
         device: &wgpu::Device,
-        pass_cache: &DevicePassCache,
     ) -> Result<Self> {
-        if !pass_cache.is_empty() {
-            return Err(preparation_error(
-                "C07 graph preparation requires the typed device pass cache to remain empty",
-            ));
-        }
         let selected = capabilities.resolve_effect_working_format(policy)?;
         if selected != lowered.working_format {
             return Err(preparation_error(
@@ -1166,15 +1160,9 @@ impl<'device> PreparedGraph<'device> {
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
         resources: &'device ResourceManager,
-        pass_cache: &'device DevicePassCache,
+        _pass_cache: &'device DevicePassCache,
     ) -> Result<Self> {
-        let plan = RuntimeGraphPreparationPlan::try_derive(
-            lowered,
-            policy,
-            capabilities,
-            device,
-            pass_cache,
-        )?;
+        let plan = RuntimeGraphPreparationPlan::try_derive(lowered, policy, capabilities, device)?;
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
 
         let mut frame_scope = resources.begin_frame()?;

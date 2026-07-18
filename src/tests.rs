@@ -10113,7 +10113,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
             && observed.allocation_preflight_is_atomic
             && observed.failure_and_drop_cleanup
             && observed.repeated_reuse_is_exact_and_bounded
-            && observed.pass_cache_remains_empty
+            && observed.populated_pass_cache_is_preserved
             && submission.queue_submission_count_for_test() == 0
             && submission.readback_queue_submission_count_for_test() == 0
             && public_state_unchanged
