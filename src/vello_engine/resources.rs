@@ -6,34 +6,91 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     BackendErrorCode, Error, PhysicalSize, Result,
     gpu_transaction::VelloResourceCommitProof,
+    resource::{FrameResourceScope, ResourceLease, ResourceManager},
 };
 
 use super::encoder::ActiveVelloEncodingScope;
 use super::{
-    BufferHandle, BufferIntent, BufferRole, ImageHandle, ImageIntent, ImageRetention,
+    BufferHandle, BufferIntent, BufferRole, ImageHandle, ImageIntent, ImageRetention, ImageRole,
     RasterImageFormat, ResourceIntent, ResourceReference,
 };
 
 #[cfg(test)]
 use super::RecordingBuilder;
 
-struct AllocatedBuffer {
-    buffer: wgpu::Buffer,
+struct ManagedBuffer {
+    lease: ResourceLease,
     byte_len: u64,
 }
 
-struct AllocatedImage {
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
+struct ManagedImage {
+    lease: ResourceLease,
     extent: PhysicalSize,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C03 retains the atlas handle, while byte accounting is private test evidence."
-        )
-    )]
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct VelloBufferKey {
+    role: BufferRole,
     byte_len: u64,
+    usage: wgpu::BufferUsages,
+}
+
+impl VelloBufferKey {
+    fn from_intent(intent: &BufferIntent) -> Self {
+        Self {
+            role: intent.role,
+            byte_len: intent.byte_len,
+            usage: buffer_usage(intent.role),
+        }
+    }
+
+    pub(crate) const fn byte_len(self) -> u64 {
+        self.byte_len
+    }
+
+    pub(crate) const fn usage(self) -> wgpu::BufferUsages {
+        self.usage
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct VelloImageKey {
+    role: ImageRole,
+    extent: PhysicalSize,
+    format: RasterImageFormat,
+    retention: ImageRetention,
+    usage: wgpu::TextureUsages,
+}
+
+impl VelloImageKey {
+    fn from_intent(intent: &ImageIntent) -> Self {
+        Self {
+            role: intent.role,
+            extent: intent.extent,
+            format: intent.format,
+            retention: intent.retention,
+            usage: image_usage(),
+        }
+    }
+
+    pub(crate) const fn extent(self) -> PhysicalSize {
+        self.extent
+    }
+
+    pub(crate) const fn texture_format(self) -> wgpu::TextureFormat {
+        texture_format(self.format)
+    }
+
+    pub(crate) const fn usage(self) -> wgpu::TextureUsages {
+        self.usage
+    }
+
+    pub(crate) const fn is_persistent_atlas(self) -> bool {
+        matches!(
+            (self.role, self.retention),
+            (ImageRole::ImageAtlas, ImageRetention::PersistentImageAtlas)
+        )
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,7 +103,7 @@ pub(crate) enum VelloAtlasOutcome {
 }
 
 impl VelloAtlasOutcome {
-    const fn merge_pending_recovery(
+    pub(crate) const fn merge_pending_recovery(
         pending: Option<Self>,
         latest: Self,
     ) -> Option<Self> {
@@ -73,11 +130,6 @@ impl VelloAtlasOutcome {
 enum PendingPersistentAtlas {
     NoAtlas,
     NewlyAllocated(ImageHandle),
-    #[expect(
-        dead_code,
-        reason = "C03 T4 records the reusable-atlas provenance that T6 will obtain from its resource manager."
-    )]
-    Reused(ImageHandle),
 }
 
 impl PendingPersistentAtlas {
@@ -88,7 +140,7 @@ impl PendingPersistentAtlas {
     const fn resource(self) -> Option<ImageHandle> {
         match self {
             Self::NoAtlas => None,
-            Self::NewlyAllocated(resource) | Self::Reused(resource) => Some(resource),
+            Self::NewlyAllocated(resource) => Some(resource),
         }
     }
 
@@ -96,24 +148,22 @@ impl PendingPersistentAtlas {
     const fn commit_outcome(self) -> VelloAtlasOutcome {
         match self {
             Self::NoAtlas => VelloAtlasOutcome::NoAtlas,
-            Self::NewlyAllocated(_) | Self::Reused(_) => VelloAtlasOutcome::Retain,
+            Self::NewlyAllocated(_) => VelloAtlasOutcome::Retain,
         }
     }
 
     const fn abort_outcome(self) -> VelloAtlasOutcome {
         match self {
             Self::NoAtlas => VelloAtlasOutcome::NoAtlas,
-            // T4 only creates a fresh atlas; it never borrows a reusable one that could be
-            // marked dirty. An aborted fresh allocation must therefore be recreated.
             Self::NewlyAllocated(_) => VelloAtlasOutcome::Recreate,
-            Self::Reused(_) => VelloAtlasOutcome::MarkDirty,
         }
     }
 }
 
 struct PendingVelloResources {
-    buffers: HashMap<BufferHandle, AllocatedBuffer>,
-    images: HashMap<ImageHandle, AllocatedImage>,
+    frame_scope: Option<FrameResourceScope>,
+    buffers: HashMap<BufferHandle, ManagedBuffer>,
+    images: HashMap<ImageHandle, ManagedImage>,
     persistent_image_atlas: PendingPersistentAtlas,
     released_buffers: HashSet<BufferHandle>,
     released_images: HashSet<ImageHandle>,
@@ -200,141 +250,27 @@ pub(crate) struct ScopeResolvedVelloResourceLease {
 }
 
 #[must_use]
+#[cfg(not(test))]
+pub(crate) struct CommittedVelloResources;
+
+#[must_use]
+#[cfg(test)]
 pub(crate) struct CommittedVelloResources {
-    persistent_image_atlas: Option<AllocatedImage>,
-    #[cfg(test)]
     atlas_outcome: VelloAtlasOutcome,
-}
-
-/// Per-device owner for retained internal raster resources.
-///
-/// A clean transaction retains only its current persistent image atlas. Every
-/// transient allocation belongs to the lease and drops at commit.
-pub(crate) struct VelloResourceManager {
-    retained_atlas: Option<AllocatedImage>,
-    pending_atlas_recovery: Option<VelloAtlasOutcome>,
-}
-
-impl VelloResourceManager {
-    pub(crate) const fn new() -> Self {
-        Self {
-            retained_atlas: None,
-            pending_atlas_recovery: None,
-        }
-    }
-
-    pub(crate) fn is_empty(&self) -> bool {
-        self.retained_atlas.is_none()
-    }
-
-    pub(crate) fn pending_commit(
-        &mut self,
-        lease: ScopeResolvedVelloResourceLease,
-    ) -> PendingVelloResourceCommit<'_> {
-        self.consume_pending_atlas_recovery_before_retaining();
-        PendingVelloResourceCommit {
-            manager: self,
-            lease: Some(lease),
-        }
-    }
-
-    pub(crate) fn record_aborted_resources(&mut self, aborted: AbortedVelloResources) {
-        let outcome = aborted.into_atlas_outcome();
-        self.pending_atlas_recovery =
-            VelloAtlasOutcome::merge_pending_recovery(self.pending_atlas_recovery, outcome);
-    }
-
-    fn consume_pending_atlas_recovery_before_retaining(&mut self) {
-        // T6 allocates a fresh atlas for each lease. A new clean lease therefore consumes any
-        // prior quarantine before its resources can become retained for a later raster pass.
-        let _ = self.pending_atlas_recovery.take();
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_empty_for_test(&self) -> bool {
-        self.is_empty()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn observation_for_test(&self) -> VelloResourceManagerObservationForTest {
-        VelloResourceManagerObservationForTest {
-            retained_count: usize::from(self.retained_atlas.is_some()),
-            retained_atlas_count: usize::from(self.retained_atlas.is_some()),
-            retained_byte_len: self.retained_atlas.as_ref().map_or(0, |atlas| atlas.byte_len),
-            retained_atlas_byte_len: self
-                .retained_atlas
-                .as_ref()
-                .map_or(0, |atlas| atlas.byte_len),
-            committed_transient_buffer_count: 0,
-            committed_transient_buffer_byte_len: 0,
-            committed_transient_image_count: 0,
-            committed_transient_image_byte_len: 0,
-            recovery_outcome: self.pending_atlas_recovery,
-        }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct VelloResourceManagerObservationForTest {
-    retained_count: usize,
-    retained_atlas_count: usize,
-    retained_byte_len: u64,
-    retained_atlas_byte_len: u64,
-    committed_transient_buffer_count: usize,
-    committed_transient_buffer_byte_len: u64,
-    committed_transient_image_count: usize,
-    committed_transient_image_byte_len: u64,
-    recovery_outcome: Option<VelloAtlasOutcome>,
-}
-
-#[cfg(test)]
-impl VelloResourceManagerObservationForTest {
-    pub(crate) const fn retained_count_for_test(&self) -> usize {
-        self.retained_count
-    }
-
-    pub(crate) const fn retained_atlas_count_for_test(&self) -> usize {
-        self.retained_atlas_count
-    }
-
-    pub(crate) const fn retained_byte_len_for_test(&self) -> u64 {
-        self.retained_byte_len
-    }
-
-    pub(crate) const fn retained_atlas_byte_len_for_test(&self) -> u64 {
-        self.retained_atlas_byte_len
-    }
-
-    pub(crate) const fn committed_transient_buffer_count_for_test(&self) -> usize {
-        self.committed_transient_buffer_count
-    }
-
-    pub(crate) const fn committed_transient_buffer_byte_len_for_test(&self) -> u64 {
-        self.committed_transient_buffer_byte_len
-    }
-
-    pub(crate) const fn committed_transient_image_count_for_test(&self) -> usize {
-        self.committed_transient_image_count
-    }
-
-    pub(crate) const fn committed_transient_image_byte_len_for_test(&self) -> u64 {
-        self.committed_transient_image_byte_len
-    }
-
-    pub(crate) const fn recovery_outcome_for_test(&self) -> Option<VelloAtlasOutcome> {
-        self.recovery_outcome
-    }
 }
 
 /// Keeps a scope-clean resource lease uncertain until the owning GPU transaction succeeds.
 #[must_use = "pending Vello resources must be committed by their transaction or aborted on drop"]
-pub(crate) struct PendingVelloResourceCommit<'manager> {
-    manager: &'manager mut VelloResourceManager,
+pub(crate) struct PendingVelloResourceCommit {
     lease: Option<ScopeResolvedVelloResourceLease>,
 }
 
-impl PendingVelloResourceCommit<'_> {
+impl PendingVelloResourceCommit {
+    pub(crate) fn new(mut lease: ScopeResolvedVelloResourceLease) -> Self {
+        lease.consume_pending_atlas_recovery();
+        Self { lease: Some(lease) }
+    }
+
     #[cfg(test)]
     pub(crate) fn allocation_summary_for_test(&self) -> VelloResourceAllocationSummaryForTest {
         self.lease
@@ -345,41 +281,38 @@ impl PendingVelloResourceCommit<'_> {
 
     pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) {
         if let Some(lease) = self.lease.take() {
-            self.manager.retained_atlas = lease.commit().into_persistent_image_atlas();
+            let _ = lease.commit();
         }
     }
 }
 
-impl Drop for PendingVelloResourceCommit<'_> {
+impl Drop for PendingVelloResourceCommit {
     fn drop(&mut self) {
         if let Some(lease) = self.lease.take() {
-            self.manager.record_aborted_resources(lease.abort());
+            let _ = lease.abort();
         }
     }
 }
 
 #[must_use]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T4 keeps the consumed abort result typed until T6 transaction routing owns it."
-    )
-    )]
 #[derive(Debug)]
 pub(crate) struct AbortedVelloResources {
+    #[cfg(test)]
     discarded_resource_count: usize,
+    #[cfg(test)]
     atlas_outcome: VelloAtlasOutcome,
 }
 
 impl VelloResourceLease {
     pub(super) fn allocate(
         scope: &ActiveVelloEncodingScope<'_>,
+        manager: &ResourceManager,
         intents: &[ResourceIntent],
     ) -> Result<Self> {
         let device = scope.device();
         preflight_resource_intents(&device.limits(), intents)?;
         let mut pending = PendingVelloResources {
+            frame_scope: Some(manager.begin_frame()?),
             buffers: HashMap::new(),
             images: HashMap::new(),
             persistent_image_atlas: PendingPersistentAtlas::NoAtlas,
@@ -408,7 +341,8 @@ impl VelloResourceLease {
     }
 
     pub(super) fn buffer(&self, handle: BufferHandle) -> Result<&wgpu::Buffer> {
-        self.live_buffer(handle).map(|allocated| &allocated.buffer)
+        let managed = self.live_buffer(handle)?;
+        self.pending.frame_scope()?.vello_buffer(&managed.lease)
     }
 
     pub(super) fn buffer_for_upload(
@@ -425,7 +359,7 @@ impl VelloResourceLease {
                 "internal Vello buffer upload exceeds its prepared allocation",
             ));
         }
-        Ok(&allocated.buffer)
+        self.pending.frame_scope()?.vello_buffer(&allocated.lease)
     }
 
     pub(super) fn indirect_buffer(
@@ -445,15 +379,23 @@ impl VelloResourceLease {
                 "internal Vello indirect dispatch exceeds its prepared allocation",
             ));
         }
-        Ok(&allocated.buffer)
+        self.pending.frame_scope()?.vello_buffer(&allocated.lease)
     }
 
     pub(super) fn image_texture(&self, handle: ImageHandle) -> Result<&wgpu::Texture> {
-        self.live_image(handle).map(|allocated| &allocated.texture)
+        let managed = self.live_image(handle)?;
+        self.pending
+            .frame_scope()?
+            .vello_image(&managed.lease)
+            .map(|(texture, _)| texture)
     }
 
     pub(super) fn image_view(&self, handle: ImageHandle) -> Result<&wgpu::TextureView> {
-        self.live_image(handle).map(|allocated| &allocated.view)
+        let managed = self.live_image(handle)?;
+        self.pending
+            .frame_scope()?
+            .vello_image(&managed.lease)
+            .map(|(_, view)| view)
     }
 
     pub(super) fn image_extent(&self, handle: ImageHandle) -> Result<PhysicalSize> {
@@ -494,38 +436,15 @@ impl VelloResourceLease {
         ScopeResolvedVelloResourceLease { lease: self }
     }
 
-    fn into_committed_resources(self) -> CommittedVelloResources {
-        let PendingVelloResources {
-            mut images,
-            persistent_image_atlas,
-            ..
-        } = self.pending;
-        #[cfg(test)]
-        let atlas_outcome = persistent_image_atlas.commit_outcome();
-        let persistent_image_atlas = persistent_image_atlas
-            .resource()
-            .and_then(|resource| images.remove(&resource));
-        CommittedVelloResources {
-            persistent_image_atlas,
-            #[cfg(test)]
-            atlas_outcome,
-        }
+    fn into_committed_resources(mut self) -> CommittedVelloResources {
+        self.pending.commit()
     }
 
-    pub(crate) fn abort(self) -> AbortedVelloResources {
-        let discarded_resource_count = self
-            .pending
-            .buffers
-            .len()
-            .saturating_add(self.pending.images.len());
-        let atlas_outcome = self.pending.persistent_image_atlas.abort_outcome();
-        AbortedVelloResources {
-            discarded_resource_count,
-            atlas_outcome,
-        }
+    pub(crate) fn abort(mut self) -> AbortedVelloResources {
+        self.pending.abort()
     }
 
-    fn live_buffer(&self, handle: BufferHandle) -> Result<&AllocatedBuffer> {
+    fn live_buffer(&self, handle: BufferHandle) -> Result<&ManagedBuffer> {
         if self.pending.released_buffers.contains(&handle) {
             return Err(render_failed(
                 "internal Vello recording uses a released buffer",
@@ -536,7 +455,7 @@ impl VelloResourceLease {
         })
     }
 
-    fn live_image(&self, handle: ImageHandle) -> Result<&AllocatedImage> {
+    fn live_image(&self, handle: ImageHandle) -> Result<&ManagedImage> {
         if self.pending.released_images.contains(&handle) {
             return Err(render_failed(
                 "internal Vello recording uses a released image",
@@ -557,6 +476,10 @@ impl ScopeResolvedVelloResourceLease {
         self.lease.into_committed_resources()
     }
 
+    fn consume_pending_atlas_recovery(&mut self) {
+        self.lease.pending.consume_pending_atlas_recovery();
+    }
+
     pub(crate) fn abort(self) -> AbortedVelloResources {
         self.lease.abort()
     }
@@ -572,8 +495,9 @@ pub(crate) async fn over_limit_buffer_preflight_for_test(device: &wgpu::Device) 
     let mut recording = super::RecordingBuilder::default();
     let _buffer = recording.new_buffer(super::BufferRole::Scene, requested_size)?;
     let (_recording, intents) = recording.finish();
+    let manager = ResourceManager::default();
     let scope = ActiveVelloEncodingScope::begin(device);
-    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    let allocation = VelloResourceLease::allocate(&scope, &manager, &intents);
     let allocation_result = match allocation {
         Ok(lease) => {
             let _aborted = lease.abort();
@@ -597,8 +521,9 @@ pub(crate) async fn no_atlas_commit_outcome_for_test(
     device: &wgpu::Device,
 ) -> Result<VelloAtlasOutcome> {
     let intents = no_atlas_resource_intents_for_test()?;
+    let manager = ResourceManager::default();
     let scope = ActiveVelloEncodingScope::begin(device);
-    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    let allocation = VelloResourceLease::allocate(&scope, &manager, &intents);
     match allocation {
         Ok(lease) => match scope.finish_with_lease(lease).await {
             Ok(lease) => {
@@ -619,8 +544,9 @@ pub(crate) async fn no_atlas_abort_outcome_for_test(
     device: &wgpu::Device,
 ) -> Result<VelloAtlasOutcome> {
     let intents = no_atlas_resource_intents_for_test()?;
+    let manager = ResourceManager::default();
     let scope = ActiveVelloEncodingScope::begin(device);
-    let allocation = VelloResourceLease::allocate(&scope, &intents);
+    let allocation = VelloResourceLease::allocate(&scope, &manager, &intents);
     let outcome = allocation.map(|lease| lease.abort().into_atlas_outcome());
     scope.finish().await?;
     outcome
@@ -637,7 +563,9 @@ fn no_atlas_resource_intents_for_test() -> Result<Vec<ResourceIntent>> {
 impl AbortedVelloResources {
     pub(super) fn without_resources() -> Self {
         Self {
+            #[cfg(test)]
             discarded_resource_count: 0,
+            #[cfg(test)]
             atlas_outcome: VelloAtlasOutcome::NoAtlas,
         }
     }
@@ -650,6 +578,7 @@ impl AbortedVelloResources {
     }
 }
 
+#[cfg(test)]
 impl AbortedVelloResources {
     pub(crate) fn into_atlas_outcome(self) -> VelloAtlasOutcome {
         self.atlas_outcome
@@ -662,8 +591,100 @@ impl CommittedVelloResources {
         self.atlas_outcome
     }
 
-    fn into_persistent_image_atlas(self) -> Option<AllocatedImage> {
-        self.persistent_image_atlas
+}
+
+impl PendingVelloResources {
+    fn frame_scope(&self) -> Result<&FrameResourceScope> {
+        self.frame_scope.as_ref().ok_or_else(|| {
+            render_failed("internal Vello resource frame was already resolved")
+        })
+    }
+
+    fn frame_scope_mut(&mut self) -> Result<&mut FrameResourceScope> {
+        self.frame_scope.as_mut().ok_or_else(|| {
+            render_failed("internal Vello resource frame was already resolved")
+        })
+    }
+
+    fn consume_pending_atlas_recovery(&mut self) {
+        if let Some(scope) = self.frame_scope.as_mut() {
+            scope.consume_vello_atlas_recovery();
+        }
+    }
+
+    fn commit(&mut self) -> CommittedVelloResources {
+        let atlas_handle = self.persistent_image_atlas.resource();
+        #[cfg(test)]
+        let atlas_outcome = self.persistent_image_atlas.commit_outcome();
+        let mut frame_scope = self
+            .frame_scope
+            .take()
+            .expect("a pending Vello commit must own its resource frame");
+
+        for (_, managed) in self.buffers.drain() {
+            frame_scope
+                .discard(managed.lease)
+                .expect("a Vello buffer must remain leased by its resource frame");
+        }
+
+        let mut retained_atlas = None;
+        for (handle, managed) in self.images.drain() {
+            if Some(handle) == atlas_handle {
+                retained_atlas = Some(managed.lease);
+            } else {
+                frame_scope
+                    .discard(managed.lease)
+                    .expect("a transient Vello image must remain leased by its resource frame");
+            }
+        }
+        if let Some(atlas) = retained_atlas {
+            frame_scope.retire_idle_vello_atlases();
+            frame_scope
+                .release(atlas)
+                .expect("the persistent Vello atlas must remain leased by its resource frame");
+        }
+        let _ = frame_scope.finish();
+
+        #[cfg(not(test))]
+        {
+            CommittedVelloResources
+        }
+        #[cfg(test)]
+        {
+            CommittedVelloResources { atlas_outcome }
+        }
+    }
+
+    fn abort(&mut self) -> AbortedVelloResources {
+        #[cfg(test)]
+        let discarded_resource_count = self.buffers.len().saturating_add(self.images.len());
+        let atlas_outcome = self.persistent_image_atlas.abort_outcome();
+        if let Some(mut frame_scope) = self.frame_scope.take() {
+            for (_, managed) in self.buffers.drain() {
+                let result = frame_scope.discard(managed.lease);
+                debug_assert!(result.is_ok());
+            }
+            for (_, managed) in self.images.drain() {
+                let result = frame_scope.discard(managed.lease);
+                debug_assert!(result.is_ok());
+            }
+            frame_scope.record_vello_atlas_recovery(atlas_outcome);
+            let _ = frame_scope.finish();
+        }
+        AbortedVelloResources {
+            #[cfg(test)]
+            discarded_resource_count,
+            #[cfg(test)]
+            atlas_outcome,
+        }
+    }
+}
+
+impl Drop for PendingVelloResources {
+    fn drop(&mut self) {
+        if self.frame_scope.is_some() {
+            let _ = self.abort();
+        }
     }
 }
 
@@ -757,25 +778,13 @@ fn allocate_buffer(
             "internal Vello resource allocation repeats a buffer identity",
         ));
     }
-    let usage = match intent.role {
-        BufferRole::Config => wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        _ => {
-            wgpu::BufferUsages::STORAGE
-                | wgpu::BufferUsages::COPY_DST
-                | wgpu::BufferUsages::COPY_SRC
-                | wgpu::BufferUsages::INDIRECT
-        }
-    };
-    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("Surgeist internal Vello buffer"),
-        size: intent.byte_len,
-        usage,
-        mapped_at_creation: false,
-    });
+    let lease = pending
+        .frame_scope_mut()?
+        .acquire_vello_buffer(device, VelloBufferKey::from_intent(intent))?;
     pending.buffers.insert(
         intent.resource,
-        AllocatedBuffer {
-            buffer,
+        ManagedBuffer {
+            lease,
             byte_len: intent.byte_len,
         },
     );
@@ -805,43 +814,19 @@ fn allocate_image(
         ));
     }
 
+    let key = VelloImageKey::from_intent(intent);
     let byte_len = image_byte_len(intent.extent, intent.format)?;
-    let format = texture_format(intent.format);
-    let texture = device.create_texture(&wgpu::TextureDescriptor {
-        label: Some("Surgeist internal Vello image"),
-        size: wgpu::Extent3d {
-            width: intent.extent.width(),
-            height: intent.extent.height(),
-            depth_or_array_layers: 1,
-        },
-        mip_level_count: 1,
-        sample_count: 1,
-        dimension: wgpu::TextureDimension::D2,
-        format,
-        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-        view_formats: &[],
-    });
-    let view = texture.create_view(&wgpu::TextureViewDescriptor {
-        label: Some("Surgeist internal Vello image view"),
-        format: Some(format),
-        dimension: Some(wgpu::TextureViewDimension::D2),
-        usage: None,
-        aspect: wgpu::TextureAspect::All,
-        base_mip_level: 0,
-        mip_level_count: None,
-        base_array_layer: 0,
-        array_layer_count: None,
-    });
+    let lease = pending
+        .frame_scope_mut()?
+        .acquire_vello_image(device, key, byte_len)?;
     if intent.retention == ImageRetention::PersistentImageAtlas {
         pending.persistent_image_atlas = PendingPersistentAtlas::NewlyAllocated(intent.resource);
     }
     pending.images.insert(
         intent.resource,
-        AllocatedImage {
-            texture,
-            view,
+        ManagedImage {
+            lease,
             extent: intent.extent,
-            byte_len,
         },
     );
     Ok(())
@@ -861,6 +846,20 @@ const fn texture_format(format: RasterImageFormat) -> wgpu::TextureFormat {
     match format {
         RasterImageFormat::Rgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
     }
+}
+
+const fn buffer_usage(role: BufferRole) -> wgpu::BufferUsages {
+    match role {
+        BufferRole::Config => wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
+        _ => wgpu::BufferUsages::STORAGE
+            .union(wgpu::BufferUsages::COPY_DST)
+            .union(wgpu::BufferUsages::COPY_SRC)
+            .union(wgpu::BufferUsages::INDIRECT),
+    }
+}
+
+const fn image_usage() -> wgpu::TextureUsages {
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST)
 }
 
 fn render_failed(message: &'static str) -> Error {

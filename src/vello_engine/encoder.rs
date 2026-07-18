@@ -3,7 +3,7 @@
 
 use peniko::ImageFormat;
 
-use crate::{BackendErrorCode, Error, PhysicalSize, Result};
+use crate::{BackendErrorCode, Error, PhysicalSize, Result, resource::ResourceManager};
 
 use super::resources::{
     AbortedVelloResources, ScopeResolvedVelloResourceLease, VelloResourceLease,
@@ -198,12 +198,13 @@ pub(crate) fn encode_recording(
     engine: &VelloEngineState,
     recording: &Recording,
     resource_intents: &[ResourceIntent],
+    resources: &ResourceManager,
     state: &mut TransactionEncodingState<'_, '_>,
 ) -> std::result::Result<VelloResourceLease, VelloEncodingFailure> {
     log::trace!("encoding checked internal Vello raster recording");
     preflight_recording(recording, resource_intents, state)
         .map_err(VelloEncodingFailure::before_resource_allocation)?;
-    let mut lease = VelloResourceLease::allocate(state.active_scope(), resource_intents)
+    let mut lease = VelloResourceLease::allocate(state.active_scope(), resources, resource_intents)
         .map_err(VelloEncodingFailure::before_resource_allocation)?;
     let result = recording
         .commands

@@ -325,6 +325,37 @@ impl TextureCacheKey {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum TransitionalTextureRole {
+    #[cfg(test)]
+    Offscreen,
+    ResolvedMask,
+    Backdrop,
+}
+
+impl TransitionalTextureRole {
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            #[cfg(test)]
+            Self::Offscreen => "Surgeist transitional offscreen target",
+            Self::ResolvedMask => "Surgeist transitional resolved-mask target",
+            Self::Backdrop => "Surgeist transitional backdrop target",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct TransitionalTextureKey {
+    role: TransitionalTextureRole,
+    descriptor: TextureCacheKey,
+}
+
+impl TransitionalTextureKey {
+    pub(crate) const fn new(role: TransitionalTextureRole, descriptor: TextureCacheKey) -> Self {
+        Self { role, descriptor }
+    }
+}
+
 pub(crate) fn headless_texture_descriptor(
     physical_size: PhysicalSize,
     format: Format,

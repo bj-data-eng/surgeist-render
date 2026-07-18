@@ -2,7 +2,11 @@ use super::{
     Error, ResourceCacheBudget, Result,
     backend::DeviceCapabilities,
     image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
-    texture::{EffectTextureDescriptor, EffectTextureKey, TextureCacheKey},
+    texture::{
+        EffectTextureDescriptor, EffectTextureKey, TextureCacheKey, TransitionalTextureKey,
+        TransitionalTextureRole,
+    },
+    vello_engine::{VelloAtlasOutcome, VelloBufferKey, VelloImageKey},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -38,13 +42,7 @@ impl WorkingFormat {
         wgpu::TextureFormatFeatureFlags::FILTERABLE
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C07 resource accounting consumes this owned format fact after lifecycle modeling"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) const fn bytes_per_pixel(self) -> u64 {
         match self {
             Self::HighPrecision => 8,
@@ -409,28 +407,47 @@ fn append_kernel_sample(bytes: &mut Vec<u8>, offset: f64, weight: f64) -> Result
 /// One non-interchangeable namespace for every resource role entering the
 /// per-device manager.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 moves Vello atlas ownership into the C07 manager namespace"
-    )
-)]
 pub(crate) enum ResourceCacheKey {
+    #[cfg(test)]
     VelloAtlas,
+    VelloBuffer(VelloBufferKey),
+    VelloImage(VelloImageKey),
     EffectTexture(EffectTextureKey),
     ResolvedMaskUpload(ResolvedMaskUploadKey),
     GaussianKernelBuffer(GaussianKernelKey),
-    TransitionalTexture(TextureCacheKey),
+    TransitionalTexture(TransitionalTextureKey),
 }
 
 impl ResourceCacheKey {
+    #[cfg(test)]
     pub(crate) const fn transitional_texture(key: TextureCacheKey) -> Self {
-        Self::TransitionalTexture(key)
+        Self::transitional_texture_for_role(TransitionalTextureRole::Offscreen, key)
     }
 
+    pub(crate) const fn transitional_texture_for_role(
+        role: TransitionalTextureRole,
+        key: TextureCacheKey,
+    ) -> Self {
+        Self::TransitionalTexture(TransitionalTextureKey::new(role, key))
+    }
+
+    #[cfg(test)]
     const fn accepts_modeled_payload(self) -> bool {
         matches!(self, Self::VelloAtlas | Self::TransitionalTexture(_))
+    }
+
+    const fn is_vello_atlas(self) -> bool {
+        matches!(self, Self::VelloImage(key) if key.is_persistent_atlas())
+    }
+
+    #[cfg(test)]
+    const fn is_vello_buffer(self) -> bool {
+        matches!(self, Self::VelloBuffer(_))
+    }
+
+    #[cfg(test)]
+    const fn is_transient_vello_image(self) -> bool {
+        matches!(self, Self::VelloImage(key) if !key.is_persistent_atlas())
     }
 }
 
@@ -450,15 +467,16 @@ enum ResourceEntryState {
 }
 
 #[derive(Clone)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 and T5 consume the concrete C07 GPU payloads through their leases"
-    )
-)]
 enum ResourcePayload {
+    #[cfg(test)]
     Modeled,
+    VelloBuffer {
+        buffer: wgpu::Buffer,
+    },
+    VelloImage {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+    },
     EffectTexture {
         texture: wgpu::Texture,
         view: wgpu::TextureView,
@@ -470,34 +488,40 @@ enum ResourcePayload {
     GaussianKernelBuffer {
         buffer: wgpu::Buffer,
     },
+    TransitionalTexture {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+    },
 }
 
 impl ResourcePayload {
     const fn matches_key(&self, key: ResourceCacheKey) -> bool {
-        matches!(
-            (self, key),
+        match (self, key) {
+            #[cfg(test)]
             (
                 Self::Modeled,
-                ResourceCacheKey::VelloAtlas | ResourceCacheKey::TransitionalTexture(_)
-            ) | (
-                Self::EffectTexture { .. },
-                ResourceCacheKey::EffectTexture(_)
-            ) | (
-                Self::ResolvedMaskUpload { .. },
-                ResourceCacheKey::ResolvedMaskUpload(_)
-            ) | (
-                Self::GaussianKernelBuffer { .. },
-                ResourceCacheKey::GaussianKernelBuffer(_)
-            )
-        )
+                ResourceCacheKey::VelloAtlas | ResourceCacheKey::TransitionalTexture(_),
+            ) => true,
+            (Self::VelloBuffer { .. }, ResourceCacheKey::VelloBuffer(_))
+            | (Self::VelloImage { .. }, ResourceCacheKey::VelloImage(_))
+            | (Self::EffectTexture { .. }, ResourceCacheKey::EffectTexture(_))
+            | (Self::ResolvedMaskUpload { .. }, ResourceCacheKey::ResolvedMaskUpload(_))
+            | (Self::GaussianKernelBuffer { .. }, ResourceCacheKey::GaussianKernelBuffer(_))
+            | (Self::TransitionalTexture { .. }, ResourceCacheKey::TransitionalTexture(_)) => true,
+            _ => false,
+        }
     }
 
     const fn label(&self) -> &'static str {
         match self {
+            #[cfg(test)]
             Self::Modeled => "Modeled",
+            Self::VelloBuffer { .. } => "VelloBuffer",
+            Self::VelloImage { .. } => "VelloImage",
             Self::EffectTexture { .. } => "EffectTexture",
             Self::ResolvedMaskUpload { .. } => "ResolvedMaskUpload",
             Self::GaussianKernelBuffer { .. } => "GaussianKernelBuffer",
+            Self::TransitionalTexture { .. } => "TransitionalTexture",
         }
     }
 }
@@ -519,9 +543,16 @@ struct ResourceManagerState {
     active_frames: BTreeSet<FrameIdentity>,
     resolved_leases: BTreeSet<(FrameIdentity, ResourceIdentity)>,
     entries: BTreeMap<ResourceIdentity, ResourceEntry>,
+    pending_vello_atlas_recovery: Option<VelloAtlasOutcome>,
     stats: ResourceLifecycleStats,
     #[cfg(test)]
     payload_creation_attempts: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum IdleReuse {
+    Allowed,
+    Fresh,
 }
 
 impl ResourceManagerState {
@@ -535,6 +566,7 @@ impl ResourceManagerState {
         frame: FrameIdentity,
         key: ResourceCacheKey,
         byte_len: u64,
+        idle_reuse: IdleReuse,
         create_payload: impl FnOnce() -> Result<ResourcePayload>,
     ) -> Result<ResourceLease> {
         if self.identity != *manager_identity || !self.active_frames.contains(&frame) {
@@ -552,19 +584,22 @@ impl ResourceManagerState {
             ));
         }
 
-        let reusable = self
-            .entries
-            .iter()
-            .filter_map(|(identity, entry)| match entry.state {
-                ResourceEntryState::Idle { last_used_frame }
-                    if entry.key == key && entry.byte_len == byte_len =>
-                {
-                    Some((last_used_frame, *identity))
-                }
-                ResourceEntryState::Idle { .. } | ResourceEntryState::Leased { .. } => None,
-            })
-            .min()
-            .map(|(_, identity)| identity);
+        let reusable = match idle_reuse {
+            IdleReuse::Allowed => self
+                .entries
+                .iter()
+                .filter_map(|(identity, entry)| match entry.state {
+                    ResourceEntryState::Idle { last_used_frame }
+                        if entry.key == key && entry.byte_len == byte_len =>
+                    {
+                        Some((last_used_frame, *identity))
+                    }
+                    ResourceEntryState::Idle { .. } | ResourceEntryState::Leased { .. } => None,
+                })
+                .min()
+                .map(|(_, identity)| identity),
+            IdleReuse::Fresh => None,
+        };
 
         let (resource, allocation_generation, payload) = if let Some(resource) = reusable {
             let entry = self
@@ -630,6 +665,7 @@ impl ResourceManagerState {
         ))
     }
 
+    #[cfg(test)]
     fn acquire(
         &mut self,
         manager_identity: &ManagerIdentity,
@@ -644,9 +680,14 @@ impl ResourceManagerState {
                 "must use a Vello or transitional namespace",
             ));
         }
-        self.acquire_with_payload(manager_identity, frame, key, byte_len, || {
-            Ok(ResourcePayload::Modeled)
-        })
+        self.acquire_with_payload(
+            manager_identity,
+            frame,
+            key,
+            byte_len,
+            IdleReuse::Allowed,
+            || Ok(ResourcePayload::Modeled),
+        )
     }
 
     fn validate_lease(
@@ -710,13 +751,7 @@ impl ResourceManagerState {
         Ok(())
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T3 replaces modeled allocations through this generation-checked transition"
-        )
-    )]
+    #[cfg(test)]
     fn replace(
         &mut self,
         manager_identity: &ManagerIdentity,
@@ -806,6 +841,39 @@ impl ResourceManagerState {
         Ok(())
     }
 
+    fn record_vello_atlas_recovery(&mut self, outcome: VelloAtlasOutcome) {
+        self.pending_vello_atlas_recovery =
+            VelloAtlasOutcome::merge_pending_recovery(self.pending_vello_atlas_recovery, outcome);
+    }
+
+    fn consume_vello_atlas_recovery(&mut self) {
+        let _ = self.pending_vello_atlas_recovery.take();
+    }
+
+    fn retire_idle_vello_atlases(&mut self) {
+        let retired = self
+            .entries
+            .iter()
+            .filter_map(|(identity, entry)| {
+                (entry.key.is_vello_atlas()
+                    && matches!(entry.state, ResourceEntryState::Idle { .. }))
+                .then_some((*identity, entry.byte_len))
+            })
+            .collect::<Vec<_>>();
+        for (identity, byte_len) in retired {
+            let removed = self
+                .entries
+                .remove(&identity)
+                .expect("an idle Vello atlas selected for replacement must remain registered");
+            debug_assert_eq!(removed.byte_len, byte_len);
+            self.retained_bytes = self
+                .retained_bytes
+                .checked_sub(byte_len)
+                .expect("retained accounting must include every replaced Vello atlas");
+            self.stats.evictions = self.stats.evictions.saturating_add(1);
+        }
+    }
+
     fn cleanup_frame(
         &mut self,
         manager_identity: &ManagerIdentity,
@@ -880,6 +948,7 @@ impl ResourceManager {
                 active_frames: BTreeSet::new(),
                 resolved_leases: BTreeSet::new(),
                 entries: BTreeMap::new(),
+                pending_vello_atlas_recovery: None,
                 stats: ResourceLifecycleStats::default(),
                 #[cfg(test)]
                 payload_creation_attempts: 0,
@@ -907,16 +976,33 @@ impl ResourceManager {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn stats(&self) -> ResourceLifecycleStats {
         lock_state(&self.state).stats
     }
 
+    #[cfg(test)]
     pub(crate) fn live_count(&self) -> usize {
         lock_state(&self.state)
             .entries
             .values()
             .filter(|entry| matches!(entry.state, ResourceEntryState::Leased { .. }))
             .count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_empty_for_test(&self) -> bool {
+        lock_state(&self.state).entries.is_empty()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn identity_for_test(&self) -> ManagerIdentity {
+        lock_state(&self.state).identity.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn budget_for_test(&self) -> ResourceCacheBudget {
+        lock_state(&self.state).budget
     }
 
     #[cfg(test)]
@@ -932,6 +1018,39 @@ impl ResourceManager {
             .values()
             .filter(|entry| matches!(entry.state, ResourceEntryState::Idle { .. }))
             .count();
+        let retained_atlas_count = state
+            .entries
+            .values()
+            .filter(|entry| entry.key.is_vello_atlas())
+            .count();
+        let retained_atlas_byte_len = state
+            .entries
+            .values()
+            .filter(|entry| entry.key.is_vello_atlas())
+            .map(|entry| entry.byte_len)
+            .sum();
+        let committed_transient_buffer_count = state
+            .entries
+            .values()
+            .filter(|entry| entry.key.is_vello_buffer())
+            .count();
+        let committed_transient_buffer_byte_len = state
+            .entries
+            .values()
+            .filter(|entry| entry.key.is_vello_buffer())
+            .map(|entry| entry.byte_len)
+            .sum();
+        let committed_transient_image_count = state
+            .entries
+            .values()
+            .filter(|entry| entry.key.is_transient_vello_image())
+            .count();
+        let committed_transient_image_byte_len = state
+            .entries
+            .values()
+            .filter(|entry| entry.key.is_transient_vello_image())
+            .map(|entry| entry.byte_len)
+            .sum();
         ResourceManagerObservationForTest {
             idle_count,
             leased_count: state.entries.len().saturating_sub(idle_count),
@@ -939,6 +1058,13 @@ impl ResourceManager {
             next_resource: state.next_resource,
             entry_count: state.entries.len(),
             payload_creation_attempts: state.payload_creation_attempts,
+            retained_atlas_count,
+            retained_atlas_byte_len,
+            committed_transient_buffer_count,
+            committed_transient_buffer_byte_len,
+            committed_transient_image_count,
+            committed_transient_image_byte_len,
+            recovery_outcome: state.pending_vello_atlas_recovery,
         }
     }
 }
@@ -1026,6 +1152,7 @@ pub(crate) struct FrameResourceScope {
 }
 
 impl FrameResourceScope {
+    #[cfg(test)]
     pub(crate) fn acquire(
         &mut self,
         key: ResourceCacheKey,
@@ -1042,6 +1169,154 @@ impl FrameResourceScope {
         Ok(&lease.payload)
     }
 
+    pub(crate) fn vello_buffer<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<&'scope wgpu::Buffer> {
+        match self.validated_payload(lease)? {
+            ResourcePayload::VelloBuffer { buffer } => Ok(buffer),
+            _ => Err(Error::invalid_value(
+                "resource lease payload",
+                lease.resource_identity().get(),
+                "must contain an internal Vello buffer",
+            )),
+        }
+    }
+
+    pub(crate) fn vello_image<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
+        match self.validated_payload(lease)? {
+            ResourcePayload::VelloImage { texture, view } => Ok((texture, view)),
+            _ => Err(Error::invalid_value(
+                "resource lease payload",
+                lease.resource_identity().get(),
+                "must contain an internal Vello image",
+            )),
+        }
+    }
+
+    pub(crate) fn transitional_texture<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
+        match self.validated_payload(lease)? {
+            ResourcePayload::TransitionalTexture { texture, view } => Ok((texture, view)),
+            _ => Err(Error::invalid_value(
+                "resource lease payload",
+                lease.resource_identity().get(),
+                "must contain a transitional offscreen texture",
+            )),
+        }
+    }
+
+    pub(crate) fn acquire_vello_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        key: VelloBufferKey,
+    ) -> Result<ResourceLease> {
+        let byte_len = key.byte_len();
+        lock_state(&self.state).acquire_with_payload(
+            &self.manager_identity,
+            self.frame,
+            ResourceCacheKey::VelloBuffer(key),
+            byte_len,
+            IdleReuse::Fresh,
+            || {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("Surgeist internal Vello buffer"),
+                    size: byte_len,
+                    usage: key.usage(),
+                    mapped_at_creation: false,
+                });
+                Ok(ResourcePayload::VelloBuffer { buffer })
+            },
+        )
+    }
+
+    pub(crate) fn acquire_vello_image(
+        &mut self,
+        device: &wgpu::Device,
+        key: VelloImageKey,
+        byte_len: u64,
+    ) -> Result<ResourceLease> {
+        lock_state(&self.state).acquire_with_payload(
+            &self.manager_identity,
+            self.frame,
+            ResourceCacheKey::VelloImage(key),
+            byte_len,
+            IdleReuse::Fresh,
+            || {
+                let format = key.texture_format();
+                let extent = key.extent();
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Surgeist internal Vello image"),
+                    size: wgpu::Extent3d {
+                        width: extent.width(),
+                        height: extent.height(),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: key.usage(),
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("Surgeist internal Vello image view"),
+                    format: Some(format),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    usage: None,
+                    aspect: wgpu::TextureAspect::All,
+                    base_mip_level: 0,
+                    mip_level_count: None,
+                    base_array_layer: 0,
+                    array_layer_count: None,
+                });
+                Ok(ResourcePayload::VelloImage { texture, view })
+            },
+        )
+    }
+
+    pub(crate) fn acquire_transitional_texture(
+        &mut self,
+        device: &wgpu::Device,
+        role: TransitionalTextureRole,
+        descriptor: super::texture::TextureDescriptor,
+    ) -> Result<ResourceLease> {
+        let key = ResourceCacheKey::transitional_texture_for_role(
+            role,
+            TextureCacheKey::from_descriptor(descriptor),
+        );
+        lock_state(&self.state).acquire_with_payload(
+            &self.manager_identity,
+            self.frame,
+            key,
+            descriptor.byte_len(),
+            IdleReuse::Allowed,
+            || {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(role.label()),
+                    size: wgpu::Extent3d {
+                        width: descriptor.physical_size().width(),
+                        height: descriptor.physical_size().height(),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::from(descriptor.format()),
+                    usage: descriptor.wgpu_usage(),
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                Ok(ResourcePayload::TransitionalTexture { texture, view })
+            },
+        )
+    }
+
     #[cfg_attr(
         not(test),
         expect(dead_code, reason = "T4 consumes concrete effect texture leases")
@@ -1052,9 +1327,7 @@ impl FrameResourceScope {
     ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
         match self.validated_payload(lease)? {
             ResourcePayload::EffectTexture { texture, view } => Ok((texture, view)),
-            ResourcePayload::Modeled
-            | ResourcePayload::ResolvedMaskUpload { .. }
-            | ResourcePayload::GaussianKernelBuffer { .. } => Err(Error::invalid_value(
+            _ => Err(Error::invalid_value(
                 "resource lease payload",
                 lease.resource_identity().get(),
                 "must contain an effect texture",
@@ -1072,9 +1345,7 @@ impl FrameResourceScope {
     ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
         match self.validated_payload(lease)? {
             ResourcePayload::ResolvedMaskUpload { texture, view } => Ok((texture, view)),
-            ResourcePayload::Modeled
-            | ResourcePayload::EffectTexture { .. }
-            | ResourcePayload::GaussianKernelBuffer { .. } => Err(Error::invalid_value(
+            _ => Err(Error::invalid_value(
                 "resource lease payload",
                 lease.resource_identity().get(),
                 "must contain a resolved-mask texture",
@@ -1092,9 +1363,7 @@ impl FrameResourceScope {
     ) -> Result<&'scope wgpu::Buffer> {
         match self.validated_payload(lease)? {
             ResourcePayload::GaussianKernelBuffer { buffer } => Ok(buffer),
-            ResourcePayload::Modeled
-            | ResourcePayload::EffectTexture { .. }
-            | ResourcePayload::ResolvedMaskUpload { .. } => Err(Error::invalid_value(
+            _ => Err(Error::invalid_value(
                 "resource lease payload",
                 lease.resource_identity().get(),
                 "must contain a Gaussian kernel buffer",
@@ -1128,6 +1397,7 @@ impl FrameResourceScope {
             self.frame,
             key,
             byte_len,
+            IdleReuse::Allowed,
             || {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some(descriptor.label()),
@@ -1199,6 +1469,7 @@ impl FrameResourceScope {
             self.frame,
             key,
             descriptor.byte_len(),
+            IdleReuse::Allowed,
             || {
                 let texture = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("Surgeist retained resolved mask upload"),
@@ -1266,6 +1537,7 @@ impl FrameResourceScope {
             self.frame,
             key,
             byte_len,
+            IdleReuse::Allowed,
             || {
                 let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("Surgeist immutable Gaussian kernel buffer"),
@@ -1281,13 +1553,19 @@ impl FrameResourceScope {
         lock_state(&self.state).release(&self.manager_identity, self.frame, lease.token)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T3 replaces modeled allocations through this generation-checked transition"
-        )
-    )]
+    pub(crate) fn record_vello_atlas_recovery(&mut self, outcome: VelloAtlasOutcome) {
+        lock_state(&self.state).record_vello_atlas_recovery(outcome);
+    }
+
+    pub(crate) fn consume_vello_atlas_recovery(&mut self) {
+        lock_state(&self.state).consume_vello_atlas_recovery();
+    }
+
+    pub(crate) fn retire_idle_vello_atlases(&mut self) {
+        lock_state(&self.state).retire_idle_vello_atlases();
+    }
+
+    #[cfg(test)]
     pub(crate) fn replace(
         &mut self,
         lease: ResourceLease,
@@ -1355,6 +1633,7 @@ pub(crate) struct FrameCleanup {
 }
 
 impl FrameCleanup {
+    #[cfg(test)]
     pub(crate) fn evicted_resources(&self) -> &[ResourceIdentity] {
         &self.evicted_resources
     }
@@ -1390,4 +1669,50 @@ pub(crate) struct ResourceManagerObservationForTest {
     pub(crate) next_resource: u64,
     pub(crate) entry_count: usize,
     pub(crate) payload_creation_attempts: u64,
+    retained_atlas_count: usize,
+    retained_atlas_byte_len: u64,
+    committed_transient_buffer_count: usize,
+    committed_transient_buffer_byte_len: u64,
+    committed_transient_image_count: usize,
+    committed_transient_image_byte_len: u64,
+    recovery_outcome: Option<VelloAtlasOutcome>,
+}
+
+#[cfg(test)]
+impl ResourceManagerObservationForTest {
+    pub(crate) const fn retained_count_for_test(&self) -> usize {
+        self.entry_count
+    }
+
+    pub(crate) const fn retained_atlas_count_for_test(&self) -> usize {
+        self.retained_atlas_count
+    }
+
+    pub(crate) const fn retained_byte_len_for_test(&self) -> u64 {
+        self.retained_bytes
+    }
+
+    pub(crate) const fn retained_atlas_byte_len_for_test(&self) -> u64 {
+        self.retained_atlas_byte_len
+    }
+
+    pub(crate) const fn committed_transient_buffer_count_for_test(&self) -> usize {
+        self.committed_transient_buffer_count
+    }
+
+    pub(crate) const fn committed_transient_buffer_byte_len_for_test(&self) -> u64 {
+        self.committed_transient_buffer_byte_len
+    }
+
+    pub(crate) const fn committed_transient_image_count_for_test(&self) -> usize {
+        self.committed_transient_image_count
+    }
+
+    pub(crate) const fn committed_transient_image_byte_len_for_test(&self) -> u64 {
+        self.committed_transient_image_byte_len
+    }
+
+    pub(crate) const fn recovery_outcome_for_test(&self) -> Option<VelloAtlasOutcome> {
+        self.recovery_outcome
+    }
 }

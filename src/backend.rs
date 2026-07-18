@@ -3,9 +3,10 @@ use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
 use super::resource::{
-    FrameCleanup, FrameResourceScope, ResourceCacheKey, ResourceIdentity, ResourceLease,
-    ResourceLifecycleStats, ResourceManager, WorkingFormat,
+    FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
 };
+#[cfg(test)]
+use super::resource::{ManagerIdentity, ResourceManagerObservationForTest};
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(any(
     feature = "render-window",
@@ -17,23 +18,22 @@ use super::surface::{PresentedConfigurationDraft, PresentedLifecycle};
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::{PresentedSurface, PresentedSurfaceAcquire};
+#[cfg(test)]
+use super::vello_engine::PreparedVelloPass;
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
-    TransactionTargetIntent, VelloEngineState, VelloResourceManager, scene::VelloScene,
+    TransactionTargetIntent, VelloEngineState, scene::VelloScene,
 };
-#[cfg(test)]
-use super::vello_engine::{PreparedVelloPass, VelloResourceManagerObservationForTest};
 use super::*;
 use super::{
     command::OffscreenBounds,
     geometry::physical_size,
     gpu_transaction::{GpuOperationStage, GpuOperationTransaction, InternalVelloPayload},
     texture::{
-        TextureCacheKey, TextureDescriptor, TextureUsageIntent, headless_texture_descriptor,
+        TextureDescriptor, TextureUsageIntent, TransitionalTextureRole, headless_texture_descriptor,
     },
 };
 use std::{
-    collections::{HashMap, VecDeque},
     fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
@@ -196,6 +196,7 @@ fn record_offscreen_texture_acquire_for_test() {
 pub(crate) struct Backend {
     instance: wgpu::Instance,
     device_states: Vec<DeviceState>,
+    resource_cache_budget: ResourceCacheBudget,
 }
 
 struct InternalVelloRenderRequest<'a> {
@@ -222,7 +223,7 @@ struct ReadyDeviceState {
     device: wgpu::Device,
     queue: wgpu::Queue,
     engine: VelloEngineState,
-    resources: VelloResourceManager,
+    resources: ResourceManager,
     #[cfg(test)]
     drop_witness: Arc<()>,
 }
@@ -257,12 +258,16 @@ pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
     device: &'ready wgpu::Device,
     queue: &'ready wgpu::Queue,
     engine: &'ready VelloEngineState,
-    resources: &'ready VelloResourceManager,
+    resources: &'ready ResourceManager,
     drop_witness: ReadyDeviceStateDropWitnessForTest,
 }
 
 #[cfg(test)]
 impl ReadyDeviceStateBorrowForTest<'_> {
+    pub(crate) fn sole_resource_manager_identity_for_test(&self) -> Option<ManagerIdentity> {
+        Some(self.resources.identity_for_test())
+    }
+
     pub(crate) fn adapter_for_test(&self) -> &wgpu::Adapter {
         self.adapter
     }
@@ -285,8 +290,12 @@ impl ReadyDeviceStateBorrowForTest<'_> {
 
     pub(crate) fn internal_resource_manager_observation_for_test(
         &self,
-    ) -> VelloResourceManagerObservationForTest {
+    ) -> ResourceManagerObservationForTest {
         self.resources.observation_for_test()
+    }
+
+    pub(crate) fn resource_cache_budget_for_test(&self) -> ResourceCacheBudget {
+        self.resources.budget_for_test()
     }
 
     pub(crate) fn drop_witness_for_test(&self) -> ReadyDeviceStateDropWitnessForTest {
@@ -309,7 +318,12 @@ impl ReadyDeviceState {
 }
 
 impl DeviceState {
-    async fn new(adapter: wgpu::Adapter, device: wgpu::Device, queue: wgpu::Queue) -> Result<Self> {
+    async fn new(
+        adapter: wgpu::Adapter,
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        resource_cache_budget: ResourceCacheBudget,
+    ) -> Result<Self> {
         let signal = Arc::new(DeviceSignal::new());
         register_device_callbacks(&device, Arc::clone(&signal));
         let capabilities = DeviceCapabilities::from_device(&adapter, &device);
@@ -322,8 +336,9 @@ impl DeviceState {
                 )
                 .with_source(source)
             })?;
-        let resources = VelloResourceManager::new();
-        debug_assert!(resources.is_empty());
+        let resources = ResourceManager::new(resource_cache_budget);
+        #[cfg(test)]
+        debug_assert!(resources.is_empty_for_test());
         Ok(Self {
             generation: 0,
             lifecycle: DeviceLifecycle::Ready(Box::new(ReadyDeviceState {
@@ -881,7 +896,7 @@ impl DeviceSlotIdentity {
 }
 
 impl Backend {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(resource_cache_budget: ResourceCacheBudget) -> Self {
         let backends = wgpu::Backends::from_env().unwrap_or_default();
         let flags = wgpu::InstanceFlags::from_build_config().with_env();
         let memory_budget_thresholds = wgpu::MemoryBudgetThresholds::default();
@@ -895,6 +910,7 @@ impl Backend {
                 backend_options,
             }),
             device_states: Vec::new(),
+            resource_cache_budget,
         }
     }
 
@@ -980,7 +996,7 @@ impl Backend {
             Ok(device) => device,
             Err(_) => return Ok(None),
         };
-        let state = DeviceState::new(adapter, device, queue).await?;
+        let state = DeviceState::new(adapter, device, queue, self.resource_cache_budget).await?;
         let slot = self.device_states.len();
         let generation = state.generation;
         self.device_states.push(state);
@@ -1079,6 +1095,7 @@ impl Backend {
             .ok_or_else(|| Error::new(error_code, unavailable_message))
     }
 
+    #[cfg(test)]
     pub(crate) fn device_queue(
         &mut self,
         identity: DeviceSlotIdentity,
@@ -1175,12 +1192,10 @@ impl Backend {
                     request.target_usage,
                 ),
             );
-            match prepared.encode_into(&ready.engine, &mut encoding) {
+            match prepared.encode_into(&ready.engine, &ready.resources, &mut encoding) {
                 Ok(encoded) => encoded,
                 Err(failure) => {
-                    let (error, aborted) = failure.into_error_and_aborted_resources();
-                    ready.resources.record_aborted_resources(aborted);
-                    return Err(error);
+                    return Err(failure.into_error_and_aborted_resources().0);
                 }
             }
         };
@@ -1188,14 +1203,12 @@ impl Backend {
         let lease = match scope.finish_with_lease(lease).await {
             Ok(lease) => lease,
             Err(failure) => {
-                let (error, aborted) = failure.into_error_and_aborted_resources();
-                ready.resources.record_aborted_resources(aborted);
-                return Err(error);
+                return Err(failure.into_error_and_aborted_resources().0);
             }
         };
         let payload = InternalVelloPayload::new(
             command_encoder.finish(),
-            ready.resources.pending_commit(lease),
+            super::vello_engine::PendingVelloResourceCommit::new(lease),
             logical_pass,
         );
         transaction
@@ -1380,12 +1393,10 @@ impl Backend {
                     target_usage,
                 ),
             );
-            match prepared.encode_into(engine, &mut encoding) {
+            match prepared.encode_into(engine, resources, &mut encoding) {
                 Ok(lease) => lease,
                 Err(failure) => {
-                    let (error, aborted) = failure.into_error_and_aborted_resources();
-                    resources.record_aborted_resources(aborted);
-                    return Err(error);
+                    return Err(failure.into_error_and_aborted_resources().0);
                 }
             }
         };
@@ -1393,15 +1404,13 @@ impl Backend {
         let lease = match scope.finish_with_lease(lease).await {
             Ok(lease) => lease,
             Err(failure) => {
-                let (error, aborted) = failure.into_error_and_aborted_resources();
-                resources.record_aborted_resources(aborted);
-                return Err(error);
+                return Err(failure.into_error_and_aborted_resources().0);
             }
         };
         let observation = InternalVelloSubmissionObservationForTest::default();
         let payload = InternalVelloPayload::observed_for_test(
             command_encoder.finish(),
-            resources.pending_commit(lease),
+            super::vello_engine::PendingVelloResourceCommit::new(lease),
             logical_pass,
             observation.clone(),
         );
@@ -1417,7 +1426,7 @@ impl Backend {
         identity: DeviceSlotIdentity,
         prepared: &PreparedVelloPass,
         target_extent: PhysicalSize,
-    ) -> Result<VelloResourceManagerObservationForTest> {
+    ) -> Result<ResourceManagerObservationForTest> {
         let transaction = self.begin_gpu_operation(
             identity,
             GpuOperationStage::Render,
@@ -1482,12 +1491,10 @@ impl Backend {
                     target_usage,
                 ),
             );
-            match prepared.encode_into(engine, &mut encoding) {
+            match prepared.encode_into(engine, resources, &mut encoding) {
                 Ok(lease) => lease,
                 Err(failure) => {
-                    let (error, aborted) = failure.into_error_and_aborted_resources();
-                    resources.record_aborted_resources(aborted);
-                    return Err(error);
+                    return Err(failure.into_error_and_aborted_resources().0);
                 }
             }
         };
@@ -1495,15 +1502,13 @@ impl Backend {
         let lease = match scope.finish_with_lease(lease).await {
             Ok(lease) => lease,
             Err(failure) => {
-                let (error, aborted) = failure.into_error_and_aborted_resources();
-                resources.record_aborted_resources(aborted);
-                return Err(error);
+                return Err(failure.into_error_and_aborted_resources().0);
             }
         };
         let (checkpoint, checkpoint_observed) = AfterInternalVelloSubmitCheckpointForTest::paused();
         let payload = InternalVelloPayload::paused_after_submit_for_test(
             command_encoder.finish(),
-            resources.pending_commit(lease),
+            super::vello_engine::PendingVelloResourceCommit::new(lease),
             logical_pass,
             checkpoint,
         );
@@ -1721,13 +1726,11 @@ impl Backend {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OffscreenRenderGpuContext<'a> {
     backend: &'a mut Backend,
     device_identity: DeviceSlotIdentity,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl<'a> OffscreenRenderGpuContext<'a> {
     #[must_use]
     pub(crate) fn new(backend: &'a mut Backend, device_identity: DeviceSlotIdentity) -> Self {
@@ -1741,17 +1744,17 @@ impl<'a> OffscreenRenderGpuContext<'a> {
 /// Describes a Vello scene that has already been encoded in offscreen-local
 /// coordinates; bounds size allocates the target texture, not a scene crop.
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OffscreenLocalSceneRenderRequest {
     bounds: OffscreenBounds,
     scale: f64,
     format: Format,
     parameters: Parameters,
+    resource_role: TransitionalTextureRole,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenLocalSceneRenderRequest {
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn new(
         bounds: OffscreenBounds,
         scale: f64,
@@ -1763,38 +1766,73 @@ impl OffscreenLocalSceneRenderRequest {
             scale,
             format,
             parameters,
+            resource_role: TransitionalTextureRole::Offscreen,
+        }
+    }
+
+    pub(crate) const fn for_resolved_mask(
+        bounds: OffscreenBounds,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Self {
+        Self {
+            bounds,
+            scale,
+            format,
+            parameters,
+            resource_role: TransitionalTextureRole::ResolvedMask,
+        }
+    }
+
+    pub(crate) const fn for_backdrop(
+        bounds: OffscreenBounds,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Self {
+        Self {
+            bounds,
+            scale,
+            format,
+            parameters,
+            resource_role: TransitionalTextureRole::Backdrop,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OffscreenRenderTarget {
+    #[cfg(test)]
     resource_identity: ResourceIdentity,
+    #[cfg(test)]
     bounds: OffscreenBounds,
     descriptor: TextureDescriptor,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenRenderTarget {
     fn new(
-        resource_identity: ResourceIdentity,
-        bounds: OffscreenBounds,
+        _resource_identity: ResourceIdentity,
+        _bounds: OffscreenBounds,
         descriptor: TextureDescriptor,
     ) -> Self {
         Self {
-            resource_identity,
-            bounds,
+            #[cfg(test)]
+            resource_identity: _resource_identity,
+            #[cfg(test)]
+            bounds: _bounds,
             descriptor,
         }
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn resource_id(self) -> u64 {
         self.resource_identity.get()
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn bounds(self) -> OffscreenBounds {
         self.bounds
     }
@@ -1805,190 +1843,11 @@ impl OffscreenRenderTarget {
     }
 }
 
-struct OffscreenTextureResource {
-    resource_identity: ResourceIdentity,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) struct OffscreenTextureResourceCache {
-    lifecycle: ResourceManager,
-    released_by_key: HashMap<TextureCacheKey, VecDeque<OffscreenTextureResource>>,
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-impl OffscreenTextureResourceCache {
-    pub(crate) fn new() -> Self {
-        Self {
-            lifecycle: ResourceManager::default(),
-            released_by_key: HashMap::new(),
-        }
-    }
-
-    fn acquire(
-        &mut self,
-        device: &wgpu::Device,
-        bounds: OffscreenBounds,
-        descriptor: TextureDescriptor,
-    ) -> Result<OffscreenTextureResourceLease> {
-        #[cfg(test)]
-        record_offscreen_texture_acquire_for_test();
-        let key = TextureCacheKey::from_descriptor(descriptor);
-        let stats_before = self.lifecycle.stats();
-        let mut frame_scope = self.lifecycle.begin_frame()?;
-        let lease = frame_scope.acquire(
-            ResourceCacheKey::transitional_texture(key),
-            descriptor.byte_len(),
-        )?;
-        let resource_identity = lease.resource_identity();
-        let lifecycle = ScopedOffscreenLifecycleLease::new(frame_scope, lease);
-        let reused = self.lifecycle.stats().hits > stats_before.hits;
-        let resource = if reused {
-            let released = self.released_by_key.get_mut(&key);
-            let resource = released.and_then(|resources| {
-                resources
-                    .iter()
-                    .position(|resource| resource.resource_identity == resource_identity)
-                    .and_then(|position| resources.remove(position))
-            });
-            match resource {
-                Some(resource) => resource,
-                None => {
-                    drop(lifecycle);
-                    return Err(Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "offscreen texture resource cache lost a released GPU resource",
-                    ));
-                }
-            }
-        } else {
-            let (texture, view) =
-                create_texture(device, "Surgeist offscreen local scene target", descriptor);
-            OffscreenTextureResource {
-                resource_identity,
-                texture,
-                view,
-            }
-        };
-        debug_assert_eq!(resource.resource_identity, resource_identity);
-        Ok(OffscreenTextureResourceLease {
-            target: OffscreenRenderTarget::new(resource_identity, bounds, descriptor),
-            texture: resource.texture,
-            view: resource.view,
-            lifecycle,
-        })
-    }
-
-    fn release_resource(&mut self, resource: OffscreenTextureResourceLease) -> Result<()> {
-        let OffscreenTextureResourceLease {
-            target,
-            texture,
-            view,
-            lifecycle,
-        } = resource;
-        let cleanup = lifecycle.release()?;
-        self.released_by_key
-            .entry(TextureCacheKey::from_descriptor(target.descriptor()))
-            .or_default()
-            .push_back(OffscreenTextureResource {
-                resource_identity: target.resource_identity,
-                texture,
-                view,
-            });
-        self.remove_evicted_resources(&cleanup);
-        Ok(())
-    }
-
-    fn remove_evicted_resources(&mut self, cleanup: &FrameCleanup) {
-        for resources in self.released_by_key.values_mut() {
-            resources.retain(|resource| {
-                !cleanup
-                    .evicted_resources()
-                    .contains(&resource.resource_identity)
-            });
-        }
-    }
-
-    #[must_use]
-    pub(crate) fn stats(&self) -> ResourceLifecycleStats {
-        self.lifecycle.stats()
-    }
-
-    #[must_use]
-    pub(crate) fn live_count(&self) -> usize {
-        self.lifecycle.live_count()
-    }
-
-    #[must_use]
-    pub(crate) fn released_resource_count(&self) -> usize {
-        self.released_by_key.values().map(VecDeque::len).sum()
-    }
-}
-
-impl Default for OffscreenTextureResourceCache {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-struct OffscreenTextureResourceLease {
-    target: OffscreenRenderTarget,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    lifecycle: ScopedOffscreenLifecycleLease,
-}
-
-struct ScopedOffscreenLifecycleLease {
-    frame_scope: Option<FrameResourceScope>,
-    lease: Option<ResourceLease>,
-}
-
-impl ScopedOffscreenLifecycleLease {
-    fn new(frame_scope: FrameResourceScope, lease: ResourceLease) -> Self {
-        Self {
-            frame_scope: Some(frame_scope),
-            lease: Some(lease),
-        }
-    }
-
-    fn release(mut self) -> Result<FrameCleanup> {
-        let mut frame_scope = self
-            .frame_scope
-            .take()
-            .expect("an unresolved offscreen lifecycle lease must own its frame scope");
-        let lease = self
-            .lease
-            .take()
-            .expect("an unresolved offscreen lifecycle lease must own its resource lease");
-        frame_scope.release(lease)?;
-        Ok(frame_scope.finish())
-    }
-
-    fn discard(&mut self) {
-        let Some(mut frame_scope) = self.frame_scope.take() else {
-            return;
-        };
-        if let Some(lease) = self.lease.take() {
-            let _ = frame_scope.discard(lease);
-        }
-        let _ = frame_scope.finish();
-    }
-}
-
-impl Drop for ScopedOffscreenLifecycleLease {
-    fn drop(&mut self) {
-        self.discard();
-    }
-}
-
-#[cfg_attr(not(test), allow(dead_code))]
-#[must_use = "offscreen rendered texture leases must be released back to their resource cache"]
+#[must_use = "offscreen rendered texture leases must be resolved by their device resource frame"]
 pub(crate) struct OffscreenRenderedTextureLease {
     target: OffscreenRenderTarget,
-    texture: wgpu::Texture,
-    view: wgpu::TextureView,
-    lifecycle: ScopedOffscreenLifecycleLease,
+    frame_scope: Option<FrameResourceScope>,
+    resource: Option<ResourceLease>,
     timings: RenderTimings,
 }
 
@@ -2002,39 +1861,76 @@ impl fmt::Debug for OffscreenRenderedTextureLease {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenRenderedTextureLease {
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn target(&self) -> OffscreenRenderTarget {
         self.target
     }
 
-    #[must_use]
-    pub(crate) const fn texture(&self) -> &wgpu::Texture {
-        &self.texture
+    pub(crate) fn texture(&self) -> Result<&wgpu::Texture> {
+        self.managed_texture().map(|(texture, _)| texture)
+    }
+
+    pub(crate) fn view(&self) -> Result<&wgpu::TextureView> {
+        self.managed_texture().map(|(_, view)| view)
     }
 
     #[must_use]
-    pub(crate) const fn view(&self) -> &wgpu::TextureView {
-        &self.view
-    }
-
-    #[must_use]
+    #[cfg(test)]
     pub(crate) const fn timings(&self) -> RenderTimings {
         self.timings
     }
 
-    pub(crate) fn release(self, cache: &mut OffscreenTextureResourceCache) -> Result<()> {
-        cache.release_resource(OffscreenTextureResourceLease {
-            target: self.target,
-            texture: self.texture,
-            view: self.view,
-            lifecycle: self.lifecycle,
-        })
+    pub(crate) fn release(mut self) -> Result<()> {
+        let mut frame_scope = self
+            .frame_scope
+            .take()
+            .expect("an unresolved offscreen lease must own its resource frame");
+        let resource = self
+            .resource
+            .take()
+            .expect("an unresolved offscreen lease must own its resource lease");
+        frame_scope.release(resource)?;
+        let _ = frame_scope.finish();
+        Ok(())
+    }
+
+    fn managed_texture(&self) -> Result<(&wgpu::Texture, &wgpu::TextureView)> {
+        let frame_scope = self.frame_scope.as_ref().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "offscreen texture resource frame was already resolved",
+            )
+        })?;
+        let resource = self.resource.as_ref().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "offscreen texture resource lease was already resolved",
+            )
+        })?;
+        frame_scope.transitional_texture(resource)
+    }
+
+    fn discard(&mut self) {
+        let Some(mut frame_scope) = self.frame_scope.take() else {
+            return;
+        };
+        if let Some(resource) = self.resource.take() {
+            let result = frame_scope.discard(resource);
+            debug_assert!(result.is_ok());
+        }
+        let _ = frame_scope.finish();
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+impl Drop for OffscreenRenderedTextureLease {
+    fn drop(&mut self) {
+        self.discard();
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn offscreen_local_scene_texture_descriptor(
     bounds: OffscreenBounds,
     scale: f64,
@@ -2066,11 +1962,9 @@ fn offscreen_local_scene_texture_descriptor_for_physical_size(
     TextureDescriptor::try_new(physical_size, format, TextureUsageIntent::OffscreenLayer)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
     context: Option<OffscreenRenderGpuContext<'_>>,
     options: Options,
-    cache: &mut OffscreenTextureResourceCache,
     scene: &VelloScene,
     request: OffscreenLocalSceneRenderRequest,
 ) -> Result<OffscreenRenderedTextureLease> {
@@ -2089,11 +1983,29 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
     }
     let descriptor =
         offscreen_local_scene_texture_descriptor_for_physical_size(physical_size, request.format)?;
-    let resource = {
-        let (device, _) = context
-            .backend
-            .device_queue(context.device_identity, RuntimeOperation::SurfaceRendering)?;
-        cache.acquire(device, request.bounds, descriptor)?
+    let mut rendered = {
+        let ready = context.backend.ready_state_mut(
+            context.device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "offscreen device resources are unavailable before allocation",
+        )?;
+        #[cfg(test)]
+        record_offscreen_texture_acquire_for_test();
+        let mut frame_scope = ready.resources.begin_frame()?;
+        let resource = frame_scope.acquire_transitional_texture(
+            &ready.device,
+            request.resource_role,
+            descriptor,
+        )?;
+        let target =
+            OffscreenRenderTarget::new(resource.resource_identity(), request.bounds, descriptor);
+        OffscreenRenderedTextureLease {
+            target,
+            frame_scope: Some(frame_scope),
+            resource: Some(resource),
+            timings: RenderTimings::default(),
+        }
     };
     let render_start = Instant::now();
     let transaction = context.backend.begin_gpu_operation(
@@ -2109,31 +2021,23 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
                 identity: context.device_identity,
                 operation: RuntimeOperation::SurfaceRendering,
                 scene,
-                target: &resource.view,
-                target_extent: resource.target.descriptor().physical_size(),
+                target: rendered.view()?,
+                target_extent: rendered.target.descriptor().physical_size(),
                 base_color: request.parameters.base_color,
                 antialiasing: options.antialiasing(),
-                target_usage: resource.target.descriptor().wgpu_usage(),
+                target_usage: rendered.target.descriptor().wgpu_usage(),
             },
         )
         .await;
     context
         .backend
         .observe_device_terminal(context.device_identity);
-    if let Err(error) = result {
-        cache.release_resource(resource)?;
-        return Err(error);
-    }
-    Ok(OffscreenRenderedTextureLease {
-        target: resource.target,
-        texture: resource.texture,
-        view: resource.view,
-        lifecycle: resource.lifecycle,
-        timings: RenderTimings {
-            render_time: render_start.elapsed(),
-            present_time: Duration::ZERO,
-        },
-    })
+    result?;
+    rendered.timings = RenderTimings {
+        render_time: render_start.elapsed(),
+        present_time: Duration::ZERO,
+    };
+    Ok(rendered)
 }
 
 #[derive(Clone, Copy, Debug, Default)]

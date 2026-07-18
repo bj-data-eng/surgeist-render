@@ -28,18 +28,17 @@ mod recording {
         ActiveVelloEncodingScope, TransactionEncodingState, TransactionTargetIntent,
         VelloEncodingFailure, VelloEngineState, encode_recording,
     };
+    #[cfg(test)]
+    pub(crate) use resources::VelloResourceAllocationSummaryForTest;
     pub(super) use resources::VelloResourceLease;
-    pub(crate) use resources::{PendingVelloResourceCommit, VelloResourceManager};
+    pub(crate) use resources::{
+        PendingVelloResourceCommit, VelloAtlasOutcome, VelloBufferKey, VelloImageKey,
+    };
     #[cfg(test)]
     pub(super) use resources::{
         ScopeResolvedVelloResourceLease, commit_scope_resolved_for_test,
         no_atlas_abort_outcome_for_test, no_atlas_commit_outcome_for_test,
         over_limit_buffer_preflight_for_test,
-    };
-    #[cfg(test)]
-    pub(crate) use resources::{
-        VelloAtlasOutcome, VelloResourceAllocationSummaryForTest,
-        VelloResourceManagerObservationForTest,
     };
 }
 mod raster {
@@ -49,6 +48,7 @@ mod raster {
         pub(crate) fn encode_into(
             &self,
             engine: &super::recording::VelloEngineState,
+            resources: &crate::resource::ResourceManager,
             state: &mut super::recording::TransactionEncodingState<'_, '_>,
         ) -> std::result::Result<EncodedVelloPass, super::recording::VelloEncodingFailure> {
             if self.target_intent.extent != state.target_extent()
@@ -71,6 +71,7 @@ mod raster {
                 engine,
                 &self.recording,
                 &self.resource_intents,
+                resources,
                 state,
             )
             .map(|resources| EncodedVelloPass {
@@ -95,14 +96,11 @@ pub(crate) use raster::{
 
 pub(crate) use recording::{
     ActiveVelloEncodingScope, PendingVelloResourceCommit, TransactionEncodingState,
-    TransactionTargetIntent, VelloEngineState, VelloResourceManager,
+    TransactionTargetIntent, VelloAtlasOutcome, VelloBufferKey, VelloEngineState, VelloImageKey,
 };
 
 #[cfg(test)]
-pub(crate) use recording::{
-    VelloAtlasOutcome, VelloResourceAllocationSummaryForTest,
-    VelloResourceManagerObservationForTest,
-};
+pub(crate) use recording::VelloResourceAllocationSummaryForTest;
 
 #[cfg(test)]
 pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> crate::Result<()> {

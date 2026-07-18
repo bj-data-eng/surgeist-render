@@ -3663,8 +3663,11 @@ fn effect_texture_dimension_is_rejected_before_allocation() {
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
     let options = renderer.options();
-    let mut cache = OffscreenTextureResourceCache::new();
     let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("effect texture dimension coverage requires a selected device context")
+        .internal_resource_manager_observation_for_test();
     let context = renderer
         .default_offscreen_render_context()
         .expect("effect texture dimension coverage requires a selected device context");
@@ -3672,11 +3675,14 @@ fn effect_texture_dimension_is_rejected_before_allocation() {
     let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
-        &mut cache,
         &scene,
         request,
     ))
     .expect_err("an over-limit effect extent should be rejected");
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("effect texture dimension coverage requires retained device resources")
+        .internal_resource_manager_observation_for_test();
 
     assert_eq!(
         acquire_observation.acquire_count_for_test(),
@@ -3684,10 +3690,10 @@ fn effect_texture_dimension_is_rejected_before_allocation() {
         "over-limit effect extent reached cache acquisition"
     );
     assert_eq!(
-        cache.stats().allocations,
-        0,
+        resources_after.payload_creation_attempts, resources_before.payload_creation_attempts,
         "over-limit effect extent reached allocation"
     );
+    assert_eq!(resources_after.entry_count, resources_before.entry_count);
     let expected_diagnostic = RuntimeCapabilityUnavailable::try_new(
         RuntimeOperation::EffectTextureAllocation,
         RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { requested, maximum },
@@ -8184,7 +8190,7 @@ fn offscreen_texture_allocation_uses_explicit_bounded_layer_descriptor() {
 
 #[test]
 fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
-    let mut cache = OffscreenTextureResourceCache::new();
+    let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
     let mut scene = VelloScene::default();
     scene.fill(
@@ -8198,7 +8204,6 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
     let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         None,
         Options::default(),
-        &mut cache,
         &scene,
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default()),
     ))
@@ -8206,8 +8211,7 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
 
     assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
     assert!(error.message().contains("offscreen Vello local scene"));
-    assert_eq!(cache.stats().allocations, 0);
-    assert_eq!(cache.live_count(), 0);
+    assert_eq!(acquire_observation.acquire_count_for_test(), 0);
 }
 
 #[test]
@@ -8225,7 +8229,6 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
     let options = renderer.options();
-    let mut cache = OffscreenTextureResourceCache::new();
     let context = renderer
         .default_offscreen_render_context()
         .expect("offscreen texture rendering requires a host adapter");
@@ -8233,7 +8236,6 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
     let output = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
-        &mut cache,
         &scene,
         request,
     ))
@@ -8245,20 +8247,23 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
         PhysicalSize::new(2, 2)
     );
     assert_eq!(output.timings().present_time, Duration::ZERO);
-    assert_eq!(cache.stats().allocations, 1);
-    let view_debug = format!("{:?}", output.view());
+    let view_debug = format!("{:?}", output.view().unwrap());
     assert!(!view_debug.is_empty());
 
     let image = pollster::block_on(renderer.read_render_texture_for_test(
-        output.texture(),
+        output.texture().unwrap(),
         output.target().descriptor().physical_size(),
     ))
     .expect("offscreen texture readback requires the same host adapter");
     assert!(pixel_alpha(&image, 0, 0) > 0);
 
-    output.release(&mut cache).unwrap();
-    assert_eq!(cache.live_count(), 0);
-    assert_eq!(cache.released_resource_count(), 1);
+    output.release().unwrap();
+    let resources = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("offscreen texture release must retain the ready device manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources.leased_count, 0);
+    assert!(resources.idle_count >= 1);
 }
 
 #[test]
@@ -8276,7 +8281,7 @@ fn offscreen_local_scene_texture_descriptor_rejects_bgra8_for_vello_target() {
 
 #[test]
 fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
-    let mut cache = OffscreenTextureResourceCache::new();
+    let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
     let scene = VelloScene::default();
     let request =
@@ -8285,15 +8290,13 @@ fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
     let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         None,
         Options::default(),
-        &mut cache,
         &scene,
         request,
     ))
     .expect_err("Bgra8 should be rejected before GPU context allocation");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(cache.stats().allocations, 0);
-    assert_eq!(cache.live_count(), 0);
+    assert_eq!(acquire_observation.acquire_count_for_test(), 0);
 }
 
 #[test]
@@ -8389,27 +8392,24 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
     let options = renderer.options();
-    let mut cache = OffscreenTextureResourceCache::new();
     let context = renderer
         .default_offscreen_render_context()
         .expect("offscreen texture reuse requires a host adapter");
     let first = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
-        &mut cache,
         &scene,
         request,
     ))
     .unwrap();
     let first_resource_id = first.target().resource_id();
     let first_descriptor = first.target().descriptor();
-    first.release(&mut cache).unwrap();
+    first.release().unwrap();
 
     let context = renderer.default_offscreen_render_context().unwrap();
     let second = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
         Some(context),
         options,
-        &mut cache,
         &scene,
         request,
     ))
@@ -8417,13 +8417,13 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
 
     assert_eq!(second.target().descriptor(), first_descriptor);
     assert_eq!(second.target().resource_id(), first_resource_id);
-    assert_eq!(cache.stats().allocations, 1);
-    assert_eq!(cache.stats().misses, 1);
-    assert_eq!(cache.stats().hits, 1);
-    assert_eq!(cache.live_count(), 1);
-    assert_eq!(cache.released_resource_count(), 0);
+    let resources = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("reused offscreen texture must remain leased from the ready device manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources.leased_count, 1);
     let image = pollster::block_on(renderer.read_render_texture_for_test(
-        second.texture(),
+        second.texture().unwrap(),
         second.target().descriptor().physical_size(),
     ))
     .expect("reused offscreen texture readback requires the same host adapter");
@@ -8432,9 +8432,12 @@ fn offscreen_reuses_resources_across_repeated_bounded_requests() {
         image.rgba().chunks_exact(4).all(|pixel| pixel[3] > 0),
         "the reused offscreen texture must contain rendered pixels"
     );
-    second.release(&mut cache).unwrap();
-    assert_eq!(cache.live_count(), 0);
-    assert_eq!(cache.released_resource_count(), 1);
+    second.release().unwrap();
+    let resources = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("offscreen texture release must retain the ready device manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources.leased_count, 0);
 }
 
 #[test]
@@ -18893,6 +18896,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             .expect("checked internal Vello encoding coverage requires a host adapter");
         let engine = pollster::block_on(VelloEngineState::new_checked(device))
             .expect("pinned internal Vello shaders must create through checked scopes");
+        let resources = ResourceManager::default();
         let target_extent = PhysicalSize::new(64, 48);
         let target_usage = wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::TEXTURE_BINDING
@@ -18945,7 +18949,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                     ),
                 );
                 msaa8_pass
-                    .encode_into(&engine, &mut state)
+                    .encode_into(&engine, &resources, &mut state)
                     .expect("an MSAA8 pass must encode through an active checked scope")
                     .into_resources_and_logical_pass()
             };
@@ -18978,7 +18982,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                     ),
                 );
                 let (lease, _logical_pass) = area_pass
-                    .encode_into(&engine, &mut state)
+                    .encode_into(&engine, &resources, &mut state)
                     .expect("an area pass must encode through an active checked scope")
                     .into_resources_and_logical_pass();
                 let aborted = lease.abort();
@@ -19020,7 +19024,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                         target_usage,
                     ),
                 );
-                match area_pass.encode_into(&engine, &mut state) {
+                match area_pass.encode_into(&engine, &resources, &mut state) {
                     Ok(encoded) => {
                         let (lease, _logical_pass) = encoded.into_resources_and_logical_pass();
                         let _ = lease.abort();
@@ -19078,7 +19082,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
                     ),
                 );
                 area_pass
-                    .encode_into(&engine, &mut state)
+                    .encode_into(&engine, &resources, &mut state)
                     .expect("the active scope must own actual target-view validation")
                     .into_resources_and_logical_pass()
             };
@@ -21286,6 +21290,78 @@ fn terminal_device_cleanup_drops_internal_engine_resources() {
         drop_witness.was_dropped_for_test(),
         "the terminal transition must drop the ready ownership bundle that owns the WGPU handles, internal engine, and resources"
     );
+}
+
+#[test]
+fn one_ready_device_owns_one_raster_and_effect_resource_manager() {
+    let options = Options::default().with_resource_cache_budget(ResourceCacheBudget::DISABLED);
+    let mut renderer = pollster::block_on(Renderer::new(options))
+        .expect("resource ownership coverage requires a real selected WGPU device");
+    let manager_identity = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("resource ownership coverage requires one ready device state");
+        let manager_identity = ready.sole_resource_manager_identity_for_test();
+        assert_eq!(
+            ready.resource_cache_budget_for_test(),
+            ResourceCacheBudget::DISABLED,
+            "the ready device manager must retain the renderer's fixed zero budget"
+        );
+        manager_identity
+    };
+    assert!(
+        manager_identity.is_some(),
+        "raster and effect allocations still have competing owners"
+    );
+
+    let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
+    let mut scene = VelloScene::default();
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::BLACK,
+        None,
+        &kurbo::Rect::new(0.0, 0.0, 1.0, 1.0),
+    );
+    let request =
+        OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
+    let context = renderer
+        .default_offscreen_render_context()
+        .expect("resource ownership coverage requires one ready device context");
+    let output = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
+        Some(context),
+        options,
+        &scene,
+        request,
+    ))
+    .expect("raster and transitional effect allocations must use the ready device manager");
+
+    let observation = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("resource ownership coverage requires the same ready device state");
+        assert_eq!(
+            ready.sole_resource_manager_identity_for_test(),
+            manager_identity,
+            "raster and effect allocations must retain one manager identity"
+        );
+        ready.internal_resource_manager_observation_for_test()
+    };
+    assert_eq!(observation.leased_count, 1);
+    assert_eq!(observation.idle_count, 0);
+    assert!(
+        observation.next_resource > output.target().resource_id(),
+        "Vello raster allocations and the transitional texture must share one identity sequence"
+    );
+
+    output.release().unwrap();
+    let cleaned = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("resource ownership coverage requires the same ready device state")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(cleaned.leased_count, 0);
+    assert_eq!(cleaned.idle_count, 0);
+    assert_eq!(cleaned.entry_count, 0);
 }
 
 #[test]

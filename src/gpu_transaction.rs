@@ -431,9 +431,9 @@ pub(crate) struct GpuOperationTransaction {
 }
 
 #[must_use = "internal Vello command buffers must remain owned by their GPU transaction"]
-pub(crate) struct InternalVelloPayload<'resources> {
+pub(crate) struct InternalVelloPayload {
     command_buffer: wgpu::CommandBuffer,
-    resources: PendingVelloResourceCommit<'resources>,
+    resources: PendingVelloResourceCommit,
     logical_pass: DirectVelloLogicalPass,
     #[cfg(test)]
     submission_observation: Option<InternalVelloSubmissionObservationForTest>,
@@ -737,10 +737,10 @@ impl PendingReadbackSubmission {
     }
 }
 
-impl<'resources> InternalVelloPayload<'resources> {
+impl InternalVelloPayload {
     pub(crate) fn new(
         command_buffer: wgpu::CommandBuffer,
-        resources: PendingVelloResourceCommit<'resources>,
+        resources: PendingVelloResourceCommit,
         logical_pass: DirectVelloLogicalPass,
     ) -> Self {
         Self {
@@ -757,7 +757,7 @@ impl<'resources> InternalVelloPayload<'resources> {
     #[cfg(test)]
     pub(crate) fn observed_for_test(
         command_buffer: wgpu::CommandBuffer,
-        resources: PendingVelloResourceCommit<'resources>,
+        resources: PendingVelloResourceCommit,
         logical_pass: DirectVelloLogicalPass,
         submission_observation: InternalVelloSubmissionObservationForTest,
     ) -> Self {
@@ -769,7 +769,7 @@ impl<'resources> InternalVelloPayload<'resources> {
     #[cfg(test)]
     pub(crate) fn paused_after_submit_for_test(
         command_buffer: wgpu::CommandBuffer,
-        resources: PendingVelloResourceCommit<'resources>,
+        resources: PendingVelloResourceCommit,
         logical_pass: DirectVelloLogicalPass,
         checkpoint: AfterInternalVelloSubmitCheckpointForTest,
     ) -> Self {
@@ -922,7 +922,7 @@ impl GpuOperationTransaction {
         self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        payload: InternalVelloPayload<'_>,
+        payload: InternalVelloPayload,
         operation: RuntimeOperation,
     ) -> Result<()> {
         #[cfg(not(test))]

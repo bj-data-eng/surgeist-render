@@ -29,7 +29,7 @@ pub(super) struct BufferHandle(ResourceId);
 pub(super) struct ImageHandle(ResourceId);
 
 /// The only image format required by the pinned Vello raster path.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum RasterImageFormat {
     Rgba8Unorm,
 }
@@ -652,13 +652,6 @@ pub(super) struct BufferIntent {
     allocation_command_index: usize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C03 T3 image intent metadata is consumed by the later resource manager."
-    )
-)]
 pub(super) struct ImageIntent {
     resource: ImageHandle,
     role: ImageRole,
@@ -667,13 +660,13 @@ pub(super) struct ImageIntent {
     retention: ImageRetention,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ImageRetention {
     Transient,
     PersistentImageAtlas,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum BufferRole {
     Scene,
     Config,
@@ -703,7 +696,7 @@ pub(super) enum BufferRole {
     MaskLut,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum ImageRole {
     GradientRamp,
     ImageAtlas,

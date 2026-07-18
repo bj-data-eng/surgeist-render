@@ -145,7 +145,7 @@ fn ensure_presented_device_available_after_creation(
 
 impl Renderer {
     pub async fn new(options: Options) -> Result<Self> {
-        let mut backend = Backend::new();
+        let mut backend = Backend::new(options.resource_cache_budget());
         let default_device = backend.select_device(None).await?;
         let backend = default_device.map(|_| backend);
 
@@ -1375,7 +1375,7 @@ impl Renderer {
         &mut self,
         prepared: &super::vello_engine::PreparedVelloPass,
         target_extent: PhysicalSize,
-    ) -> Result<super::vello_engine::VelloResourceManagerObservationForTest> {
+    ) -> Result<super::resource::ResourceManagerObservationForTest> {
         let device_identity = self.default_device.ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -1596,9 +1596,9 @@ impl Renderer {
         let bounds = backdrop.capture_bounds();
         let physical_size = physical_size(bounds.rect().size(), scale)?;
         let local_scene = self.backdrop_source_scene(&layer, source_commands, bounds, scale)?;
-        let request = OffscreenLocalSceneRenderRequest::new(bounds, scale, format, parameters);
+        let request =
+            OffscreenLocalSceneRenderRequest::for_backdrop(bounds, scale, format, parameters);
         let options = self.options;
-        let mut cache = OffscreenTextureResourceCache::new();
         let Some(context) = self.default_offscreen_render_context() else {
             return Err(Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -1609,7 +1609,6 @@ impl Renderer {
         let rendered = render_internal_vello_local_scene_to_offscreen_texture(
             Some(context),
             options,
-            &mut cache,
             &local_scene,
             request,
         )
@@ -1632,13 +1631,13 @@ impl Renderer {
             read_texture_rgba(
                 backend,
                 device_identity,
-                rendered.texture(),
+                rendered.texture()?,
                 physical_size,
                 RuntimeOperation::SurfaceRendering,
             )
             .await?
         };
-        rendered.release(&mut cache)?;
+        rendered.release()?;
         let filtered = image::ResolvedMaterializedImageFilterExecution::try_new_for_image_buffer(
             backdrop.filters(),
             &source,
@@ -1740,9 +1739,9 @@ impl Renderer {
         }
 
         let local_scene = self.mask_source_scene(&layer, children, bounds, scale)?;
-        let request = OffscreenLocalSceneRenderRequest::new(bounds, scale, format, parameters);
+        let request =
+            OffscreenLocalSceneRenderRequest::for_resolved_mask(bounds, scale, format, parameters);
         let options = self.options;
-        let mut cache = OffscreenTextureResourceCache::new();
         let Some(context) = self.default_offscreen_render_context() else {
             return Err(Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -1753,7 +1752,6 @@ impl Renderer {
         let rendered = render_internal_vello_local_scene_to_offscreen_texture(
             Some(context),
             options,
-            &mut cache,
             &local_scene,
             request,
         )
@@ -1776,13 +1774,13 @@ impl Renderer {
             read_texture_rgba(
                 backend,
                 device_identity,
-                rendered.texture(),
+                rendered.texture()?,
                 physical_size,
                 RuntimeOperation::SurfaceRendering,
             )
             .await?
         };
-        rendered.release(&mut cache)?;
+        rendered.release()?;
         let masked = ResolvedAlphaMaskExecution::try_new(&source, mask.alpha_mask())?
             .execute_to_image_buffer()?;
         let masked_size = masked.size();
