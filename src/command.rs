@@ -157,6 +157,7 @@ pub(crate) struct NormalizedLayer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenderLayerMask {
     alpha_mask: ImageBuffer,
+    annihilates_source: bool,
 }
 
 impl RenderLayerMask {
@@ -165,14 +166,25 @@ impl RenderLayerMask {
             PrimitiveFamily::MasksAndClips,
             PrimitiveOperation::MaterializedAlphaMaskExecution,
         ))?;
+        let annihilates_source = mask
+            .alpha_mask()
+            .rgba()
+            .chunks_exact(4)
+            .all(|pixel| pixel[3] == 0);
         Ok(Self {
             alpha_mask: mask.alpha_mask().clone(),
+            annihilates_source,
         })
     }
 
     #[must_use]
     pub(crate) const fn alpha_mask(&self) -> &ImageBuffer {
         &self.alpha_mask
+    }
+
+    #[must_use]
+    pub(crate) const fn annihilates_source(&self) -> bool {
+        self.annihilates_source
     }
 }
 

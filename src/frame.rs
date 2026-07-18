@@ -83,6 +83,15 @@ impl FrameContext {
         self.plan_local_bounds(self.output_bounds, Transform::identity())
     }
 
+    fn initial_parent_contribution(self) -> SemanticSourceBounds {
+        match self.output_bounds {
+            LogicalBounds::NonEmpty(bounds) if self.base_color.a() > 0.0 => {
+                SemanticSourceBounds::NonEmpty(bounds)
+            }
+            LogicalBounds::Empty(_) | LogicalBounds::NonEmpty(_) => SemanticSourceBounds::Empty,
+        }
+    }
+
     fn plan_local_bounds(
         self,
         logical_bounds: LogicalBounds,
@@ -277,7 +286,10 @@ impl FramePlan {
         commands: RenderCommands,
         context: FrameContext,
     ) -> Result<Self> {
-        let contribution = SemanticSourceContribution::try_from_commands(commands.commands)?;
+        let contribution = SemanticSourceContribution::try_from_commands(
+            commands.commands,
+            context.initial_parent_contribution(),
+        )?;
         let commands = RenderCommands::new(contribution.commands);
         let selection_requirements = graph_selection_requirements(&commands.commands);
         if selection_requirements.is_empty() {
@@ -462,29 +474,37 @@ impl SemanticSourceBounds {
 #[derive(Clone, Debug, PartialEq)]
 struct SemanticSourceContribution {
     commands: Vec<RenderCommand>,
-    bounds: SemanticSourceBounds,
+    source_bounds: SemanticSourceBounds,
+    current_parent: SemanticSourceBounds,
 }
 
 impl SemanticSourceContribution {
-    fn try_from_commands(commands: Vec<RenderCommand>) -> Result<Self> {
+    fn try_from_commands(
+        commands: Vec<RenderCommand>,
+        initial_parent: SemanticSourceBounds,
+    ) -> Result<Self> {
         let mut contributing_commands = Vec::with_capacity(commands.len());
-        let mut contribution_bounds = SemanticSourceBounds::Empty;
+        let mut source_bounds = SemanticSourceBounds::Empty;
+        let mut current_parent = initial_parent;
         for command in commands {
-            let Some((command, bounds)) = Self::try_from_command(command)? else {
-                continue;
-            };
-            contribution_bounds = contribution_bounds.try_union(bounds)?;
-            contributing_commands.push(command);
+            let contribution = Self::try_from_command(command, current_parent)?;
+            current_parent = contribution.current_parent;
+            if let Some(command) = contribution.command {
+                source_bounds = source_bounds.try_union(contribution.source_bounds)?;
+                contributing_commands.push(command);
+            }
         }
         Ok(Self {
             commands: contributing_commands,
-            bounds: contribution_bounds,
+            source_bounds,
+            current_parent,
         })
     }
 
     fn try_from_command(
         command: RenderCommand,
-    ) -> Result<Option<(RenderCommand, SemanticSourceBounds)>> {
+        current_parent: SemanticSourceBounds,
+    ) -> Result<SemanticCommandContribution> {
         match command {
             RenderCommand::TextRun {
                 font,
@@ -512,47 +532,44 @@ impl SemanticSourceContribution {
                     SemanticSourceBounds::try_from_rect(ink_bounds)?
                         .try_transform(transform, "text source transform")?
                 };
-                if source_bounds == SemanticSourceBounds::Empty {
-                    Ok(None)
-                } else {
-                    Ok(Some((
-                        RenderCommand::TextRun {
-                            font,
-                            size,
-                            transform,
-                            paint,
-                            glyphs,
-                            bounds,
-                        },
-                        source_bounds,
-                    )))
-                }
+                SemanticCommandContribution::try_new(
+                    RenderCommand::TextRun {
+                        font,
+                        size,
+                        transform,
+                        paint,
+                        glyphs,
+                        bounds,
+                    },
+                    source_bounds,
+                    current_parent,
+                )
             }
             RenderCommand::Layer {
                 mut layer,
                 children,
             } => {
-                let children = Self::try_from_commands(children)?;
-                let mut source_bounds = children.bounds;
+                let children = Self::try_from_commands(children, SemanticSourceBounds::Empty)?;
+                let mut source_bounds = children.current_parent;
 
                 if let Some(backdrop) = layer.backdrop.as_deref() {
                     let filter_plan = AlgorithmFilterPlan::from_filter_list(backdrop.filters());
-                    if filter_plan.output_is_always_transparent() {
+                    let mut backdrop_bounds =
+                        SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
+                    if let Some(clip) = backdrop.clip() {
+                        backdrop_bounds = backdrop_bounds.try_intersect(
+                            SemanticSourceBounds::try_for_clip(clip)?,
+                            "backdrop clip intersection",
+                        )?;
+                    }
+                    let captured_parent = current_parent
+                        .try_intersect(backdrop_bounds, "backdrop current-parent intersection")?;
+                    if filter_plan.output_is_always_transparent()
+                        || captured_parent == SemanticSourceBounds::Empty
+                    {
                         layer.backdrop = None;
                     } else {
-                        let mut backdrop_bounds =
-                            SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
-                        if let Some(clip) = backdrop.clip() {
-                            backdrop_bounds = backdrop_bounds.try_intersect(
-                                SemanticSourceBounds::try_for_clip(clip)?,
-                                "backdrop clip intersection",
-                            )?;
-                        }
-                        if backdrop_bounds == SemanticSourceBounds::Empty {
-                            layer.backdrop = None;
-                        } else {
-                            source_bounds = source_bounds.try_union(backdrop_bounds)?;
-                        }
+                        source_bounds = source_bounds.try_union(captured_parent)?;
                     }
                 }
 
@@ -562,35 +579,63 @@ impl SemanticSourceContribution {
                         "layer clip intersection",
                     )?;
                 }
+                if layer
+                    .mask
+                    .as_ref()
+                    .is_some_and(RenderLayerMask::annihilates_source)
+                {
+                    source_bounds = SemanticSourceBounds::Empty;
+                }
                 if layer.opacity <= 0.0 {
                     source_bounds = SemanticSourceBounds::Empty;
                 }
                 source_bounds = source_bounds
                     .try_transform(layer.transform, "semantic layer source transform")?;
-                if source_bounds == SemanticSourceBounds::Empty {
-                    return Ok(None);
-                }
-
-                Ok(Some((
+                SemanticCommandContribution::try_new(
                     RenderCommand::Layer {
                         layer,
                         children: children.commands,
                     },
                     source_bounds,
-                )))
+                    current_parent,
+                )
             }
             command @ (RenderCommand::Fill { .. }
             | RenderCommand::Stroke { .. }
             | RenderCommand::Shadow { .. }
             | RenderCommand::Image { .. }) => {
                 let bounds = SemanticSourceBounds::try_for_command(&command)?;
-                if bounds == SemanticSourceBounds::Empty {
-                    Ok(None)
-                } else {
-                    Ok(Some((command, bounds)))
-                }
+                SemanticCommandContribution::try_new(command, bounds, current_parent)
             }
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticCommandContribution {
+    command: Option<RenderCommand>,
+    source_bounds: SemanticSourceBounds,
+    current_parent: SemanticSourceBounds,
+}
+
+impl SemanticCommandContribution {
+    fn try_new(
+        command: RenderCommand,
+        source_bounds: SemanticSourceBounds,
+        current_parent: SemanticSourceBounds,
+    ) -> Result<Self> {
+        if source_bounds == SemanticSourceBounds::Empty {
+            return Ok(Self {
+                command: None,
+                source_bounds,
+                current_parent,
+            });
+        }
+        Ok(Self {
+            command: Some(command),
+            source_bounds,
+            current_parent: current_parent.try_union(source_bounds)?,
+        })
     }
 }
 
@@ -2067,6 +2112,12 @@ struct SemanticCommandPlanningState {
     parent_to_surface: Transform,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VelloSpanFlush {
+    parent: PlannedGraphParent,
+    next_parent_locality: CaptureParentLocality,
+}
+
 struct SemanticFrameGraphPlanner {
     context: FrameContext,
     builder: SemanticGraphBuilder,
@@ -2168,7 +2219,7 @@ impl SemanticFrameGraphPlanner {
         &mut self,
         commands: Vec<RenderCommand>,
         mut parent: PlannedGraphParent,
-        state: SemanticCommandPlanningState,
+        mut state: SemanticCommandPlanningState,
     ) -> Result<PlannedGraphParent> {
         let mut span = Vec::new();
         for command in commands {
@@ -2177,7 +2228,9 @@ impl SemanticFrameGraphPlanner {
                 continue;
             }
 
-            parent = self.flush_vello_span(span, parent, state)?;
+            let flush = self.flush_vello_span(span, parent, state)?;
+            parent = flush.parent;
+            state.parent_locality = flush.next_parent_locality;
             span = Vec::new();
             let RenderCommand::Layer { layer, children } = command else {
                 return Err(Error::new(
@@ -2186,8 +2239,9 @@ impl SemanticFrameGraphPlanner {
                 ));
             };
             parent = self.plan_external_layer(layer, children, parent, state)?;
+            state.parent_locality = CaptureParentLocality::External;
         }
-        self.flush_vello_span(span, parent, state)
+        Ok(self.flush_vello_span(span, parent, state)?.parent)
     }
 
     fn flush_vello_span(
@@ -2195,20 +2249,29 @@ impl SemanticFrameGraphPlanner {
         commands: Vec<RenderCommand>,
         parent: PlannedGraphParent,
         state: SemanticCommandPlanningState,
-    ) -> Result<PlannedGraphParent> {
-        let contribution = SemanticSourceContribution::try_from_commands(commands)?;
+    ) -> Result<VelloSpanFlush> {
+        let contribution =
+            SemanticSourceContribution::try_from_commands(commands, SemanticSourceBounds::Empty)?;
         let Some(logical_bounds) = contribution
-            .bounds
+            .source_bounds
             .require_non_empty_for_graph("Vello span bounds")?
         else {
-            return Ok(parent);
+            return Ok(VelloSpanFlush {
+                parent,
+                next_parent_locality: state.parent_locality,
+            });
         };
         let raster_transform = state.capture_transform.then(state.parent_to_surface)?;
         let spatial = match self
             .context
             .plan_local_bounds(LogicalBounds::NonEmpty(logical_bounds), raster_transform)?
         {
-            FrameSpatialPlan::Empty(_) => return Ok(parent),
+            FrameSpatialPlan::Empty(_) => {
+                return Ok(VelloSpanFlush {
+                    parent,
+                    next_parent_locality: state.parent_locality,
+                });
+            }
             FrameSpatialPlan::NonEmpty(spatial) => spatial,
         };
         let capture_resource = graph_build(self.builder.declare_resource(
@@ -2244,13 +2307,17 @@ impl SemanticFrameGraphPlanner {
             spatial,
             SemanticPassIntent::CanonicalizeCapture,
         )?;
-        self.composite_into_parent(
+        let parent = self.composite_into_parent(
             parent,
             canonical,
             &[],
             SemanticCompositeKind::SpanSourceOver,
             true,
-        )
+        )?;
+        Ok(VelloSpanFlush {
+            parent,
+            next_parent_locality: CaptureParentLocality::External,
+        })
     }
 
     fn plan_external_layer(
@@ -2311,12 +2378,13 @@ impl SemanticFrameGraphPlanner {
         children: Vec<RenderCommand>,
         raster_transform: Transform,
     ) -> Result<Option<PlannedGraphResource>> {
-        let contribution = SemanticSourceContribution::try_from_commands(children)?;
+        let contribution =
+            SemanticSourceContribution::try_from_commands(children, SemanticSourceBounds::Empty)?;
         if contribution.commands.is_empty() {
             return Ok(None);
         }
         let Some(logical_bounds) = contribution
-            .bounds
+            .source_bounds
             .require_non_empty_for_graph("layer source bounds")?
         else {
             return Ok(None);
@@ -4258,6 +4326,7 @@ pub(crate) struct FramePlanObservation {
     pub(crate) base_color: Option<super::paint::Color>,
     pub(crate) selection_requirements: Vec<FrameSelectionRequirementObservation>,
     pub(crate) vello_spans: Vec<VelloSpanObservation>,
+    pub(crate) graph_layer_blends: Vec<super::layer::BlendMode>,
     pub(crate) backdrop_dependency: BackdropDependencyObservation,
     pub(crate) current_parent_backdrop_reads: usize,
     pub(crate) stores_cloned_command_prefix: bool,
@@ -4337,6 +4406,7 @@ fn observe_direct_frame_plan(plan: DirectVelloPlan) -> FramePlanObservation {
         base_color: Some(plan.base_color),
         selection_requirements: Vec::new(),
         vello_spans: Vec::new(),
+        graph_layer_blends: Vec::new(),
         backdrop_dependency: BackdropDependencyObservation::None,
         current_parent_backdrop_reads: 0,
         stores_cloned_command_prefix: false,
@@ -4382,6 +4452,14 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
                 .map(observe_vello_command)
                 .collect(),
             captured_before_outer_semantics: span.captured_before_outer_semantics,
+        })
+        .collect();
+    let graph_layer_blends = graph
+        .composites
+        .iter()
+        .filter_map(|composite| match &composite.kind {
+            SemanticCompositeKind::Layer { blend, .. } => Some(*blend),
+            SemanticCompositeKind::SpanSourceOver | SemanticCompositeKind::DropShadow => None,
         })
         .collect();
     let complete = graph.passes.iter().all(|pass| pass.scheduled)
@@ -4452,6 +4530,7 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
         base_color,
         selection_requirements,
         vello_spans,
+        graph_layer_blends,
         backdrop_dependency: if graph.backdrop_reads.is_empty() {
             BackdropDependencyObservation::None
         } else {

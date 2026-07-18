@@ -9330,6 +9330,133 @@ fn nested_non_normal_blend_stays_in_masked_layer_source_vello_span() {
 }
 
 #[test]
+fn nested_mask_boundary_makes_following_multiply_an_ordered_graph_composite() {
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+            .unwrap(),
+        |scene| {
+            scene
+                .layer(
+                    Layer::new()
+                        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+                        .unwrap(),
+                    |scene| {
+                        scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+                    },
+                )
+                .layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+                    scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+                });
+        },
+    );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the nested-mask blend fixture must produce a complete frame plan");
+
+    assert_eq!(
+        (&plan.vello_spans, &plan.graph_layer_blends),
+        (
+            &vec![
+                VelloSpanObservation {
+                    scope: VelloSpanScopeObservation::LayerSource,
+                    commands: vec![VelloCommandObservation::Fill],
+                    captured_before_outer_semantics: true,
+                },
+                VelloSpanObservation {
+                    scope: VelloSpanScopeObservation::LayerSource,
+                    commands: vec![VelloCommandObservation::Fill],
+                    captured_before_outer_semantics: true,
+                },
+            ],
+            &vec![BlendMode::Normal, BlendMode::Multiply, BlendMode::Normal],
+        ),
+        "following Multiply remained capture-local after the nested mask materialized its parent"
+    );
+}
+
+#[test]
+fn transparent_resolved_alpha_mask_annihilates_unspecified_text_without_graph_selection() {
+    let transparent_mask =
+        ImageBuffer::try_new(PhysicalSize::new(2, 2), [255, 127, 63, 0].repeat(4)).unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_resolved_alpha_mask(transparent_mask)
+                .unwrap(),
+            |scene| add_planning_text(scene, TextRunBounds::unspecified()),
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.unresolved_resource.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::DirectVello
+                    && plan.direct_commands == [VelloCommandObservation::Fill]
+                    && plan.selection_requirements.is_empty()
+                    && plan.resource_count == 0
+                    && plan.pass_count == 0
+            }),
+        "transparent resolved mask retained graph selection or unresolved text bounds"
+    );
+}
+
+#[test]
+fn bounded_blur_backdrop_over_empty_parent_is_pruned_without_erasing_foreground() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap();
+    let layer = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    });
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 6.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::DirectVello
+                    && plan.direct_commands == [VelloCommandObservation::LocalLayer]
+                    && plan.selection_requirements.is_empty()
+                    && plan.current_parent_backdrop_reads == 0
+                    && plan.resource_count == 0
+                    && plan.pass_count == 0
+            }),
+        "bounded blur backdrop over an exact empty parent retained a graph boundary"
+    );
+}
+
+#[test]
 fn zero_opacity_backdrop_preserves_foreground_without_graph_boundary() {
     let filters = FilterList::try_ops(vec![
         FilterOp::opacity(UnitFilterAmount::try_new(0.0).unwrap()),
@@ -9802,9 +9929,11 @@ fn backdrop_plan_depends_on_current_parent_not_cloned_commands() {
 #[test]
 fn graph_planning_requires_explicit_text_ink_bounds_only_for_bounded_subtrees() {
     let mut unspecified = Scene::new();
-    unspecified.layer(bounded_planning_backdrop(), |scene| {
-        add_planning_text(scene, TextRunBounds::unspecified());
-    });
+    unspecified
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            add_planning_text(scene, TextRunBounds::unspecified());
+        });
     let unresolved = observe_frame_plan(
         &unspecified,
         Size::new(8.0, 6.0),
@@ -9823,12 +9952,15 @@ fn graph_planning_requires_explicit_text_ink_bounds_only_for_bounded_subtrees() 
     assert!(!unresolved.has_partial_plan);
 
     let mut ink = Scene::new();
-    ink.layer(bounded_planning_backdrop(), |scene| {
-        add_planning_text(
-            scene,
-            TextRunBounds::try_ink(Rect::new(1.0, 1.0, 4.0, 2.0)).unwrap(),
-        );
-    });
+    ink.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK).layer(
+        bounded_planning_backdrop(),
+        |scene| {
+            add_planning_text(
+                scene,
+                TextRunBounds::try_ink(Rect::new(1.0, 1.0, 4.0, 2.0)).unwrap(),
+            );
+        },
+    );
     let ink_result = observe_frame_plan(
         &ink,
         Size::new(8.0, 6.0),
@@ -9842,9 +9974,11 @@ fn graph_planning_requires_explicit_text_ink_bounds_only_for_bounded_subtrees() 
     );
 
     let mut empty = Scene::new();
-    empty.layer(bounded_planning_backdrop(), |scene| {
-        add_planning_text(scene, TextRunBounds::empty());
-    });
+    empty
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            add_planning_text(scene, TextRunBounds::empty());
+        });
     let empty_result = observe_frame_plan(
         &empty,
         Size::new(8.0, 6.0),
@@ -9914,9 +10048,11 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
     );
 
     let mut failing = Scene::new();
-    failing.layer(bounded_planning_backdrop(), |scene| {
-        add_planning_text(scene, TextRunBounds::unspecified());
-    });
+    failing
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            add_planning_text(scene, TextRunBounds::unspecified());
+        });
     let failure = observe_frame_plan(
         &failing,
         Size::new(8.0, 6.0),
