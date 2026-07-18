@@ -18164,6 +18164,70 @@ fn presented_configuration_test_seam_is_test_only() {
 
 #[cfg(feature = "render-window")]
 #[test]
+fn planner_failure_precedes_pending_presented_surface_configuration() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented planner-gate coverage requires a compatible device");
+    let mut surface = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(8.0, 6.0),
+            ..SurfaceOptions::default()
+        },
+    );
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let configuration_count_before = presented_configuration_count_for_test(&surface);
+    let presented_before = presented_observation_for_test(&surface);
+    let stats_before = renderer.stats();
+    let parameters_before = surface.last_parameters;
+    assert!(matches!(
+        lifecycle_before,
+        PresentedLifecycle::ResizePending { .. }
+    ));
+    assert_eq!(resource_before, None);
+    assert_eq!(configuration_count_before, 0);
+
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            add_planning_text(scene, TextRunBounds::unspecified());
+        });
+
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect_err("unresolved bounded text must fail the complete frame plan");
+    let expected = UnresolvedResource::new(
+        UnresolvedResourceKind::TextRunInkBounds,
+        "normalized command 1.0",
+    );
+    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
+    assert_eq!(error.unresolved_resource_diagnostic(), Some(&expected));
+
+    assert_eq!(
+        presented_configuration_count_for_test(&surface),
+        configuration_count_before,
+        "presented configuration occurred before planner failure"
+    );
+    assert_eq!(
+        presented_resource_id_for_test(&surface),
+        resource_before,
+        "planner failure published presented configuration resources"
+    );
+    assert_eq!(
+        presented_lifecycle_for_test(&surface),
+        lifecycle_before,
+        "planner failure changed the pending presented lifecycle"
+    );
+    assert_eq!(presented_observation_for_test(&surface), presented_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    let frame_gate = renderer.preexecution_frame_gate_observation_for_test();
+    assert_eq!(frame_gate.validated_plan_count, 0);
+    assert_eq!(frame_gate.plan_count_at_transitional_effect_execution, None);
+}
+
+#[cfg(feature = "render-window")]
+#[test]
 fn presented_setup_and_resize_commit_only_after_clean_configuration() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("presented configuration coverage requires a compatible device");
@@ -19699,6 +19763,14 @@ fn presented_resource_id_for_test(surface: &Surface) -> Option<u64> {
         SurfaceBackend::Presented { surface, .. } => surface
             .committed()
             .map(|resources| resources.resource_id_for_test()),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+fn presented_configuration_count_for_test(surface: &Surface) -> usize {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.configuration_count_for_test(),
         _ => panic!("the fixture must retain a presented surface backend"),
     }
 }

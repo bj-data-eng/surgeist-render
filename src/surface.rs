@@ -372,6 +372,7 @@ impl DisplayFreePresentedSurfaceObservationForTest {
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) struct DisplayFreePresentedSurfaceStateForTest {
     target_identity: u64,
+    configuration_count: usize,
     next_outcome: PresentedAcquireOutcomeForTest,
     observation: DisplayFreePresentedSurfaceObservationForTest,
 }
@@ -464,6 +465,7 @@ impl PresentedSurface {
                 DisplayFreePresentedSurfaceStateForTest {
                     target_identity: NEXT_DISPLAY_FREE_PRESENTED_TARGET_ID
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                    configuration_count: 0,
                     next_outcome: PresentedAcquireOutcomeForTest::Success,
                     observation: DisplayFreePresentedSurfaceObservationForTest::default(),
                 },
@@ -493,7 +495,12 @@ impl PresentedSurface {
         match &self.target {
             PresentedSurfaceTarget::Host(surface) => surface.configure(device, &config),
             #[cfg(all(test, feature = "render-window"))]
-            PresentedSurfaceTarget::DisplayFreeHostEffectForTest(_) => {}
+            PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) => {
+                let mut state = state
+                    .lock()
+                    .expect("display-free presentation fixture state must remain available");
+                state.configuration_count = state.configuration_count.saturating_add(1);
+            }
         }
         PresentedConfigurationDraft {
             resources: PresentedResourceBundle::new(device, config),
@@ -594,6 +601,17 @@ impl PresentedSurface {
     #[cfg(all(test, feature = "render-window"))]
     pub(crate) fn observation_for_test(&self) -> DisplayFreePresentedSurfaceObservationForTest {
         self.observation_handle_for_test().snapshot_for_test()
+    }
+
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn configuration_count_for_test(&self) -> usize {
+        let PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) = &self.target else {
+            panic!("only the display-free presented fixture exposes configuration observations");
+        };
+        state
+            .lock()
+            .expect("display-free presentation fixture state must remain available")
+            .configuration_count
     }
 
     #[cfg(all(test, feature = "render-window"))]

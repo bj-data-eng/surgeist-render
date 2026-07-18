@@ -596,9 +596,6 @@ impl Renderer {
         surface.ensure_renderable()?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
 
-        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
-            .await?;
-
         let Some(device_identity) = surface.device_identity() else {
             return Err(Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -641,6 +638,8 @@ impl Renderer {
             self.preexecution_frame_gate_observation
                 .validated_plan_count += 1;
         }
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
         let (normalized, validated_graph_plan) = match frame_plan {
             FramePlan::DirectVello(plan) => (plan.into_commands(), None),
             FramePlan::GpuGraph(plan) => {
