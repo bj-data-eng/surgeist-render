@@ -653,29 +653,59 @@ impl SemanticSourceContribution {
                     }
                 }
 
-                if let Some(mask) = layer.mask.as_ref()
-                    && let Some(mask_source_bounds) = source_bounds.known_non_empty_extent()
-                    && let FrameSpatialPlan::NonEmpty(spatial) = context.plan_local_bounds(
-                        LogicalBounds::NonEmpty(mask_source_bounds),
-                        layer_to_surface,
-                    )?
-                {
-                    let known_physical_size = PhysicalSize::new(
-                        spatial.device_extent.width,
-                        spatial.device_extent.height,
-                    );
-                    if source_bounds.contains_unresolved_content() {
-                        mask.validate_minimum_physical_size(known_physical_size)?;
-                    } else {
-                        mask.validate_expected_physical_size(known_physical_size)?;
-                    }
-                }
+                let known_source_spatial = if layer.mask.is_some() {
+                    source_bounds
+                        .known_non_empty_extent()
+                        .map(|bounds| {
+                            context.plan_local_bounds(
+                                LogicalBounds::NonEmpty(bounds),
+                                layer_to_surface,
+                            )
+                        })
+                        .transpose()?
+                } else {
+                    None
+                };
 
                 if let Some(clip) = layer.clip.as_ref() {
                     source_bounds = source_bounds.try_intersect(
                         SemanticSourceBounds::try_for_clip(clip)?,
                         "layer clip intersection",
                     )?;
+                }
+                if let Some(mask) = layer.mask.as_ref()
+                    && !source_bounds.is_exactly_empty()
+                {
+                    if layer.clip.is_some() {
+                        let mask_bounds = layer.pass_plan.bounds().ok_or_else(|| {
+                            Error::new(
+                                BackendErrorCode::RenderFailed,
+                                "a clipped resolved mask has no normalized offscreen bounds",
+                            )
+                        })?;
+                        if let FrameSpatialPlan::NonEmpty(spatial) = context.plan_local_bounds(
+                            LogicalBounds::try_from_rect(
+                                mask_bounds.rect(),
+                                "resolved layer mask bounds",
+                            )?,
+                            layer_to_surface,
+                        )? {
+                            mask.validate_expected_physical_size(PhysicalSize::new(
+                                spatial.device_extent.width,
+                                spatial.device_extent.height,
+                            ))?;
+                        }
+                    } else if let Some(FrameSpatialPlan::NonEmpty(spatial)) = known_source_spatial {
+                        let known_physical_size = PhysicalSize::new(
+                            spatial.device_extent.width,
+                            spatial.device_extent.height,
+                        );
+                        if source_bounds.contains_unresolved_content() {
+                            mask.validate_minimum_physical_size(known_physical_size)?;
+                        } else {
+                            mask.validate_expected_physical_size(known_physical_size)?;
+                        }
+                    }
                 }
                 if layer
                     .mask
@@ -2480,11 +2510,13 @@ impl SemanticFrameGraphPlanner {
             return Ok(parent);
         };
 
-        let alpha_mask = layer
-            .mask
-            .as_ref()
-            .map(|mask| self.import_alpha_mask(mask, source))
-            .transpose()?;
+        let alpha_mask = match layer.mask.as_ref() {
+            Some(mask) => {
+                let spatial = self.plan_alpha_mask_spatial(&layer, source, layer_to_surface)?;
+                Some(self.import_alpha_mask(mask, spatial)?)
+            }
+            None => None,
+        };
         self.composite_into_parent(
             parent,
             source,
@@ -2781,19 +2813,44 @@ impl SemanticFrameGraphPlanner {
         })
     }
 
+    fn plan_alpha_mask_spatial(
+        &self,
+        layer: &NormalizedLayer,
+        source: PlannedGraphResource,
+        layer_to_surface: Transform,
+    ) -> Result<NonEmptyFrameSpatialPlan> {
+        if layer.clip.is_none() {
+            return Ok(source.spatial);
+        }
+        let bounds = layer.pass_plan.bounds().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "a clipped resolved mask reached graph planning without offscreen bounds",
+            )
+        })?;
+        match self.context.plan_local_bounds(
+            LogicalBounds::try_from_rect(bounds.rect(), "resolved layer mask bounds")?,
+            layer_to_surface,
+        )? {
+            FrameSpatialPlan::NonEmpty(spatial) => Ok(spatial),
+            FrameSpatialPlan::Empty(_) => Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "an empty clipped resolved mask survived semantic contribution pruning",
+            )),
+        }
+    }
+
     fn import_alpha_mask(
         &mut self,
         mask: &RenderLayerMask,
-        source: PlannedGraphResource,
+        spatial: NonEmptyFrameSpatialPlan,
     ) -> Result<PlannedGraphResource> {
         let physical_size = mask.alpha_mask().size();
-        let expected = source.spatial.device_extent;
-        mask.validate_expected_physical_size(PhysicalSize::new(expected.width, expected.height))?;
         let resource = graph_build(
             self.builder
                 .import_resource(SemanticResourceDescriptor::new(
                     SemanticResourceRole::ImportedImage,
-                    source.spatial,
+                    spatial,
                     0,
                 )),
         )?;
@@ -2804,8 +2861,8 @@ impl SemanticFrameGraphPlanner {
         Ok(PlannedGraphResource {
             id: resource,
             producer: None,
-            logical_bounds: source.logical_bounds,
-            spatial: source.spatial,
+            logical_bounds: spatial.logical_bounds,
+            spatial,
         })
     }
 
@@ -4468,6 +4525,7 @@ pub(crate) struct FramePlanObservation {
     pub(crate) antialiasing: Option<super::renderer::Antialiasing>,
     pub(crate) base_color: Option<super::paint::Color>,
     pub(crate) selection_requirements: Vec<FrameSelectionRequirementObservation>,
+    pub(crate) resolved_alpha_mask_device_extents: Vec<(u32, u32)>,
     pub(crate) vello_spans: Vec<VelloSpanObservation>,
     pub(crate) graph_layer_blends: Vec<super::layer::BlendMode>,
     pub(crate) backdrop_dependency: BackdropDependencyObservation,
@@ -4548,6 +4606,7 @@ fn observe_direct_frame_plan(plan: DirectVelloPlan) -> FramePlanObservation {
         antialiasing: Some(plan.antialiasing),
         base_color: Some(plan.base_color),
         selection_requirements: Vec::new(),
+        resolved_alpha_mask_device_extents: Vec::new(),
         vello_spans: Vec::new(),
         graph_layer_blends: Vec::new(),
         backdrop_dependency: BackdropDependencyObservation::None,
@@ -4578,6 +4637,22 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
             GraphSelectionRequirement::BoundedBackdrop => {
                 FrameSelectionRequirementObservation::BoundedBackdrop
             }
+        })
+        .collect();
+    let resolved_alpha_mask_device_extents = graph
+        .imports
+        .iter()
+        .filter_map(|import| match import.kind {
+            SemanticImportKind::ResolvedAlphaMask { .. } => graph
+                .resources
+                .iter()
+                .find(|resource| resource.id == import.resource)
+                .map(|resource| {
+                    (
+                        resource.descriptor.device_extent.width,
+                        resource.descriptor.device_extent.height,
+                    )
+                }),
         })
         .collect();
     let vello_spans = graph
@@ -4672,6 +4747,7 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
         antialiasing,
         base_color,
         selection_requirements,
+        resolved_alpha_mask_device_extents,
         vello_spans,
         graph_layer_blends,
         backdrop_dependency: if graph.backdrop_reads.is_empty() {

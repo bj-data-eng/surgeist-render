@@ -331,15 +331,19 @@ impl LayerPassPlan {
         if let Some(unsupported) = unsupported_layer_effect(layer) {
             return Self::diagnostic_boundary(unsupported);
         }
+        let outer_clip_bounds = clip_bounds(clip)?;
         if let Some(backdrop) = layer.backdrop_filter() {
-            let bounds = OffscreenBounds::try_new(backdrop.capture_bounds().rect())?;
+            let bounds = match outer_clip_bounds {
+                Some(bounds) => bounds,
+                None => OffscreenBounds::try_new(backdrop.capture_bounds().rect())?,
+            };
             return Ok(Self::new(
                 LayerPassRequirement::BoundedBackdropCapture,
                 LayerPassKind::OffscreenTexture,
                 Some(bounds),
             ));
         }
-        let bounds = match clip_bounds(clip)? {
+        let bounds = match outer_clip_bounds {
             Some(bounds) => Some(bounds),
             None => commands_bounds(children)?,
         };

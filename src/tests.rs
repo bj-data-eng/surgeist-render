@@ -9245,6 +9245,15 @@ fn opaque_planning_mask(size: PhysicalSize) -> ImageBuffer {
     ImageBuffer::try_new(size, vec![255; byte_len]).unwrap()
 }
 
+fn transparent_planning_mask(size: PhysicalSize) -> ImageBuffer {
+    let byte_len = usize::try_from(size.width())
+        .unwrap()
+        .checked_mul(usize::try_from(size.height()).unwrap())
+        .and_then(|pixels| pixels.checked_mul(4))
+        .unwrap();
+    ImageBuffer::try_new(size, vec![0; byte_len]).unwrap()
+}
+
 fn bounded_planning_backdrop() -> Layer {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
@@ -9481,6 +9490,119 @@ fn transparent_resolved_alpha_mask_annihilates_unspecified_text_without_graph_se
                     && plan.pass_count == 0
             }),
         "transparent resolved mask retained graph selection or unresolved text bounds"
+    );
+}
+
+#[test]
+fn clipped_known_mask_source_uses_post_clip_extent_for_validation_and_import() {
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_clip(Shape::rect(Rect::new(1.0, 0.0, 2.0, 1.0)))
+            .unwrap()
+            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(2, 1)))
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
+        },
+    );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(4.0, 2.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::GpuGraph
+                    && plan.plan_count == 1
+                    && plan.complete
+                    && plan.selection_requirements
+                        == [FrameSelectionRequirementObservation::ResolvedAlphaMask]
+                    && plan.resolved_alpha_mask_device_extents == [(2, 1)]
+            }),
+        "known 3x1 source was not validated and imported as the post-clip 2x1 mask extent"
+    );
+}
+
+#[test]
+fn transparent_mask_under_nonempty_clip_prunes_mixed_unresolved_source() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(4.0, 0.0, 1.0, 1.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_clip(Shape::rect(Rect::new(0.0, 0.0, 2.0, 1.0)))
+                .unwrap()
+                .try_resolved_alpha_mask(transparent_planning_mask(PhysicalSize::new(2, 1)))
+                .unwrap(),
+            |scene| {
+                scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
+                add_planning_text(scene, TextRunBounds::unspecified());
+            },
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(6.0, 2.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.unresolved_resource.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::DirectVello
+                    && plan.direct_commands == [VelloCommandObservation::Fill]
+                    && plan.selection_requirements.is_empty()
+                    && plan.resource_count == 0
+                    && plan.pass_count == 0
+            }),
+        "transparent 2x1 mask retained unclipped mixed sizing or unresolved graph text instead of preserving the sibling DirectVello plan"
+    );
+}
+
+#[test]
+fn exact_empty_outer_clip_skips_mask_size_validation_and_preserves_sibling() {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(4.0, 0.0, 1.0, 1.0), Color::BLACK)
+        .layer(
+            Layer::new()
+                .try_clip(Shape::rect(Rect::new(0.0, 0.0, 0.0, 1.0)))
+                .unwrap()
+                .try_resolved_alpha_mask(transparent_planning_mask(PhysicalSize::new(7, 3)))
+                .unwrap(),
+            |scene| {
+                scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
+            },
+        );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(6.0, 2.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.unresolved_resource.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::DirectVello
+                    && plan.direct_commands == [VelloCommandObservation::Fill]
+                    && plan.selection_requirements.is_empty()
+                    && plan.resource_count == 0
+                    && plan.pass_count == 0
+            }),
+        "exact-empty outer clip retained resolved-mask size validation or failed to preserve the sibling DirectVello plan"
     );
 }
 
