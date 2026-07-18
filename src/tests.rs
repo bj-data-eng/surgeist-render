@@ -10494,6 +10494,29 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
 }
 
 #[test]
+fn render_plans_before_transitional_effect_execution() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
+        .expect("the pre-execution frame-gate fixture requires a headless surface");
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
+        .layer(bounded_planning_backdrop(), |scene| {
+            scene.fill(Rect::new(1.0, 1.0, 4.0, 3.0), Color::BLACK);
+        });
+
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect("the supported bounded-backdrop render must complete");
+    let observation = renderer.preexecution_frame_gate_observation_for_test();
+
+    assert!(
+        observation.validated_plan_count == 1
+            && observation.plan_count_at_transitional_effect_execution == Some(1),
+        "renderer entered transitional effect execution before one validated plan"
+    );
+}
+
+#[test]
 fn materialized_image_filter_classifier_preserves_mixed_filter_order() {
     let shadow = FilterDropShadow::try_from_shadow(
         Shadow::try_new(Point::new(2.0, 3.0), 4.0, 0.0, Color::BLACK).unwrap(),

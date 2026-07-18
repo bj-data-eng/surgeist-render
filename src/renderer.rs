@@ -7,6 +7,7 @@ use super::{
     backend::*,
     command::{RenderCommand, RenderCommands},
     encode::encode_vello_scene,
+    frame::{FrameContext, FramePlan},
     geometry::physical_size,
     gpu_transaction::{GpuOperationDraft, GpuOperationStage},
     readback::read_texture_rgba,
@@ -42,6 +43,15 @@ pub struct Renderer {
     uploaded_images: HashSet<ImageId>,
     backend: Option<Backend>,
     default_device: Option<DeviceSlotIdentity>,
+    #[cfg(test)]
+    preexecution_frame_gate_observation: PreexecutionFrameGateObservationForTest,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreexecutionFrameGateObservationForTest {
+    pub(crate) validated_plan_count: u8,
+    pub(crate) plan_count_at_transitional_effect_execution: Option<u8>,
 }
 
 struct RenderPublication {
@@ -146,6 +156,8 @@ impl Renderer {
             uploaded_images: HashSet::new(),
             backend,
             default_device,
+            #[cfg(test)]
+            preexecution_frame_gate_observation: PreexecutionFrameGateObservationForTest::default(),
         })
     }
 
@@ -610,25 +622,57 @@ impl Renderer {
             present_time: Duration::ZERO,
             ..Stats::default()
         };
+        #[cfg(test)]
+        {
+            self.preexecution_frame_gate_observation =
+                PreexecutionFrameGateObservationForTest::default();
+        }
         let normalized = scene.normalize(self.capabilities())?;
-        let normalized = RenderCommands::new(
-            self.materialize_resolved_backdrops(
-                normalized.commands,
-                surface.scale(),
-                surface.options.format,
-                parameters,
-            )
-            .await?,
-        );
-        let normalized = RenderCommands::new(
-            self.materialize_resolved_layer_masks(
-                normalized.commands,
-                surface.scale(),
-                surface.options.format,
-                parameters,
-            )
-            .await?,
-        );
+        let transitional_source = normalized.clone();
+        let frame_context = FrameContext::try_new(
+            surface.size(),
+            surface.scale(),
+            self.options.antialiasing(),
+            parameters.base_color,
+        )?;
+        let frame_plan = normalized.plan_for(frame_context)?;
+        #[cfg(test)]
+        {
+            self.preexecution_frame_gate_observation
+                .validated_plan_count += 1;
+        }
+        let (normalized, validated_graph_plan) = match frame_plan {
+            FramePlan::DirectVello(plan) => (plan.into_commands(), None),
+            FramePlan::GpuGraph(plan) => {
+                #[cfg(test)]
+                {
+                    self.preexecution_frame_gate_observation
+                        .plan_count_at_transitional_effect_execution = Some(
+                        self.preexecution_frame_gate_observation
+                            .validated_plan_count,
+                    );
+                }
+                let normalized = RenderCommands::new(
+                    self.materialize_resolved_backdrops(
+                        transitional_source.commands,
+                        surface.scale(),
+                        surface.options.format,
+                        parameters,
+                    )
+                    .await?,
+                );
+                let normalized = RenderCommands::new(
+                    self.materialize_resolved_layer_masks(
+                        normalized.commands,
+                        surface.scale(),
+                        surface.options.format,
+                        parameters,
+                    )
+                    .await?,
+                );
+                (normalized, Some(plan))
+            }
+        };
         let mut uploaded_images = self.uploaded_images.clone();
         collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
         let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
@@ -659,6 +703,7 @@ impl Renderer {
             backend.observe_device_terminal(device_identity);
             frame
         };
+        drop(validated_graph_plan);
         let frame = match frame {
             Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
                 self.configure_presented_surface_if_needed(
@@ -1002,6 +1047,13 @@ impl Renderer {
     #[must_use]
     pub const fn stats(&self) -> Stats {
         self.stats
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn preexecution_frame_gate_observation_for_test(
+        &self,
+    ) -> PreexecutionFrameGateObservationForTest {
+        self.preexecution_frame_gate_observation
     }
 
     #[must_use]

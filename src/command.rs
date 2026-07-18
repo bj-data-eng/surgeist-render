@@ -22,13 +22,6 @@ impl RenderCommands {
         Self { commands }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C06 T5 stages frame planning for the C06 T6 renderer gate."
-        )
-    )]
     pub(crate) fn plan_for(self, context: FrameContext) -> Result<FramePlan> {
         FramePlan::try_from_commands(self, context)
     }

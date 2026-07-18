@@ -22,13 +22,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::{command::LayerPassPlan, filter::ColorClampBoundary, style::ColorFilterOp};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T2 stages the resolved-frame planner that C06 T6 will invoke."
-    )
-)]
 pub(crate) struct FrameContext {
     output_bounds: LogicalBounds,
     surface_scale: f64,
@@ -36,13 +29,6 @@ pub(crate) struct FrameContext {
     base_color: Color,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T2 stages the resolved-frame planner that C06 T6 will invoke."
-    )
-)]
 impl FrameContext {
     pub(crate) fn try_new(
         surface_size: Size,
@@ -250,13 +236,6 @@ impl FrameContext {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T5 stages the resolved frame plan that C06 T6 will require before execution."
-    )
-)]
 pub(crate) enum FramePlan {
     DirectVello(DirectVelloPlan),
     GpuGraph(GpuRenderGraph),
@@ -270,19 +249,18 @@ pub(crate) struct DirectVelloPlan {
     base_color: Color,
 }
 
+impl DirectVelloPlan {
+    pub(crate) fn into_commands(self) -> RenderCommands {
+        self.commands
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GraphSelectionRequirement {
     ResolvedAlphaMask,
     BoundedBackdrop,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T5 stages the resolved frame conversion that C06 T6 will invoke."
-    )
-)]
 impl FramePlan {
     pub(crate) fn try_from_commands(
         commands: RenderCommands,
@@ -1307,13 +1285,6 @@ impl SemanticPassId {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages semantic resource roles for C06 T5-T6 graph planning."
-    )
-)]
 enum SemanticResourceRole {
     RootWorkingImage,
     CaptureWorkingImage,
@@ -1336,13 +1307,6 @@ struct SemanticResourceDescriptor {
 }
 
 impl SemanticResourceDescriptor {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C06 T4 resource descriptors are constructed by the staged C06 planner tests."
-        )
-    )]
     const fn new(
         role: SemanticResourceRole,
         spatial: NonEmptyFrameSpatialPlan,
@@ -1360,39 +1324,18 @@ impl SemanticResourceDescriptor {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages root and transparent initialization intents for C06 T5-T6."
-    )
-)]
 enum WorkingImageInitialization {
     SurfaceBaseColor(super::paint::Color),
     Transparent,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages RGBA and SourceAlpha blur intent for C06 T5-T6."
-    )
-)]
 enum BlurInput {
     Rgba,
     SourceAlpha,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages the finite semantic pass vocabulary for C06 T5-T6."
-    )
-)]
 enum SemanticPassIntent {
     ClearRoot {
         initialization: WorkingImageInitialization,
@@ -1415,13 +1358,6 @@ enum SemanticPassIntent {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages empty and resource-bearing semantic results for C06 T5-T6."
-    )
-)]
 enum SemanticPassResult {
     Empty,
     Resource(SemanticResourceId),
@@ -1601,13 +1537,6 @@ struct SemanticImportPlan {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages the immutable validated graph consumed by C06 T5-T6 and C07."
-    )
-)]
 pub(crate) struct GpuRenderGraph {
     generation: GraphGeneration,
     resources: Vec<SemanticGraphResource>,
@@ -1623,13 +1552,6 @@ pub(crate) struct GpuRenderGraph {
 }
 
 #[derive(Debug)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C06 T4 stages the private graph builder that C06 T5-T6 will invoke."
-    )
-)]
 struct SemanticGraphBuilder {
     generation: GraphGeneration,
     phase: GraphBuildPhase,
