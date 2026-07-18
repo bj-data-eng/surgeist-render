@@ -10513,6 +10513,101 @@ fn device_pass_cache_owns_exact_sampler_layout_shader_and_pipeline_key_spaces() 
     );
 }
 
+fn c08_shader_commands_for_test() -> command::RenderCommands {
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(-1.25, -0.75, 2.0, 1.5), Color::BLACK)
+        .stroke(
+            Shape::rect(Rect::new(2.0, 1.0, 3.0, 2.0)),
+            Stroke::try_new(0.5).unwrap(),
+            Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+        );
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
+fn c08_shader_frame_context_for_test() -> super::frame::FrameContext {
+    super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("C08 checked shader realization requires backend selection")
+        .expect("C08 checked shader realization requires a host adapter");
+    let capabilities = {
+        let ready = backend
+            .ready_device_state_borrow_for_test(identity)
+            .expect("C08 checked shader realization requires a ready device");
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test())
+    };
+    let working_format = capabilities
+        .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)
+        .expect("C08 checked shader realization requires one supported working format");
+    let commands = c08_shader_commands_for_test();
+    let context = c08_shader_frame_context_for_test();
+    let rgba_requests = super::pass::c08_pass_cache_requests_for_test(
+        commands.clone(),
+        context,
+        capabilities,
+        working_format,
+        Format::Rgba8,
+    )
+    .expect("C08 RGBA shader realization requires exact lowered pass keys");
+    let bgra_requests = super::pass::c08_pass_cache_requests_for_test(
+        commands,
+        context,
+        capabilities,
+        working_format,
+        Format::Bgra8,
+    )
+    .expect("C08 BGRA shader realization requires exact lowered pass keys");
+    let observed = pollster::block_on(backend.c08_shader_cache_realization_observation_for_test(
+        identity,
+        &rgba_requests,
+        &bgra_requests,
+    ))
+    .expect("C08 checked shader realization must reach its transaction observation");
+
+    assert!(
+        observed.realizes_all_checked_programs
+            && observed.provisional_handles_are_encoding_ready
+            && observed.commits_only_after_clean_transaction
+            && observed.reuses_exact_committed_entries
+            && observed.failed_validation_publishes_none
+            && observed.cancellation_publishes_none
+            && observed.device_transition_publishes_none
+            && observed.specializes_rgba_and_bgra_outputs,
+        "C08 pass objects are not transactionally cached"
+    );
+}
+
+#[test]
+fn c08_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
+    let observed = super::pass::c08_pass_layout_observation_for_test(
+        c08_shader_commands_for_test(),
+        c08_shader_frame_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.canonicalize_binds_capture_and_spatial_only
+            && observed.span_source_over_binds_source_and_spatial_only
+            && observed.present_binds_final_image_and_spatial_only
+            && observed.copy_only_parent_is_not_sampled
+            && observed.dummy_parameters_are_not_bound
+            && observed.c09_typed_vocabulary_is_preserved
+            && observed.output_specialization_is_exact,
+        "C08 pass layout contains a copy-only or dummy binding"
+    );
+}
+
 #[test]
 fn c07_contains_no_placeholder_custom_shader_program() {
     let custom_pass_sources = [
@@ -10524,28 +10619,50 @@ fn c07_contains_no_placeholder_custom_shader_program() {
         ["Rect", "Shader"].concat(),
         ["Rect", "PassBounds"].concat(),
         ["encode_clear_", "fill_pass"].concat(),
-        "create_shader_module".to_owned(),
-        "create_render_pipeline".to_owned(),
-        "ShaderSource::Wgsl".to_owned(),
-        "@vertex".to_owned(),
-        "@fragment".to_owned(),
-        "include_str!(".to_owned(),
         "create_command_encoder".to_owned(),
         "begin_render_pass".to_owned(),
         "queue.submit".to_owned(),
+        "map_async".to_owned(),
+        "Device::poll".to_owned(),
     ];
     let has_placeholder_program = custom_pass_sources.iter().any(|source| {
         forbidden
             .iter()
             .any(|marker| source.contains(marker.as_str()))
     });
-    let shader_artifact_exists = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("src/shaders")
-        .exists();
+    let shader_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/shaders");
+    let mut shader_files = fs::read_dir(&shader_directory)
+        .expect("the C08 shader source directory must exist")
+        .map(|entry| {
+            entry
+                .expect("the C08 shader directory entry must be readable")
+                .file_name()
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect::<Vec<_>>();
+    shader_files.sort();
+    let expected_shader_files = [
+        "canonicalize_capture.wgsl".to_owned(),
+        "present.wgsl".to_owned(),
+        "span_source_over.wgsl".to_owned(),
+    ];
+    let shader_owner = include_str!("shader.rs");
+    let exact_tracked_sources = shader_files == expected_shader_files
+        && expected_shader_files.iter().all(|file| {
+            shader_owner
+                .matches(format!("include_str!(\"shaders/{file}\")").as_str())
+                .count()
+                == 1
+                && fs::read_to_string(shader_directory.join(file))
+                    .is_ok_and(|source| source.contains("@vertex") && source.contains("@fragment"))
+        });
+    let checked_borrowed_sources = shader_owner.contains("wgpu::ShaderSource::Wgsl(Cow::Borrowed(")
+        && !shader_owner.contains("wgpu::ShaderSource::Wgsl(Cow::Owned(");
 
     assert!(
-        !has_placeholder_program && !shader_artifact_exists,
-        "C07 introduced a custom shader program before executable semantics"
+        !has_placeholder_program && exact_tracked_sources && checked_borrowed_sources,
+        "C08 introduced a placeholder or later-cycle custom shader program"
     );
 }
 

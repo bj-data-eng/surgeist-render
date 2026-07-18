@@ -2,6 +2,8 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
+#[cfg(test)]
+use super::pass::C08PassCacheRequestsForTest;
 use super::pass::{LoweredGraphPlan, PreparedGraph};
 use super::resource::{
     FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
@@ -32,7 +34,7 @@ use super::{
     command::OffscreenBounds,
     geometry::physical_size,
     gpu_transaction::{GpuOperationStage, GpuOperationTransaction, InternalVelloPayload},
-    shader::DevicePassCache,
+    shader::{DevicePassCache, ProvisionalDevicePassCacheUpdate},
     texture::{
         TextureDescriptor, TextureUsageIntent, TransitionalTextureRole, headless_texture_descriptor,
     },
@@ -203,6 +205,19 @@ pub(crate) struct Backend {
     resource_cache_budget: ResourceCacheBudget,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C08ShaderCacheRealizationObservationForTest {
+    pub(crate) realizes_all_checked_programs: bool,
+    pub(crate) provisional_handles_are_encoding_ready: bool,
+    pub(crate) commits_only_after_clean_transaction: bool,
+    pub(crate) reuses_exact_committed_entries: bool,
+    pub(crate) failed_validation_publishes_none: bool,
+    pub(crate) cancellation_publishes_none: bool,
+    pub(crate) device_transition_publishes_none: bool,
+    pub(crate) specializes_rgba_and_bgra_outputs: bool,
+}
+
 struct InternalVelloRenderRequest<'a> {
     identity: DeviceSlotIdentity,
     operation: RuntimeOperation,
@@ -339,6 +354,63 @@ impl ReadyDeviceState {
             drop_witness: ReadyDeviceStateDropWitnessForTest::from_ready_bundle(&self.drop_witness),
         }
     }
+}
+
+#[cfg(test)]
+fn provision_c08_requests_for_test(
+    ready: &ReadyDeviceState,
+    requests: &C08PassCacheRequestsForTest,
+    invalidate_last_pipeline: bool,
+) -> Result<(ProvisionalDevicePassCacheUpdate, bool)> {
+    let mut update = ready.pass_cache.provisional_update();
+    let last = requests.passes().len().saturating_sub(1);
+    let mut encoding_ready = !requests.passes().is_empty();
+    for (index, keys) in requests.passes().iter().enumerate() {
+        let objects = if invalidate_last_pipeline && index == last {
+            update.realize_c08_pass_with_invalid_fragment_for_test(
+                &ready.device,
+                &ready.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+        } else {
+            update.realize_c08_pass(
+                &ready.device,
+                &ready.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+        };
+        drop(objects);
+        encoding_ready &= update.contains_c08_pass_for_test(
+            &ready.pass_cache,
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        );
+    }
+    Ok((update, encoding_ready))
+}
+
+#[cfg(test)]
+fn c08_requests_are_cached_for_test(
+    cache: &DevicePassCache,
+    requests: &C08PassCacheRequestsForTest,
+) -> bool {
+    !requests.passes().is_empty()
+        && requests.passes().iter().all(|keys| {
+            cache.contains_c08_pass_for_test(
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+        })
 }
 
 impl DeviceState {
@@ -715,6 +787,14 @@ impl DeviceSignal {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .first_terminal
             .clone()
+    }
+
+    pub(crate) fn has_active_operation(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .active_operation_generation
+            .is_some()
     }
 
     /// Linearizes public state with terminal signal delivery.
@@ -1192,53 +1272,74 @@ impl Backend {
             peniko::Color::from(request.base_color),
             request.antialiasing,
         )?)?;
-        let ready = self.ready_state_mut(
-            request.identity,
-            request.operation,
-            BackendErrorCode::RenderFailed,
-            "internal Vello device resources are unavailable before rendering",
-        )?;
-        let mut command_encoder =
-            ready
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("Surgeist internal Vello frame encoder"),
-                });
-        let mut scope = ActiveVelloEncodingScope::begin(&ready.device);
-        let encoded: EncodedVelloPass = {
-            let mut encoding = TransactionEncodingState::new(
-                &mut scope,
-                &ready.queue,
-                &mut command_encoder,
-                request.target,
-                TransactionTargetIntent::new(
-                    request.target_extent,
-                    wgpu::TextureFormat::Rgba8Unorm,
-                    request.target_usage,
-                ),
-            );
-            match prepared.encode_into(&ready.engine, &ready.resources, &mut encoding) {
-                Ok(encoded) => encoded,
+        {
+            let ready = self.ready_state_mut(
+                request.identity,
+                request.operation,
+                BackendErrorCode::RenderFailed,
+                "internal Vello device resources are unavailable before rendering",
+            )?;
+            let mut command_encoder =
+                ready
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("Surgeist internal Vello frame encoder"),
+                    });
+            let mut scope = ActiveVelloEncodingScope::begin(&ready.device);
+            let encoded: EncodedVelloPass = {
+                let mut encoding = TransactionEncodingState::new(
+                    &mut scope,
+                    &ready.queue,
+                    &mut command_encoder,
+                    request.target,
+                    TransactionTargetIntent::new(
+                        request.target_extent,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        request.target_usage,
+                    ),
+                );
+                match prepared.encode_into(&ready.engine, &ready.resources, &mut encoding) {
+                    Ok(encoded) => encoded,
+                    Err(failure) => {
+                        return Err(failure.into_error_and_aborted_resources().0);
+                    }
+                }
+            };
+            let (lease, logical_pass) = encoded.into_resources_and_logical_pass();
+            let lease = match scope.finish_with_lease(lease).await {
+                Ok(lease) => lease,
                 Err(failure) => {
                     return Err(failure.into_error_and_aborted_resources().0);
                 }
-            }
+            };
+            let payload = InternalVelloPayload::new(
+                command_encoder.finish(),
+                super::vello_engine::PendingVelloResourceCommit::new(lease),
+                logical_pass,
+            );
+            transaction
+                .submit_internal_vello(&ready.device, &ready.queue, payload, request.operation)
+                .await?;
+        }
+        self.commit_checked_pass_cache_update(request.identity, None, request.operation)
+    }
+
+    fn commit_checked_pass_cache_update(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        update: Option<ProvisionalDevicePassCacheUpdate>,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        let Some(update) = update else {
+            return Ok(());
         };
-        let (lease, logical_pass) = encoded.into_resources_and_logical_pass();
-        let lease = match scope.finish_with_lease(lease).await {
-            Ok(lease) => lease,
-            Err(failure) => {
-                return Err(failure.into_error_and_aborted_resources().0);
-            }
-        };
-        let payload = InternalVelloPayload::new(
-            command_encoder.finish(),
-            super::vello_engine::PendingVelloResourceCommit::new(lease),
-            logical_pass,
-        );
-        transaction
-            .submit_internal_vello(&ready.device, &ready.queue, payload, request.operation)
-            .await
+        let ready = self.ready_state_mut(
+            identity,
+            operation,
+            BackendErrorCode::RenderFailed,
+            "checked C08 pass objects lost their persistent device cache",
+        )?;
+        update.commit(&mut ready.pass_cache)
     }
 
     #[cfg(any(
@@ -1654,6 +1755,7 @@ impl Backend {
             return Err(terminal.error(RuntimeOperation::EffectRendering));
         }
         let capabilities = state.capabilities;
+        let realize_checked_passes = state.signal.has_active_operation();
         let ready = state.ready().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
@@ -1667,7 +1769,7 @@ impl Backend {
             &ready.device,
             &ready.queue,
             &ready.resources,
-            &ready.pass_cache,
+            (&ready.pass_cache, realize_checked_passes),
         )
     }
 
@@ -1771,6 +1873,267 @@ impl Backend {
         state
             .ready_mut()
             .map(ReadyDeviceState::seed_pass_cache_sampler_for_test)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c08_shader_cache_realization_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        rgba_requests: &C08PassCacheRequestsForTest,
+        bgra_requests: &C08PassCacheRequestsForTest,
+    ) -> Result<C08ShaderCacheRealizationObservationForTest> {
+        let initial_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 shader-cache observation requires a ready device",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (rgba_update, provisional_handles_are_encoding_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 shader realization lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, rgba_requests, false)?
+        };
+        let counts_before_commit = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 shader realization lost its persistent cache",
+            )?
+            .pass_cache
+            .counts_for_test();
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(rgba_update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let rgba_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 committed cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let realizes_all_checked_programs = initial_counts.is_empty()
+            && counts_before_commit == initial_counts
+            && rgba_counts != initial_counts
+            && c08_requests_are_cached_for_test(
+                &self
+                    .ready_state_mut(
+                        identity,
+                        RuntimeOperation::EffectRendering,
+                        BackendErrorCode::RenderFailed,
+                        "C08 committed programs disappeared",
+                    )?
+                    .pass_cache,
+                rgba_requests,
+            );
+
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (reused_update, reused_handles_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 cache reuse lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, rgba_requests, false)?
+        };
+        let exact_existing_entries_reused =
+            reused_update.is_empty_for_test() && reused_handles_ready;
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(reused_update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let reused_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 reused cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let reuses_exact_committed_entries =
+            exact_existing_entries_reused && reused_counts == rgba_counts;
+
+        let validation_transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let validation_update = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 validation probe lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, bgra_requests, true)?.0
+        };
+        let validation_error = validation_transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await;
+        drop(validation_update);
+        let after_validation_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 validation probe lost its persistent cache",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let failed_validation_publishes_none = validation_error
+            .as_ref()
+            .is_err_and(|error| error.code() == ErrorCode::RenderFailed)
+            && after_validation_counts == rgba_counts;
+
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (bgra_update, bgra_handles_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 BGRA specialization lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, bgra_requests, false)?
+        };
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(bgra_update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let specialized_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 specialized cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let specializes_rgba_and_bgra_outputs =
+            bgra_handles_ready && specialized_counts != rgba_counts && {
+                let ready = self.ready_state_mut(
+                    identity,
+                    RuntimeOperation::EffectRendering,
+                    BackendErrorCode::RenderFailed,
+                    "C08 specialized programs disappeared",
+                )?;
+                c08_requests_are_cached_for_test(&ready.pass_cache, rgba_requests)
+                    && c08_requests_are_cached_for_test(&ready.pass_cache, bgra_requests)
+            };
+
+        let cancellation_identity = self.add_device_slot_for_test().await?;
+        let cancellation_transaction = self.begin_gpu_operation(
+            cancellation_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (canceled_update, canceled_handles_ready) = {
+            let ready = self.ready_state_mut(
+                cancellation_identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 cancellation probe lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, rgba_requests, false)?
+        };
+        let cancellation_cache_before_drop = self
+            .device_states
+            .get(cancellation_identity.slot())
+            .and_then(DeviceState::ready)
+            .map(|ready| ready.pass_cache.counts_for_test())
+            .is_some_and(DevicePassCacheCountsForTest::is_empty);
+        drop(canceled_update);
+        drop(cancellation_transaction);
+        let cancellation_publishes_none = canceled_handles_ready
+            && cancellation_cache_before_drop
+            && self
+                .device_states
+                .get(cancellation_identity.slot())
+                .and_then(DeviceState::ready)
+                .map(|ready| ready.pass_cache.counts_for_test())
+                .is_some_and(DevicePassCacheCountsForTest::is_empty)
+            && self
+                .device_states
+                .get(cancellation_identity.slot())
+                .is_some_and(|state| state.signal.active_generation_for_test().is_none());
+
+        let transition_transaction = self.begin_gpu_operation(
+            cancellation_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (transition_update, transition_handles_ready) = {
+            let ready = self.ready_state_mut(
+                cancellation_identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 transition probe lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, rgba_requests, false)?
+        };
+        self.signal_loss_for_test(cancellation_identity, DeviceLossReason::Destroyed);
+        let transition_cache_before_finish = self
+            .device_states
+            .get(cancellation_identity.slot())
+            .and_then(DeviceState::ready)
+            .map(|ready| ready.pass_cache.counts_for_test())
+            .is_some_and(DevicePassCacheCountsForTest::is_empty);
+        let transition_error = transition_transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await;
+        drop(transition_update);
+        let device_transition_publishes_none = transition_handles_ready
+            && transition_cache_before_finish
+            && transition_error.is_err()
+            && self.renderer_released_for_test(cancellation_identity);
+
+        Ok(C08ShaderCacheRealizationObservationForTest {
+            realizes_all_checked_programs,
+            provisional_handles_are_encoding_ready,
+            commits_only_after_clean_transaction: counts_before_commit == initial_counts
+                && rgba_counts != counts_before_commit,
+            reuses_exact_committed_entries,
+            failed_validation_publishes_none,
+            cancellation_publishes_none,
+            device_transition_publishes_none,
+            specializes_rgba_and_bgra_outputs,
+        })
     }
 
     #[cfg(test)]

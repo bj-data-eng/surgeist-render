@@ -27,10 +27,10 @@ use super::{
         ResourceManager, WorkingFormat,
     },
     shader::{
-        BindGroupLayoutKey, DevicePassCache, PassSpatialUniformBytes, RenderPipelineKey,
-        SamplerKey, ShaderBindingRoleKey, ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey,
-        ShaderModuleKey, ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey,
-        ShaderTextureFormatKey,
+        BindGroupLayoutKey, DevicePassCache, PassSpatialUniformBytes,
+        ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
+        ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey, ShaderModuleKey,
+        ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
     style::ColorFilterOp,
     texture::EffectTextureDescriptor,
@@ -51,6 +51,179 @@ pub(crate) struct C08ExecutableSubsetObservationForTest {
     pub(crate) rejects_malformed_dependencies_reads_results_and_releases: bool,
     pub(crate) rejects_later_cycle_plan: bool,
     pub(crate) preserves_direct_and_transitional_planner_routes: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C08PassLayoutObservationForTest {
+    pub(crate) canonicalize_binds_capture_and_spatial_only: bool,
+    pub(crate) span_source_over_binds_source_and_spatial_only: bool,
+    pub(crate) present_binds_final_image_and_spatial_only: bool,
+    pub(crate) copy_only_parent_is_not_sampled: bool,
+    pub(crate) dummy_parameters_are_not_bound: bool,
+    pub(crate) c09_typed_vocabulary_is_preserved: bool,
+    pub(crate) output_specialization_is_exact: bool,
+}
+
+#[cfg(test)]
+pub(crate) struct C08PassCacheRequestsForTest {
+    passes: Vec<RuntimePassCacheKeys>,
+}
+
+#[cfg(test)]
+impl C08PassCacheRequestsForTest {
+    pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
+        &self.passes
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn c08_pass_cache_requests_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+    output_format: Format,
+) -> Result<C08PassCacheRequestsForTest> {
+    let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        output_format,
+        &capabilities,
+    )?;
+    let preparable = C08PreparableGraph::try_from_lowered(lowered).map_err(|_| {
+        lowering_error("the checked C08 cache fixture did not retain exact executable keys")
+    })?;
+    let passes = preparable
+        .lowered
+        .passes
+        .iter()
+        .filter_map(|pass| pass.cache_keys.clone())
+        .collect::<Vec<_>>();
+    if passes.is_empty() {
+        return Err(lowering_error(
+            "the checked C08 cache fixture contains no custom pass keys",
+        ));
+    }
+    Ok(C08PassCacheRequestsForTest { passes })
+}
+
+#[cfg(test)]
+pub(crate) fn c08_pass_layout_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C08PassLayoutObservationForTest {
+    use super::shader::{C08ProgramForTest, c08_pass_key_facts_for_test};
+
+    let mut canonicalize_binds_capture_and_spatial_only = true;
+    let mut span_source_over_binds_source_and_spatial_only = true;
+    let mut present_binds_final_image_and_spatial_only = true;
+    let mut copy_only_parent_is_not_sampled = true;
+    let mut dummy_parameters_are_not_bound = true;
+    let mut output_specializations = Vec::new();
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        for output_format in [Format::Rgba8, Format::Bgra8] {
+            let Ok(requests) = c08_pass_cache_requests_for_test(
+                commands.clone(),
+                context,
+                capabilities,
+                working_format,
+                output_format,
+            ) else {
+                return C08PassLayoutObservationForTest::default();
+            };
+            let facts = requests
+                .passes()
+                .iter()
+                .filter_map(|keys| {
+                    c08_pass_key_facts_for_test(
+                        keys.samplers(),
+                        keys.layout(),
+                        keys.shader(),
+                        keys.pipeline(),
+                    )
+                })
+                .collect::<Vec<_>>();
+            if facts.len() != requests.passes().len() {
+                return C08PassLayoutObservationForTest::default();
+            }
+            let canonicalize = facts
+                .iter()
+                .find(|facts| facts.program == C08ProgramForTest::CanonicalizeCapture);
+            let source_over = facts
+                .iter()
+                .find(|facts| facts.program == C08ProgramForTest::SpanSourceOver);
+            let present = facts
+                .iter()
+                .find(|facts| facts.program == C08ProgramForTest::Present);
+            canonicalize_binds_capture_and_spatial_only &= canonicalize.is_some_and(|facts| {
+                facts.source_role == ShaderBindingRoleKey::CaptureSource
+                    && facts.source_format == ShaderTextureFormatKey::VelloCaptureRgba8Unorm
+                    && facts.working_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.output_format.is_none()
+                    && facts.target_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.has_only_spatial_uniform
+            });
+            span_source_over_binds_source_and_spatial_only &= source_over.is_some_and(|facts| {
+                facts.source_role == ShaderBindingRoleKey::CompositeSource
+                    && facts.source_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.working_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.output_format.is_none()
+                    && facts.target_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.has_only_spatial_uniform
+                    && facts.has_fixed_source_over_blend
+            });
+            copy_only_parent_is_not_sampled &= facts
+                .iter()
+                .all(|facts| facts.source_role != ShaderBindingRoleKey::CompositeParent);
+            dummy_parameters_are_not_bound &=
+                facts.iter().all(|facts| facts.has_only_spatial_uniform);
+            present_binds_final_image_and_spatial_only &= present.is_some_and(|facts| {
+                facts.source_role == ShaderBindingRoleKey::FinalWorkingImage
+                    && facts.source_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.working_format == ShaderTextureFormatKey::working(working_format)
+                    && facts.output_format == Some(ShaderTextureFormatKey::output(output_format))
+                    && facts.target_format == ShaderTextureFormatKey::output(output_format)
+                    && facts.has_only_spatial_uniform
+            });
+            if let Some(facts) = present {
+                output_specializations.push((facts.working_format, facts.output_format));
+            }
+        }
+    }
+    let output_specialization_is_exact = output_specializations.len() == 4
+        && output_specializations.iter().all(|specialization| {
+            output_specializations
+                .iter()
+                .filter(|candidate| *candidate == specialization)
+                .count()
+                == 1
+        });
+    let c09_typed_vocabulary_is_preserved = matches!(
+        ShaderBindingRoleKey::CompositeParent,
+        ShaderBindingRoleKey::CompositeParent
+    ) && matches!(
+        ShaderDataBindingKey::CompositeParameters,
+        ShaderDataBindingKey::CompositeParameters
+    ) && matches!(
+        ShaderDataBindingKey::PresentParameters,
+        ShaderDataBindingKey::PresentParameters
+    );
+
+    C08PassLayoutObservationForTest {
+        canonicalize_binds_capture_and_spatial_only,
+        span_source_over_binds_source_and_spatial_only,
+        present_binds_final_image_and_spatial_only,
+        copy_only_parent_is_not_sampled,
+        dummy_parameters_are_not_bound,
+        c09_typed_vocabulary_is_preserved,
+        output_specialization_is_exact,
+    }
 }
 
 #[cfg(test)]
@@ -2118,6 +2291,7 @@ pub(crate) struct PreparedGraph<'device> {
     c08_execution: Option<C08ExecutionFacts>,
     resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
+    pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
     _ready_device: PhantomData<(
@@ -2145,7 +2319,7 @@ impl<'device> PreparedGraph<'device> {
             device,
             queue,
             resources,
-            pass_cache,
+            (pass_cache, false),
         )?;
         if prepared.c08_execution_facts().is_none() {
             return Err(preparation_error(
@@ -2162,9 +2336,26 @@ impl<'device> PreparedGraph<'device> {
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
         resources: &'device ResourceManager,
-        pass_cache: &'device DevicePassCache,
+        pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         match C08PreparableGraph::try_from_lowered(lowered) {
+            Ok(preparable) if pass_cache_phase.1 => {
+                let prepared = Self::try_prepare_inner(
+                    GraphPreparationSource::C08(preparable),
+                    policy,
+                    capabilities,
+                    device,
+                    queue,
+                    resources,
+                    pass_cache_phase,
+                )?;
+                if prepared.c08_execution_facts().is_none() {
+                    return Err(preparation_error(
+                        "C08 preparation lost its validated execution facts",
+                    ));
+                }
+                Ok(prepared)
+            }
             Ok(preparable) => Self::try_prepare_c08(
                 preparable,
                 policy,
@@ -2172,7 +2363,7 @@ impl<'device> PreparedGraph<'device> {
                 device,
                 queue,
                 resources,
-                pass_cache,
+                pass_cache_phase.0,
             ),
             Err(lowered) => Self::try_prepare_inner(
                 GraphPreparationSource::Transitional(lowered),
@@ -2181,7 +2372,7 @@ impl<'device> PreparedGraph<'device> {
                 device,
                 queue,
                 resources,
-                pass_cache,
+                (pass_cache_phase.0, false),
             ),
         }
     }
@@ -2193,8 +2384,9 @@ impl<'device> PreparedGraph<'device> {
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
         resources: &'device ResourceManager,
-        _pass_cache: &'device DevicePassCache,
+        pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
+        let (pass_cache, realize_checked_passes) = pass_cache_phase;
         let (lowered, c08_execution) = source.into_parts();
         let plan = RuntimeGraphPreparationPlan::try_derive(lowered, policy, capabilities, device)?;
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
@@ -2234,11 +2426,35 @@ impl<'device> PreparedGraph<'device> {
             }
         }
 
+        let pass_cache_update = if realize_checked_passes && c08_execution.is_some() {
+            let mut update = pass_cache.provisional_update();
+            for keys in plan
+                .passes
+                .iter()
+                .filter_map(|request| request.cache_keys.as_ref())
+            {
+                update
+                    .realize_c08_pass(
+                        device,
+                        pass_cache,
+                        keys.samplers(),
+                        keys.layout(),
+                        keys.shader(),
+                        keys.pipeline(),
+                    )?
+                    .require_encoding_ready()?;
+            }
+            Some(update)
+        } else {
+            None
+        };
+
         Ok(Self {
             plan,
             c08_execution,
             resource_bindings,
             kernel_bindings,
+            pass_cache_update,
             frame_scope: Some(frame_scope),
             next_pass: 0,
             _ready_device: PhantomData,
@@ -2498,6 +2714,7 @@ impl<'device> PreparedGraph<'device> {
                 "prepared graph cannot finish before every pass and last-use release",
             ));
         }
+        let _ = self.pass_cache_update.take();
         self.frame_scope
             .take()
             .ok_or_else(|| preparation_error("prepared frame resource scope is already closed"))
@@ -3225,7 +3442,19 @@ fn runtime_pass_cache_keys(
         return Ok(None);
     }
     let program = shader_program(kind)?;
-    let sampled_textures = reads
+    let sampled_reads = reads
+        .iter()
+        .filter(|read| {
+            !matches!(
+                kind,
+                RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::SpanSourceOver,
+                    ..
+                }))
+            ) || read.role != RuntimeReadRole::CompositeParent
+        })
+        .collect::<Vec<_>>();
+    let sampled_textures = sampled_reads
         .iter()
         .map(|read| {
             let format = resource_formats
@@ -3235,7 +3464,7 @@ fn runtime_pass_cache_keys(
             Ok((shader_binding_role(read.role), format.shader_key()))
         })
         .collect::<Result<Vec<_>>>()?;
-    let samplers = reads
+    let samplers = sampled_reads
         .iter()
         .map(|read| read.sampler_key)
         .collect::<Vec<_>>();
@@ -3350,14 +3579,15 @@ fn shader_data_bindings(kind: &RuntimePassKind) -> Vec<ShaderDataBindingKey> {
             ShaderDataBindingKey::SpatialUniform,
             ShaderDataBindingKey::DropShadowParameters,
         ],
+        RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::SpanSourceOver,
+            ..
+        })) => vec![ShaderDataBindingKey::SpatialUniform],
         RuntimePassKind::Composite(Some(_)) => vec![
             ShaderDataBindingKey::SpatialUniform,
             ShaderDataBindingKey::CompositeParameters,
         ],
-        RuntimePassKind::Present => vec![
-            ShaderDataBindingKey::SpatialUniform,
-            ShaderDataBindingKey::PresentParameters,
-        ],
+        RuntimePassKind::Present => vec![ShaderDataBindingKey::SpatialUniform],
         RuntimePassKind::ClearRoot { .. }
         | RuntimePassKind::VelloCapture(_)
         | RuntimePassKind::ColorFilter(None)
