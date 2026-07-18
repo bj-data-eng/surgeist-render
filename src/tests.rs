@@ -45,7 +45,7 @@ use super::{
         AllocationGeneration, GaussianKernelKey, GaussianKernelPlan, GaussianKernelSamplingForm,
         ResourceCacheKey, ResourceIdentity, ResourceManager, WorkingFormat,
     },
-    shader::device_pass_cache_owns_exact_key_spaces_for_test,
+    shader::{DevicePassCache, device_pass_cache_owns_exact_key_spaces_for_test},
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
         EffectTextureDescriptor, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
@@ -10095,6 +10095,76 @@ fn c08_executor_accepts_only_clear_capture_canonicalize_span_source_over_and_pre
             && observed.rejects_later_cycle_plan
             && observed.preserves_direct_and_transitional_planner_routes,
         "C08 has no closed pre-allocation executable subset"
+    );
+}
+
+#[test]
+fn c08_preparation_rejects_later_cycle_plan_without_resource_or_cache_mutation() {
+    let policy = EffectQualityPolicy::AllowReducedPrecision;
+    let options = Options::default()
+        .with_effect_quality_policy(policy)
+        .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
+    let mut renderer = pollster::block_on(Renderer::new(options))
+        .expect("C08 preparation rejection requires a real selected WGPU device");
+    let _surface = pollster::block_on(renderer.create_headless(Size::new(16.0, 12.0), 1.0))
+        .expect("C08 preparation rejection requires a device-backed headless surface");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("C08 preparation rejection requires one ready device bundle");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let working_format = capabilities
+        .resolve_effect_working_format(policy)
+        .expect("the selected C08 device must resolve its immutable working format");
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+    )
+    .unwrap();
+    let super::frame::FramePlan::GpuGraph(graph) = runtime_lowering_commands_for_test()
+        .plan_for(context)
+        .expect("the later-cycle fixture must remain a validated graph plan")
+    else {
+        panic!("the later-cycle fixture must retain its transitional graph route");
+    };
+    let lowered = super::pass::LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .expect("the later-cycle fixture must reach validated runtime lowering");
+    let resources = ResourceManager::new(ResourceCacheBudget::new(1024 * 1024));
+    let mut pass_cache = DevicePassCache::new();
+    let _ = pass_cache.seed_sampler_for_test(ready.device_for_test());
+    let resources_before = resources.observation_for_test();
+    let pass_cache_before = pass_cache.counts_for_test();
+
+    let preparation = match super::pass::C08PreparableGraph::try_from_lowered(lowered) {
+        Ok(preparable) => super::pass::PreparedGraph::try_prepare_c08(
+            preparable,
+            policy,
+            &capabilities,
+            ready.device_for_test(),
+            ready.queue_for_test(),
+            &resources,
+            &pass_cache,
+        )
+        .map_err(|_| ()),
+        Err(_) => Err(()),
+    };
+    let later_cycle_reached_preparation = preparation.is_ok();
+    drop(preparation);
+    let resources_after = resources.observation_for_test();
+    let pass_cache_after = pass_cache.counts_for_test();
+
+    assert!(
+        !later_cycle_reached_preparation
+            && resources_after == resources_before
+            && pass_cache_after == pass_cache_before,
+        "later-cycle graph reached C08 resource or cache preparation"
     );
 }
 

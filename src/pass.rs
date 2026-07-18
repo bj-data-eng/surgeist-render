@@ -469,13 +469,13 @@ pub(crate) struct LoweredGraphPlan {
 }
 
 #[must_use]
-pub(crate) struct C08ExecutableSubset<'plan> {
+pub(crate) struct C08ExecutionFacts {
     working_format: WorkingFormat,
     output_format: Format,
-    captures: Vec<C08VelloCaptureExecutionFacts<'plan>>,
+    captures: Vec<C08VelloCaptureExecutionFacts>,
 }
 
-impl C08ExecutableSubset<'_> {
+impl C08ExecutionFacts {
     #[must_use]
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         self.working_format
@@ -487,7 +487,7 @@ impl C08ExecutableSubset<'_> {
     }
 
     #[must_use]
-    pub(crate) fn captures(&self) -> &[C08VelloCaptureExecutionFacts<'_>] {
+    pub(crate) fn captures(&self) -> &[C08VelloCaptureExecutionFacts] {
         &self.captures
     }
 
@@ -529,11 +529,32 @@ impl C08ExecutableSubset<'_> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub(crate) struct C08VelloCaptureExecutionFacts<'plan> {
+#[must_use]
+pub(crate) struct C08PreparableGraph {
+    lowered: LoweredGraphPlan,
+    execution: C08ExecutionFacts,
+}
+
+impl C08PreparableGraph {
+    pub(crate) fn try_from_lowered(
+        lowered: LoweredGraphPlan,
+    ) -> std::result::Result<Self, LoweredGraphPlan> {
+        let Some(execution) = lowered.c08_execution_facts() else {
+            return Err(lowered);
+        };
+        Ok(Self { lowered, execution })
+    }
+
+    fn into_parts(self) -> (LoweredGraphPlan, C08ExecutionFacts) {
+        (self.lowered, self.execution)
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct C08VelloCaptureExecutionFacts {
     pass: RuntimePassId,
     target: RuntimeResourceId,
-    commands: &'plan RenderCommands,
+    commands: RenderCommands,
     initial_transform: Transform,
     antialiasing: Antialiasing,
     target_extent: PhysicalSize,
@@ -541,7 +562,7 @@ pub(crate) struct C08VelloCaptureExecutionFacts<'plan> {
     raster_scale: f64,
 }
 
-impl C08VelloCaptureExecutionFacts<'_> {
+impl C08VelloCaptureExecutionFacts {
     #[must_use]
     pub(crate) const fn pass(&self) -> RuntimePassId {
         self.pass
@@ -553,8 +574,8 @@ impl C08VelloCaptureExecutionFacts<'_> {
     }
 
     #[must_use]
-    pub(crate) const fn commands(&self) -> &RenderCommands {
-        self.commands
+    pub(crate) fn commands(&self) -> &RenderCommands {
+        &self.commands
     }
 
     #[must_use]
@@ -808,7 +829,7 @@ impl LoweredGraphPlan {
             ));
         }
 
-        let lowered = Self {
+        Ok(Self {
             generation: RuntimeGraphGeneration(view.generation()),
             working_format,
             output_format,
@@ -816,12 +837,10 @@ impl LoweredGraphPlan {
             passes,
             root_working_image,
             final_present,
-        };
-        let _ = lowered.c08_executable_subset();
-        Ok(lowered)
+        })
     }
 
-    pub(crate) fn c08_executable_subset(&self) -> Option<C08ExecutableSubset<'_>> {
+    fn c08_execution_facts(&self) -> Option<C08ExecutionFacts> {
         if ![Format::Rgba8, Format::Bgra8].contains(&self.output_format) {
             return None;
         }
@@ -1027,14 +1046,14 @@ impl LoweredGraphPlan {
             }
         }
 
-        let subset = C08ExecutableSubset {
+        let execution = C08ExecutionFacts {
             working_format: self.working_format,
             output_format: self.output_format,
             captures,
         };
-        subset
+        execution
             .proves_exact_execution_facts_for(self)
-            .then_some(subset)
+            .then_some(execution)
     }
 
     #[cfg(test)]
@@ -1084,12 +1103,12 @@ fn c08_read_is_exact(
         && read.sampler_key == sampler_key
 }
 
-fn c08_capture_execution_facts<'plan>(
+fn c08_capture_execution_facts(
     pass: RuntimePassId,
     target: RuntimeResourceId,
-    span: &'plan RuntimeVelloSpan,
+    span: &RuntimeVelloSpan,
     spatial: RuntimeSpatialDescriptor,
-) -> Option<C08VelloCaptureExecutionFacts<'plan>> {
+) -> Option<C08VelloCaptureExecutionFacts> {
     if span.scope != RuntimeVelloSpanScope::CurrentParent
         || span.commands.commands.is_empty()
         || !span.captured_before_outer_semantics
@@ -1128,7 +1147,7 @@ fn c08_capture_execution_facts<'plan>(
     Some(C08VelloCaptureExecutionFacts {
         pass,
         target,
-        commands: &span.commands,
+        commands: span.commands.clone(),
         initial_transform,
         antialiasing: span.antialiasing,
         target_extent: spatial.device_extent,
@@ -1175,8 +1194,10 @@ fn c08_executable_subset_observation(
         &capabilities,
     )
     .ok()?;
-    let rgba_subset = rgba.c08_executable_subset()?;
-    let bgra_subset = bgra.c08_executable_subset()?;
+    let rgba_preparable = C08PreparableGraph::try_from_lowered(rgba.clone()).ok()?;
+    let bgra_preparable = C08PreparableGraph::try_from_lowered(bgra).ok()?;
+    let rgba_subset = &rgba_preparable.execution;
+    let bgra_subset = &bgra_preparable.execution;
     let accepts_exact_rgba_and_bgra = rgba_subset.working_format() == WorkingFormat::HighPrecision
         && rgba_subset.output_format() == Format::Rgba8
         && bgra_subset.working_format() == WorkingFormat::HighPrecision
@@ -1200,7 +1221,7 @@ fn c08_executable_subset_observation(
         rejects_malformed_dependencies_reads_results_and_releases: c08_rejects_malformed_bindings(
             &rgba,
         ),
-        rejects_later_cycle_plan: later_cycle.c08_executable_subset().is_none(),
+        rejects_later_cycle_plan: C08PreparableGraph::try_from_lowered(later_cycle).is_err(),
         preserves_direct_and_transitional_planner_routes: direct_route && transitional_route,
     })
 }
@@ -1258,7 +1279,7 @@ fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPl
     composite_payloads.into_iter().all(|payload| {
         let mut invalid = plan.clone();
         invalid.passes[composite_index].kind = RuntimePassKind::Composite(payload);
-        invalid.c08_executable_subset().is_none()
+        C08PreparableGraph::try_from_lowered(invalid).is_err()
     })
 }
 
@@ -1306,8 +1327,8 @@ fn c08_rejects_missing_or_reordered_spine_passes(plan: &LoweredGraphPlan) -> boo
         missing_present,
         nonterminal_present,
     ]
-    .iter()
-    .all(|invalid| invalid.c08_executable_subset().is_none())
+    .into_iter()
+    .all(|invalid| C08PreparableGraph::try_from_lowered(invalid).is_err())
 }
 
 #[cfg(test)]
@@ -1411,8 +1432,8 @@ fn c08_rejects_malformed_bindings(plan: &LoweredGraphPlan) -> bool {
     invalid_plans.push(invalid);
 
     invalid_plans
-        .iter()
-        .all(|invalid| invalid.c08_executable_subset().is_none())
+        .into_iter()
+        .all(|invalid| C08PreparableGraph::try_from_lowered(invalid).is_err())
 }
 
 #[cfg(test)]
@@ -1445,9 +1466,10 @@ fn bounded_capture_transform_observation(
             &capabilities,
         )
         .ok()?;
-        let subset = lowered.c08_executable_subset()?;
-        let actual_capture = subset.captures().first()?;
-        let capture_pass = lowered
+        let preparable = C08PreparableGraph::try_from_lowered(lowered).ok()?;
+        let actual_capture = preparable.execution.captures().first()?;
+        let capture_pass = preparable
+            .lowered
             .passes
             .iter()
             .find(|pass| pass.id == actual_capture.pass())?;
@@ -1458,7 +1480,8 @@ fn bounded_capture_transform_observation(
         span.capture_transform = capture_transform;
         span.parent_to_surface = parent_to_surface;
         let target = actual_capture.target();
-        let mut spatial = lowered
+        let mut spatial = preparable
+            .lowered
             .resources
             .iter()
             .find(|resource| resource.id == target)?
@@ -2071,10 +2094,28 @@ struct PreparedKernelBinding {
     lease: Option<ResourceLease>,
 }
 
+enum GraphPreparationSource {
+    C08(C08PreparableGraph),
+    Transitional(LoweredGraphPlan),
+}
+
+impl GraphPreparationSource {
+    fn into_parts(self) -> (LoweredGraphPlan, Option<C08ExecutionFacts>) {
+        match self {
+            Self::C08(preparable) => {
+                let (lowered, execution) = preparable.into_parts();
+                (lowered, Some(execution))
+            }
+            Self::Transitional(lowered) => (lowered, None),
+        }
+    }
+}
+
 /// One allocation-backed, generation-bound C07 handoff. Its lifetime prevents
 /// the ready device bundle from transitioning while C08 owns its frame scope.
 pub(crate) struct PreparedGraph<'device> {
     plan: RuntimeGraphPreparationPlan,
+    c08_execution: Option<C08ExecutionFacts>,
     resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
     frame_scope: Option<FrameResourceScope>,
@@ -2088,6 +2129,32 @@ pub(crate) struct PreparedGraph<'device> {
 }
 
 impl<'device> PreparedGraph<'device> {
+    pub(crate) fn try_prepare_c08(
+        preparable: C08PreparableGraph,
+        policy: EffectQualityPolicy,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache: &'device DevicePassCache,
+    ) -> Result<Self> {
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C08(preparable),
+            policy,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache,
+        )?;
+        if prepared.c08_execution_facts().is_none() {
+            return Err(preparation_error(
+                "C08 preparation lost its validated execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+
     pub(crate) fn try_prepare(
         lowered: LoweredGraphPlan,
         policy: EffectQualityPolicy,
@@ -2095,8 +2162,40 @@ impl<'device> PreparedGraph<'device> {
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
         resources: &'device ResourceManager,
+        pass_cache: &'device DevicePassCache,
+    ) -> Result<Self> {
+        match C08PreparableGraph::try_from_lowered(lowered) {
+            Ok(preparable) => Self::try_prepare_c08(
+                preparable,
+                policy,
+                capabilities,
+                device,
+                queue,
+                resources,
+                pass_cache,
+            ),
+            Err(lowered) => Self::try_prepare_inner(
+                GraphPreparationSource::Transitional(lowered),
+                policy,
+                capabilities,
+                device,
+                queue,
+                resources,
+                pass_cache,
+            ),
+        }
+    }
+
+    fn try_prepare_inner(
+        source: GraphPreparationSource,
+        policy: EffectQualityPolicy,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
         _pass_cache: &'device DevicePassCache,
     ) -> Result<Self> {
+        let (lowered, c08_execution) = source.into_parts();
         let plan = RuntimeGraphPreparationPlan::try_derive(lowered, policy, capabilities, device)?;
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
 
@@ -2137,12 +2236,17 @@ impl<'device> PreparedGraph<'device> {
 
         Ok(Self {
             plan,
+            c08_execution,
             resource_bindings,
             kernel_bindings,
             frame_scope: Some(frame_scope),
             next_pass: 0,
             _ready_device: PhantomData,
         })
+    }
+
+    pub(crate) const fn c08_execution_facts(&self) -> Option<&C08ExecutionFacts> {
+        self.c08_execution.as_ref()
     }
 
     #[cfg_attr(
