@@ -289,6 +289,8 @@ impl FramePlan {
         let contribution = SemanticSourceContribution::try_from_commands(
             commands.commands,
             context.initial_parent_contribution(),
+            context,
+            Transform::identity(),
         )?;
         let commands = RenderCommands::new(contribution.commands);
         let selection_requirements = graph_selection_requirements(&commands.commands);
@@ -482,12 +484,15 @@ impl SemanticSourceContribution {
     fn try_from_commands(
         commands: Vec<RenderCommand>,
         initial_parent: SemanticSourceBounds,
+        context: FrameContext,
+        local_to_surface: Transform,
     ) -> Result<Self> {
         let mut contributing_commands = Vec::with_capacity(commands.len());
         let mut source_bounds = SemanticSourceBounds::Empty;
         let mut current_parent = initial_parent;
         for command in commands {
-            let contribution = Self::try_from_command(command, current_parent)?;
+            let contribution =
+                Self::try_from_command(command, current_parent, context, local_to_surface)?;
             current_parent = contribution.current_parent;
             if let Some(command) = contribution.command {
                 source_bounds = source_bounds.try_union(contribution.source_bounds)?;
@@ -504,6 +509,8 @@ impl SemanticSourceContribution {
     fn try_from_command(
         command: RenderCommand,
         current_parent: SemanticSourceBounds,
+        context: FrameContext,
+        local_to_surface: Transform,
     ) -> Result<SemanticCommandContribution> {
         match command {
             RenderCommand::TextRun {
@@ -549,28 +556,67 @@ impl SemanticSourceContribution {
                 mut layer,
                 children,
             } => {
-                let children = Self::try_from_commands(children, SemanticSourceBounds::Empty)?;
+                let layer_to_surface = layer.transform.then(local_to_surface)?;
+                let children = Self::try_from_commands(
+                    children,
+                    SemanticSourceBounds::Empty,
+                    context,
+                    layer_to_surface,
+                )?;
                 let mut source_bounds = children.current_parent;
 
                 if let Some(backdrop) = layer.backdrop.as_deref() {
                     let filter_plan = AlgorithmFilterPlan::from_filter_list(backdrop.filters());
-                    let mut backdrop_bounds =
+                    let capture_bounds =
                         SemanticSourceBounds::try_from_rect(backdrop.capture_bounds().rect())?;
-                    if let Some(clip) = backdrop.clip() {
-                        backdrop_bounds = backdrop_bounds.try_intersect(
-                            SemanticSourceBounds::try_for_clip(clip)?,
-                            "backdrop clip intersection",
-                        )?;
-                    }
                     let captured_parent = current_parent
-                        .try_intersect(backdrop_bounds, "backdrop current-parent intersection")?;
-                    if filter_plan.output_is_always_transparent()
-                        || captured_parent == SemanticSourceBounds::Empty
+                        .try_intersect(capture_bounds, "backdrop current-parent intersection")?;
+                    if captured_parent == SemanticSourceBounds::Empty
+                        || filter_plan.output_is_always_transparent()
                     {
                         layer.backdrop = None;
                     } else {
-                        source_bounds = source_bounds.try_union(captured_parent)?;
+                        let capture_bounds = LogicalBounds::try_from_rect(
+                            backdrop.capture_bounds().rect(),
+                            "backdrop capture bounds",
+                        )?;
+                        let filter_plan = context.plan_filter_list(
+                            capture_bounds,
+                            layer_to_surface,
+                            backdrop.filters(),
+                            FilterSourceRole::Backdrop,
+                        )?;
+                        let mut backdrop_contribution = match filter_plan {
+                            ResolvedFrameFilterPlan::Empty(_) => SemanticSourceBounds::Empty,
+                            ResolvedFrameFilterPlan::NonEmpty(plan) => {
+                                SemanticSourceBounds::NonEmpty(plan.final_bounds)
+                            }
+                        };
+                        if let Some(clip) = backdrop.clip() {
+                            backdrop_contribution = backdrop_contribution.try_intersect(
+                                SemanticSourceBounds::try_for_clip(clip)?,
+                                "post-filter backdrop clip intersection",
+                            )?;
+                        }
+                        if backdrop_contribution == SemanticSourceBounds::Empty {
+                            layer.backdrop = None;
+                        } else {
+                            source_bounds = source_bounds.try_union(backdrop_contribution)?;
+                        }
                     }
+                }
+
+                if let (Some(mask), SemanticSourceBounds::NonEmpty(mask_source_bounds)) =
+                    (layer.mask.as_ref(), source_bounds)
+                    && let FrameSpatialPlan::NonEmpty(spatial) = context.plan_local_bounds(
+                        LogicalBounds::NonEmpty(mask_source_bounds),
+                        layer_to_surface,
+                    )?
+                {
+                    mask.validate_expected_physical_size(PhysicalSize::new(
+                        spatial.device_extent.width,
+                        spatial.device_extent.height,
+                    ))?;
                 }
 
                 if let Some(clip) = layer.clip.as_ref() {
@@ -1390,6 +1436,7 @@ enum SemanticCompositeKind {
         opacity: f32,
         blend: super::layer::BlendMode,
         clip: Option<Box<RenderClip>>,
+        outer_clips: Vec<SemanticOuterClip>,
         alpha_mask: Option<SemanticResourceId>,
     },
     DropShadow,
@@ -2104,12 +2151,19 @@ enum CaptureParentLocality {
     CaptureLocal,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
+struct SemanticOuterClip {
+    clip: RenderClip,
+    transform: Transform,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 struct SemanticCommandPlanningState {
     parent_locality: CaptureParentLocality,
     span_scope: SemanticVelloSpanScope,
     capture_transform: Transform,
     parent_to_surface: Transform,
+    outer_clips: Vec<SemanticOuterClip>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2179,6 +2233,7 @@ impl SemanticFrameGraphPlanner {
                 span_scope: SemanticVelloSpanScope::CurrentParent,
                 capture_transform: Transform::identity(),
                 parent_to_surface: Transform::identity(),
+                outer_clips: Vec::new(),
             },
         )?;
         let present = graph_build(planner.builder.declare_pass(
@@ -2228,7 +2283,7 @@ impl SemanticFrameGraphPlanner {
                 continue;
             }
 
-            let flush = self.flush_vello_span(span, parent, state)?;
+            let flush = self.flush_vello_span(span, parent, &state)?;
             parent = flush.parent;
             state.parent_locality = flush.next_parent_locality;
             span = Vec::new();
@@ -2238,20 +2293,25 @@ impl SemanticFrameGraphPlanner {
                     "frame partition classified a non-layer command as a custom boundary",
                 ));
             };
-            parent = self.plan_external_layer(layer, children, parent, state)?;
+            parent = self.plan_external_layer(layer, children, parent, &state)?;
             state.parent_locality = CaptureParentLocality::External;
         }
-        Ok(self.flush_vello_span(span, parent, state)?.parent)
+        Ok(self.flush_vello_span(span, parent, &state)?.parent)
     }
 
     fn flush_vello_span(
         &mut self,
         commands: Vec<RenderCommand>,
         parent: PlannedGraphParent,
-        state: SemanticCommandPlanningState,
+        state: &SemanticCommandPlanningState,
     ) -> Result<VelloSpanFlush> {
-        let contribution =
-            SemanticSourceContribution::try_from_commands(commands, SemanticSourceBounds::Empty)?;
+        let raster_transform = state.capture_transform.then(state.parent_to_surface)?;
+        let contribution = SemanticSourceContribution::try_from_commands(
+            commands,
+            SemanticSourceBounds::Empty,
+            self.context,
+            raster_transform,
+        )?;
         let Some(logical_bounds) = contribution
             .source_bounds
             .require_non_empty_for_graph("Vello span bounds")?
@@ -2261,7 +2321,6 @@ impl SemanticFrameGraphPlanner {
                 next_parent_locality: state.parent_locality,
             });
         };
-        let raster_transform = state.capture_transform.then(state.parent_to_surface)?;
         let spatial = match self
             .context
             .plan_local_bounds(LogicalBounds::NonEmpty(logical_bounds), raster_transform)?
@@ -2307,13 +2366,19 @@ impl SemanticFrameGraphPlanner {
             spatial,
             SemanticPassIntent::CanonicalizeCapture,
         )?;
-        let parent = self.composite_into_parent(
-            parent,
-            canonical,
-            &[],
-            SemanticCompositeKind::SpanSourceOver,
-            true,
-        )?;
+        let composite_kind = if state.outer_clips.is_empty() {
+            SemanticCompositeKind::SpanSourceOver
+        } else {
+            SemanticCompositeKind::Layer {
+                transform: Transform::identity(),
+                opacity: 1.0,
+                blend: super::layer::BlendMode::Normal,
+                clip: None,
+                outer_clips: state.outer_clips.clone(),
+                alpha_mask: None,
+            }
+        };
+        let parent = self.composite_into_parent(parent, canonical, &[], composite_kind, true)?;
         Ok(VelloSpanFlush {
             parent,
             next_parent_locality: CaptureParentLocality::External,
@@ -2325,24 +2390,34 @@ impl SemanticFrameGraphPlanner {
         layer: NormalizedLayer,
         children: Vec<RenderCommand>,
         parent: PlannedGraphParent,
-        state: SemanticCommandPlanningState,
+        state: &SemanticCommandPlanningState,
     ) -> Result<PlannedGraphParent> {
         let layer_transform = layer.transform.then(state.capture_transform)?;
         let layer_to_surface = layer_transform.then(state.parent_to_surface)?;
+        if layer.isolation == LayerIsolation::ClipOnly {
+            let clip = layer.clip.clone().ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "a clip-only layer reached graph planning without clip geometry",
+                )
+            })?;
+            let mut child_state = state.clone();
+            child_state.capture_transform = layer_transform;
+            child_state.outer_clips.push(SemanticOuterClip {
+                clip,
+                transform: layer_transform,
+            });
+            return self.plan_commands(children, parent, child_state);
+        }
         let is_transparent_wrapper = layer.clip.is_none()
             && layer.mask.is_none()
             && layer.backdrop.is_none()
             && (layer.opacity - 1.0).abs() < f32::EPSILON
             && layer.blend == super::layer::BlendMode::Normal;
         if is_transparent_wrapper {
-            return self.plan_commands(
-                children,
-                parent,
-                SemanticCommandPlanningState {
-                    capture_transform: layer_transform,
-                    ..state
-                },
-            );
+            let mut child_state = state.clone();
+            child_state.capture_transform = layer_transform;
+            return self.plan_commands(children, parent, child_state);
         }
 
         let mut source = self.plan_layer_source(children, layer_to_surface)?;
@@ -2367,6 +2442,7 @@ impl SemanticFrameGraphPlanner {
                 opacity: layer.opacity,
                 blend: layer.blend,
                 clip: layer.clip.map(Box::new),
+                outer_clips: state.outer_clips.clone(),
                 alpha_mask: alpha_mask.map(|mask| mask.id),
             },
             true,
@@ -2378,8 +2454,12 @@ impl SemanticFrameGraphPlanner {
         children: Vec<RenderCommand>,
         raster_transform: Transform,
     ) -> Result<Option<PlannedGraphResource>> {
-        let contribution =
-            SemanticSourceContribution::try_from_commands(children, SemanticSourceBounds::Empty)?;
+        let contribution = SemanticSourceContribution::try_from_commands(
+            children,
+            SemanticSourceBounds::Empty,
+            self.context,
+            raster_transform,
+        )?;
         if contribution.commands.is_empty() {
             return Ok(None);
         }
@@ -2405,6 +2485,7 @@ impl SemanticFrameGraphPlanner {
                 span_scope: SemanticVelloSpanScope::LayerSource,
                 capture_transform: Transform::identity(),
                 parent_to_surface: raster_transform,
+                outer_clips: Vec::new(),
             },
         )?;
         Ok(Some(source_parent.current))
@@ -2454,12 +2535,27 @@ impl SemanticFrameGraphPlanner {
             raster_transform,
         )?;
 
+        let mut backdrop_contribution = SemanticSourceBounds::NonEmpty(filtered.logical_bounds);
+        if let Some(clip) = backdrop.clip() {
+            backdrop_contribution = backdrop_contribution.try_intersect(
+                SemanticSourceBounds::try_for_clip(clip)?,
+                "post-filter backdrop clip intersection",
+            )?;
+        }
+        let backdrop_bounds = backdrop_contribution
+            .require_non_empty_for_graph("post-filter backdrop contribution bounds")?
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "post-filter backdrop contribution became empty after semantic planning",
+                )
+            })?;
         let group_bounds = match foreground {
-            Some(foreground) => filtered.logical_bounds.try_union(
+            Some(foreground) => backdrop_bounds.try_union(
                 foreground.logical_bounds,
                 "backdrop foreground group bounds",
             )?,
-            None => filtered.logical_bounds,
+            None => backdrop_bounds,
         };
         let group_spatial = match self
             .context
@@ -2478,6 +2574,7 @@ impl SemanticFrameGraphPlanner {
                 opacity: 1.0,
                 blend: super::layer::BlendMode::Normal,
                 clip: backdrop.clip().cloned().map(Box::new),
+                outer_clips: Vec::new(),
                 alpha_mask: None,
             },
             true,
@@ -2639,13 +2736,7 @@ impl SemanticFrameGraphPlanner {
     ) -> Result<PlannedGraphResource> {
         let physical_size = mask.alpha_mask().size();
         let expected = source.spatial.device_extent;
-        if physical_size != PhysicalSize::new(expected.width, expected.height) {
-            return Err(Error::invalid_value(
-                "resolved layer alpha mask size",
-                format!("{}x{}", physical_size.width(), physical_size.height()),
-                "must match the offscreen layer bounds in device pixels",
-            ));
-        }
+        mask.validate_expected_physical_size(PhysicalSize::new(expected.width, expected.height))?;
         let resource = graph_build(
             self.builder
                 .import_resource(SemanticResourceDescriptor::new(
@@ -2749,7 +2840,7 @@ fn command_is_local_to_capture(
         return false;
     }
     let child_parent_locality = if parent_locality == CaptureParentLocality::CaptureLocal
-        || layer.isolation != LayerIsolation::None
+        || layer.isolation == LayerIsolation::BackendLayer
     {
         CaptureParentLocality::CaptureLocal
     } else {

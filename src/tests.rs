@@ -9386,6 +9386,69 @@ fn nested_mask_boundary_makes_following_multiply_an_ordered_graph_composite() {
 }
 
 #[test]
+fn clip_only_wrapper_does_not_make_nested_multiply_capture_local() {
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+            .unwrap(),
+        |scene| {
+            scene
+                .layer(
+                    Layer::new()
+                        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+                        .unwrap(),
+                    |scene| {
+                        scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+                    },
+                )
+                .layer(
+                    Layer::new()
+                        .try_clip(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)))
+                        .unwrap(),
+                    |scene| {
+                        scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
+                            scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+                        });
+                    },
+                );
+        },
+    );
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+    let plan = result
+        .plan
+        .as_ref()
+        .expect("the clip-only blend fixture must produce a complete frame plan");
+
+    assert_eq!(
+        (&plan.vello_spans, &plan.graph_layer_blends),
+        (
+            &vec![
+                VelloSpanObservation {
+                    scope: VelloSpanScopeObservation::LayerSource,
+                    commands: vec![VelloCommandObservation::Fill],
+                    captured_before_outer_semantics: true,
+                },
+                VelloSpanObservation {
+                    scope: VelloSpanScopeObservation::LayerSource,
+                    commands: vec![VelloCommandObservation::Fill],
+                    captured_before_outer_semantics: true,
+                },
+            ],
+            &vec![BlendMode::Normal, BlendMode::Multiply, BlendMode::Normal],
+        ),
+        "ClipOnly made the nested Multiply capture-local after a materialized graph boundary"
+    );
+}
+
+#[test]
 fn transparent_resolved_alpha_mask_annihilates_unspecified_text_without_graph_selection() {
     let transparent_mask =
         ImageBuffer::try_new(PhysicalSize::new(2, 2), [255, 127, 63, 0].repeat(4)).unwrap();
@@ -9422,6 +9485,52 @@ fn transparent_resolved_alpha_mask_annihilates_unspecified_text_without_graph_se
 }
 
 #[test]
+fn transparent_mismatched_resolved_alpha_mask_reports_typed_size_error() {
+    let transparent_mask =
+        ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 127, 63, 0]).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_resolved_alpha_mask(transparent_mask)
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+        },
+    );
+    let normalized = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the mismatched transparent-mask fixture must normalize");
+    let context = super::frame::FrameContext::try_new(
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    )
+    .expect("the mismatched transparent-mask frame context must resolve");
+    let result = normalized.plan_for(context);
+    let observed = result.as_ref().err().map(|error| {
+        let diagnostic = error.invalid_value_diagnostic();
+        (
+            error.code(),
+            diagnostic.map(InvalidValue::field),
+            diagnostic.map(InvalidValue::value),
+            diagnostic.map(InvalidValue::invariant),
+        )
+    });
+
+    assert_eq!(
+        observed,
+        Some((
+            ErrorCode::InvalidInput,
+            Some("resolved layer alpha mask size"),
+            Some("1x1"),
+            Some("must match the offscreen layer bounds in device pixels"),
+        )),
+        "transparent mask annihilation suppressed the typed resolved-mask-size error"
+    );
+}
+
+#[test]
 fn bounded_blur_backdrop_over_empty_parent_is_pruned_without_erasing_foreground() {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
@@ -9453,6 +9562,43 @@ fn bounded_blur_backdrop_over_empty_parent_is_pruned_without_erasing_foreground(
                     && plan.pass_count == 0
             }),
         "bounded blur backdrop over an exact empty parent retained a graph boundary"
+    );
+}
+
+#[test]
+fn post_filter_backdrop_clip_retains_expanded_halo_outside_capture() {
+    let filters =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap();
+    let clip = ClipInput::try_shape(Shape::rect(Rect::new(4.5, 1.0, 1.0, 1.0))).unwrap();
+    let layer = Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, Some(clip)).unwrap())
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(3.0, 1.0, 1.0, 1.0), Color::BLACK)
+        .layer(layer, |_| {});
+
+    let result = observe_frame_plan(
+        &scene,
+        Size::new(8.0, 8.0),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    );
+
+    assert!(
+        result.error_code.is_none()
+            && result.plan.as_ref().is_some_and(|plan| {
+                plan.route == FramePlanRouteObservation::GpuGraph
+                    && plan.selection_requirements
+                        == [FrameSelectionRequirementObservation::BoundedBackdrop]
+                    && plan.backdrop_dependency
+                        == BackdropDependencyObservation::CompletedCurrentParent
+                    && plan.current_parent_backdrop_reads == 1
+                    && plan.captures_precede_outer_semantics
+            }),
+        "post-filter backdrop halo was pruned before its outside-capture clip"
     );
 }
 

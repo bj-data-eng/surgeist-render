@@ -186,6 +186,18 @@ impl RenderLayerMask {
     pub(crate) const fn annihilates_source(&self) -> bool {
         self.annihilates_source
     }
+
+    pub(crate) fn validate_expected_physical_size(&self, expected: PhysicalSize) -> Result<()> {
+        let physical_size = self.alpha_mask.size();
+        if physical_size != expected {
+            return Err(Error::invalid_value(
+                "resolved layer alpha mask size",
+                format!("{}x{}", physical_size.width(), physical_size.height()),
+                "must match the offscreen layer bounds in device pixels",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
