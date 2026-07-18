@@ -3637,49 +3637,69 @@ fn precision_resolver_covers_both_high_only_reduced_only_and_neither() {
 
 #[test]
 fn effect_texture_dimension_is_rejected_before_allocation() {
-    fn validate_then_observe_allocation(
-        capabilities: &DeviceCapabilities,
-        requested: PhysicalSize,
-        allocation_observed: &mut bool,
-    ) -> Result<()> {
-        capabilities.validate_effect_texture_extent(requested)?;
-        *allocation_observed = true;
-        Ok(())
-    }
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("effect texture dimension coverage requires a selected host adapter");
+    let maximum = renderer
+        .default_device_capabilities_for_test()
+        .max_effect_texture_dimension_2d();
+    let requested = PhysicalSize::new(u32::MAX, u32::MAX);
+    assert!(
+        maximum < requested.width(),
+        "the selected device must expose a finite over-limit extent"
+    );
 
-    let maximum = 4_096;
+    let bounds = command::OffscreenBounds::try_new(Rect::new(
+        0.0,
+        0.0,
+        f64::from(requested.width()),
+        f64::from(requested.height()),
+    ))
+    .unwrap();
+    let scene = VelloScene::default();
+    let request =
+        OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
+    let options = renderer.options();
+    let mut cache = OffscreenTextureResourceCache::new();
+    let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let context = renderer
+        .default_offscreen_render_context()
+        .expect("effect texture dimension coverage requires a selected device context");
+
+    let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
+        Some(context),
+        options,
+        &mut cache,
+        &scene,
+        request,
+    ))
+    .expect_err("an over-limit effect extent should be rejected");
+
+    assert_eq!(
+        acquire_observation.acquire_count_for_test(),
+        0,
+        "over-limit effect extent reached cache acquisition"
+    );
+    assert_eq!(
+        cache.stats().allocations,
+        0,
+        "over-limit effect extent reached allocation"
+    );
+    let expected_diagnostic = RuntimeCapabilityUnavailable::try_new(
+        RuntimeOperation::EffectTextureAllocation,
+        RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { requested, maximum },
+    )
+    .unwrap();
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        Some(&expected_diagnostic),
+    );
+
     let capabilities = DeviceCapabilities::from_test_facts(true, true, maximum);
-    for requested in [
-        PhysicalSize::new(maximum + 1, 1),
-        PhysicalSize::new(1, maximum + 1),
-        PhysicalSize::new(maximum + 1, maximum + 1),
-    ] {
-        let mut allocation_observed = false;
-        let result =
-            validate_then_observe_allocation(&capabilities, requested, &mut allocation_observed);
-
-        assert!(
-            !allocation_observed,
-            "over-limit effect extent reached allocation"
-        );
-        let error = result.expect_err("an over-limit effect extent should be rejected");
-        let expected_diagnostic = RuntimeCapabilityUnavailable::try_new(
-            RuntimeOperation::EffectTextureAllocation,
-            RuntimeCapabilityUnavailableReason::TextureDimensionExceeded { requested, maximum },
-        )
-        .unwrap();
-        assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
-        assert_eq!(
-            error.runtime_capability_unavailable_diagnostic(),
-            Some(&expected_diagnostic),
-        );
-    }
-
     for requested in [PhysicalSize::new(1, 1), PhysicalSize::new(maximum, maximum)] {
-        let mut allocation_observed = false;
-        validate_then_observe_allocation(&capabilities, requested, &mut allocation_observed)
-            .expect("an in-limit nonempty effect extent should reach allocation");
-        assert!(allocation_observed);
+        capabilities
+            .validate_effect_texture_extent(requested)
+            .expect("an in-limit nonempty effect extent should pass validation");
     }
 
     for requested in [

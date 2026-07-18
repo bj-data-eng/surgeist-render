@@ -1907,6 +1907,15 @@ pub(crate) fn offscreen_local_scene_texture_descriptor(
     scale: f64,
     format: Format,
 ) -> Result<TextureDescriptor> {
+    let physical_size = offscreen_local_scene_physical_size(bounds, scale, format)?;
+    offscreen_local_scene_texture_descriptor_for_physical_size(physical_size, format)
+}
+
+fn offscreen_local_scene_physical_size(
+    bounds: OffscreenBounds,
+    scale: f64,
+    format: Format,
+) -> Result<PhysicalSize> {
     if format != Format::Rgba8 {
         return Err(Error::invalid_value(
             "offscreen Vello scene texture format",
@@ -1914,11 +1923,14 @@ pub(crate) fn offscreen_local_scene_texture_descriptor(
             "must be Rgba8 for minimal offscreen Vello targets",
         ));
     }
-    TextureDescriptor::try_new(
-        physical_size(bounds.rect().size(), scale)?,
-        format,
-        TextureUsageIntent::OffscreenLayer,
-    )
+    physical_size(bounds.rect().size(), scale)
+}
+
+fn offscreen_local_scene_texture_descriptor_for_physical_size(
+    physical_size: PhysicalSize,
+    format: Format,
+) -> Result<TextureDescriptor> {
+    TextureDescriptor::try_new(physical_size, format, TextureUsageIntent::OffscreenLayer)
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1929,19 +1941,22 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
     scene: &VelloScene,
     request: OffscreenLocalSceneRenderRequest,
 ) -> Result<OffscreenRenderedTextureLease> {
-    let descriptor =
-        offscreen_local_scene_texture_descriptor(request.bounds, request.scale, request.format)?;
+    let physical_size =
+        offscreen_local_scene_physical_size(request.bounds, request.scale, request.format)?;
     let Some(context) = context else {
+        offscreen_local_scene_texture_descriptor_for_physical_size(physical_size, request.format)?;
         return Err(Error::runtime_unavailable(
             RuntimeOperation::SurfaceRendering,
             RuntimeCapabilityUnavailableReason::AdapterUnavailable,
             "offscreen Vello local scene rendering requires an available wgpu device context",
         ));
     };
+    if let Some(capabilities) = context.backend.device_capabilities(context.device_identity) {
+        capabilities.validate_effect_texture_extent(physical_size)?;
+    }
+    let descriptor =
+        offscreen_local_scene_texture_descriptor_for_physical_size(physical_size, request.format)?;
     let resource = {
-        if let Some(capabilities) = context.backend.device_capabilities(context.device_identity) {
-            capabilities.validate_effect_texture_extent(descriptor.physical_size())?;
-        }
         let (device, _) = context
             .backend
             .device_queue(context.device_identity, RuntimeOperation::SurfaceRendering)?;
