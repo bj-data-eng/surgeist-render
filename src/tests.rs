@@ -36,6 +36,7 @@ use super::{
     command,
     encode::*,
     image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
+    pass::pass_spatial_uniform_bytes_for_test,
     reference::{
         MaterializedDropShadowOffsetQuantizationPolicy, PremultipliedRgba8,
         ReferencePremultipliedRgba8Buffer,
@@ -44,10 +45,7 @@ use super::{
         AllocationGeneration, GaussianKernelKey, GaussianKernelPlan, GaussianKernelSamplingForm,
         ResourceCacheKey, ResourceIdentity, ResourceManager, WorkingFormat,
     },
-    shader::{
-        RectPassBounds, RectShaderPassDescriptor, RectShaderPassExecution, RectShaderPassKind,
-        RectShaderPipelineKey, encode_clear_fill_pass,
-    },
+    shader::device_pass_cache_owns_exact_key_spaces_for_test,
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
         EffectTextureDescriptor, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
@@ -7795,237 +7793,6 @@ fn texture_lifecycle_accounting_is_separate_from_image_cache_stats() {
 }
 
 #[test]
-fn shader_pass_descriptor_names_textures_bounds_and_kind() {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(16, 8),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(16, 8),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(2, 1, 6, 4, source, destination).unwrap();
-
-    let pass = RectShaderPassDescriptor::try_new(
-        "layer-source",
-        "layer-destination",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::IdentityCopy,
-    )
-    .unwrap();
-
-    assert_eq!(pass.source_label(), "layer-source");
-    assert_eq!(pass.destination_label(), "layer-destination");
-    assert_eq!(pass.source(), source);
-    assert_eq!(pass.destination(), destination);
-    assert_eq!(pass.bounds(), bounds);
-    assert_eq!(pass.bounds().x(), 2);
-    assert_eq!(pass.bounds().y(), 1);
-    assert_eq!(pass.kind(), RectShaderPassKind::IdentityCopy);
-}
-
-#[test]
-fn shader_pipeline_key_is_stable_and_distinct_from_texture_cache_keys() {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(8, 8),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(8, 8),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(0, 0, 8, 8, source, destination).unwrap();
-    let pass = RectShaderPassDescriptor::try_new(
-        "source",
-        "destination",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::ClearFill,
-    )
-    .unwrap();
-
-    let key = RectShaderPipelineKey::from_descriptor(pass);
-    assert_eq!(key, RectShaderPipelineKey::from_descriptor(pass));
-    assert_ne!(
-        key,
-        RectShaderPipelineKey::from_descriptor(
-            RectShaderPassDescriptor::try_new(
-                "source",
-                "destination",
-                source,
-                destination,
-                bounds,
-                RectShaderPassKind::IdentityCopy,
-            )
-            .unwrap()
-        )
-    );
-    assert_ne!(
-        format!("{key:?}"),
-        format!("{:?}", TextureCacheKey::from_descriptor(destination))
-    );
-}
-
-#[test]
-fn shader_rect_bounds_reject_zero_and_out_of_range_regions() {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(4, 4),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(4, 4),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-
-    let zero_width = RectPassBounds::try_new(0, 0, 0, 1, source, destination)
-        .expect_err("zero-width shader bounds should be rejected");
-    assert_eq!(zero_width.code(), ErrorCode::InvalidInput);
-
-    let source_overflow = RectPassBounds::try_new(3, 0, 2, 1, source, destination)
-        .expect_err("source bounds must fit source texture");
-    assert_eq!(source_overflow.code(), ErrorCode::InvalidInput);
-
-    let destination_overflow = RectPassBounds::try_new(
-        0,
-        3,
-        1,
-        2,
-        source,
-        TextureDescriptor::try_new(
-            PhysicalSize::new(4, 3),
-            Format::Rgba8,
-            TextureUsageIntent::IntermediatePass,
-        )
-        .unwrap(),
-    )
-    .expect_err("destination bounds must fit destination texture");
-    assert_eq!(destination_overflow.code(), ErrorCode::InvalidInput);
-}
-
-#[test]
-fn shader_pass_descriptor_revalidates_bounds_against_named_textures() {
-    let large_source = TextureDescriptor::try_new(
-        PhysicalSize::new(8, 8),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let large_destination = TextureDescriptor::try_new(
-        PhysicalSize::new(8, 8),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let smaller_destination = TextureDescriptor::try_new(
-        PhysicalSize::new(4, 4),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(3, 3, 2, 2, large_source, large_destination).unwrap();
-
-    let error = RectShaderPassDescriptor::try_new(
-        "source",
-        "smaller-destination",
-        large_source,
-        smaller_destination,
-        bounds,
-        RectShaderPassKind::ClearFill,
-    )
-    .expect_err("descriptor must revalidate bounds against its own destination");
-
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(
-        error.invalid_value_diagnostic().map(InvalidValue::field),
-        Some("rect shader pass destination x extent")
-    );
-}
-
-#[test]
-fn shader_clear_fill_descriptor_rejects_partial_destination_bounds() {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(8, 8),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(8, 8),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(2, 1, 4, 4, source, destination).unwrap();
-
-    let error = RectShaderPassDescriptor::try_new(
-        "source",
-        "destination",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::ClearFill,
-    )
-    .expect_err("clear/fill uses attachment clear and must be fullscreen");
-
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(
-        error.invalid_value_diagnostic().map(InvalidValue::field),
-        Some("rect shader clear/fill bounds")
-    );
-}
-
-#[test]
-fn shader_pass_contract_only_context_reports_adapter_unavailable() {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(2, 2),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(2, 2),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(0, 0, 2, 2, source, destination).unwrap();
-    let pass = RectShaderPassDescriptor::try_new(
-        "source",
-        "destination",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::ClearFill,
-    )
-    .unwrap();
-
-    let error = pollster::block_on(encode_clear_fill_pass(
-        RectShaderPassExecution::contract_only(),
-        pass,
-        Color::BLACK,
-    ))
-    .expect_err("contract-only shader pass should report missing GPU context");
-
-    assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
-    assert!(error.message().contains("rect/fullscreen shader pass"));
-}
-
-#[test]
 fn shader_clear_fill_pass_encodes_when_gpu_context_is_available() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     assert!(
@@ -8300,40 +8067,6 @@ fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
 }
 
 #[test]
-fn offscreen_rect_shader_pass_descriptor_targets_offscreen_textures() {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(4, 3),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(4, 3),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(0, 0, 4, 3, source, destination).unwrap();
-
-    let pass = RectShaderPassDescriptor::try_new(
-        "offscreen-layer",
-        "intermediate-pass",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::IdentityCopy,
-    )
-    .unwrap();
-
-    assert_eq!(pass.source().intent(), TextureUsageIntent::OffscreenLayer);
-    assert_eq!(
-        pass.destination().intent(),
-        TextureUsageIntent::IntermediatePass
-    );
-    assert_eq!(pass.kind(), RectShaderPassKind::IdentityCopy);
-}
-
-#[test]
 fn offscreen_nested_layer_opacity_stays_on_direct_vello_surface_path() {
     let mut scene = Scene::new();
     scene.layer(Layer::new().try_opacity(0.75).unwrap(), |scene| {
@@ -8578,45 +8311,6 @@ fn sequence9_guardrail_texture_lifecycle_is_deterministic_for_nested_layer_bound
     assert_eq!(manager.stats().releases, 2);
     assert_eq!(manager.live_count(), 2);
     assert_eq!(manager.retained_count(), 2);
-}
-
-#[test]
-fn sequence9_guardrail_rect_shader_plumbing_accepts_offscreen_to_intermediate_without_filter_semantics()
- {
-    let source = TextureDescriptor::try_new(
-        PhysicalSize::new(5, 4),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let destination = TextureDescriptor::try_new(
-        PhysicalSize::new(5, 4),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let bounds = RectPassBounds::try_new(0, 0, 5, 4, source, destination).unwrap();
-
-    let pass = RectShaderPassDescriptor::try_new(
-        "sequence9-layer-source",
-        "sequence9-intermediate",
-        source,
-        destination,
-        bounds,
-        RectShaderPassKind::IdentityCopy,
-    )
-    .unwrap();
-
-    assert_eq!(pass.kind(), RectShaderPassKind::IdentityCopy);
-    assert_eq!(pass.source().intent(), TextureUsageIntent::OffscreenLayer);
-    assert_eq!(
-        pass.destination().intent(),
-        TextureUsageIntent::IntermediatePass
-    );
-    assert_eq!(
-        RectShaderPipelineKey::from_descriptor(pass),
-        RectShaderPipelineKey::from_descriptor(pass)
-    );
 }
 
 #[test]
@@ -10366,6 +10060,192 @@ fn runtime_lowering_derives_exact_sampler_layout_shader_and_pipeline_keys() {
             && observed.keys_separate_program_layout_sampling_and_edge
             && observed.keys_separate_source_working_and_output_formats,
         "lowered pass omitted its exact cache keys"
+    );
+}
+
+#[test]
+fn pass_spatial_uniform_bytes_match_the_exact_little_endian_layout_without_pod() {
+    let source_extent = PhysicalSize::new(0x0102_0304, 0x0a0b_0c0d);
+    let destination_extent = PhysicalSize::new(0x1020_3040, 0x5060_7080);
+    let serialized = pass_spatial_uniform_bytes_for_test(
+        Point::new(1.5, -2.25),
+        2.5,
+        source_extent,
+        Point::new(-4.5, 8.25),
+        0.5,
+        destination_extent,
+    );
+    let expected = [
+        0x00, 0x00, 0xc0, 0x3f, 0x00, 0x00, 0x10, 0xc0, 0x00, 0x00, 0x20, 0x40, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x90, 0xc0, 0x00, 0x00, 0x04, 0x41, 0x00, 0x00, 0x00, 0x3f, 0x00, 0x00,
+        0x00, 0x00, 0x04, 0x03, 0x02, 0x01, 0x0d, 0x0c, 0x0b, 0x0a, 0x40, 0x30, 0x20, 0x10, 0x80,
+        0x70, 0x60, 0x50,
+    ];
+    let exact_layout = serialized.as_ref().is_ok_and(|bytes| {
+        bytes == &expected && bytes[12..16] == [0; 4] && bytes[28..32] == [0; 4]
+    });
+
+    let finite_overflow_cases = [
+        (
+            pass_spatial_uniform_bytes_for_test(
+                Point::new(f64::MAX, 0.0),
+                1.0,
+                source_extent,
+                Point::new(0.0, 0.0),
+                1.0,
+                destination_extent,
+            ),
+            "pass spatial source origin x",
+        ),
+        (
+            pass_spatial_uniform_bytes_for_test(
+                Point::new(0.0, f64::MAX),
+                1.0,
+                source_extent,
+                Point::new(0.0, 0.0),
+                1.0,
+                destination_extent,
+            ),
+            "pass spatial source origin y",
+        ),
+        (
+            pass_spatial_uniform_bytes_for_test(
+                Point::new(0.0, 0.0),
+                f64::MAX,
+                source_extent,
+                Point::new(0.0, 0.0),
+                1.0,
+                destination_extent,
+            ),
+            "pass spatial source raster scale",
+        ),
+        (
+            pass_spatial_uniform_bytes_for_test(
+                Point::new(0.0, 0.0),
+                1.0,
+                source_extent,
+                Point::new(f64::MAX, 0.0),
+                1.0,
+                destination_extent,
+            ),
+            "pass spatial destination origin x",
+        ),
+        (
+            pass_spatial_uniform_bytes_for_test(
+                Point::new(0.0, 0.0),
+                1.0,
+                source_extent,
+                Point::new(0.0, f64::MAX),
+                1.0,
+                destination_extent,
+            ),
+            "pass spatial destination origin y",
+        ),
+        (
+            pass_spatial_uniform_bytes_for_test(
+                Point::new(0.0, 0.0),
+                1.0,
+                source_extent,
+                Point::new(0.0, 0.0),
+                f64::MAX,
+                destination_extent,
+            ),
+            "pass spatial destination raster scale",
+        ),
+    ];
+    let finite_overflow_is_typed = finite_overflow_cases.into_iter().all(|(result, field)| {
+        result.as_ref().is_err_and(|error| {
+            error.code() == ErrorCode::InvalidInput
+                && error.invalid_value_diagnostic().map(InvalidValue::field) == Some(field)
+        })
+    });
+
+    assert!(
+        exact_layout && finite_overflow_is_typed,
+        "pass spatial serialization has no explicit 48-byte contract"
+    );
+}
+
+#[test]
+fn pass_spatial_uniform_rejects_f32_underflowing_raster_scales() {
+    let underflowing_scale = f64::from_bits(1);
+    assert!(underflowing_scale.is_finite() && underflowing_scale > 0.0);
+    assert_eq!(underflowing_scale as f32, 0.0);
+
+    let source_error = pass_spatial_uniform_bytes_for_test(
+        Point::new(0.0, 0.0),
+        underflowing_scale,
+        PhysicalSize::new(1, 1),
+        Point::new(0.0, 0.0),
+        1.0,
+        PhysicalSize::new(1, 1),
+    );
+    let destination_error = pass_spatial_uniform_bytes_for_test(
+        Point::new(0.0, 0.0),
+        1.0,
+        PhysicalSize::new(1, 1),
+        Point::new(0.0, 0.0),
+        underflowing_scale,
+        PhysicalSize::new(1, 1),
+    );
+    let rejects_scale = |result: &Result<[u8; 48]>, field| {
+        result.as_ref().is_err_and(|error| {
+            error.code() == ErrorCode::InvalidInput
+                && error.invalid_value_diagnostic().map(InvalidValue::field) == Some(field)
+        })
+    };
+
+    assert!(
+        rejects_scale(&source_error, "pass spatial source raster scale")
+            && rejects_scale(&destination_error, "pass spatial destination raster scale"),
+        "positive f64 raster scale narrowed to zero"
+    );
+}
+
+#[test]
+fn device_pass_cache_owns_exact_sampler_layout_shader_and_pipeline_key_spaces() {
+    let ready_state =
+        source_braced_block_from_marker(include_str!("backend.rs"), "struct ReadyDeviceState {");
+    assert!(
+        device_pass_cache_owns_exact_key_spaces_for_test()
+            && ready_state.matches("DevicePassCache").count() == 1,
+        "device pass cache does not separate exact key spaces"
+    );
+}
+
+#[test]
+fn c07_contains_no_placeholder_custom_shader_program() {
+    let custom_pass_sources = [
+        include_str!("shader.rs"),
+        include_str!("pass.rs"),
+        include_str!("resource.rs"),
+    ];
+    let forbidden = [
+        ["Rect", "Shader"].concat(),
+        ["Rect", "PassBounds"].concat(),
+        ["encode_clear_", "fill_pass"].concat(),
+        "create_shader_module".to_owned(),
+        "create_render_pipeline".to_owned(),
+        "ShaderSource::Wgsl".to_owned(),
+        "@vertex".to_owned(),
+        "@fragment".to_owned(),
+        "include_str!(".to_owned(),
+        "create_command_encoder".to_owned(),
+        "begin_render_pass".to_owned(),
+        "queue.submit".to_owned(),
+    ];
+    let has_placeholder_program = custom_pass_sources.iter().any(|source| {
+        forbidden
+            .iter()
+            .any(|marker| source.contains(marker.as_str()))
+    });
+    let shader_artifact_exists = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("src/shaders")
+        .exists();
+
+    assert!(
+        !has_placeholder_program && !shader_artifact_exists,
+        "C07 introduced a custom shader program before executable semantics"
     );
 }
 
@@ -24763,15 +24643,11 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         ["no GPU machines should report the", " explicit diagnostic"].concat();
     assert!(!tests_code.contains(&removed_skip_helper));
     assert!(!tests_source.contains(&removed_skip_message));
-    for contract_test in [
-        "shader_pass_contract_only_context_reports_adapter_unavailable",
-        "offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic",
-    ] {
-        assert!(
-            tests_code.contains(&format!("fn {contract_test}()")),
-            "contract-only behavior must remain separate in {contract_test}"
-        );
-    }
+    let contract_test = "offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic";
+    assert!(
+        tests_code.contains(&format!("fn {contract_test}()")),
+        "contract-only behavior must remain separate in {contract_test}"
+    );
     let required_headless_marker = ["fn render_scene_to_required_", "headless("].concat();
     let required_headless_helper =
         source_braced_block_from_marker(tests_source, &required_headless_marker);

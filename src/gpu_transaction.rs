@@ -859,13 +859,7 @@ impl GpuOperationTransaction {
     }
 
     /// Submits one command buffer while this transaction owns its generation and scopes.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T6 retains the existing rect probe until its test-only clear migration"
-        )
-    )]
+    #[cfg(test)]
     pub(crate) async fn submit_command_buffer(
         self,
         queue: &wgpu::Queue,
@@ -885,10 +879,7 @@ impl GpuOperationTransaction {
                 all(feature = "render-web", target_arch = "wasm32")
             ))
         ),
-        expect(
-            dead_code,
-            reason = "T6 retains the existing rect probe until its test-only clear migration"
-        )
+        expect(dead_code, reason = "presented output submission is feature-gated")
     )]
     pub(crate) async fn submit_command_buffer_with_host_effect(
         self,

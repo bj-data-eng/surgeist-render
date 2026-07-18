@@ -29,6 +29,7 @@ use super::{
     command::OffscreenBounds,
     geometry::physical_size,
     gpu_transaction::{GpuOperationStage, GpuOperationTransaction, InternalVelloPayload},
+    shader::DevicePassCache,
     texture::{
         TextureDescriptor, TextureUsageIntent, TransitionalTextureRole, headless_texture_descriptor,
     },
@@ -224,8 +225,15 @@ struct ReadyDeviceState {
     queue: wgpu::Queue,
     engine: VelloEngineState,
     resources: ResourceManager,
+    pass_cache: DevicePassCache,
     #[cfg(test)]
     drop_witness: Arc<()>,
+}
+
+impl Drop for ReadyDeviceState {
+    fn drop(&mut self) {
+        self.pass_cache.clear();
+    }
 }
 
 enum DeviceLifecycle {
@@ -347,6 +355,7 @@ impl DeviceState {
                 queue,
                 engine,
                 resources,
+                pass_cache: DevicePassCache::new(),
                 #[cfg(test)]
                 drop_witness: Arc::new(()),
             })),

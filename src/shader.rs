@@ -1,9 +1,8 @@
-use super::gpu_transaction::GpuOperationTransaction;
+use std::collections::HashMap;
+
 use super::{
-    Color, Error, Format, Result, RuntimeCapabilityUnavailableReason, RuntimeOperation,
-    image::ResolvedMaskUploadKey,
+    Error, Format, Result, image::ResolvedMaskUploadKey, pass::RuntimeSpatialDescriptor,
     resource::WorkingFormat,
-    texture::{TextureDescriptor, TextureUsageIntent},
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -241,416 +240,138 @@ impl RenderPipelineKey {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum RectShaderPassKind {
-    ClearFill,
-    IdentityCopy,
+/// Device-lifetime ownership for the four exact custom-pass WGPU handle spaces.
+pub(crate) struct DevicePassCache {
+    samplers: HashMap<SamplerKey, wgpu::Sampler>,
+    layouts: HashMap<BindGroupLayoutKey, wgpu::BindGroupLayout>,
+    shaders: HashMap<ShaderModuleKey, wgpu::ShaderModule>,
+    pipelines: HashMap<RenderPipelineKey, wgpu::RenderPipeline>,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct RectPassBounds {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-impl RectPassBounds {
-    pub(crate) fn try_new(
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        source: TextureDescriptor,
-        destination: TextureDescriptor,
-    ) -> Result<Self> {
-        if width == 0 {
-            return Err(Error::invalid_value(
-                "rect shader pass width",
-                width,
-                "must be greater than 0 device pixels",
-            ));
-        }
-        if height == 0 {
-            return Err(Error::invalid_value(
-                "rect shader pass height",
-                height,
-                "must be greater than 0 device pixels",
-            ));
-        }
-        Self::validate_texture_fit("source", x, y, width, height, source)?;
-        Self::validate_texture_fit("destination", x, y, width, height, destination)?;
-        Ok(Self {
-            x,
-            y,
-            width,
-            height,
-        })
-    }
-
+impl DevicePassCache {
     #[must_use]
-    pub(crate) const fn x(self) -> u32 {
-        self.x
-    }
-
-    #[must_use]
-    pub(crate) const fn y(self) -> u32 {
-        self.y
-    }
-
-    #[must_use]
-    pub(crate) const fn width(self) -> u32 {
-        self.width
-    }
-
-    #[must_use]
-    pub(crate) const fn height(self) -> u32 {
-        self.height
-    }
-
-    fn validate_texture_fit(
-        texture_role: &'static str,
-        x: u32,
-        y: u32,
-        width: u32,
-        height: u32,
-        descriptor: TextureDescriptor,
-    ) -> Result<()> {
-        let max_x = x.checked_add(width).ok_or_else(|| {
-            Error::invalid_value(
-                format!("rect shader pass {texture_role} x extent"),
-                format!("{x}+{width}"),
-                "must fit in u32 device pixels",
-            )
-        })?;
-        let max_y = y.checked_add(height).ok_or_else(|| {
-            Error::invalid_value(
-                format!("rect shader pass {texture_role} y extent"),
-                format!("{y}+{height}"),
-                "must fit in u32 device pixels",
-            )
-        })?;
-        let size = descriptor.physical_size();
-        if max_x > size.width() {
-            return Err(Error::invalid_value(
-                format!("rect shader pass {texture_role} x extent"),
-                max_x,
-                "must fit inside the texture width",
-            ));
-        }
-        if max_y > size.height() {
-            return Err(Error::invalid_value(
-                format!("rect shader pass {texture_role} y extent"),
-                max_y,
-                "must fit inside the texture height",
-            ));
-        }
-        Ok(())
-    }
-
-    fn covers(self, descriptor: TextureDescriptor) -> bool {
-        self.x == 0
-            && self.y == 0
-            && self.width == descriptor.physical_size().width()
-            && self.height == descriptor.physical_size().height()
-    }
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct RectShaderPassDescriptor {
-    source_label: &'static str,
-    destination_label: &'static str,
-    source: TextureDescriptor,
-    destination: TextureDescriptor,
-    bounds: RectPassBounds,
-    kind: RectShaderPassKind,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-impl RectShaderPassDescriptor {
-    pub(crate) fn try_new(
-        source_label: &'static str,
-        destination_label: &'static str,
-        source: TextureDescriptor,
-        destination: TextureDescriptor,
-        bounds: RectPassBounds,
-        kind: RectShaderPassKind,
-    ) -> Result<Self> {
-        validate_label("rect shader pass source texture", source_label)?;
-        validate_label("rect shader pass destination texture", destination_label)?;
-        RectPassBounds::validate_texture_fit(
-            "source",
-            bounds.x(),
-            bounds.y(),
-            bounds.width(),
-            bounds.height(),
-            source,
-        )?;
-        RectPassBounds::validate_texture_fit(
-            "destination",
-            bounds.x(),
-            bounds.y(),
-            bounds.width(),
-            bounds.height(),
-            destination,
-        )?;
-        if kind == RectShaderPassKind::ClearFill && !bounds.covers(destination) {
-            return Err(Error::invalid_value(
-                "rect shader clear/fill bounds",
-                format!(
-                    "{},{},{}x{} over {}x{}",
-                    bounds.x(),
-                    bounds.y(),
-                    bounds.width(),
-                    bounds.height(),
-                    destination.physical_size().width(),
-                    destination.physical_size().height()
-                ),
-                "must cover the full destination texture",
-            ));
-        }
-        if kind == RectShaderPassKind::IdentityCopy && source.format() != destination.format() {
-            return Err(Error::invalid_value(
-                "rect shader pass texture formats",
-                format!("{:?}->{:?}", source.format(), destination.format()),
-                "must match for identity copy passes",
-            ));
-        }
-        Ok(Self {
-            source_label,
-            destination_label,
-            source,
-            destination,
-            bounds,
-            kind,
-        })
-    }
-
-    #[must_use]
-    pub(crate) const fn source_label(self) -> &'static str {
-        self.source_label
-    }
-
-    #[must_use]
-    pub(crate) const fn destination_label(self) -> &'static str {
-        self.destination_label
-    }
-
-    #[must_use]
-    pub(crate) const fn source(self) -> TextureDescriptor {
-        self.source
-    }
-
-    #[must_use]
-    pub(crate) const fn destination(self) -> TextureDescriptor {
-        self.destination
-    }
-
-    #[must_use]
-    pub(crate) const fn bounds(self) -> RectPassBounds {
-        self.bounds
-    }
-
-    #[must_use]
-    pub(crate) const fn kind(self) -> RectShaderPassKind {
-        self.kind
-    }
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct RectShaderPipelineKey {
-    kind: RectShaderPassKind,
-    source_format: Format,
-    destination_format: Format,
-    source_intent: TextureUsageIntent,
-    destination_intent: TextureUsageIntent,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-impl RectShaderPipelineKey {
-    #[must_use]
-    pub(crate) const fn from_descriptor(descriptor: RectShaderPassDescriptor) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            kind: descriptor.kind,
-            source_format: descriptor.source.format(),
-            destination_format: descriptor.destination.format(),
-            source_intent: descriptor.source.intent(),
-            destination_intent: descriptor.destination.intent(),
+            samplers: HashMap::new(),
+            layouts: HashMap::new(),
+            shaders: HashMap::new(),
+            pipelines: HashMap::new(),
         }
     }
-}
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-#[derive(Clone, Copy)]
-pub(crate) struct RectShaderPassGpuContext<'a> {
-    device: &'a wgpu::Device,
-    queue: &'a wgpu::Queue,
-    source_view: &'a wgpu::TextureView,
-    destination_view: &'a wgpu::TextureView,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-impl<'a> RectShaderPassGpuContext<'a> {
-    #[must_use]
-    pub(crate) const fn new(
-        device: &'a wgpu::Device,
-        queue: &'a wgpu::Queue,
-        source_view: &'a wgpu::TextureView,
-        destination_view: &'a wgpu::TextureView,
-    ) -> Self {
-        Self {
-            device,
-            queue,
-            source_view,
-            destination_view,
-        }
+    pub(crate) fn clear(&mut self) {
+        self.samplers.clear();
+        self.layouts.clear();
+        self.shaders.clear();
+        self.pipelines.clear();
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-pub(crate) enum RectShaderPassExecution<'a> {
-    ContractOnly,
-    Gpu(RectShaderPassGpuExecution<'a>),
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-impl<'a> RectShaderPassExecution<'a> {
-    #[must_use]
-    pub(crate) const fn contract_only() -> Self {
-        Self::ContractOnly
+#[cfg(test)]
+pub(crate) fn device_pass_cache_owns_exact_key_spaces_for_test() -> bool {
+    fn sampler_space(space: &HashMap<SamplerKey, wgpu::Sampler>) -> bool {
+        space.is_empty()
+    }
+    fn layout_space(space: &HashMap<BindGroupLayoutKey, wgpu::BindGroupLayout>) -> bool {
+        space.is_empty()
+    }
+    fn shader_space(space: &HashMap<ShaderModuleKey, wgpu::ShaderModule>) -> bool {
+        space.is_empty()
+    }
+    fn pipeline_space(space: &HashMap<RenderPipelineKey, wgpu::RenderPipeline>) -> bool {
+        space.is_empty()
     }
 
+    let cache = DevicePassCache::new();
+    sampler_space(&cache.samplers)
+        && layout_space(&cache.layouts)
+        && shader_space(&cache.shaders)
+        && pipeline_space(&cache.pipelines)
+}
+
+/// Exact 48-byte WGSL spatial uniform with explicit little-endian encoding.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 writes serialized spatial uniforms for executable passes"
+    )
+)]
+pub(crate) struct PassSpatialUniformBytes([u8; 48]);
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 writes serialized spatial uniforms for executable passes"
+    )
+)]
+impl PassSpatialUniformBytes {
+    pub(crate) fn try_from_runtime_spatial_descriptors(
+        source: RuntimeSpatialDescriptor,
+        destination: RuntimeSpatialDescriptor,
+    ) -> Result<Self> {
+        let source_origin = source.texel_origin();
+        let source_origin_x =
+            narrow_spatial_scalar("pass spatial source origin x", source_origin.x())?;
+        let source_origin_y =
+            narrow_spatial_scalar("pass spatial source origin y", source_origin.y())?;
+        let source_raster_scale =
+            narrow_raster_scale("pass spatial source raster scale", source.raster_scale())?;
+
+        let destination_origin = destination.texel_origin();
+        let destination_origin_x =
+            narrow_spatial_scalar("pass spatial destination origin x", destination_origin.x())?;
+        let destination_origin_y =
+            narrow_spatial_scalar("pass spatial destination origin y", destination_origin.y())?;
+        let destination_raster_scale = narrow_raster_scale(
+            "pass spatial destination raster scale",
+            destination.raster_scale(),
+        )?;
+
+        let source_extent = source.device_extent();
+        let destination_extent = destination.device_extent();
+        let mut bytes = [0_u8; 48];
+        bytes[0..4].copy_from_slice(&source_origin_x.to_le_bytes());
+        bytes[4..8].copy_from_slice(&source_origin_y.to_le_bytes());
+        bytes[8..12].copy_from_slice(&source_raster_scale.to_le_bytes());
+        bytes[16..20].copy_from_slice(&destination_origin_x.to_le_bytes());
+        bytes[20..24].copy_from_slice(&destination_origin_y.to_le_bytes());
+        bytes[24..28].copy_from_slice(&destination_raster_scale.to_le_bytes());
+        bytes[32..36].copy_from_slice(&source_extent.width().to_le_bytes());
+        bytes[36..40].copy_from_slice(&source_extent.height().to_le_bytes());
+        bytes[40..44].copy_from_slice(&destination_extent.width().to_le_bytes());
+        bytes[44..48].copy_from_slice(&destination_extent.height().to_le_bytes());
+        Ok(Self(bytes))
+    }
+
+    #[cfg(test)]
     #[must_use]
-    pub(crate) const fn gpu(
-        context: RectShaderPassGpuContext<'a>,
-        transaction: GpuOperationTransaction,
-    ) -> Self {
-        Self::Gpu(RectShaderPassGpuExecution {
-            context,
-            transaction,
-        })
+    pub(crate) const fn into_bytes_for_test(self) -> [u8; 48] {
+        self.0
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-pub(crate) struct RectShaderPassGpuExecution<'a> {
-    context: RectShaderPassGpuContext<'a>,
-    transaction: GpuOperationTransaction,
-}
-
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-pub(crate) async fn encode_clear_fill_pass(
-    execution: RectShaderPassExecution<'_>,
-    descriptor: RectShaderPassDescriptor,
-    color: Color,
-) -> Result<()> {
-    if descriptor.kind() != RectShaderPassKind::ClearFill {
+fn narrow_spatial_scalar(field: &'static str, value: f64) -> Result<f32> {
+    let narrowed = value as f32;
+    if !narrowed.is_finite() {
         return Err(Error::invalid_value(
-            "rect shader pass kind",
-            format!("{:?}", descriptor.kind()),
-            "must be ClearFill for clear/fill encoding",
+            field,
+            value,
+            "must remain finite after f64-to-f32 narrowing",
         ));
     }
-    let RectShaderPassExecution::Gpu(RectShaderPassGpuExecution {
-        context,
-        transaction,
-    }) = execution
-    else {
-        return Err(Error::runtime_unavailable(
-            RuntimeOperation::SurfaceRendering,
-            RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-            "rect/fullscreen shader pass requires an available wgpu device context",
-        ));
-    };
-    let _source_view = context.source_view;
-    let mut encoder = context
-        .device
-        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist rect shader pass clear/fill"),
-        });
-    {
-        let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(descriptor.destination_label()),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: context.destination_view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: f64::from(color.r()),
-                        g: f64::from(color.g()),
-                        b: f64::from(color.b()),
-                        a: f64::from(color.a()),
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            depth_stencil_attachment: None,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-            multiview_mask: None,
-        });
-    }
-    transaction
-        .submit_command_buffer(
-            context.queue,
-            encoder.finish(),
-            RuntimeOperation::SurfaceRendering,
-        )
-        .await
+    Ok(narrowed)
 }
 
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "T6 removes the existing rect shader probe")
-)]
-fn validate_label(name: &'static str, value: &'static str) -> Result<()> {
-    if value.is_empty() {
-        return Err(Error::invalid_value(name, value, "must not be empty"));
+fn narrow_raster_scale(field: &'static str, value: f64) -> Result<f32> {
+    let narrowed = narrow_spatial_scalar(field, value)?;
+    if narrowed <= 0.0 {
+        return Err(Error::invalid_value(
+            field,
+            value,
+            "must remain strictly positive after f64-to-f32 narrowing",
+        ));
     }
-    Ok(())
+    Ok(narrowed)
 }

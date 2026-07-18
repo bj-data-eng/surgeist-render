@@ -1290,46 +1290,51 @@ impl Renderer {
             RuntimeOperation::SurfaceRendering,
         )?;
         let (result, destination_texture) = {
-            use super::shader::{
-                RectPassBounds, RectShaderPassDescriptor, RectShaderPassExecution,
-                RectShaderPassGpuContext, RectShaderPassKind, encode_clear_fill_pass,
-            };
             use super::texture::{TextureDescriptor, TextureUsageIntent};
 
-            let source = TextureDescriptor::try_new(
-                PhysicalSize::new(2, 2),
-                Format::Rgba8,
-                TextureUsageIntent::OffscreenLayer,
-            )?;
             let destination = TextureDescriptor::try_new(
                 PhysicalSize::new(2, 2),
                 Format::Rgba8,
                 TextureUsageIntent::IntermediatePass,
             )?;
-            let bounds = RectPassBounds::try_new(0, 0, 2, 2, source, destination)?;
-            let pass = RectShaderPassDescriptor::try_new(
-                "scoped source",
-                "scoped destination",
-                source,
-                destination,
-                bounds,
-                RectShaderPassKind::ClearFill,
-            )?;
             let (device, queue) =
                 backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
-            let (_source_texture, source_view) =
-                create_texture(device, "Surgeist scoped shader source", source);
             let (destination_texture, destination_view) =
-                create_texture(device, "Surgeist scoped shader destination", destination);
-            let context =
-                RectShaderPassGpuContext::new(device, queue, &source_view, &destination_view);
+                create_texture(device, "Surgeist scoped clear destination", destination);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Surgeist scoped test-only clear encoder"),
+            });
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Surgeist scoped test-only clear pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &destination_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.25,
+                                g: 0.5,
+                                b: 0.75,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+            }
             (
-                encode_clear_fill_pass(
-                    RectShaderPassExecution::gpu(context, transaction),
-                    pass,
-                    Color::try_rgba(0.25, 0.5, 0.75, 1.0)?,
-                )
-                .await,
+                transaction
+                    .submit_command_buffer(
+                        queue,
+                        encoder.finish(),
+                        RuntimeOperation::SurfaceRendering,
+                    )
+                    .await,
                 destination_texture,
             )
         };

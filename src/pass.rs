@@ -30,6 +30,36 @@ use super::{
 #[cfg(test)]
 use super::frame::{FrameContext, FramePlan};
 
+#[cfg(test)]
+pub(crate) fn pass_spatial_uniform_bytes_for_test(
+    source_origin: Point,
+    source_raster_scale: f64,
+    source_extent: PhysicalSize,
+    destination_origin: Point,
+    destination_raster_scale: f64,
+    destination_extent: PhysicalSize,
+) -> Result<[u8; 48]> {
+    let source = RuntimeSpatialDescriptor {
+        logical_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+        device_origin: (0, 0),
+        device_extent: source_extent,
+        texel_origin: source_origin,
+        raster_scale: source_raster_scale,
+    };
+    let destination = RuntimeSpatialDescriptor {
+        logical_bounds: Rect::new(0.0, 0.0, 1.0, 1.0),
+        device_origin: (0, 0),
+        device_extent: destination_extent,
+        texel_origin: destination_origin,
+        raster_scale: destination_raster_scale,
+    };
+    super::shader::PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
+        source,
+        destination,
+    )
+    .map(super::shader::PassSpatialUniformBytes::into_bytes_for_test)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RuntimeGraphGeneration(GraphLoweringGeneration);
 
@@ -86,6 +116,21 @@ impl RuntimeSpatialDescriptor {
             texel_origin: spatial.texel_origin(),
             raster_scale: spatial.raster_scale(),
         }
+    }
+
+    #[must_use]
+    pub(crate) const fn device_extent(self) -> PhysicalSize {
+        self.device_extent
+    }
+
+    #[must_use]
+    pub(crate) const fn texel_origin(self) -> Point {
+        self.texel_origin
+    }
+
+    #[must_use]
+    pub(crate) const fn raster_scale(self) -> f64 {
+        self.raster_scale
     }
 }
 
