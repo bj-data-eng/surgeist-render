@@ -1,11 +1,17 @@
-use super::{Error, ResourceCacheBudget, Result, texture::TextureCacheKey};
+use super::{
+    Error, ResourceCacheBudget, Result,
+    backend::DeviceCapabilities,
+    image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
+    texture::{EffectTextureDescriptor, EffectTextureKey, TextureCacheKey},
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, Mutex, MutexGuard},
 };
+use wgpu::util::DeviceExt;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum WorkingFormat {
     HighPrecision,
     ReducedPrecision,
@@ -107,29 +113,324 @@ impl AllocationGeneration {
     }
 }
 
-/// One non-interchangeable namespace for every resource role entering the
-/// per-device manager. T3 adds descriptor facts to the role-only variants.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 #[cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "T3 supplies concrete descriptors for the modeled C07 resource namespaces"
+        reason = "T5 consumes the C07 Gaussian sampling forms during pass lowering"
+    )
+)]
+pub(crate) enum GaussianKernelSamplingForm {
+    PairedLinear,
+    FullNearest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct GaussianKernelKey {
+    standard_deviation_bits: u64,
+    raster_scale_bits: u64,
+    support_multiple_bits: u64,
+    support_radius: u32,
+    sampling_form: GaussianKernelSamplingForm,
+}
+
+impl GaussianKernelKey {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 constructs exact Gaussian kernel plans during pass lowering"
+        )
+    )]
+    pub(crate) const fn from_exact_plan(
+        standard_deviation_bits: u64,
+        raster_scale_bits: u64,
+        support_multiple_bits: u64,
+        support_radius: u32,
+        sampling_form: GaussianKernelSamplingForm,
+    ) -> Self {
+        Self {
+            standard_deviation_bits,
+            raster_scale_bits,
+            support_multiple_bits,
+            support_radius,
+            sampling_form,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct GaussianKernelPlan {
+    key: GaussianKernelKey,
+    upload_bytes: Arc<[u8]>,
+    byte_len: u64,
+}
+
+impl GaussianKernelPlan {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 constructs exact Gaussian kernel plans during pass lowering"
+        )
+    )]
+    pub(crate) fn try_new(
+        standard_deviation: f64,
+        raster_scale: f64,
+        support_multiple: f64,
+        sampling_form: GaussianKernelSamplingForm,
+    ) -> Result<Self> {
+        for (field, value) in [
+            ("Gaussian standard deviation", standard_deviation),
+            ("Gaussian raster scale", raster_scale),
+            ("Gaussian support multiple", support_multiple),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(Error::invalid_value(
+                    field,
+                    value,
+                    "must be finite and greater than zero",
+                ));
+            }
+        }
+        let device_standard_deviation = standard_deviation * raster_scale;
+        if !device_standard_deviation.is_finite() || device_standard_deviation <= 0.0 {
+            return Err(Error::invalid_value(
+                "Gaussian device standard deviation",
+                device_standard_deviation,
+                "must be finite and greater than zero",
+            ));
+        }
+        let support = device_standard_deviation * support_multiple;
+        if !support.is_finite() || support > f64::from(u32::MAX) {
+            return Err(Error::invalid_value(
+                "Gaussian support radius",
+                support,
+                "must be finite and fit in u32 device pixels",
+            ));
+        }
+        let support_radius = support.ceil() as u32;
+        let weight_count = usize::try_from(support_radius)
+            .ok()
+            .and_then(|radius| radius.checked_add(1))
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "Gaussian kernel weight count",
+                    support_radius,
+                    "must fit addressable memory",
+                )
+            })?;
+        let mut positive_weights = Vec::new();
+        positive_weights
+            .try_reserve_exact(weight_count)
+            .map_err(|_| {
+                Error::invalid_value(
+                    "Gaussian kernel weight count",
+                    weight_count,
+                    "must fit available addressable memory",
+                )
+            })?;
+        for offset in 0..=support_radius {
+            let offset = f64::from(offset);
+            let ratio = offset / device_standard_deviation;
+            positive_weights.push((-0.5 * ratio * ratio).exp());
+        }
+        let normalization =
+            positive_weights[0] + 2.0 * positive_weights.iter().skip(1).sum::<f64>();
+        if !normalization.is_finite() || normalization <= 0.0 {
+            return Err(Error::invalid_value(
+                "Gaussian kernel normalization",
+                normalization,
+                "must be finite and greater than zero",
+            ));
+        }
+        for weight in &mut positive_weights {
+            *weight /= normalization;
+        }
+
+        let sample_count = match sampling_form {
+            GaussianKernelSamplingForm::FullNearest => support_radius
+                .checked_mul(2)
+                .and_then(|count| count.checked_add(1)),
+            GaussianKernelSamplingForm::PairedLinear => support_radius
+                .checked_add(1)
+                .and_then(|count| count.checked_div(2))
+                .and_then(|pairs| pairs.checked_mul(2))
+                .and_then(|paired| paired.checked_add(1)),
+        }
+        .ok_or_else(|| {
+            Error::invalid_value(
+                "Gaussian kernel sample count",
+                support_radius,
+                "must fit in u32",
+            )
+        })?;
+        let byte_capacity = usize::try_from(sample_count)
+            .ok()
+            .and_then(|count| count.checked_mul(8))
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "Gaussian kernel byte length",
+                    sample_count,
+                    "must fit addressable memory",
+                )
+            })?;
+        let mut upload_bytes = Vec::new();
+        upload_bytes.try_reserve_exact(byte_capacity).map_err(|_| {
+            Error::invalid_value(
+                "Gaussian kernel byte length",
+                byte_capacity,
+                "must fit available addressable memory",
+            )
+        })?;
+        append_kernel_sample(&mut upload_bytes, 0.0, positive_weights[0])?;
+        match sampling_form {
+            GaussianKernelSamplingForm::FullNearest => {
+                for offset in 1..=support_radius {
+                    let offset_index = usize::try_from(offset)
+                        .expect("validated u32 Gaussian offsets must fit usize");
+                    let weight = positive_weights[offset_index];
+                    append_kernel_sample(&mut upload_bytes, f64::from(offset), weight)?;
+                    append_kernel_sample(&mut upload_bytes, -f64::from(offset), weight)?;
+                }
+            }
+            GaussianKernelSamplingForm::PairedLinear => {
+                let mut first = 1_u32;
+                while first <= support_radius {
+                    let second = first
+                        .checked_add(1)
+                        .filter(|value| *value <= support_radius);
+                    let first_index = usize::try_from(first)
+                        .expect("validated u32 Gaussian offsets must fit usize");
+                    let first_weight = positive_weights[first_index];
+                    let (offset, weight) = if let Some(second) = second {
+                        let second_index = usize::try_from(second)
+                            .expect("validated u32 Gaussian offsets must fit usize");
+                        let second_weight = positive_weights[second_index];
+                        let weight = first_weight + second_weight;
+                        if weight <= 0.0 {
+                            return Err(Error::invalid_value(
+                                "Gaussian paired sample weight",
+                                weight,
+                                "must remain greater than zero",
+                            ));
+                        }
+                        let offset = (f64::from(first) * first_weight
+                            + f64::from(second) * second_weight)
+                            / weight;
+                        (offset, weight)
+                    } else {
+                        (f64::from(first), first_weight)
+                    };
+                    append_kernel_sample(&mut upload_bytes, offset, weight)?;
+                    append_kernel_sample(&mut upload_bytes, -offset, weight)?;
+                    let Some(next) = first.checked_add(2) else {
+                        break;
+                    };
+                    first = next;
+                }
+            }
+        }
+        if upload_bytes.len() != byte_capacity {
+            return Err(Error::invalid_value(
+                "Gaussian kernel byte length",
+                upload_bytes.len(),
+                "must match the exact serialized sample count",
+            ));
+        }
+
+        let byte_len = u64::try_from(upload_bytes.len()).map_err(|_| {
+            Error::invalid_value(
+                "Gaussian kernel byte length",
+                upload_bytes.len(),
+                "must fit in u64",
+            )
+        })?;
+        Ok(Self {
+            key: GaussianKernelKey::from_exact_plan(
+                standard_deviation.to_bits(),
+                raster_scale.to_bits(),
+                support_multiple.to_bits(),
+                support_radius,
+                sampling_form,
+            ),
+            upload_bytes: upload_bytes.into(),
+            byte_len,
+        })
+    }
+
+    pub(crate) const fn key(&self) -> GaussianKernelKey {
+        self.key
+    }
+
+    pub(crate) fn upload_bytes(&self) -> &[u8] {
+        &self.upload_bytes
+    }
+
+    pub(crate) const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    pub(crate) fn validate_upload_byte_len(&self, actual_len: usize) -> Result<()> {
+        if actual_len != self.upload_bytes.len() {
+            return Err(Error::invalid_value(
+                "Gaussian kernel upload byte length",
+                actual_len,
+                "must equal the exact serialized kernel plan length",
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T5 constructs exact Gaussian kernel plans during pass lowering"
+    )
+)]
+fn append_kernel_sample(bytes: &mut Vec<u8>, offset: f64, weight: f64) -> Result<()> {
+    let offset = offset as f32;
+    let weight = weight as f32;
+    if !offset.is_finite() || !weight.is_finite() {
+        return Err(Error::invalid_value(
+            "Gaussian kernel sample",
+            format!("offset {offset}, weight {weight}"),
+            "must narrow to finite f32 values",
+        ));
+    }
+    bytes.extend_from_slice(&offset.to_le_bytes());
+    bytes.extend_from_slice(&weight.to_le_bytes());
+    Ok(())
+}
+
+/// One non-interchangeable namespace for every resource role entering the
+/// per-device manager.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 moves Vello atlas ownership into the C07 manager namespace"
     )
 )]
 pub(crate) enum ResourceCacheKey {
     VelloAtlas,
-    CaptureTexture,
-    WorkingTexture,
-    CoverageTexture,
-    ResolvedMaskUpload,
-    GaussianKernelBuffer,
+    EffectTexture(EffectTextureKey),
+    ResolvedMaskUpload(ResolvedMaskUploadKey),
+    GaussianKernelBuffer(GaussianKernelKey),
     TransitionalTexture(TextureCacheKey),
 }
 
 impl ResourceCacheKey {
     pub(crate) const fn transitional_texture(key: TextureCacheKey) -> Self {
         Self::TransitionalTexture(key)
+    }
+
+    const fn accepts_modeled_payload(self) -> bool {
+        matches!(self, Self::VelloAtlas | Self::TransitionalTexture(_))
     }
 }
 
@@ -148,12 +449,65 @@ enum ResourceEntryState {
     Leased { frame: FrameIdentity },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 and T5 consume the concrete C07 GPU payloads through their leases"
+    )
+)]
+enum ResourcePayload {
+    Modeled,
+    EffectTexture {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+    },
+    ResolvedMaskUpload {
+        texture: wgpu::Texture,
+        view: wgpu::TextureView,
+    },
+    GaussianKernelBuffer {
+        buffer: wgpu::Buffer,
+    },
+}
+
+impl ResourcePayload {
+    const fn matches_key(&self, key: ResourceCacheKey) -> bool {
+        matches!(
+            (self, key),
+            (
+                Self::Modeled,
+                ResourceCacheKey::VelloAtlas | ResourceCacheKey::TransitionalTexture(_)
+            ) | (
+                Self::EffectTexture { .. },
+                ResourceCacheKey::EffectTexture(_)
+            ) | (
+                Self::ResolvedMaskUpload { .. },
+                ResourceCacheKey::ResolvedMaskUpload(_)
+            ) | (
+                Self::GaussianKernelBuffer { .. },
+                ResourceCacheKey::GaussianKernelBuffer(_)
+            )
+        )
+    }
+
+    const fn label(&self) -> &'static str {
+        match self {
+            Self::Modeled => "Modeled",
+            Self::EffectTexture { .. } => "EffectTexture",
+            Self::ResolvedMaskUpload { .. } => "ResolvedMaskUpload",
+            Self::GaussianKernelBuffer { .. } => "GaussianKernelBuffer",
+        }
+    }
+}
+
 struct ResourceEntry {
     key: ResourceCacheKey,
     allocation_generation: AllocationGeneration,
     byte_len: u64,
     state: ResourceEntryState,
+    payload: ResourcePayload,
 }
 
 struct ResourceManagerState {
@@ -173,12 +527,13 @@ impl ResourceManagerState {
         Error::invalid_value("resource lease", resource.get(), reason)
     }
 
-    fn acquire(
+    fn acquire_with_payload(
         &mut self,
         manager_identity: &ManagerIdentity,
         frame: FrameIdentity,
         key: ResourceCacheKey,
         byte_len: u64,
+        create_payload: impl FnOnce() -> Result<ResourcePayload>,
     ) -> Result<ResourceLease> {
         if self.identity != *manager_identity || !self.active_frames.contains(&frame) {
             return Err(Error::invalid_value(
@@ -209,15 +564,24 @@ impl ResourceManagerState {
             .min()
             .map(|(_, identity)| identity);
 
-        let (resource, allocation_generation) = if let Some(resource) = reusable {
+        let (resource, allocation_generation, payload) = if let Some(resource) = reusable {
             let entry = self
                 .entries
                 .get_mut(&resource)
                 .expect("the selected idle resource must remain registered");
+            debug_assert!(entry.payload.matches_key(key));
             entry.state = ResourceEntryState::Leased { frame };
             self.stats.hits = self.stats.hits.saturating_add(1);
-            (resource, entry.allocation_generation)
+            (resource, entry.allocation_generation, entry.payload.clone())
         } else {
+            let payload = create_payload()?;
+            if !payload.matches_key(key) {
+                return Err(Error::invalid_value(
+                    "resource payload",
+                    payload.label(),
+                    "must match its exact resource cache-key namespace",
+                ));
+            }
             let next_resource = self.next_resource.checked_add(1).ok_or_else(|| {
                 Error::invalid_value(
                     "resource identity",
@@ -243,11 +607,12 @@ impl ResourceManagerState {
                     allocation_generation,
                     byte_len,
                     state: ResourceEntryState::Leased { frame },
+                    payload: payload.clone(),
                 },
             );
             self.stats.misses = self.stats.misses.saturating_add(1);
             self.stats.allocations = self.stats.allocations.saturating_add(1);
-            (resource, allocation_generation)
+            (resource, allocation_generation, payload)
         };
 
         Ok(ResourceLease::new(
@@ -255,7 +620,27 @@ impl ResourceManagerState {
             frame,
             resource,
             allocation_generation,
+            payload,
         ))
+    }
+
+    fn acquire(
+        &mut self,
+        manager_identity: &ManagerIdentity,
+        frame: FrameIdentity,
+        key: ResourceCacheKey,
+        byte_len: u64,
+    ) -> Result<ResourceLease> {
+        if !key.accepts_modeled_payload() {
+            return Err(Error::invalid_value(
+                "modeled resource key",
+                format!("{key:?}"),
+                "must use a Vello or transitional namespace",
+            ));
+        }
+        self.acquire_with_payload(manager_identity, frame, key, byte_len, || {
+            Ok(ResourcePayload::Modeled)
+        })
     }
 
     fn validate_lease(
@@ -335,6 +720,13 @@ impl ResourceManagerState {
         byte_len: u64,
     ) -> Result<ResourceLease> {
         self.validate_lease(manager_identity, frame, &token)?;
+        if !key.accepts_modeled_payload() {
+            return Err(Error::invalid_value(
+                "modeled resource key",
+                format!("{key:?}"),
+                "must use a Vello or transitional namespace",
+            ));
+        }
         if byte_len == 0 {
             return Err(Error::invalid_value(
                 "resource byte length",
@@ -377,6 +769,7 @@ impl ResourceManagerState {
         entry.key = key;
         entry.allocation_generation = allocation_generation;
         entry.byte_len = byte_len;
+        entry.payload = ResourcePayload::Modeled;
         self.retained_bytes = retained_bytes;
         self.stats.allocations = self.stats.allocations.saturating_add(1);
         Ok(ResourceLease::new(
@@ -384,6 +777,7 @@ impl ResourceManagerState {
             frame,
             token.resource_identity,
             allocation_generation,
+            ResourcePayload::Modeled,
         ))
     }
 
@@ -562,6 +956,7 @@ struct ResourceLeaseToken {
 #[must_use = "resource leases must be resolved by their owning frame scope"]
 pub(crate) struct ResourceLease {
     token: ResourceLeaseToken,
+    payload: ResourcePayload,
 }
 
 impl ResourceLease {
@@ -570,6 +965,7 @@ impl ResourceLease {
         frame_identity: FrameIdentity,
         resource_identity: ResourceIdentity,
         allocation_generation: AllocationGeneration,
+        payload: ResourcePayload,
     ) -> Self {
         Self {
             token: ResourceLeaseToken {
@@ -578,6 +974,7 @@ impl ResourceLease {
                 resource_identity,
                 allocation_generation,
             },
+            payload,
         }
     }
 
@@ -604,6 +1001,7 @@ impl fmt::Debug for ResourceLease {
             .field("frame_identity", &self.token.frame_identity)
             .field("resource_identity", &self.token.resource_identity)
             .field("allocation_generation", &self.token.allocation_generation)
+            .field("payload", &self.payload.label())
             .finish()
     }
 }
@@ -623,6 +1021,234 @@ impl FrameResourceScope {
         byte_len: u64,
     ) -> Result<ResourceLease> {
         lock_state(&self.state).acquire(&self.manager_identity, self.frame, key, byte_len)
+    }
+
+    fn validated_payload<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<&'scope ResourcePayload> {
+        lock_state(&self.state).validate_lease(&self.manager_identity, self.frame, &lease.token)?;
+        Ok(&lease.payload)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "T4 consumes concrete effect texture leases")
+    )]
+    pub(crate) fn effect_texture<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
+        match self.validated_payload(lease)? {
+            ResourcePayload::EffectTexture { texture, view } => Ok((texture, view)),
+            ResourcePayload::Modeled
+            | ResourcePayload::ResolvedMaskUpload { .. }
+            | ResourcePayload::GaussianKernelBuffer { .. } => Err(Error::invalid_value(
+                "resource lease payload",
+                lease.resource_identity().get(),
+                "must contain an effect texture",
+            )),
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "T5 consumes retained mask upload leases")
+    )]
+    pub(crate) fn resolved_mask_texture<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
+        match self.validated_payload(lease)? {
+            ResourcePayload::ResolvedMaskUpload { texture, view } => Ok((texture, view)),
+            ResourcePayload::Modeled
+            | ResourcePayload::EffectTexture { .. }
+            | ResourcePayload::GaussianKernelBuffer { .. } => Err(Error::invalid_value(
+                "resource lease payload",
+                lease.resource_identity().get(),
+                "must contain a resolved-mask texture",
+            )),
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "T5 consumes immutable Gaussian kernel leases")
+    )]
+    pub(crate) fn gaussian_kernel_buffer<'scope>(
+        &'scope self,
+        lease: &'scope ResourceLease,
+    ) -> Result<&'scope wgpu::Buffer> {
+        match self.validated_payload(lease)? {
+            ResourcePayload::GaussianKernelBuffer { buffer } => Ok(buffer),
+            ResourcePayload::Modeled
+            | ResourcePayload::EffectTexture { .. }
+            | ResourcePayload::ResolvedMaskUpload { .. } => Err(Error::invalid_value(
+                "resource lease payload",
+                lease.resource_identity().get(),
+                "must contain a Gaussian kernel buffer",
+            )),
+        }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T4 connects C07 effect texture leases to the ready-device manager"
+        )
+    )]
+    pub(crate) fn acquire_effect_texture(
+        &mut self,
+        device: &wgpu::Device,
+        capabilities: &DeviceCapabilities,
+        descriptor: EffectTextureDescriptor,
+    ) -> Result<ResourceLease> {
+        capabilities.validate_effect_texture_allocation(
+            descriptor.physical_size(),
+            descriptor.working_format(),
+            descriptor.texture_format(),
+            descriptor.usage(),
+        )?;
+        let key = ResourceCacheKey::EffectTexture(descriptor.cache_key());
+        lock_state(&self.state).acquire_with_payload(
+            &self.manager_identity,
+            self.frame,
+            key,
+            descriptor.byte_len(),
+            || {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(descriptor.label()),
+                    size: wgpu::Extent3d {
+                        width: descriptor.physical_size().width(),
+                        height: descriptor.physical_size().height(),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: descriptor.texture_format(),
+                    usage: descriptor.usage(),
+                    view_formats: &[],
+                });
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                Ok(ResourcePayload::EffectTexture { texture, view })
+            },
+        )
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 consumes retained mask-upload leases during runtime pass lowering"
+        )
+    )]
+    pub(crate) fn acquire_resolved_mask_upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        capabilities: &DeviceCapabilities,
+        descriptor: &ResolvedMaskUploadDescriptor,
+    ) -> Result<ResourceLease> {
+        let physical_size = descriptor.physical_size();
+        if physical_size.width() == 0 || physical_size.height() == 0 {
+            return Err(Error::invalid_value(
+                "resolved mask upload extent",
+                format!("{}x{}", physical_size.width(), physical_size.height()),
+                "must have positive width and height before GPU allocation",
+            ));
+        }
+        descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
+        let usage = wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
+        capabilities.validate_effect_texture_allocation(
+            physical_size,
+            None,
+            wgpu::TextureFormat::Rgba8Unorm,
+            usage,
+        )?;
+        let key = ResourceCacheKey::ResolvedMaskUpload(descriptor.cache_key());
+        lock_state(&self.state).acquire_with_payload(
+            &self.manager_identity,
+            self.frame,
+            key,
+            descriptor.byte_len(),
+            || {
+                let texture = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Surgeist retained resolved mask upload"),
+                    size: wgpu::Extent3d {
+                        width: physical_size.width(),
+                        height: physical_size.height(),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage,
+                    view_formats: &[],
+                });
+                queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        texture: &texture,
+                        mip_level: 0,
+                        origin: wgpu::Origin3d::ZERO,
+                        aspect: wgpu::TextureAspect::All,
+                    },
+                    descriptor.bytes(),
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(descriptor.row_bytes()),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: physical_size.width(),
+                        height: physical_size.height(),
+                        depth_or_array_layers: 1,
+                    },
+                );
+                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+                Ok(ResourcePayload::ResolvedMaskUpload { texture, view })
+            },
+        )
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "T5 consumes immutable Gaussian kernel leases during runtime pass lowering"
+        )
+    )]
+    pub(crate) fn acquire_gaussian_kernel_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        plan: &GaussianKernelPlan,
+    ) -> Result<ResourceLease> {
+        plan.validate_upload_byte_len(plan.upload_bytes().len())?;
+        let byte_len = plan.byte_len();
+        if byte_len == 0 || byte_len > device.limits().max_buffer_size {
+            return Err(Error::invalid_value(
+                "Gaussian kernel buffer byte length",
+                byte_len,
+                "must be positive and no greater than the selected device buffer limit",
+            ));
+        }
+        let key = ResourceCacheKey::GaussianKernelBuffer(plan.key());
+        lock_state(&self.state).acquire_with_payload(
+            &self.manager_identity,
+            self.frame,
+            key,
+            byte_len,
+            || {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("Surgeist immutable Gaussian kernel buffer"),
+                    contents: plan.upload_bytes(),
+                    usage: wgpu::BufferUsages::STORAGE,
+                });
+                Ok(ResourcePayload::GaussianKernelBuffer { buffer })
+            },
+        )
     }
 
     pub(crate) fn release(&mut self, lease: ResourceLease) -> Result<()> {

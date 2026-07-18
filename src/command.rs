@@ -1,6 +1,7 @@
 use super::{
     frame::{FrameContext, FramePlan, LogicalBounds},
     geometry::offset_radii,
+    image::ResolvedMaskUploadDescriptor,
     paint::PaintKind,
     scene::Command,
     shape::ShapeKind,
@@ -150,6 +151,7 @@ pub(crate) struct NormalizedLayer {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct RenderLayerMask {
     alpha_mask: ImageBuffer,
+    upload: ResolvedMaskUploadDescriptor,
     annihilates_source: bool,
 }
 
@@ -164,8 +166,10 @@ impl RenderLayerMask {
             .rgba()
             .chunks_exact(4)
             .all(|pixel| pixel[3] == 0);
+        let upload = ResolvedMaskUploadDescriptor::from_resolved_alpha_mask(mask.alpha_mask())?;
         Ok(Self {
             alpha_mask: mask.alpha_mask().clone(),
+            upload,
             annihilates_source,
         })
     }
@@ -173,6 +177,11 @@ impl RenderLayerMask {
     #[must_use]
     pub(crate) const fn alpha_mask(&self) -> &ImageBuffer {
         &self.alpha_mask
+    }
+
+    #[must_use]
+    pub(crate) const fn upload(&self) -> &ResolvedMaskUploadDescriptor {
+        &self.upload
     }
 
     #[must_use]

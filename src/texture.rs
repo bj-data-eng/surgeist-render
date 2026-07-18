@@ -1,4 +1,189 @@
-use super::{Error, Format, PhysicalSize, Result};
+use super::{Error, Format, PhysicalSize, Result, resource::WorkingFormat};
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 connects C07 effect texture roles to the ready-device manager"
+    )
+)]
+pub(crate) enum EffectTextureRole {
+    Capture,
+    Working,
+    Coverage,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct EffectTextureKey {
+    role: EffectTextureRole,
+    working_format: Option<WorkingFormat>,
+    texture_format: wgpu::TextureFormat,
+    physical_size: PhysicalSize,
+    usage: wgpu::TextureUsages,
+}
+
+impl EffectTextureKey {
+    pub(crate) const fn from_descriptor(descriptor: EffectTextureDescriptor) -> Self {
+        Self {
+            role: descriptor.role,
+            working_format: descriptor.working_format,
+            texture_format: descriptor.texture_format,
+            physical_size: descriptor.physical_size,
+            usage: descriptor.usage,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct EffectTextureDescriptor {
+    role: EffectTextureRole,
+    working_format: Option<WorkingFormat>,
+    texture_format: wgpu::TextureFormat,
+    physical_size: PhysicalSize,
+    usage: wgpu::TextureUsages,
+    byte_len: u64,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T4 connects C07 effect texture requests to the ready-device manager"
+    )
+)]
+impl EffectTextureDescriptor {
+    pub(crate) fn try_capture(
+        physical_size: PhysicalSize,
+        usage: wgpu::TextureUsages,
+    ) -> Result<Self> {
+        Self::try_new(
+            EffectTextureRole::Capture,
+            None,
+            wgpu::TextureFormat::Rgba8Unorm,
+            physical_size,
+            usage,
+        )
+    }
+
+    pub(crate) fn try_working(
+        working_format: WorkingFormat,
+        physical_size: PhysicalSize,
+        usage: wgpu::TextureUsages,
+    ) -> Result<Self> {
+        Self::try_new(
+            EffectTextureRole::Working,
+            Some(working_format),
+            working_format.texture_format(),
+            physical_size,
+            usage,
+        )
+    }
+
+    pub(crate) fn try_coverage(
+        physical_size: PhysicalSize,
+        usage: wgpu::TextureUsages,
+    ) -> Result<Self> {
+        Self::try_new(
+            EffectTextureRole::Coverage,
+            None,
+            wgpu::TextureFormat::Rgba8Unorm,
+            physical_size,
+            usage,
+        )
+    }
+
+    fn try_new(
+        role: EffectTextureRole,
+        working_format: Option<WorkingFormat>,
+        texture_format: wgpu::TextureFormat,
+        physical_size: PhysicalSize,
+        usage: wgpu::TextureUsages,
+    ) -> Result<Self> {
+        if physical_size.width() == 0 || physical_size.height() == 0 {
+            return Err(Error::invalid_value(
+                "effect texture extent",
+                format!("{}x{}", physical_size.width(), physical_size.height()),
+                "must have positive width and height",
+            ));
+        }
+        if usage.is_empty() {
+            return Err(Error::invalid_value(
+                "effect texture usage",
+                "empty",
+                "must contain at least one WGPU texture usage",
+            ));
+        }
+        let bytes_per_pixel = match texture_format {
+            wgpu::TextureFormat::Rgba16Float => 8_u64,
+            wgpu::TextureFormat::Rgba8Unorm => 4_u64,
+            _ => {
+                return Err(Error::invalid_value(
+                    "effect texture format",
+                    format!("{texture_format:?}"),
+                    "must be Rgba16Float or Rgba8Unorm",
+                ));
+            }
+        };
+        let pixel_count = u64::from(physical_size.width())
+            .checked_mul(u64::from(physical_size.height()))
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "effect texture pixel count",
+                    format!("{}x{}", physical_size.width(), physical_size.height()),
+                    "must fit in u64",
+                )
+            })?;
+        let byte_len = pixel_count.checked_mul(bytes_per_pixel).ok_or_else(|| {
+            Error::invalid_value(
+                "effect texture byte length",
+                format!("{pixel_count} pixels at {bytes_per_pixel} bytes per pixel"),
+                "must fit in u64",
+            )
+        })?;
+
+        Ok(Self {
+            role,
+            working_format,
+            texture_format,
+            physical_size,
+            usage,
+            byte_len,
+        })
+    }
+
+    pub(crate) const fn working_format(self) -> Option<WorkingFormat> {
+        self.working_format
+    }
+
+    pub(crate) const fn texture_format(self) -> wgpu::TextureFormat {
+        self.texture_format
+    }
+
+    pub(crate) const fn physical_size(self) -> PhysicalSize {
+        self.physical_size
+    }
+
+    pub(crate) const fn usage(self) -> wgpu::TextureUsages {
+        self.usage
+    }
+
+    pub(crate) const fn byte_len(self) -> u64 {
+        self.byte_len
+    }
+
+    pub(crate) const fn cache_key(self) -> EffectTextureKey {
+        EffectTextureKey::from_descriptor(self)
+    }
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self.role {
+            EffectTextureRole::Capture => "Surgeist retained capture texture",
+            EffectTextureRole::Working => "Surgeist retained working texture",
+            EffectTextureRole::Coverage => "Surgeist retained coverage texture",
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum TextureUsageIntent {

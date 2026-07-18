@@ -35,12 +35,14 @@ use super::{
     backend::*,
     command,
     encode::*,
+    image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
     reference::{
         MaterializedDropShadowOffsetQuantizationPolicy, PremultipliedRgba8,
         ReferencePremultipliedRgba8Buffer,
     },
     resource::{
-        AllocationGeneration, ResourceCacheKey, ResourceIdentity, ResourceManager, WorkingFormat,
+        AllocationGeneration, GaussianKernelKey, GaussianKernelPlan, GaussianKernelSamplingForm,
+        ResourceCacheKey, ResourceIdentity, ResourceManager, WorkingFormat,
     },
     shader::{
         RectPassBounds, RectShaderPassDescriptor, RectShaderPassExecution, RectShaderPassKind,
@@ -48,7 +50,8 @@ use super::{
     },
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
-        TextureCacheKey, TextureDescriptor, TextureUsageIntent, headless_texture_descriptor,
+        EffectTextureDescriptor, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
+        headless_texture_descriptor,
     },
 };
 
@@ -6771,6 +6774,16 @@ fn texture_cache_records_misses_reuse_hits_and_live_count() {
     assert_eq!(manager.live_count(), 1);
 }
 
+fn modeled_resource_key_for_test(discriminator: u32) -> ResourceCacheKey {
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(discriminator.max(1), 1),
+        Format::Rgba8,
+        TextureUsageIntent::IntermediatePass,
+    )
+    .unwrap();
+    ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor))
+}
+
 #[test]
 fn resource_leases_reject_stale_generation_and_double_release_by_model() {
     let manager = ResourceManager::default();
@@ -6787,7 +6800,7 @@ fn resource_leases_reject_stale_generation_and_double_release_by_model() {
     assert_eq!(stale.allocation_generation.get_for_test(), 1);
 
     let current = frame
-        .replace(lease, ResourceCacheKey::CaptureTexture, 8)
+        .replace(lease, modeled_resource_key_for_test(1), 8)
         .unwrap();
     let current_token = current.token_for_test();
     let replay_after_release = current_token.clone();
@@ -6865,10 +6878,10 @@ fn resource_trim_order_is_last_used_then_resource_identity() {
 
     let mut current_frame = manager.begin_frame().unwrap();
     let first_equal_age = current_frame
-        .acquire(ResourceCacheKey::CaptureTexture, 4)
+        .acquire(modeled_resource_key_for_test(1), 4)
         .unwrap();
     let second_equal_age = current_frame
-        .acquire(ResourceCacheKey::WorkingTexture, 4)
+        .acquire(modeled_resource_key_for_test(2), 4)
         .unwrap();
     let first_equal_age_identity = first_equal_age.resource_identity();
     let second_equal_age_identity = second_equal_age.resource_identity();
@@ -6897,7 +6910,7 @@ fn resource_frame_scope_cleanup_covers_success_error_and_cancellation() {
     let success_manager = ResourceManager::default();
     let mut success_scope = success_manager.begin_frame().unwrap();
     let _success_lease = success_scope
-        .acquire(ResourceCacheKey::CaptureTexture, 4)
+        .acquire(modeled_resource_key_for_test(1), 4)
         .unwrap();
     let _ = success_scope.finish();
     assert_eq!(success_manager.observation_for_test().idle_count, 1);
@@ -6906,7 +6919,7 @@ fn resource_frame_scope_cleanup_covers_success_error_and_cancellation() {
     let error_manager = ResourceManager::default();
     let error_result: Result<()> = (|| {
         let mut error_scope = error_manager.begin_frame()?;
-        let _error_lease = error_scope.acquire(ResourceCacheKey::WorkingTexture, 8)?;
+        let _error_lease = error_scope.acquire(modeled_resource_key_for_test(2), 8)?;
         Err(Error::invalid_value(
             "resource frame fixture",
             "error",
@@ -6920,7 +6933,7 @@ fn resource_frame_scope_cleanup_covers_success_error_and_cancellation() {
     let cancellation_manager = ResourceManager::default();
     let mut canceled_scope = cancellation_manager.begin_frame().unwrap();
     let _canceled_lease = canceled_scope
-        .acquire(ResourceCacheKey::CoverageTexture, 16)
+        .acquire(modeled_resource_key_for_test(3), 16)
         .unwrap();
     drop(canceled_scope);
     assert_eq!(cancellation_manager.observation_for_test().idle_count, 1);
@@ -6937,7 +6950,7 @@ fn resource_byte_accounting_overflow_is_typed() {
     let mut second_frame = manager.begin_frame().unwrap();
 
     let error = second_frame
-        .acquire(ResourceCacheKey::GaussianKernelBuffer, 1)
+        .acquire(modeled_resource_key_for_test(4), 1)
         .expect_err("retained resource byte overflow must be rejected");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
@@ -6951,16 +6964,532 @@ fn resource_byte_accounting_overflow_is_typed() {
 
 #[test]
 fn resource_role_keys_keep_allocation_namespaces_distinct() {
+    let capture = EffectTextureDescriptor::try_capture(
+        PhysicalSize::new(2, 2),
+        wgpu::TextureUsages::TEXTURE_BINDING,
+    )
+    .unwrap();
+    let coverage = EffectTextureDescriptor::try_coverage(
+        PhysicalSize::new(2, 2),
+        wgpu::TextureUsages::TEXTURE_BINDING,
+    )
+    .unwrap();
+    let working = EffectTextureDescriptor::try_working(
+        WorkingFormat::ReducedPrecision,
+        PhysicalSize::new(2, 2),
+        wgpu::TextureUsages::TEXTURE_BINDING,
+    )
+    .unwrap();
+    let mask = ResolvedMaskUploadKey::new(
+        ImageId::new(1),
+        PhysicalSize::new(2, 2),
+        ImageQuality::Medium,
+        Extend::Pad,
+    );
+    let kernel = GaussianKernelKey::from_exact_plan(
+        1.0_f64.to_bits(),
+        1.0_f64.to_bits(),
+        2.5_f64.to_bits(),
+        3,
+        GaussianKernelSamplingForm::PairedLinear,
+    );
     let keys = std::collections::HashSet::from([
         ResourceCacheKey::VelloAtlas,
-        ResourceCacheKey::CaptureTexture,
-        ResourceCacheKey::WorkingTexture,
-        ResourceCacheKey::CoverageTexture,
-        ResourceCacheKey::ResolvedMaskUpload,
-        ResourceCacheKey::GaussianKernelBuffer,
+        ResourceCacheKey::EffectTexture(capture.cache_key()),
+        ResourceCacheKey::EffectTexture(working.cache_key()),
+        ResourceCacheKey::EffectTexture(coverage.cache_key()),
+        ResourceCacheKey::ResolvedMaskUpload(mask),
+        ResourceCacheKey::GaussianKernelBuffer(kernel),
+        modeled_resource_key_for_test(5),
     ]);
 
-    assert_eq!(keys.len(), 6);
+    assert_eq!(keys.len(), 7);
+}
+
+#[test]
+fn effect_texture_keys_separate_format_extent_usage_and_role() {
+    let baseline = EffectTextureDescriptor::try_capture(
+        PhysicalSize::new(8, 4),
+        wgpu::TextureUsages::TEXTURE_BINDING,
+    )
+    .unwrap();
+    let keys = std::collections::HashSet::from([
+        ResourceCacheKey::EffectTexture(baseline.cache_key()),
+        ResourceCacheKey::EffectTexture(
+            EffectTextureDescriptor::try_coverage(
+                PhysicalSize::new(8, 4),
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+            .unwrap()
+            .cache_key(),
+        ),
+        ResourceCacheKey::EffectTexture(
+            EffectTextureDescriptor::try_working(
+                WorkingFormat::HighPrecision,
+                PhysicalSize::new(8, 4),
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+            .unwrap()
+            .cache_key(),
+        ),
+        ResourceCacheKey::EffectTexture(
+            EffectTextureDescriptor::try_working(
+                WorkingFormat::ReducedPrecision,
+                PhysicalSize::new(8, 4),
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+            .unwrap()
+            .cache_key(),
+        ),
+        ResourceCacheKey::EffectTexture(
+            EffectTextureDescriptor::try_capture(
+                PhysicalSize::new(9, 4),
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+            .unwrap()
+            .cache_key(),
+        ),
+        ResourceCacheKey::EffectTexture(
+            EffectTextureDescriptor::try_capture(
+                PhysicalSize::new(8, 5),
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            )
+            .unwrap()
+            .cache_key(),
+        ),
+        ResourceCacheKey::EffectTexture(
+            EffectTextureDescriptor::try_capture(
+                PhysicalSize::new(8, 4),
+                wgpu::TextureUsages::COPY_DST,
+            )
+            .unwrap()
+            .cache_key(),
+        ),
+    ]);
+
+    assert_eq!(
+        keys.len(),
+        7,
+        "effect textures can alias across semantic roles"
+    );
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("effect texture allocation coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("effect texture allocation coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let capabilities = DeviceCapabilities::from_device(ready.adapter_for_test(), device);
+    let working_format = capabilities
+        .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)
+        .expect("the selected test device must support one effect working format");
+    let descriptor = EffectTextureDescriptor::try_working(
+        working_format,
+        PhysicalSize::new(3, 2),
+        working_format.required_usages(),
+    )
+    .unwrap();
+    let manager = ResourceManager::new(ResourceCacheBudget::new(1_024 * 1_024));
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first = first_frame
+        .acquire_effect_texture(device, &capabilities, descriptor)
+        .unwrap();
+    let first_identity = first.resource_identity();
+    let stale = first.token_for_test();
+    assert!(first_frame.effect_texture(&first).is_ok());
+    assert_eq!(
+        manager.observation_for_test().retained_bytes,
+        descriptor.byte_len()
+    );
+    first_frame.release(first).unwrap();
+    let first_cleanup = first_frame.finish();
+    assert!(first_cleanup.evicted_resources().is_empty());
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "validated effect texture creation emitted a WGPU validation error"
+    );
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let allocations_before_reuse = manager.stats().allocations;
+    let mut second_frame = manager.begin_frame().unwrap();
+    let reused = second_frame
+        .acquire_effect_texture(device, &capabilities, descriptor)
+        .unwrap();
+    assert_eq!(reused.resource_identity(), first_identity);
+    assert_eq!(manager.stats().allocations, allocations_before_reuse);
+    assert_eq!(manager.stats().hits, 1);
+    let stale_error = second_frame
+        .release_injected_for_test(stale)
+        .expect_err("an effect texture lease from the prior frame must be stale");
+    assert_eq!(stale_error.code(), ErrorCode::InvalidInput);
+
+    let coverage_descriptor = EffectTextureDescriptor::try_coverage(
+        PhysicalSize::new(3, 2),
+        wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST),
+    )
+    .unwrap();
+    let coverage = second_frame
+        .acquire_effect_texture(device, &capabilities, coverage_descriptor)
+        .unwrap();
+    assert_ne!(coverage.resource_identity(), first_identity);
+    let capture_descriptor = EffectTextureDescriptor::try_capture(
+        PhysicalSize::new(3, 2),
+        wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST),
+    )
+    .unwrap();
+    let capture = second_frame
+        .acquire_effect_texture(device, &capabilities, capture_descriptor)
+        .unwrap();
+    assert_ne!(capture.resource_identity(), first_identity);
+    assert_ne!(capture.resource_identity(), coverage.resource_identity());
+    assert_eq!(manager.stats().allocations, allocations_before_reuse + 2);
+    assert_eq!(
+        manager.observation_for_test().retained_bytes,
+        descriptor.byte_len() + coverage_descriptor.byte_len() + capture_descriptor.byte_len()
+    );
+    second_frame.release(capture).unwrap();
+    second_frame.release(coverage).unwrap();
+    second_frame.release(reused).unwrap();
+    let _ = second_frame.finish();
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "exact-key effect texture reuse emitted a WGPU validation error"
+    );
+
+    let stats_before_rejection = manager.stats();
+    let retained_before_rejection = manager.observation_for_test().retained_bytes;
+    let mut rejected_frame = manager.begin_frame().unwrap();
+    let over_limit = DeviceCapabilities::from_test_facts(true, true, 1);
+    let dimension_error = rejected_frame
+        .acquire_effect_texture(device, &over_limit, descriptor)
+        .expect_err("an over-limit effect texture must fail before allocation");
+    assert_eq!(
+        dimension_error.code(),
+        ErrorCode::RuntimeCapabilityUnavailable
+    );
+    assert_eq!(manager.stats(), stats_before_rejection);
+    assert_eq!(
+        manager.observation_for_test().retained_bytes,
+        retained_before_rejection
+    );
+
+    let unsupported = DeviceCapabilities::from_test_facts(false, false, u32::MAX);
+    let format_error = rejected_frame
+        .acquire_effect_texture(device, &unsupported, descriptor)
+        .expect_err("an unsupported effect format must fail before allocation");
+    assert_eq!(format_error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(manager.stats(), stats_before_rejection);
+    assert_eq!(
+        manager.observation_for_test().retained_bytes,
+        retained_before_rejection
+    );
+}
+
+#[test]
+fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
+    let image_id = ImageId::new(17);
+    let keys = std::collections::HashSet::from([
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
+            image_id,
+            PhysicalSize::new(8, 4),
+            ImageQuality::Medium,
+            Extend::Pad,
+        )),
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
+            ImageId::new(18),
+            PhysicalSize::new(8, 4),
+            ImageQuality::Medium,
+            Extend::Pad,
+        )),
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
+            image_id,
+            PhysicalSize::new(9, 4),
+            ImageQuality::Medium,
+            Extend::Pad,
+        )),
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
+            image_id,
+            PhysicalSize::new(8, 4),
+            ImageQuality::High,
+            Extend::Pad,
+        )),
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
+            image_id,
+            PhysicalSize::new(8, 4),
+            ImageQuality::Medium,
+            Extend::Reflect,
+        )),
+    ]);
+
+    assert_eq!(keys.len(), 5, "mask upload key omits semantic image facts");
+
+    let mask_bytes = vec![0, 0, 0, 255, 12, 34, 56, 128];
+    let mask_buffer = ImageBuffer::try_new(PhysicalSize::new(2, 1), mask_bytes.clone()).unwrap();
+    let descriptor = ResolvedMaskUploadDescriptor::from_resolved_alpha_mask(&mask_buffer).unwrap();
+    assert_eq!(descriptor.physical_size(), mask_buffer.size());
+    assert_eq!(descriptor.row_bytes(), 8);
+    assert_eq!(descriptor.byte_len(), 8);
+    assert_eq!(descriptor.bytes(), mask_bytes);
+    assert_eq!(descriptor.cache_key().image_id(), descriptor.image().id());
+    assert_eq!(
+        descriptor.cache_key().physical_size(),
+        PhysicalSize::new(2, 1)
+    );
+    assert_eq!(descriptor.cache_key().quality(), ImageQuality::Medium);
+    assert_eq!(descriptor.cache_key().extend(), Extend::Pad);
+    for invalid_len in [7, 9] {
+        let error = descriptor
+            .validate_upload_byte_len(invalid_len)
+            .expect_err("short and long resolved-mask uploads must be rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+    }
+
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_resolved_alpha_mask(mask_buffer.clone())
+            .unwrap(),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
+        },
+    );
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
+    let [command::RenderCommand::Layer { layer, .. }] = normalized.commands.as_slice() else {
+        panic!("the resolved-mask fixture must normalize to one layer command");
+    };
+    let normalized_mask = layer
+        .mask
+        .as_ref()
+        .expect("the normalized layer must retain its resolved alpha mask");
+    assert_eq!(normalized_mask.alpha_mask(), &mask_buffer);
+    assert_eq!(normalized_mask.upload().bytes(), mask_bytes);
+    assert_eq!(normalized_mask.upload().cache_key(), descriptor.cache_key());
+
+    let sampled_descriptor = ResolvedMaskUploadDescriptor::try_from_image(
+        descriptor
+            .image()
+            .clone()
+            .quality(ImageQuality::High)
+            .extend(Extend::Reflect),
+    )
+    .unwrap();
+    assert_eq!(sampled_descriptor.image().id(), descriptor.image().id());
+    assert_ne!(sampled_descriptor.cache_key(), descriptor.cache_key());
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("resolved-mask upload coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("resolved-mask upload coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let queue = ready.queue_for_test();
+    let capabilities = DeviceCapabilities::from_device(ready.adapter_for_test(), device);
+    let manager = ResourceManager::new(ResourceCacheBudget::new(1_024 * 1_024));
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first = first_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &descriptor)
+        .unwrap();
+    let first_identity = first.resource_identity();
+    assert!(first_frame.resolved_mask_texture(&first).is_ok());
+    assert_eq!(manager.observation_for_test().retained_bytes, 8);
+    first_frame.release(first).unwrap();
+    let _ = first_frame.finish();
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "validated resolved-mask upload emitted a WGPU validation error"
+    );
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let allocations_before_reuse = manager.stats().allocations;
+    let mut second_frame = manager.begin_frame().unwrap();
+    let reused = second_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &descriptor)
+        .unwrap();
+    assert_eq!(reused.resource_identity(), first_identity);
+    assert_eq!(manager.stats().allocations, allocations_before_reuse);
+    let differently_sampled = second_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &sampled_descriptor)
+        .unwrap();
+    assert_ne!(differently_sampled.resource_identity(), first_identity);
+    assert_eq!(manager.stats().allocations, allocations_before_reuse + 1);
+    assert_eq!(manager.observation_for_test().retained_bytes, 16);
+    second_frame.release(differently_sampled).unwrap();
+    second_frame.release(reused).unwrap();
+    let _ = second_frame.finish();
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "exact-key resolved-mask reuse emitted a WGPU validation error"
+    );
+
+    let stats_before_rejection = manager.stats();
+    let mut rejected_frame = manager.begin_frame().unwrap();
+    let over_limit = DeviceCapabilities::from_test_facts(true, true, 1);
+    let error = rejected_frame
+        .acquire_resolved_mask_upload(device, queue, &over_limit, &descriptor)
+        .expect_err("an over-limit mask upload must fail before texture allocation");
+    assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
+    assert_eq!(manager.stats(), stats_before_rejection);
+}
+
+#[test]
+fn gaussian_kernel_buffer_keys_include_the_exact_plan() {
+    let standard_deviation = 2.0_f64;
+    let raster_scale = 1.5_f64;
+    let support_multiple = 2.5_f64;
+    let keys = std::collections::HashSet::from([
+        ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
+            standard_deviation.to_bits(),
+            raster_scale.to_bits(),
+            support_multiple.to_bits(),
+            8,
+            GaussianKernelSamplingForm::PairedLinear,
+        )),
+        ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
+            f64::from_bits(standard_deviation.to_bits() + 1).to_bits(),
+            raster_scale.to_bits(),
+            support_multiple.to_bits(),
+            8,
+            GaussianKernelSamplingForm::PairedLinear,
+        )),
+        ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
+            standard_deviation.to_bits(),
+            f64::from_bits(raster_scale.to_bits() + 1).to_bits(),
+            support_multiple.to_bits(),
+            8,
+            GaussianKernelSamplingForm::PairedLinear,
+        )),
+        ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
+            standard_deviation.to_bits(),
+            raster_scale.to_bits(),
+            f64::from_bits(support_multiple.to_bits() + 1).to_bits(),
+            8,
+            GaussianKernelSamplingForm::PairedLinear,
+        )),
+        ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
+            standard_deviation.to_bits(),
+            raster_scale.to_bits(),
+            support_multiple.to_bits(),
+            9,
+            GaussianKernelSamplingForm::PairedLinear,
+        )),
+        ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
+            standard_deviation.to_bits(),
+            raster_scale.to_bits(),
+            support_multiple.to_bits(),
+            8,
+            GaussianKernelSamplingForm::FullNearest,
+        )),
+    ]);
+
+    assert_eq!(
+        keys.len(),
+        6,
+        "kernel buffer key omits exact planning facts"
+    );
+
+    let paired = GaussianKernelPlan::try_new(
+        standard_deviation,
+        raster_scale,
+        support_multiple,
+        GaussianKernelSamplingForm::PairedLinear,
+    )
+    .unwrap();
+    assert_eq!(
+        paired.key(),
+        GaussianKernelKey::from_exact_plan(
+            standard_deviation.to_bits(),
+            raster_scale.to_bits(),
+            support_multiple.to_bits(),
+            8,
+            GaussianKernelSamplingForm::PairedLinear,
+        )
+    );
+    assert_eq!(paired.upload_bytes().len() % 8, 0);
+    assert_eq!(paired.byte_len(), paired.upload_bytes().len() as u64);
+    for invalid_len in [
+        paired.upload_bytes().len() - 1,
+        paired.upload_bytes().len() + 1,
+    ] {
+        let error = paired
+            .validate_upload_byte_len(invalid_len)
+            .expect_err("short and long Gaussian uploads must be rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+    }
+    let weight_sum = paired
+        .upload_bytes()
+        .chunks_exact(8)
+        .map(|sample| f32::from_le_bytes(sample[4..8].try_into().unwrap()))
+        .sum::<f32>();
+    assert!((weight_sum - 1.0).abs() <= 1.0e-6);
+
+    let full = GaussianKernelPlan::try_new(
+        standard_deviation,
+        raster_scale,
+        support_multiple,
+        GaussianKernelSamplingForm::FullNearest,
+    )
+    .unwrap();
+    assert_ne!(paired.key(), full.key());
+    assert_ne!(paired.upload_bytes(), full.upload_bytes());
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("Gaussian kernel allocation coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("Gaussian kernel allocation coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let manager = ResourceManager::new(ResourceCacheBudget::new(1_024 * 1_024));
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first = first_frame
+        .acquire_gaussian_kernel_buffer(device, &paired)
+        .unwrap();
+    let first_identity = first.resource_identity();
+    assert_eq!(
+        first_frame.gaussian_kernel_buffer(&first).unwrap().usage(),
+        wgpu::BufferUsages::STORAGE,
+        "immutable kernel payloads must not retain a write usage"
+    );
+    assert_eq!(
+        manager.observation_for_test().retained_bytes,
+        paired.byte_len()
+    );
+    first_frame.release(first).unwrap();
+    let _ = first_frame.finish();
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "validated Gaussian kernel upload emitted a WGPU validation error"
+    );
+
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let allocations_before_reuse = manager.stats().allocations;
+    let mut second_frame = manager.begin_frame().unwrap();
+    let reused = second_frame
+        .acquire_gaussian_kernel_buffer(device, &paired)
+        .unwrap();
+    assert_eq!(reused.resource_identity(), first_identity);
+    assert_eq!(manager.stats().allocations, allocations_before_reuse);
+    let full_lease = second_frame
+        .acquire_gaussian_kernel_buffer(device, &full)
+        .unwrap();
+    assert_ne!(full_lease.resource_identity(), first_identity);
+    assert_eq!(manager.stats().allocations, allocations_before_reuse + 1);
+    assert_eq!(
+        manager.observation_for_test().retained_bytes,
+        paired.byte_len() + full.byte_len()
+    );
+    second_frame.release(full_lease).unwrap();
+    second_frame.release(reused).unwrap();
+    let _ = second_frame.finish();
+    assert!(
+        pollster::block_on(error_scope.pop()).is_none(),
+        "immutable Gaussian kernel reuse emitted a WGPU validation error"
+    );
 }
 
 #[test]

@@ -7,7 +7,10 @@ use super::{
     },
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
 };
-use std::{hash::Hasher, sync::Arc};
+use std::{
+    hash::{Hash, Hasher},
+    sync::Arc,
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ImageId(u64);
@@ -131,6 +134,69 @@ pub enum Extend {
     Reflect,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResolvedMaskUploadKey {
+    image_id: ImageId,
+    physical_size: PhysicalSize,
+    quality: ImageQuality,
+    extend: Extend,
+}
+
+impl ResolvedMaskUploadKey {
+    pub(crate) const fn new(
+        image_id: ImageId,
+        physical_size: PhysicalSize,
+        quality: ImageQuality,
+        extend: Extend,
+    ) -> Self {
+        Self {
+            image_id,
+            physical_size,
+            quality,
+            extend,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn image_id(self) -> ImageId {
+        self.image_id
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn physical_size(self) -> PhysicalSize {
+        self.physical_size
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn quality(self) -> ImageQuality {
+        self.quality
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn extend(self) -> Extend {
+        self.extend
+    }
+}
+
+impl Hash for ResolvedMaskUploadKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.image_id.hash(state);
+        self.physical_size.hash(state);
+        match self.quality {
+            ImageQuality::Low => 0_u8,
+            ImageQuality::Medium => 1,
+            ImageQuality::High => 2,
+        }
+        .hash(state);
+        match self.extend {
+            Extend::Pad => 0_u8,
+            Extend::Repeat => 1,
+            Extend::Reflect => 2,
+        }
+        .hash(state);
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ImageFit {
     Fill,
@@ -197,6 +263,118 @@ impl ImageBuffer {
     #[must_use]
     pub fn into_rgba(self) -> Vec<u8> {
         self.rgba
+    }
+}
+
+/// Backend-phase upload facts for one normalized resolved alpha mask.
+///
+/// The public mask remains an `ImageBuffer`; this private descriptor retains an
+/// `Image` so identity and sampling facts travel with the exact validated bytes.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedMaskUploadDescriptor {
+    image: Image,
+    physical_size: PhysicalSize,
+    row_bytes: u32,
+    byte_len: u64,
+}
+
+impl PartialEq for ResolvedMaskUploadDescriptor {
+    fn eq(&self, other: &Self) -> bool {
+        self.cache_key() == other.cache_key() && self.bytes() == other.bytes()
+    }
+}
+
+impl Eq for ResolvedMaskUploadDescriptor {}
+
+impl ResolvedMaskUploadDescriptor {
+    pub(crate) fn from_resolved_alpha_mask(alpha_mask: &ImageBuffer) -> Result<Self> {
+        let physical_size = alpha_mask.size();
+        let image = Image::from_rgba(
+            Size::new(
+                f64::from(physical_size.width()),
+                f64::from(physical_size.height()),
+            ),
+            Arc::<[u8]>::from(alpha_mask.rgba()),
+        )?;
+        Self::try_from_image(image)
+    }
+
+    pub(crate) fn try_from_image(image: Image) -> Result<Self> {
+        let width = image_dimension(image.size.width(), "width")?;
+        let height = image_dimension(image.size.height(), "height")?;
+        let physical_size = PhysicalSize::new(width, height);
+        let row_bytes = width.checked_mul(4).ok_or_else(|| {
+            Error::invalid_value(
+                "resolved mask upload row length",
+                width,
+                "must fit in u32 bytes",
+            )
+        })?;
+        let byte_len = u64::from(row_bytes)
+            .checked_mul(u64::from(height))
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "resolved mask upload byte length",
+                    format!("{row_bytes}x{height}"),
+                    "must fit in u64",
+                )
+            })?;
+        let descriptor = Self {
+            image,
+            physical_size,
+            row_bytes,
+            byte_len,
+        };
+        descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
+        Ok(descriptor)
+    }
+
+    pub(crate) fn validate_upload_byte_len(&self, actual_len: usize) -> Result<()> {
+        let actual_len = u64::try_from(actual_len).map_err(|_| {
+            Error::invalid_value(
+                "resolved mask upload byte length",
+                actual_len,
+                "must fit in u64",
+            )
+        })?;
+        if actual_len != self.byte_len {
+            return Err(Error::invalid_value(
+                "resolved mask upload byte length",
+                actual_len,
+                "must equal width multiplied by height multiplied by four",
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn image(&self) -> &Image {
+        &self.image
+    }
+
+    pub(crate) const fn physical_size(&self) -> PhysicalSize {
+        self.physical_size
+    }
+
+    pub(crate) const fn row_bytes(&self) -> u32 {
+        self.row_bytes
+    }
+
+    pub(crate) const fn byte_len(&self) -> u64 {
+        self.byte_len
+    }
+
+    pub(crate) fn bytes(&self) -> &[u8] {
+        &self.image.bytes
+    }
+
+    pub(crate) const fn cache_key(&self) -> ResolvedMaskUploadKey {
+        ResolvedMaskUploadKey::new(
+            self.image.id,
+            self.physical_size,
+            self.image.quality,
+            self.image.extend,
+        )
     }
 }
 

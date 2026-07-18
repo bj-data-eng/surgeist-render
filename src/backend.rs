@@ -388,22 +388,27 @@ impl DeviceState {
 pub(crate) struct DeviceCapabilities {
     high_precision: bool,
     reduced_precision: bool,
+    high_precision_features: wgpu::TextureFormatFeatures,
+    reduced_precision_features: wgpu::TextureFormatFeatures,
     max_effect_texture_dimension_2d: u32,
 }
 
 impl DeviceCapabilities {
-    fn from_device(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Self {
+    pub(crate) fn from_device(adapter: &wgpu::Adapter, device: &wgpu::Device) -> Self {
         let high_precision = WorkingFormat::HighPrecision;
         let reduced_precision = WorkingFormat::ReducedPrecision;
+        let high_precision_features =
+            adapter.get_texture_format_features(high_precision.texture_format());
+        let reduced_precision_features =
+            adapter.get_texture_format_features(reduced_precision.texture_format());
         Self {
-            high_precision: supports_effect_texture_format(
-                high_precision,
-                adapter.get_texture_format_features(high_precision.texture_format()),
-            ),
+            high_precision: supports_effect_texture_format(high_precision, high_precision_features),
             reduced_precision: supports_effect_texture_format(
                 reduced_precision,
-                adapter.get_texture_format_features(reduced_precision.texture_format()),
+                reduced_precision_features,
             ),
+            high_precision_features,
+            reduced_precision_features,
             max_effect_texture_dimension_2d: device.limits().max_texture_dimension_2d,
         }
     }
@@ -464,15 +469,86 @@ impl DeviceCapabilities {
         ))
     }
 
+    pub(crate) fn validate_effect_texture_allocation(
+        &self,
+        requested: PhysicalSize,
+        working_format: Option<WorkingFormat>,
+        texture_format: wgpu::TextureFormat,
+        usage: wgpu::TextureUsages,
+    ) -> Result<()> {
+        self.validate_effect_texture_extent(requested)?;
+        let (features, policy) = match texture_format {
+            wgpu::TextureFormat::Rgba16Float => (
+                self.high_precision_features,
+                EffectQualityPolicy::RequireHighPrecision,
+            ),
+            wgpu::TextureFormat::Rgba8Unorm => (
+                self.reduced_precision_features,
+                EffectQualityPolicy::AllowReducedPrecision,
+            ),
+            _ => {
+                return Err(Error::invalid_value(
+                    "effect texture format",
+                    format!("{texture_format:?}"),
+                    "must be Rgba16Float or Rgba8Unorm",
+                ));
+            }
+        };
+        if working_format.is_some_and(|format| format.texture_format() != texture_format) {
+            return Err(Error::invalid_value(
+                "effect working texture format",
+                format!("{working_format:?} as {texture_format:?}"),
+                "must use the underlying format selected by WorkingFormat",
+            ));
+        }
+        let complete_working_support = working_format.is_none_or(|format| {
+            format.is_supported_by(features)
+                && match format {
+                    WorkingFormat::HighPrecision => self.high_precision,
+                    WorkingFormat::ReducedPrecision => self.reduced_precision,
+                }
+        });
+        let exact_usage_support = features.allowed_usages.contains(usage);
+        let filterable_support = !usage.contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            || features
+                .flags
+                .contains(wgpu::TextureFormatFeatureFlags::FILTERABLE);
+        if complete_working_support && exact_usage_support && filterable_support {
+            return Ok(());
+        }
+
+        Err(Error::runtime_unavailable(
+            RuntimeOperation::EffectRendering,
+            RuntimeCapabilityUnavailableReason::EffectFormatUnavailable { policy },
+            format!(
+                "the selected GPU does not support {texture_format:?} with exact usage {usage:?}"
+            ),
+        ))
+    }
+
     #[cfg(test)]
-    pub(crate) const fn from_test_facts(
+    pub(crate) fn from_test_facts(
         high_precision: bool,
         reduced_precision: bool,
         max_effect_texture_dimension_2d: u32,
     ) -> Self {
+        let complete_features = |supported| wgpu::TextureFormatFeatures {
+            allowed_usages: if supported {
+                WorkingFormat::HighPrecision.required_usages()
+            } else {
+                wgpu::TextureUsages::empty()
+            },
+            flags: if supported {
+                wgpu::TextureFormatFeatureFlags::FILTERABLE
+            } else {
+                wgpu::TextureFormatFeatureFlags::empty()
+            },
+        };
         Self {
             high_precision,
             reduced_precision,
+            high_precision_features: complete_features(high_precision),
+            reduced_precision_features: complete_features(reduced_precision),
             max_effect_texture_dimension_2d,
         }
     }

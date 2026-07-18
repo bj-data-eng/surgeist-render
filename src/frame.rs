@@ -10,6 +10,7 @@ use super::{
         FilterRegionPlan, FilterSourceBounds,
     },
     geometry::{PhysicalSize, Point, Rect, Size, Transform},
+    image::ResolvedMaskUploadDescriptor,
     paint::Color,
     renderer::Antialiasing,
     style::{FilterBlur, FilterDropShadow, FilterList},
@@ -1525,12 +1526,14 @@ struct SemanticBackdropRead {
     completed_parent: SemanticResourceId,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 enum SemanticImportKind {
-    ResolvedAlphaMask { physical_size: PhysicalSize },
+    ResolvedAlphaMask {
+        upload: ResolvedMaskUploadDescriptor,
+    },
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 struct SemanticImportPlan {
     resource: SemanticResourceId,
     kind: SemanticImportKind,
@@ -2815,7 +2818,6 @@ impl SemanticFrameGraphPlanner {
         mask: &RenderLayerMask,
         spatial: NonEmptyFrameSpatialPlan,
     ) -> Result<PlannedGraphResource> {
-        let physical_size = mask.alpha_mask().size();
         let resource = graph_build(
             self.builder
                 .import_resource(SemanticResourceDescriptor::new(
@@ -2826,7 +2828,9 @@ impl SemanticFrameGraphPlanner {
         )?;
         self.imports.push(SemanticImportPlan {
             resource,
-            kind: SemanticImportKind::ResolvedAlphaMask { physical_size },
+            kind: SemanticImportKind::ResolvedAlphaMask {
+                upload: mask.upload().clone(),
+            },
         });
         Ok(PlannedGraphResource {
             id: resource,
@@ -4612,7 +4616,7 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
     let resolved_alpha_mask_device_extents = graph
         .imports
         .iter()
-        .filter_map(|import| match import.kind {
+        .filter_map(|import| match &import.kind {
             SemanticImportKind::ResolvedAlphaMask { .. } => graph
                 .resources
                 .iter()
