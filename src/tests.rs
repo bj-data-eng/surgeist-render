@@ -39,15 +39,16 @@ use super::{
         MaterializedDropShadowOffsetQuantizationPolicy, PremultipliedRgba8,
         ReferencePremultipliedRgba8Buffer,
     },
-    resource::WorkingFormat,
+    resource::{
+        AllocationGeneration, ResourceCacheKey, ResourceIdentity, ResourceManager, WorkingFormat,
+    },
     shader::{
         RectPassBounds, RectShaderPassDescriptor, RectShaderPassExecution, RectShaderPassKind,
         RectShaderPipelineKey, encode_clear_fill_pass,
     },
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
-        OffscreenTextureCache, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
-        headless_texture_descriptor,
+        TextureCacheKey, TextureDescriptor, TextureUsageIntent, headless_texture_descriptor,
     },
 };
 
@@ -4053,11 +4054,33 @@ fn options_default_requires_high_precision_and_bounds_retention() {
 #[test]
 fn resource_cache_budget_zero_disables_idle_retention() {
     let disabled = ResourceCacheBudget::new(0);
+    let descriptor = TextureDescriptor::try_new(
+        PhysicalSize::new(1, 1),
+        Format::Rgba8,
+        TextureUsageIntent::OffscreenLayer,
+    )
+    .unwrap();
+    let manager = ResourceManager::new(disabled);
+    let mut frame = manager.begin_frame().unwrap();
+    let lease = frame
+        .acquire(
+            ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor)),
+            descriptor.byte_len(),
+        )
+        .unwrap();
+    frame.release(lease).unwrap();
+    let cleanup = frame.finish();
 
     assert_eq!(disabled, ResourceCacheBudget::DISABLED);
     assert_eq!(disabled.bytes(), 0);
     assert_eq!(ResourceCacheBudget::default(), ResourceCacheBudget::DEFAULT);
     assert_eq!(ResourceCacheBudget::DEFAULT.bytes(), 64 * 1024 * 1024);
+    assert_eq!(
+        manager.retained_count(),
+        0,
+        "zero budget retained an idle byte-accounted resource"
+    );
+    assert_eq!(cleanup.evicted_resources().len(), 1);
 }
 
 #[test]
@@ -6727,22 +6750,217 @@ fn texture_cache_records_misses_reuse_hits_and_live_count() {
         TextureUsageIntent::OffscreenLayer,
     )
     .unwrap();
-    let mut cache = OffscreenTextureCache::new();
+    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let manager = ResourceManager::default();
 
-    let first = cache.acquire(descriptor).unwrap();
-    assert_eq!(cache.stats().allocations, 1);
-    assert_eq!(cache.stats().misses, 1);
-    assert_eq!(cache.stats().hits, 0);
-    assert_eq!(cache.live_count(), 1);
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    assert_eq!(manager.stats().allocations, 1);
+    assert_eq!(manager.stats().misses, 1);
+    assert_eq!(manager.stats().hits, 0);
+    assert_eq!(manager.live_count(), 1);
 
-    cache.release(first).unwrap();
-    let second = cache.acquire(descriptor).unwrap();
+    first_frame.release(first).unwrap();
+    let _ = first_frame.finish();
+    let mut second_frame = manager.begin_frame().unwrap();
+    let _second = second_frame.acquire(key, descriptor.byte_len()).unwrap();
 
-    assert_eq!(second.descriptor(), descriptor);
-    assert_eq!(cache.stats().allocations, 1);
-    assert_eq!(cache.stats().misses, 1);
-    assert_eq!(cache.stats().hits, 1);
-    assert_eq!(cache.live_count(), 1);
+    assert_eq!(manager.stats().allocations, 1);
+    assert_eq!(manager.stats().misses, 1);
+    assert_eq!(manager.stats().hits, 1);
+    assert_eq!(manager.live_count(), 1);
+}
+
+#[test]
+fn resource_leases_reject_stale_generation_and_double_release_by_model() {
+    let manager = ResourceManager::default();
+    let foreign_manager = ResourceManager::default();
+    let mut frame = manager.begin_frame().unwrap();
+    let foreign_manager_frame = foreign_manager.begin_frame().unwrap();
+    let foreign_frame = manager.begin_frame().unwrap();
+    let lease = frame.acquire(ResourceCacheKey::VelloAtlas, 4).unwrap();
+    let stale = lease.token_for_test();
+
+    assert_eq!(stale.manager_identity, frame.manager_identity_for_test());
+    assert_eq!(stale.frame_identity, frame.frame_identity_for_test());
+    assert_eq!(stale.resource_identity, lease.resource_identity());
+    assert_eq!(stale.allocation_generation.get_for_test(), 1);
+
+    let current = frame
+        .replace(lease, ResourceCacheKey::CaptureTexture, 8)
+        .unwrap();
+    let current_token = current.token_for_test();
+    let replay_after_release = current_token.clone();
+    assert_eq!(current_token.resource_identity, stale.resource_identity);
+    assert!(
+        current_token.allocation_generation.get_for_test()
+            > stale.allocation_generation.get_for_test(),
+        "replacement allocation generation must advance monotonically"
+    );
+
+    let before_rejections = manager.observation_for_test();
+    let stale_error = frame
+        .release_injected_for_test(stale)
+        .expect_err("a stale allocation generation must be rejected");
+
+    let mut foreign_manager_token = current_token.clone();
+    foreign_manager_token.manager_identity = foreign_manager_frame.manager_identity_for_test();
+    let foreign_manager_error = frame
+        .release_injected_for_test(foreign_manager_token)
+        .expect_err("a foreign manager identity must be rejected");
+
+    let mut foreign_frame_token = current_token.clone();
+    foreign_frame_token.frame_identity = foreign_frame.frame_identity_for_test();
+    let foreign_frame_error = frame
+        .release_injected_for_test(foreign_frame_token)
+        .expect_err("a foreign frame identity must be rejected");
+
+    let mut foreign_resource_token = current_token.clone();
+    foreign_resource_token.resource_identity = ResourceIdentity::from_raw_for_test(u64::MAX);
+    let foreign_resource_error = frame
+        .release_injected_for_test(foreign_resource_token)
+        .expect_err("a foreign resource identity must be rejected");
+
+    let mut foreign_allocation_token = current_token;
+    foreign_allocation_token.allocation_generation =
+        AllocationGeneration::from_raw_for_test(u64::MAX);
+    let foreign_allocation_error = frame
+        .release_injected_for_test(foreign_allocation_token)
+        .expect_err("a foreign allocation generation must be rejected");
+
+    for error in [
+        stale_error,
+        foreign_manager_error,
+        foreign_frame_error,
+        foreign_resource_error,
+        foreign_allocation_error,
+    ] {
+        assert_eq!(error.code(), ErrorCode::InvalidInput);
+    }
+    assert_eq!(manager.observation_for_test(), before_rejections);
+
+    // The production operation consumes this non-Clone lease. A second release
+    // cannot be expressed without the explicitly test-only injected token path.
+    frame.release(current).unwrap();
+    let releases_after_production_release = manager.stats().releases;
+    let replay_error = frame
+        .release_injected_for_test(replay_after_release)
+        .expect_err("an injected replay of a consumed lease must be rejected");
+    assert_eq!(replay_error.code(), ErrorCode::InvalidInput);
+    assert_eq!(manager.stats().releases, releases_after_production_release);
+    let _ = frame.finish();
+    assert_eq!(manager.observation_for_test().idle_count, 1);
+}
+
+#[test]
+fn resource_trim_order_is_last_used_then_resource_identity() {
+    let manager = ResourceManager::new(ResourceCacheBudget::new(4));
+    let mut older_frame = manager.begin_frame().unwrap();
+    let older = older_frame
+        .acquire(ResourceCacheKey::VelloAtlas, 4)
+        .unwrap();
+    let older_identity = older.resource_identity();
+    older_frame.release(older).unwrap();
+    assert!(older_frame.finish().evicted_resources().is_empty());
+
+    let mut current_frame = manager.begin_frame().unwrap();
+    let first_equal_age = current_frame
+        .acquire(ResourceCacheKey::CaptureTexture, 4)
+        .unwrap();
+    let second_equal_age = current_frame
+        .acquire(ResourceCacheKey::WorkingTexture, 4)
+        .unwrap();
+    let first_equal_age_identity = first_equal_age.resource_identity();
+    let second_equal_age_identity = second_equal_age.resource_identity();
+    let active_cleanup = current_frame.trim_idle_for_test();
+    let mut evicted_resources = active_cleanup.evicted_resources().to_vec();
+    assert_eq!(evicted_resources, &[older_identity]);
+    assert_eq!(manager.observation_for_test().leased_count, 2);
+    assert_eq!(manager.observation_for_test().retained_bytes, 8);
+    current_frame.release(second_equal_age).unwrap();
+    current_frame.release(first_equal_age).unwrap();
+    let cleanup = current_frame.finish();
+    evicted_resources.extend_from_slice(cleanup.evicted_resources());
+
+    assert_eq!(
+        evicted_resources,
+        &[older_identity, first_equal_age_identity],
+        "idle trim order is not deterministic"
+    );
+    assert_eq!(manager.retained_count(), 1);
+    assert_eq!(manager.observation_for_test().retained_bytes, 4);
+    assert_eq!(second_equal_age_identity.get(), 3);
+}
+
+#[test]
+fn resource_frame_scope_cleanup_covers_success_error_and_cancellation() {
+    let success_manager = ResourceManager::default();
+    let mut success_scope = success_manager.begin_frame().unwrap();
+    let _success_lease = success_scope
+        .acquire(ResourceCacheKey::CaptureTexture, 4)
+        .unwrap();
+    let _ = success_scope.finish();
+    assert_eq!(success_manager.observation_for_test().idle_count, 1);
+    assert_eq!(success_manager.observation_for_test().leased_count, 0);
+
+    let error_manager = ResourceManager::default();
+    let error_result: Result<()> = (|| {
+        let mut error_scope = error_manager.begin_frame()?;
+        let _error_lease = error_scope.acquire(ResourceCacheKey::WorkingTexture, 8)?;
+        Err(Error::invalid_value(
+            "resource frame fixture",
+            "error",
+            "must exercise scope-owned error cleanup",
+        ))
+    })();
+    assert_eq!(error_result.unwrap_err().code(), ErrorCode::InvalidInput);
+    assert_eq!(error_manager.observation_for_test().idle_count, 1);
+    assert_eq!(error_manager.observation_for_test().leased_count, 0);
+
+    let cancellation_manager = ResourceManager::default();
+    let mut canceled_scope = cancellation_manager.begin_frame().unwrap();
+    let _canceled_lease = canceled_scope
+        .acquire(ResourceCacheKey::CoverageTexture, 16)
+        .unwrap();
+    drop(canceled_scope);
+    assert_eq!(cancellation_manager.observation_for_test().idle_count, 1);
+    assert_eq!(cancellation_manager.observation_for_test().leased_count, 0);
+}
+
+#[test]
+fn resource_byte_accounting_overflow_is_typed() {
+    let manager = ResourceManager::default();
+    let mut first_frame = manager.begin_frame().unwrap();
+    let _maximum = first_frame
+        .acquire(ResourceCacheKey::VelloAtlas, u64::MAX)
+        .unwrap();
+    let mut second_frame = manager.begin_frame().unwrap();
+
+    let error = second_frame
+        .acquire(ResourceCacheKey::GaussianKernelBuffer, 1)
+        .expect_err("retained resource byte overflow must be rejected");
+
+    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("retained resource byte length")
+    );
+    assert_eq!(manager.observation_for_test().retained_bytes, u64::MAX);
+    assert_eq!(manager.observation_for_test().leased_count, 1);
+}
+
+#[test]
+fn resource_role_keys_keep_allocation_namespaces_distinct() {
+    let keys = std::collections::HashSet::from([
+        ResourceCacheKey::VelloAtlas,
+        ResourceCacheKey::CaptureTexture,
+        ResourceCacheKey::WorkingTexture,
+        ResourceCacheKey::CoverageTexture,
+        ResourceCacheKey::ResolvedMaskUpload,
+        ResourceCacheKey::GaussianKernelBuffer,
+    ]);
+
+    assert_eq!(keys.len(), 6);
 }
 
 #[test]
@@ -6753,17 +6971,22 @@ fn texture_cache_release_and_eviction_accounting_is_deterministic() {
         TextureUsageIntent::IntermediatePass,
     )
     .unwrap();
-    let mut cache = OffscreenTextureCache::new();
+    let manager = ResourceManager::new(ResourceCacheBudget::DISABLED);
+    let mut frame = manager.begin_frame().unwrap();
+    let lease = frame
+        .acquire(
+            ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor)),
+            descriptor.byte_len(),
+        )
+        .unwrap();
+    frame.release(lease).unwrap();
+    let cleanup = frame.finish();
 
-    let handle = cache.acquire(descriptor).unwrap();
-    cache.release(handle).unwrap();
-    let evicted = cache.evict_released();
-
-    assert_eq!(evicted, 1);
-    assert_eq!(cache.live_count(), 0);
-    assert_eq!(cache.retained_count(), 0);
-    assert_eq!(cache.stats().releases, 1);
-    assert_eq!(cache.stats().evictions, 1);
+    assert_eq!(cleanup.evicted_resources().len(), 1);
+    assert_eq!(manager.live_count(), 0);
+    assert_eq!(manager.retained_count(), 0);
+    assert_eq!(manager.stats().releases, 1);
+    assert_eq!(manager.stats().evictions, 1);
 }
 
 #[test]
@@ -6774,20 +6997,24 @@ fn texture_cache_rejects_stale_handle_after_reuse() {
         TextureUsageIntent::OffscreenLayer,
     )
     .unwrap();
-    let mut cache = OffscreenTextureCache::new();
-
-    let stale = cache.acquire(descriptor).unwrap();
-    cache.release(stale).unwrap();
-    let current = cache.acquire(descriptor).unwrap();
-    let error = cache
-        .release(stale)
-        .expect_err("stale handles must not release a new lease");
+    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let manager = ResourceManager::default();
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let stale = first.token_for_test();
+    first_frame.release(first).unwrap();
+    let _ = first_frame.finish();
+    let mut second_frame = manager.begin_frame().unwrap();
+    let current = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let error = second_frame
+        .release_injected_for_test(stale)
+        .expect_err("stale frame leases must not release a new lease");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(cache.live_count(), 1);
-    assert_eq!(cache.stats().releases, 1);
-    cache.release(current).unwrap();
-    assert_eq!(cache.stats().releases, 2);
+    assert_eq!(manager.live_count(), 1);
+    assert_eq!(manager.stats().releases, 1);
+    second_frame.release(current).unwrap();
+    assert_eq!(manager.stats().releases, 2);
 }
 
 #[test]
@@ -6798,20 +7025,23 @@ fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
         TextureUsageIntent::IntermediatePass,
     )
     .unwrap();
-    let mut first_cache = OffscreenTextureCache::new();
-    let mut second_cache = OffscreenTextureCache::new();
+    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let first_manager = ResourceManager::default();
+    let second_manager = ResourceManager::default();
+    let mut first_frame = first_manager.begin_frame().unwrap();
+    let mut second_frame = second_manager.begin_frame().unwrap();
 
-    let foreign = first_cache.acquire(descriptor).unwrap();
-    let local = second_cache.acquire(descriptor).unwrap();
-    let error = second_cache
+    let foreign = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let local = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let error = second_frame
         .release(foreign)
         .expect_err("foreign handles must not release matching local entries");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(second_cache.live_count(), 1);
-    assert_eq!(second_cache.stats().releases, 0);
-    second_cache.release(local).unwrap();
-    assert_eq!(second_cache.stats().releases, 1);
+    assert_eq!(second_manager.live_count(), 1);
+    assert_eq!(second_manager.stats().releases, 0);
+    second_frame.release(local).unwrap();
+    assert_eq!(second_manager.stats().releases, 1);
 }
 
 #[test]
@@ -6822,20 +7052,23 @@ fn texture_cache_default_construction_rejects_same_descriptor_foreign_release() 
         TextureUsageIntent::OffscreenLayer,
     )
     .unwrap();
-    let mut first_cache = OffscreenTextureCache::default();
-    let mut second_cache = OffscreenTextureCache::default();
+    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let first_manager = ResourceManager::default();
+    let second_manager = ResourceManager::default();
+    let mut first_frame = first_manager.begin_frame().unwrap();
+    let mut second_frame = second_manager.begin_frame().unwrap();
 
-    let foreign = first_cache.acquire(descriptor).unwrap();
-    let local = second_cache.acquire(descriptor).unwrap();
-    let error = second_cache
+    let foreign = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let local = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let error = second_frame
         .release(foreign)
         .expect_err("default-constructed caches must still have unique identities");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(second_cache.live_count(), 1);
-    assert_eq!(second_cache.stats().releases, 0);
-    second_cache.release(local).unwrap();
-    assert_eq!(second_cache.stats().releases, 1);
+    assert_eq!(second_manager.live_count(), 1);
+    assert_eq!(second_manager.stats().releases, 0);
+    second_frame.release(local).unwrap();
+    assert_eq!(second_manager.stats().releases, 1);
 }
 
 #[test]
@@ -6893,17 +7126,21 @@ fn texture_lifecycle_accounting_is_separate_from_image_cache_stats() {
         TextureUsageIntent::OffscreenLayer,
     )
     .unwrap();
-    let mut cache = OffscreenTextureCache::new();
-    let handle = cache.acquire(descriptor).unwrap();
-    cache.release(handle).unwrap();
-    let _ = cache.acquire(descriptor).unwrap();
+    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let manager = ResourceManager::default();
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    first_frame.release(first).unwrap();
+    let _ = first_frame.finish();
+    let mut second_frame = manager.begin_frame().unwrap();
+    let _second = second_frame.acquire(key, descriptor.byte_len()).unwrap();
 
     assert_eq!(image_stats.images, 2);
     assert_eq!(image_stats.cache_misses, 1);
     assert_eq!(image_stats.cache_hits, 1);
     assert_eq!(image_stats.uploaded_bytes, 4);
-    assert_eq!(cache.stats().misses, 1);
-    assert_eq!(cache.stats().hits, 1);
+    assert_eq!(manager.stats().misses, 1);
+    assert_eq!(manager.stats().hits, 1);
 }
 
 #[test]
@@ -7565,12 +7802,12 @@ fn offscreen_no_allocation_when_layer_isolation_is_unnecessary() {
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[0] else {
         panic!("expected layer command");
     };
-    let cache = OffscreenTextureCache::new();
+    let manager = ResourceManager::default();
 
     assert_eq!(layer.pass_plan.kind(), command::LayerPassKind::None);
     assert!(!layer.pass_plan.requires_offscreen_texture());
-    assert_eq!(cache.stats().allocations, 0);
-    assert_eq!(cache.live_count(), 0);
+    assert_eq!(manager.stats().allocations, 0);
+    assert_eq!(manager.live_count(), 0);
 }
 
 #[test]
@@ -7669,23 +7906,30 @@ fn sequence9_guardrail_texture_lifecycle_is_deterministic_for_nested_layer_bound
     let inner_bounds = command::OffscreenBounds::try_new(Rect::new(2.0, 1.0, 3.0, 2.0)).unwrap();
     let outer = offscreen_local_scene_texture_descriptor(outer_bounds, 1.0, Format::Rgba8).unwrap();
     let inner = offscreen_local_scene_texture_descriptor(inner_bounds, 1.0, Format::Rgba8).unwrap();
-    let mut cache = OffscreenTextureCache::new();
+    let outer_key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(outer));
+    let inner_key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(inner));
+    let manager = ResourceManager::default();
 
-    let outer_first = cache.acquire(outer).unwrap();
-    let inner_first = cache.acquire(inner).unwrap();
-    cache.release(inner_first).unwrap();
-    cache.release(outer_first).unwrap();
-    let outer_second = cache.acquire(outer).unwrap();
-    let inner_second = cache.acquire(inner).unwrap();
+    let mut first_frame = manager.begin_frame().unwrap();
+    let outer_first = first_frame.acquire(outer_key, outer.byte_len()).unwrap();
+    let inner_first = first_frame.acquire(inner_key, inner.byte_len()).unwrap();
+    let outer_identity = outer_first.resource_identity();
+    let inner_identity = inner_first.resource_identity();
+    first_frame.release(inner_first).unwrap();
+    first_frame.release(outer_first).unwrap();
+    let _ = first_frame.finish();
+    let mut second_frame = manager.begin_frame().unwrap();
+    let outer_second = second_frame.acquire(outer_key, outer.byte_len()).unwrap();
+    let inner_second = second_frame.acquire(inner_key, inner.byte_len()).unwrap();
 
-    assert_eq!(outer_second.descriptor(), outer);
-    assert_eq!(inner_second.descriptor(), inner);
-    assert_eq!(cache.stats().allocations, 2);
-    assert_eq!(cache.stats().misses, 2);
-    assert_eq!(cache.stats().hits, 2);
-    assert_eq!(cache.stats().releases, 2);
-    assert_eq!(cache.live_count(), 2);
-    assert_eq!(cache.retained_count(), 2);
+    assert_eq!(outer_second.resource_identity(), outer_identity);
+    assert_eq!(inner_second.resource_identity(), inner_identity);
+    assert_eq!(manager.stats().allocations, 2);
+    assert_eq!(manager.stats().misses, 2);
+    assert_eq!(manager.stats().hits, 2);
+    assert_eq!(manager.stats().releases, 2);
+    assert_eq!(manager.live_count(), 2);
+    assert_eq!(manager.retained_count(), 2);
 }
 
 #[test]

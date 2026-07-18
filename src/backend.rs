@@ -2,7 +2,10 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
-use super::resource::WorkingFormat;
+use super::resource::{
+    FrameCleanup, FrameResourceScope, ResourceCacheKey, ResourceIdentity, ResourceLease,
+    ResourceLifecycleStats, ResourceManager, WorkingFormat,
+};
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(any(
     feature = "render-window",
@@ -26,8 +29,7 @@ use super::{
     geometry::physical_size,
     gpu_transaction::{GpuOperationStage, GpuOperationTransaction, InternalVelloPayload},
     texture::{
-        OffscreenTextureCache, OffscreenTextureHandle, TextureCacheKey, TextureDescriptor,
-        TextureLifecycleStats, TextureUsageIntent, headless_texture_descriptor,
+        TextureCacheKey, TextureDescriptor, TextureUsageIntent, headless_texture_descriptor,
     },
 };
 use std::{
@@ -1692,8 +1694,7 @@ impl OffscreenLocalSceneRenderRequest {
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OffscreenRenderTarget {
-    handle: OffscreenTextureHandle,
-    resource_id: u64,
+    resource_identity: ResourceIdentity,
     bounds: OffscreenBounds,
     descriptor: TextureDescriptor,
 }
@@ -1701,27 +1702,20 @@ pub(crate) struct OffscreenRenderTarget {
 #[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenRenderTarget {
     fn new(
-        handle: OffscreenTextureHandle,
-        resource_id: u64,
+        resource_identity: ResourceIdentity,
         bounds: OffscreenBounds,
         descriptor: TextureDescriptor,
     ) -> Self {
         Self {
-            handle,
-            resource_id,
+            resource_identity,
             bounds,
             descriptor,
         }
     }
 
     #[must_use]
-    pub(crate) const fn handle(self) -> OffscreenTextureHandle {
-        self.handle
-    }
-
-    #[must_use]
     pub(crate) const fn resource_id(self) -> u64 {
-        self.resource_id
+        self.resource_identity.get()
     }
 
     #[must_use]
@@ -1736,25 +1730,23 @@ impl OffscreenRenderTarget {
 }
 
 struct OffscreenTextureResource {
-    resource_id: u64,
+    resource_identity: ResourceIdentity,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) struct OffscreenTextureResourceCache {
-    lifecycle: OffscreenTextureCache,
+    lifecycle: ResourceManager,
     released_by_key: HashMap<TextureCacheKey, VecDeque<OffscreenTextureResource>>,
-    next_resource_id: u64,
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
 impl OffscreenTextureResourceCache {
     pub(crate) fn new() -> Self {
         Self {
-            lifecycle: OffscreenTextureCache::new(),
+            lifecycle: ResourceManager::default(),
             released_by_key: HashMap::new(),
-            next_resource_id: 0,
         }
     }
 
@@ -1768,17 +1760,26 @@ impl OffscreenTextureResourceCache {
         record_offscreen_texture_acquire_for_test();
         let key = TextureCacheKey::from_descriptor(descriptor);
         let stats_before = self.lifecycle.stats();
-        let handle = self.lifecycle.acquire(descriptor)?;
+        let mut frame_scope = self.lifecycle.begin_frame()?;
+        let lease = frame_scope.acquire(
+            ResourceCacheKey::transitional_texture(key),
+            descriptor.byte_len(),
+        )?;
+        let resource_identity = lease.resource_identity();
+        let lifecycle = ScopedOffscreenLifecycleLease::new(frame_scope, lease);
         let reused = self.lifecycle.stats().hits > stats_before.hits;
         let resource = if reused {
-            match self
-                .released_by_key
-                .get_mut(&key)
-                .and_then(VecDeque::pop_front)
-            {
+            let released = self.released_by_key.get_mut(&key);
+            let resource = released.and_then(|resources| {
+                resources
+                    .iter()
+                    .position(|resource| resource.resource_identity == resource_identity)
+                    .and_then(|position| resources.remove(position))
+            });
+            match resource {
                 Some(resource) => resource,
                 None => {
-                    let _ = self.lifecycle.release(handle);
+                    drop(lifecycle);
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "offscreen texture resource cache lost a released GPU resource",
@@ -1786,50 +1787,60 @@ impl OffscreenTextureResourceCache {
                 }
             }
         } else {
-            self.next_resource_id = self.next_resource_id.checked_add(1).ok_or_else(|| {
-                Error::invalid_value(
-                    "offscreen texture resource id",
-                    self.next_resource_id,
-                    "must have remaining resource id space",
-                )
-            })?;
             let (texture, view) =
                 create_texture(device, "Surgeist offscreen local scene target", descriptor);
             OffscreenTextureResource {
-                resource_id: self.next_resource_id,
+                resource_identity,
                 texture,
                 view,
             }
         };
+        debug_assert_eq!(resource.resource_identity, resource_identity);
         Ok(OffscreenTextureResourceLease {
-            target: OffscreenRenderTarget::new(handle, resource.resource_id, bounds, descriptor),
+            target: OffscreenRenderTarget::new(resource_identity, bounds, descriptor),
             texture: resource.texture,
             view: resource.view,
+            lifecycle,
         })
     }
 
     fn release_resource(&mut self, resource: OffscreenTextureResourceLease) -> Result<()> {
-        self.lifecycle.release(resource.target.handle())?;
+        let OffscreenTextureResourceLease {
+            target,
+            texture,
+            view,
+            lifecycle,
+        } = resource;
+        let cleanup = lifecycle.release()?;
         self.released_by_key
-            .entry(TextureCacheKey::from_descriptor(
-                resource.target.descriptor(),
-            ))
+            .entry(TextureCacheKey::from_descriptor(target.descriptor()))
             .or_default()
             .push_back(OffscreenTextureResource {
-                resource_id: resource.target.resource_id(),
-                texture: resource.texture,
-                view: resource.view,
+                resource_identity: target.resource_identity,
+                texture,
+                view,
             });
+        self.remove_evicted_resources(&cleanup);
         Ok(())
     }
 
+    fn remove_evicted_resources(&mut self, cleanup: &FrameCleanup) {
+        for resources in self.released_by_key.values_mut() {
+            resources.retain(|resource| {
+                !cleanup
+                    .evicted_resources()
+                    .contains(&resource.resource_identity)
+            });
+        }
+    }
+
     #[must_use]
-    pub(crate) const fn stats(&self) -> TextureLifecycleStats {
+    pub(crate) fn stats(&self) -> ResourceLifecycleStats {
         self.lifecycle.stats()
     }
 
     #[must_use]
-    pub(crate) const fn live_count(&self) -> usize {
+    pub(crate) fn live_count(&self) -> usize {
         self.lifecycle.live_count()
     }
 
@@ -1849,6 +1860,50 @@ struct OffscreenTextureResourceLease {
     target: OffscreenRenderTarget,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    lifecycle: ScopedOffscreenLifecycleLease,
+}
+
+struct ScopedOffscreenLifecycleLease {
+    frame_scope: Option<FrameResourceScope>,
+    lease: Option<ResourceLease>,
+}
+
+impl ScopedOffscreenLifecycleLease {
+    fn new(frame_scope: FrameResourceScope, lease: ResourceLease) -> Self {
+        Self {
+            frame_scope: Some(frame_scope),
+            lease: Some(lease),
+        }
+    }
+
+    fn release(mut self) -> Result<FrameCleanup> {
+        let mut frame_scope = self
+            .frame_scope
+            .take()
+            .expect("an unresolved offscreen lifecycle lease must own its frame scope");
+        let lease = self
+            .lease
+            .take()
+            .expect("an unresolved offscreen lifecycle lease must own its resource lease");
+        frame_scope.release(lease)?;
+        Ok(frame_scope.finish())
+    }
+
+    fn discard(&mut self) {
+        let Some(mut frame_scope) = self.frame_scope.take() else {
+            return;
+        };
+        if let Some(lease) = self.lease.take() {
+            let _ = frame_scope.discard(lease);
+        }
+        let _ = frame_scope.finish();
+    }
+}
+
+impl Drop for ScopedOffscreenLifecycleLease {
+    fn drop(&mut self) {
+        self.discard();
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -1857,6 +1912,7 @@ pub(crate) struct OffscreenRenderedTextureLease {
     target: OffscreenRenderTarget,
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    lifecycle: ScopedOffscreenLifecycleLease,
     timings: RenderTimings,
 }
 
@@ -1897,6 +1953,7 @@ impl OffscreenRenderedTextureLease {
             target: self.target,
             texture: self.texture,
             view: self.view,
+            lifecycle: self.lifecycle,
         })
     }
 }
@@ -1995,6 +2052,7 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
         target: resource.target,
         texture: resource.texture,
         view: resource.view,
+        lifecycle: resource.lifecycle,
         timings: RenderTimings {
             render_time: render_start.elapsed(),
             present_time: Duration::ZERO,
