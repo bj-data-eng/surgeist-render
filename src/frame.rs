@@ -301,6 +301,24 @@ impl FramePlan {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn forced_c08_graph_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+) -> Result<GpuRenderGraph> {
+    let output_spatial = match context.output_spatial_plan()? {
+        FrameSpatialPlan::NonEmpty(spatial) => spatial,
+        FrameSpatialPlan::Empty(_) => {
+            return Err(Error::invalid_value(
+                "forced C08 graph output bounds",
+                "empty",
+                "must be non-empty before the private graph fixture is planned",
+            ));
+        }
+    };
+    SemanticFrameGraphPlanner::build(commands, context, output_spatial, Vec::new())
+}
+
 fn graph_selection_requirements(commands: &[RenderCommand]) -> Vec<GraphSelectionRequirement> {
     let mut requirements = Vec::new();
     collect_graph_selection_requirements(commands, &mut requirements);

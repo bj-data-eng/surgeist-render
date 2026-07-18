@@ -11,11 +11,18 @@ use super::{
 };
 
 pub(crate) fn encode_vello_scene(commands: &RenderCommands, scale: f64) -> Result<VelloScene> {
+    encode_vello_scene_with_initial_transform(commands, Transform::scale(scale, scale)?)
+}
+
+pub(crate) fn encode_vello_scene_with_initial_transform(
+    commands: &RenderCommands,
+    initial_transform: Transform,
+) -> Result<VelloScene> {
     let mut encoded = VelloScene::default();
     encode_vello_commands(
         &commands.commands,
         &mut encoded,
-        kurbo::Affine::scale(scale),
+        kurbo::Affine::from(initial_transform),
     )?;
     Ok(encoded)
 }

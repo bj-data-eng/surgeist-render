@@ -9457,6 +9457,38 @@ fn negative_and_fractional_origins_preserve_texel_center_mapping() {
 }
 
 #[test]
+fn bounded_capture_transform_preserves_signed_origin_texel_centers_and_scale() {
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.25, 0.5, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        ahem_font("C08 bounded capture transform"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        TextRunBounds::try_ink(Rect::new(-1.25, -0.75, 2.0, 1.5)).unwrap(),
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_run(run);
+    let commands = scene.normalize(Capabilities::CURRENT).unwrap();
+    let observed = super::pass::bounded_capture_transform_observation_for_test(
+        commands,
+        Transform::translation(0.375, -0.625).unwrap(),
+        Transform::translation(-2.0, 1.25).unwrap(),
+        Antialiasing::Msaa16,
+    );
+
+    assert!(
+        observed.preserves_application_order_formula
+            && observed.preserves_signed_texel_center_mapping
+            && observed.covers_required_raster_scales
+            && observed.preserves_capture_execution_facts
+            && observed.lowers_scene_with_explicit_initial_transform,
+        "bounded capture transform changed the signed texel-center mapping"
+    );
+}
+
+#[test]
 fn largest_singular_value_raster_scale_preserves_local_effect_space() {
     let transform = Transform::try_new([2.0, 1.0, 1.0, 3.0, 4.0, -2.0]).unwrap();
     let observed =
@@ -10028,6 +10060,42 @@ fn observe_runtime_lowering_for_test() -> super::pass::RuntimeLoweringObservatio
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     )
     .expect("the complete semantic graph must reach runtime lowering")
+}
+
+#[test]
+fn c08_executor_accepts_only_clear_capture_canonicalize_span_source_over_and_present() {
+    let mut c08_scene = Scene::new();
+    c08_scene
+        .fill(Rect::new(-1.25, -0.75, 2.0, 1.5), Color::BLACK)
+        .stroke(
+            Shape::rect(Rect::new(2.0, 1.0, 3.0, 2.0)),
+            Stroke::try_new(0.5).unwrap(),
+            Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+        );
+    let c08_commands = c08_scene.normalize(Capabilities::CURRENT).unwrap();
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+    )
+    .unwrap();
+    let observed = super::pass::c08_executable_subset_observation_for_test(
+        c08_commands,
+        runtime_lowering_commands_for_test(),
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.accepts_exact_rgba_and_bgra
+            && observed.rejects_every_other_pass_kind_and_composite_payload
+            && observed.rejects_missing_or_reordered_spine_passes
+            && observed.rejects_malformed_dependencies_reads_results_and_releases
+            && observed.rejects_later_cycle_plan
+            && observed.preserves_direct_and_transitional_planner_routes,
+        "C08 has no closed pre-allocation executable subset"
+    );
 }
 
 #[test]

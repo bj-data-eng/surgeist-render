@@ -43,6 +43,54 @@ use super::texture::EffectTextureRole;
 use super::frame::{FrameContext, FramePlan};
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C08ExecutableSubsetObservationForTest {
+    pub(crate) accepts_exact_rgba_and_bgra: bool,
+    pub(crate) rejects_every_other_pass_kind_and_composite_payload: bool,
+    pub(crate) rejects_missing_or_reordered_spine_passes: bool,
+    pub(crate) rejects_malformed_dependencies_reads_results_and_releases: bool,
+    pub(crate) rejects_later_cycle_plan: bool,
+    pub(crate) preserves_direct_and_transitional_planner_routes: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c08_executable_subset_observation_for_test(
+    c08_commands: RenderCommands,
+    later_cycle_commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C08ExecutableSubsetObservationForTest {
+    c08_executable_subset_observation(c08_commands, later_cycle_commands, context, capabilities)
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct BoundedCaptureTransformObservationForTest {
+    pub(crate) preserves_application_order_formula: bool,
+    pub(crate) preserves_signed_texel_center_mapping: bool,
+    pub(crate) covers_required_raster_scales: bool,
+    pub(crate) preserves_capture_execution_facts: bool,
+    pub(crate) lowers_scene_with_explicit_initial_transform: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn bounded_capture_transform_observation_for_test(
+    commands: RenderCommands,
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+    antialiasing: Antialiasing,
+) -> BoundedCaptureTransformObservationForTest {
+    bounded_capture_transform_observation(
+        commands,
+        capture_transform,
+        parent_to_surface,
+        antialiasing,
+    )
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
 pub(crate) fn pass_spatial_uniform_bytes_for_test(
     source_origin: Point,
     source_raster_scale: f64,
@@ -420,6 +468,163 @@ pub(crate) struct LoweredGraphPlan {
     final_present: RuntimePassId,
 }
 
+#[must_use]
+pub(crate) struct C08ExecutableSubset<'plan> {
+    working_format: WorkingFormat,
+    output_format: Format,
+    captures: Vec<C08VelloCaptureExecutionFacts<'plan>>,
+}
+
+impl C08ExecutableSubset<'_> {
+    #[must_use]
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.working_format
+    }
+
+    #[must_use]
+    pub(crate) const fn output_format(&self) -> Format {
+        self.output_format
+    }
+
+    #[must_use]
+    pub(crate) fn captures(&self) -> &[C08VelloCaptureExecutionFacts<'_>] {
+        &self.captures
+    }
+
+    fn proves_exact_execution_facts_for(&self, plan: &LoweredGraphPlan) -> bool {
+        if self.working_format() != plan.working_format
+            || self.output_format() != plan.output_format
+        {
+            return false;
+        }
+        let mut passes = BTreeSet::new();
+        let mut targets = BTreeSet::new();
+        self.captures().iter().all(|capture| {
+            let Some(pass) = plan.passes.iter().find(|pass| pass.id == capture.pass()) else {
+                return false;
+            };
+            let RuntimePassKind::VelloCapture(Some(span)) = &pass.kind else {
+                return false;
+            };
+            let Some(target) = plan
+                .resources
+                .iter()
+                .find(|resource| resource.id == capture.target())
+            else {
+                return false;
+            };
+            passes.insert(capture.pass())
+                && targets.insert(capture.target())
+                && capture.commands() == &span.commands
+                && capture
+                    .initial_transform()
+                    .as_array()
+                    .iter()
+                    .all(|value| value.is_finite())
+                && capture.antialiasing() == span.antialiasing
+                && capture.target_extent() == target.spatial.device_extent
+                && capture.texel_origin() == target.spatial.texel_origin
+                && capture.raster_scale() == target.spatial.raster_scale
+        })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct C08VelloCaptureExecutionFacts<'plan> {
+    pass: RuntimePassId,
+    target: RuntimeResourceId,
+    commands: &'plan RenderCommands,
+    initial_transform: Transform,
+    antialiasing: Antialiasing,
+    target_extent: PhysicalSize,
+    texel_origin: Point,
+    raster_scale: f64,
+}
+
+impl C08VelloCaptureExecutionFacts<'_> {
+    #[must_use]
+    pub(crate) const fn pass(&self) -> RuntimePassId {
+        self.pass
+    }
+
+    #[must_use]
+    pub(crate) const fn target(&self) -> RuntimeResourceId {
+        self.target
+    }
+
+    #[must_use]
+    pub(crate) const fn commands(&self) -> &RenderCommands {
+        self.commands
+    }
+
+    #[must_use]
+    pub(crate) const fn initial_transform(&self) -> Transform {
+        self.initial_transform
+    }
+
+    #[must_use]
+    pub(crate) const fn antialiasing(&self) -> Antialiasing {
+        self.antialiasing
+    }
+
+    #[must_use]
+    pub(crate) const fn target_extent(&self) -> PhysicalSize {
+        self.target_extent
+    }
+
+    #[must_use]
+    pub(crate) const fn texel_origin(&self) -> Point {
+        self.texel_origin
+    }
+
+    #[must_use]
+    pub(crate) const fn raster_scale(&self) -> f64 {
+        self.raster_scale
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08PassClass {
+    ClearRoot,
+    VelloCapture,
+    CanonicalizeCapture,
+    SpanSourceOver,
+    Present,
+}
+
+fn c08_pass_class(kind: &RuntimePassKind) -> Option<C08PassClass> {
+    match kind {
+        RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::SurfaceBaseColor,
+            ..
+        } => Some(C08PassClass::ClearRoot),
+        RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::Transparent,
+            ..
+        } => None,
+        RuntimePassKind::VelloCapture(Some(_)) => Some(C08PassClass::VelloCapture),
+        RuntimePassKind::VelloCapture(None) => None,
+        RuntimePassKind::CanonicalizeCapture => Some(C08PassClass::CanonicalizeCapture),
+        RuntimePassKind::CopyBackdrop
+        | RuntimePassKind::ColorFilter(_)
+        | RuntimePassKind::BlurHorizontal(_)
+        | RuntimePassKind::BlurVertical(_)
+        | RuntimePassKind::DropShadowColorize(_) => None,
+        RuntimePassKind::Composite(Some(composite)) => match &composite.kind {
+            RuntimeCompositeKind::SpanSourceOver
+                if composite.source_captured_before_outer_semantics =>
+            {
+                Some(C08PassClass::SpanSourceOver)
+            }
+            RuntimeCompositeKind::SpanSourceOver
+            | RuntimeCompositeKind::Layer { .. }
+            | RuntimeCompositeKind::DropShadow => None,
+        },
+        RuntimePassKind::Composite(None) => None,
+        RuntimePassKind::Present => Some(C08PassClass::Present),
+    }
+}
+
 impl LoweredGraphPlan {
     #[cfg_attr(
         not(test),
@@ -603,7 +808,7 @@ impl LoweredGraphPlan {
             ));
         }
 
-        Ok(Self {
+        let lowered = Self {
             generation: RuntimeGraphGeneration(view.generation()),
             working_format,
             output_format,
@@ -611,7 +816,225 @@ impl LoweredGraphPlan {
             passes,
             root_working_image,
             final_present,
-        })
+        };
+        let _ = lowered.c08_executable_subset();
+        Ok(lowered)
+    }
+
+    pub(crate) fn c08_executable_subset(&self) -> Option<C08ExecutableSubset<'_>> {
+        if ![Format::Rgba8, Format::Bgra8].contains(&self.output_format) {
+            return None;
+        }
+        let resource_by_id = self
+            .resources
+            .iter()
+            .map(|resource| (resource.id, resource))
+            .collect::<BTreeMap<_, _>>();
+        if resource_by_id.len() != self.resources.len() {
+            return None;
+        }
+        let resource_formats = self
+            .resources
+            .iter()
+            .map(|resource| (resource.id, resource.format))
+            .collect::<BTreeMap<_, _>>();
+        let pass_ids = self
+            .passes
+            .iter()
+            .map(|pass| pass.id)
+            .collect::<BTreeSet<_>>();
+        if pass_ids.len() != self.passes.len() {
+            return None;
+        }
+
+        let clear = self.passes.first()?;
+        if c08_pass_class(&clear.kind) != Some(C08PassClass::ClearRoot)
+            || !clear.dependencies.is_empty()
+            || !clear.reads.is_empty()
+            || !clear.releases.is_empty()
+            || clear.cache_keys.is_some()
+            || clear.result != RuntimeResultBinding::Resource(self.root_working_image)
+        {
+            return None;
+        }
+        let root = resource_by_id.get(&self.root_working_image).copied()?;
+        if !c08_resource_has_fixed_facts(
+            root,
+            RuntimeResourceRole::RootWorkingImage,
+            RuntimeResourceFormat::Working(self.working_format),
+            RuntimeResourceProducer::Pass(clear.id),
+        ) {
+            return None;
+        }
+
+        let mut cursor = 1;
+        let mut parent = root;
+        let mut parent_producer = clear.id;
+        let mut captures = Vec::new();
+        let mut expected_resources = BTreeSet::from([self.root_working_image]);
+        while let Some(capture) = self.passes.get(cursor)
+            && c08_pass_class(&capture.kind) == Some(C08PassClass::VelloCapture)
+        {
+            let canonicalize = self.passes.get(cursor.checked_add(1)?)?;
+            let composite = self.passes.get(cursor.checked_add(2)?)?;
+            let RuntimePassKind::VelloCapture(Some(span)) = &capture.kind else {
+                return None;
+            };
+            let RuntimeResultBinding::Resource(capture_target) = capture.result else {
+                return None;
+            };
+            if !capture.dependencies.is_empty()
+                || !capture.reads.is_empty()
+                || !capture.releases.is_empty()
+                || capture.cache_keys.is_some()
+            {
+                return None;
+            }
+            let capture_resource = resource_by_id.get(&capture_target).copied()?;
+            if !c08_resource_has_fixed_facts(
+                capture_resource,
+                RuntimeResourceRole::CaptureWorkingImage,
+                RuntimeResourceFormat::VelloCaptureRgba8Unorm,
+                RuntimeResourceProducer::Pass(capture.id),
+            ) || capture_resource.expected_reads != 1
+                || capture_resource.last_use != canonicalize.id
+            {
+                return None;
+            }
+
+            if c08_pass_class(&canonicalize.kind) != Some(C08PassClass::CanonicalizeCapture)
+                || canonicalize.dependencies.as_slice() != [capture.id]
+                || canonicalize.reads.len() != 1
+                || !c08_read_is_exact(
+                    &canonicalize.reads[0],
+                    RuntimeReadRole::CaptureSource,
+                    capture_target,
+                    RuntimeSamplingFilter::Linear,
+                    RuntimeSamplingEdge::ClampToExtent,
+                    capture_resource.format,
+                )
+                || canonicalize.releases.as_slice() != [capture_target]
+            {
+                return None;
+            }
+            let RuntimeResultBinding::Resource(canonical_target) = canonicalize.result else {
+                return None;
+            };
+            let canonical_resource = resource_by_id.get(&canonical_target).copied()?;
+            if !c08_resource_has_fixed_facts(
+                canonical_resource,
+                RuntimeResourceRole::FilterIntermediate,
+                RuntimeResourceFormat::Working(self.working_format),
+                RuntimeResourceProducer::Pass(canonicalize.id),
+            ) || canonical_resource.expected_reads != 1
+                || canonical_resource.last_use != composite.id
+                || canonical_resource.spatial != capture_resource.spatial
+            {
+                return None;
+            }
+
+            if c08_pass_class(&composite.kind) != Some(C08PassClass::SpanSourceOver)
+                || composite.dependencies.as_slice() != [parent_producer, canonicalize.id]
+                || composite.reads.len() != 2
+                || !c08_read_is_exact(
+                    &composite.reads[0],
+                    RuntimeReadRole::CompositeParent,
+                    parent.id,
+                    RuntimeSamplingFilter::Linear,
+                    RuntimeSamplingEdge::ClampToExtent,
+                    parent.format,
+                )
+                || !c08_read_is_exact(
+                    &composite.reads[1],
+                    RuntimeReadRole::CompositeSource,
+                    canonical_target,
+                    RuntimeSamplingFilter::Linear,
+                    RuntimeSamplingEdge::TransparentBlack,
+                    canonical_resource.format,
+                )
+                || composite.releases.as_slice() != [parent.id, canonical_target]
+                || parent.expected_reads != 1
+                || parent.last_use != composite.id
+            {
+                return None;
+            }
+            let RuntimeResultBinding::Resource(composite_target) = composite.result else {
+                return None;
+            };
+            let composite_resource = resource_by_id.get(&composite_target).copied()?;
+            if !c08_resource_has_fixed_facts(
+                composite_resource,
+                RuntimeResourceRole::CompositeResult,
+                RuntimeResourceFormat::Working(self.working_format),
+                RuntimeResourceProducer::Pass(composite.id),
+            ) || composite_resource.spatial != root.spatial
+            {
+                return None;
+            }
+
+            expected_resources.extend([capture_target, canonical_target, composite_target]);
+            captures.push(c08_capture_execution_facts(
+                capture.id,
+                capture_target,
+                span,
+                capture_resource.spatial,
+            )?);
+            parent = composite_resource;
+            parent_producer = composite.id;
+            cursor = cursor.checked_add(3)?;
+        }
+
+        let present = self.passes.get(cursor)?;
+        if cursor.checked_add(1)? != self.passes.len()
+            || present.id != self.final_present
+            || c08_pass_class(&present.kind) != Some(C08PassClass::Present)
+            || present.dependencies.as_slice() != [parent_producer]
+            || present.reads.len() != 1
+            || !c08_read_is_exact(
+                &present.reads[0],
+                RuntimeReadRole::FinalWorkingImage,
+                parent.id,
+                RuntimeSamplingFilter::Linear,
+                RuntimeSamplingEdge::ClampToExtent,
+                parent.format,
+            )
+            || present.result != RuntimeResultBinding::Output(self.output_format)
+            || present.releases.as_slice() != [parent.id]
+            || parent.expected_reads != 1
+            || parent.last_use != present.id
+        {
+            return None;
+        }
+        if expected_resources.len() != self.resources.len()
+            || expected_resources
+                .iter()
+                .any(|resource| !resource_by_id.contains_key(resource))
+        {
+            return None;
+        }
+        for pass in &self.passes {
+            let expected_cache_keys = runtime_pass_cache_keys(
+                &pass.kind,
+                &pass.reads,
+                pass.result,
+                self.working_format,
+                self.output_format,
+                &resource_formats,
+            )
+            .ok()?;
+            if pass.cache_keys != expected_cache_keys {
+                return None;
+            }
+        }
+
+        let subset = C08ExecutableSubset {
+            working_format: self.working_format,
+            output_format: self.output_format,
+            captures,
+        };
+        subset
+            .proves_exact_execution_facts_for(self)
+            .then_some(subset)
     }
 
     #[cfg(test)]
@@ -622,6 +1045,518 @@ impl LoweredGraphPlan {
         }
         invalid
     }
+}
+
+fn c08_resource_has_fixed_facts(
+    resource: &RuntimeResourceRequest,
+    role: RuntimeResourceRole,
+    format: RuntimeResourceFormat,
+    producer: RuntimeResourceProducer,
+) -> bool {
+    resource.role == role
+        && resource.format == format
+        && resource.producer == producer
+        && resource.import.is_none()
+}
+
+fn c08_read_is_exact(
+    read: &RuntimeReadBinding,
+    role: RuntimeReadRole,
+    resource: RuntimeResourceId,
+    sampling_filter: RuntimeSamplingFilter,
+    sampling_edge: RuntimeSamplingEdge,
+    source_format: RuntimeResourceFormat,
+) -> bool {
+    let sampler_key = SamplerKey::new(
+        shader_binding_role(role),
+        source_format.shader_key(),
+        match sampling_filter {
+            RuntimeSamplingFilter::Nearest => ShaderSamplingFilterKey::Nearest,
+            RuntimeSamplingFilter::Linear => ShaderSamplingFilterKey::Linear,
+        },
+        shader_sampling_edge(sampling_edge),
+        None,
+    );
+    read.role == role
+        && read.resource == resource
+        && read.sampling_filter == sampling_filter
+        && read.sampling_edge == sampling_edge
+        && read.sampler_key == sampler_key
+}
+
+fn c08_capture_execution_facts<'plan>(
+    pass: RuntimePassId,
+    target: RuntimeResourceId,
+    span: &'plan RuntimeVelloSpan,
+    spatial: RuntimeSpatialDescriptor,
+) -> Option<C08VelloCaptureExecutionFacts<'plan>> {
+    if span.scope != RuntimeVelloSpanScope::CurrentParent
+        || span.commands.commands.is_empty()
+        || !span.captured_before_outer_semantics
+        || spatial.device_extent.width() == 0
+        || spatial.device_extent.height() == 0
+        || !spatial.texel_origin.x().is_finite()
+        || !spatial.texel_origin.y().is_finite()
+        || !spatial.raster_scale.is_finite()
+        || spatial.raster_scale <= 0.0
+    {
+        return None;
+    }
+    let expected_device_x = spatial.texel_origin.x() * spatial.raster_scale;
+    let expected_device_y = spatial.texel_origin.y() * spatial.raster_scale;
+    let tolerance = f64::EPSILON
+        * spatial
+            .raster_scale
+            .abs()
+            .max(expected_device_x.abs())
+            .max(expected_device_y.abs())
+            .max(1.0)
+        * 8.0;
+    if (expected_device_x - f64::from(spatial.device_origin.0)).abs() > tolerance
+        || (expected_device_y - f64::from(spatial.device_origin.1)).abs() > tolerance
+    {
+        return None;
+    }
+    let initial_transform = span
+        .capture_transform
+        .then(span.parent_to_surface)
+        .ok()?
+        .then(Transform::translation(-spatial.texel_origin.x(), -spatial.texel_origin.y()).ok()?)
+        .ok()?
+        .then(Transform::scale(spatial.raster_scale, spatial.raster_scale).ok()?)
+        .ok()?;
+    Some(C08VelloCaptureExecutionFacts {
+        pass,
+        target,
+        commands: &span.commands,
+        initial_transform,
+        antialiasing: span.antialiasing,
+        target_extent: spatial.device_extent,
+        texel_origin: spatial.texel_origin,
+        raster_scale: spatial.raster_scale,
+    })
+}
+
+#[cfg(test)]
+fn c08_executable_subset_observation(
+    c08_commands: RenderCommands,
+    later_cycle_commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<C08ExecutableSubsetObservationForTest> {
+    let direct_route = matches!(
+        c08_commands.clone().plan_for(context),
+        Ok(FramePlan::DirectVello(_))
+    );
+    let later_cycle_plan = later_cycle_commands.clone().plan_for(context).ok()?;
+    let transitional_route = matches!(&later_cycle_plan, FramePlan::GpuGraph(_));
+    let FramePlan::GpuGraph(later_cycle_graph) = later_cycle_plan else {
+        return None;
+    };
+    let c08_graph = super::frame::forced_c08_graph_for_test(c08_commands, context).ok()?;
+    let rgba = LoweredGraphPlan::try_lower_validated_graph(
+        &c08_graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok()?;
+    let bgra = LoweredGraphPlan::try_lower_validated_graph(
+        &c08_graph,
+        WorkingFormat::HighPrecision,
+        Format::Bgra8,
+        &capabilities,
+    )
+    .ok()?;
+    let later_cycle = LoweredGraphPlan::try_lower_validated_graph(
+        &later_cycle_graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok()?;
+    let rgba_subset = rgba.c08_executable_subset()?;
+    let bgra_subset = bgra.c08_executable_subset()?;
+    let accepts_exact_rgba_and_bgra = rgba_subset.working_format() == WorkingFormat::HighPrecision
+        && rgba_subset.output_format() == Format::Rgba8
+        && bgra_subset.working_format() == WorkingFormat::HighPrecision
+        && bgra_subset.output_format() == Format::Bgra8
+        && !rgba_subset.captures().is_empty()
+        && rgba_subset.captures().len() == bgra_subset.captures().len()
+        && rgba_subset.captures().iter().all(|capture| {
+            capture.target_extent().width() > 0
+                && capture.target_extent().height() > 0
+                && capture.raster_scale().is_finite()
+                && capture.raster_scale() > 0.0
+        });
+
+    Some(C08ExecutableSubsetObservationForTest {
+        accepts_exact_rgba_and_bgra,
+        rejects_every_other_pass_kind_and_composite_payload:
+            c08_rejects_every_other_pass_kind_and_composite_payload(&rgba),
+        rejects_missing_or_reordered_spine_passes: c08_rejects_missing_or_reordered_spine_passes(
+            &rgba,
+        ),
+        rejects_malformed_dependencies_reads_results_and_releases: c08_rejects_malformed_bindings(
+            &rgba,
+        ),
+        rejects_later_cycle_plan: later_cycle.c08_executable_subset().is_none(),
+        preserves_direct_and_transitional_planner_routes: direct_route && transitional_route,
+    })
+}
+
+#[cfg(test)]
+fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPlan) -> bool {
+    let forbidden_kinds = [
+        RuntimePassKind::ClearRoot {
+            initialization: RuntimeInitialization::Transparent,
+            color: Color::TRANSPARENT,
+        },
+        RuntimePassKind::VelloCapture(None),
+        RuntimePassKind::CopyBackdrop,
+        RuntimePassKind::ColorFilter(None),
+        RuntimePassKind::BlurHorizontal(None),
+        RuntimePassKind::BlurVertical(None),
+        RuntimePassKind::DropShadowColorize(None),
+        RuntimePassKind::Composite(None),
+    ];
+    if forbidden_kinds
+        .iter()
+        .any(|kind| c08_pass_class(kind).is_some())
+    {
+        return false;
+    }
+    let Some(composite_index) = plan
+        .passes
+        .iter()
+        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::SpanSourceOver))
+    else {
+        return false;
+    };
+    let composite_payloads = [
+        None,
+        Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::SpanSourceOver,
+            source_captured_before_outer_semantics: false,
+        }),
+        Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::Layer {
+                transform: Transform::identity(),
+                opacity: 1.0,
+                blend: BlendMode::Normal,
+                clip: None,
+                outer_clips: Vec::new(),
+                alpha_mask: None,
+            },
+            source_captured_before_outer_semantics: true,
+        }),
+        Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::DropShadow,
+            source_captured_before_outer_semantics: true,
+        }),
+    ];
+    composite_payloads.into_iter().all(|payload| {
+        let mut invalid = plan.clone();
+        invalid.passes[composite_index].kind = RuntimePassKind::Composite(payload);
+        invalid.c08_executable_subset().is_none()
+    })
+}
+
+#[cfg(test)]
+fn c08_rejects_missing_or_reordered_spine_passes(plan: &LoweredGraphPlan) -> bool {
+    let Some(capture_index) = plan
+        .passes
+        .iter()
+        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::VelloCapture))
+    else {
+        return false;
+    };
+    let Some(canonicalize_index) = capture_index.checked_add(1) else {
+        return false;
+    };
+    let Some(present_index) = plan
+        .passes
+        .iter()
+        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::Present))
+    else {
+        return false;
+    };
+
+    let mut missing_canonicalize = plan.clone();
+    missing_canonicalize.passes.remove(canonicalize_index);
+    let mut reordered_pair = plan.clone();
+    reordered_pair
+        .passes
+        .swap(capture_index, canonicalize_index);
+    let mut repeated_clear = plan.clone();
+    repeated_clear
+        .passes
+        .insert(capture_index, repeated_clear.passes[0].clone());
+    let mut missing_present = plan.clone();
+    missing_present.passes.remove(present_index);
+    let mut nonterminal_present = plan.clone();
+    nonterminal_present
+        .passes
+        .swap(present_index - 1, present_index);
+
+    [
+        missing_canonicalize,
+        reordered_pair,
+        repeated_clear,
+        missing_present,
+        nonterminal_present,
+    ]
+    .iter()
+    .all(|invalid| invalid.c08_executable_subset().is_none())
+}
+
+#[cfg(test)]
+fn c08_rejects_malformed_bindings(plan: &LoweredGraphPlan) -> bool {
+    let Some(capture_index) = plan
+        .passes
+        .iter()
+        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::VelloCapture))
+    else {
+        return false;
+    };
+    let canonicalize_index = capture_index + 1;
+    let composite_index = capture_index + 2;
+    let present_index = plan.passes.len() - 1;
+    let RuntimeResultBinding::Resource(capture_target) = plan.passes[capture_index].result else {
+        return false;
+    };
+    let RuntimeResultBinding::Resource(canonical_target) = plan.passes[canonicalize_index].result
+    else {
+        return false;
+    };
+    let Some(capture_resource_index) = plan
+        .resources
+        .iter()
+        .position(|resource| resource.id == capture_target)
+    else {
+        return false;
+    };
+
+    let mut invalid_plans = Vec::new();
+
+    let mut invalid = plan.clone();
+    invalid.passes[canonicalize_index].dependencies.clear();
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[canonicalize_index].reads[0].role = RuntimeReadRole::FinalWorkingImage;
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[canonicalize_index].reads[0].resource = plan.root_working_image;
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[canonicalize_index].result = RuntimeResultBinding::Empty;
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[canonicalize_index].releases.clear();
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[composite_index].reads.swap(0, 1);
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[composite_index].result = RuntimeResultBinding::Resource(canonical_target);
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[composite_index].cache_keys = None;
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[present_index].result = RuntimeResultBinding::Output(Format::Bgra8);
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.passes[present_index].releases.clear();
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.resources[capture_resource_index].expected_reads = 2;
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.resources[capture_resource_index].format =
+        RuntimeResourceFormat::Working(plan.working_format);
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.resources[capture_resource_index]
+        .spatial
+        .texel_origin = Point::new(-0.25, 0.5);
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    invalid.final_present = invalid.passes[0].id;
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    if let RuntimePassKind::VelloCapture(Some(span)) = &mut invalid.passes[capture_index].kind {
+        span.scope = RuntimeVelloSpanScope::LayerSource;
+    }
+    invalid_plans.push(invalid);
+
+    let mut invalid = plan.clone();
+    if let RuntimePassKind::VelloCapture(Some(span)) = &mut invalid.passes[capture_index].kind {
+        span.captured_before_outer_semantics = false;
+    }
+    invalid_plans.push(invalid);
+
+    invalid_plans
+        .iter()
+        .all(|invalid| invalid.c08_executable_subset().is_none())
+}
+
+#[cfg(test)]
+fn bounded_capture_transform_observation(
+    commands: RenderCommands,
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+    antialiasing: Antialiasing,
+) -> Option<BoundedCaptureTransformObservationForTest> {
+    let capabilities = DeviceCapabilities::from_test_facts(true, true, 4_096);
+    let scales = [1.0, 1.25, 2.0];
+    let mut preserves_application_order_formula = true;
+    let mut preserves_signed_texel_center_mapping = true;
+    let mut preserves_capture_execution_facts = true;
+    let mut lowers_scene_with_explicit_initial_transform = true;
+
+    for raster_scale in scales {
+        let context = FrameContext::try_new(
+            super::Size::new(64.0, 64.0),
+            raster_scale,
+            antialiasing,
+            Color::TRANSPARENT,
+        )
+        .ok()?;
+        let graph = super::frame::forced_c08_graph_for_test(commands.clone(), context).ok()?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            WorkingFormat::HighPrecision,
+            Format::Rgba8,
+            &capabilities,
+        )
+        .ok()?;
+        let subset = lowered.c08_executable_subset()?;
+        let actual_capture = subset.captures().first()?;
+        let capture_pass = lowered
+            .passes
+            .iter()
+            .find(|pass| pass.id == actual_capture.pass())?;
+        let RuntimePassKind::VelloCapture(Some(actual_span)) = &capture_pass.kind else {
+            return None;
+        };
+        let mut span = actual_span.clone();
+        span.capture_transform = capture_transform;
+        span.parent_to_surface = parent_to_surface;
+        let target = actual_capture.target();
+        let mut spatial = lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == target)?
+            .spatial;
+        spatial.device_origin = (-3, -2);
+        spatial.texel_origin = Point::new(-3.0 / raster_scale, -2.0 / raster_scale);
+        spatial.raster_scale = raster_scale;
+        let facts = c08_capture_execution_facts(capture_pass.id, target, &span, spatial)?;
+
+        let expected_transform = capture_transform
+            .then(parent_to_surface)
+            .ok()?
+            .then(
+                Transform::translation(-spatial.texel_origin.x(), -spatial.texel_origin.y())
+                    .ok()?,
+            )
+            .ok()?
+            .then(Transform::scale(raster_scale, raster_scale).ok()?)
+            .ok()?;
+        preserves_application_order_formula &= transforms_are_close(
+            facts.initial_transform(),
+            expected_transform,
+            f64::EPSILON * 32.0,
+        );
+
+        let local_to_surface = capture_transform.then(parent_to_surface).ok()?;
+        let texel = (2_u32, 3_u32);
+        let mapped_center = Point::new(
+            spatial.texel_origin.x() + (f64::from(texel.0) + 0.5) / raster_scale,
+            spatial.texel_origin.y() + (f64::from(texel.1) + 0.5) / raster_scale,
+        );
+        let local_center = inverse_transform_point(local_to_surface, mapped_center)?;
+        let encoded_center = apply_transform(facts.initial_transform(), local_center);
+        preserves_signed_texel_center_mapping &= (encoded_center.x() - 2.5).abs() <= 1.0e-12
+            && (encoded_center.y() - 3.5).abs() <= 1.0e-12
+            && facts.texel_origin() == spatial.texel_origin;
+
+        preserves_capture_execution_facts &= facts.pass() == capture_pass.id
+            && facts.target() == target
+            && facts.commands() == &commands
+            && facts.antialiasing() == antialiasing
+            && facts.target_extent() == spatial.device_extent
+            && facts.raster_scale() == raster_scale;
+
+        let encoded = super::encode::encode_vello_scene_with_initial_transform(
+            facts.commands(),
+            facts.initial_transform(),
+        )
+        .ok()?;
+        let encoded_transform = encoded
+            .observation_for_test()
+            .first_glyph_run_for_test()?
+            .transform_components_for_test();
+        lowers_scene_with_explicit_initial_transform &= encoded_transform
+            .iter()
+            .zip(facts.initial_transform().as_array())
+            .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5);
+    }
+
+    Some(BoundedCaptureTransformObservationForTest {
+        preserves_application_order_formula,
+        preserves_signed_texel_center_mapping,
+        covers_required_raster_scales: scales == [1.0, 1.25, 2.0],
+        preserves_capture_execution_facts,
+        lowers_scene_with_explicit_initial_transform,
+    })
+}
+
+#[cfg(test)]
+fn transforms_are_close(left: Transform, right: Transform, tolerance: f64) -> bool {
+    left.as_array()
+        .into_iter()
+        .zip(right.as_array())
+        .all(|(left, right)| (left - right).abs() <= tolerance)
+}
+
+#[cfg(test)]
+fn apply_transform(transform: Transform, point: Point) -> Point {
+    let [a, b, c, d, e, f] = transform.as_array();
+    Point::new(
+        a * point.x() + c * point.y() + e,
+        b * point.x() + d * point.y() + f,
+    )
+}
+
+#[cfg(test)]
+fn inverse_transform_point(transform: Transform, point: Point) -> Option<Point> {
+    let [a, b, c, d, e, f] = transform.as_array();
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant.abs() <= f64::EPSILON {
+        return None;
+    }
+    let x = point.x() - e;
+    let y = point.y() - f;
+    Some(Point::new(
+        (d * x - c * y) / determinant,
+        (-b * x + a * y) / determinant,
+    ))
 }
 
 const VELLO_CAPTURE_TEXTURE_USAGES: wgpu::TextureUsages = wgpu::TextureUsages::STORAGE_BINDING
