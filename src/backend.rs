@@ -2,6 +2,7 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
+use super::pass::{LoweredGraphPlan, PreparedGraph};
 use super::resource::{
     FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
 };
@@ -267,6 +268,7 @@ pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
     queue: &'ready wgpu::Queue,
     engine: &'ready VelloEngineState,
     resources: &'ready ResourceManager,
+    pass_cache: &'ready DevicePassCache,
     drop_witness: ReadyDeviceStateDropWitnessForTest,
 }
 
@@ -306,6 +308,10 @@ impl ReadyDeviceStateBorrowForTest<'_> {
         self.resources.budget_for_test()
     }
 
+    pub(crate) fn device_pass_cache_is_empty_for_test(&self) -> bool {
+        self.pass_cache.is_empty()
+    }
+
     pub(crate) fn drop_witness_for_test(&self) -> ReadyDeviceStateDropWitnessForTest {
         self.drop_witness.clone()
     }
@@ -320,6 +326,7 @@ impl ReadyDeviceState {
             queue: &self.queue,
             engine: &self.engine,
             resources: &self.resources,
+            pass_cache: &self.pass_cache,
             drop_witness: ReadyDeviceStateDropWitnessForTest::from_ready_bundle(&self.drop_witness),
         }
     }
@@ -1607,6 +1614,52 @@ impl Backend {
         {
             state.observe_terminal();
         }
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 calls the validated C07 graph preparation handoff before execution"
+        )
+    )]
+    pub(crate) fn prepare_graph_resources(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+    ) -> Result<PreparedGraph<'_>> {
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot is unavailable for graph preparation",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before graph preparation",
+            ));
+        }
+        if let Some(terminal) = state.terminal() {
+            return Err(terminal.error(RuntimeOperation::EffectRendering));
+        }
+        let capabilities = state.capabilities;
+        let ready = state.ready().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "ready GPU device resources disappeared before graph preparation",
+            )
+        })?;
+        PreparedGraph::try_prepare(
+            lowered,
+            policy,
+            &capabilities,
+            &ready.device,
+            &ready.queue,
+            &ready.resources,
+            &ready.pass_cache,
+        )
     }
 
     pub(crate) fn device_capabilities(

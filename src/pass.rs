@@ -1,4 +1,7 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    marker::PhantomData,
+};
 
 use super::{
     BackendErrorCode, Color, Error, Format, PhysicalSize, Point, Rect, Result, Transform,
@@ -17,15 +20,24 @@ use super::{
     },
     image::ResolvedMaskUploadDescriptor,
     layer::BlendMode,
-    renderer::Antialiasing,
-    resource::{GaussianKernelKey, GaussianKernelSamplingForm, WorkingFormat},
+    renderer::{Antialiasing, EffectQualityPolicy},
+    resource::{
+        FrameCleanup, FrameResourceScope, GaussianKernelKey, GaussianKernelPlan,
+        GaussianKernelSamplingForm, ResourceAllocationPreflight, ResourceIdentity, ResourceLease,
+        ResourceManager, WorkingFormat,
+    },
     shader::{
-        BindGroupLayoutKey, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey, ShaderBlendKey,
-        ShaderCompositeKey, ShaderDataBindingKey, ShaderModuleKey, ShaderProgramKey,
-        ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
+        BindGroupLayoutKey, DevicePassCache, PassSpatialUniformBytes, RenderPipelineKey,
+        SamplerKey, ShaderBindingRoleKey, ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey,
+        ShaderModuleKey, ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey,
+        ShaderTextureFormatKey,
     },
     style::ColorFilterOp,
+    texture::EffectTextureDescriptor,
 };
+
+#[cfg(test)]
+use super::texture::EffectTextureRole;
 
 #[cfg(test)]
 use super::frame::{FrameContext, FramePlan};
@@ -317,6 +329,35 @@ pub(crate) struct RuntimeReadBinding {
     sampler_key: SamplerKey,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 consumes these exact immutable runtime read-binding facts"
+    )
+)]
+impl RuntimeReadBinding {
+    pub(crate) const fn role(&self) -> RuntimeReadRole {
+        self.role
+    }
+
+    pub(crate) const fn resource(&self) -> RuntimeResourceId {
+        self.resource
+    }
+
+    pub(crate) const fn sampling_filter(&self) -> RuntimeSamplingFilter {
+        self.sampling_filter
+    }
+
+    pub(crate) const fn sampling_edge(&self) -> RuntimeSamplingEdge {
+        self.sampling_edge
+    }
+
+    pub(crate) const fn sampler_key(&self) -> SamplerKey {
+        self.sampler_key
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeResultBinding {
     Empty,
@@ -330,6 +371,31 @@ pub(crate) struct RuntimePassCacheKeys {
     layout: BindGroupLayoutKey,
     shader: ShaderModuleKey,
     pipeline: RenderPipelineKey,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 consumes these exact immutable device pass-cache keys"
+    )
+)]
+impl RuntimePassCacheKeys {
+    pub(crate) fn samplers(&self) -> &[SamplerKey] {
+        &self.samplers
+    }
+
+    pub(crate) const fn layout(&self) -> &BindGroupLayoutKey {
+        &self.layout
+    }
+
+    pub(crate) const fn shader(&self) -> &ShaderModuleKey {
+        &self.shader
+    }
+
+    pub(crate) const fn pipeline(&self) -> &RenderPipelineKey {
+        &self.pipeline
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -547,6 +613,1260 @@ impl LoweredGraphPlan {
             final_present,
         })
     }
+
+    #[cfg(test)]
+    pub(crate) fn with_duplicate_preparation_resource_for_test(&self) -> Self {
+        let mut invalid = self.clone();
+        if invalid.resources.len() > 1 {
+            invalid.resources[1].id = invalid.resources[0].id;
+        }
+        invalid
+    }
+}
+
+const VELLO_CAPTURE_TEXTURE_USAGES: wgpu::TextureUsages = wgpu::TextureUsages::STORAGE_BINDING
+    .union(wgpu::TextureUsages::TEXTURE_BINDING)
+    .union(wgpu::TextureUsages::COPY_SRC)
+    .union(wgpu::TextureUsages::COPY_DST);
+const RESOLVED_MASK_TEXTURE_USAGES: wgpu::TextureUsages =
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum RuntimeAllocationRequest {
+    EffectTexture(EffectTextureDescriptor),
+    ResolvedMask(ResolvedMaskUploadDescriptor),
+}
+
+impl RuntimeAllocationRequest {
+    fn preflight(&self) -> Result<ResourceAllocationPreflight> {
+        match self {
+            Self::EffectTexture(descriptor) => {
+                ResourceAllocationPreflight::effect_texture(*descriptor)
+            }
+            Self::ResolvedMask(descriptor) => {
+                ResourceAllocationPreflight::resolved_mask(descriptor)
+            }
+        }
+    }
+
+    fn acquire(
+        &self,
+        frame_scope: &mut FrameResourceScope,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<ResourceLease> {
+        match self {
+            Self::EffectTexture(descriptor) => {
+                frame_scope.acquire_effect_texture(device, capabilities, *descriptor)
+            }
+            Self::ResolvedMask(descriptor) => {
+                frame_scope.acquire_resolved_mask_upload(device, queue, capabilities, descriptor)
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RuntimeResourcePreparationRequest {
+    runtime: RuntimeResourceRequest,
+    allocation: RuntimeAllocationRequest,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RuntimeKernelPreparationRequest {
+    key: GaussianKernelKey,
+    plan: GaussianKernelPlan,
+    last_use: RuntimePassId,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RuntimePassPreparationRequest {
+    runtime: RuntimePass,
+    spatial_uniform: Option<PassSpatialUniformBytes>,
+    cache_keys: Option<RuntimePassCacheKeys>,
+    kernel: Option<GaussianKernelKey>,
+    kernel_releases: Vec<GaussianKernelKey>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct RuntimeGraphPreparationPlan {
+    generation: RuntimeGraphGeneration,
+    working_format: WorkingFormat,
+    output_format: Format,
+    resources: Vec<RuntimeResourcePreparationRequest>,
+    kernels: Vec<RuntimeKernelPreparationRequest>,
+    passes: Vec<RuntimePassPreparationRequest>,
+    root_working_image: RuntimeResourceId,
+    final_present: RuntimePassId,
+    allocation_preflights: Vec<ResourceAllocationPreflight>,
+}
+
+impl RuntimeGraphPreparationPlan {
+    fn try_derive(
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        capabilities: &DeviceCapabilities,
+        device: &wgpu::Device,
+        pass_cache: &DevicePassCache,
+    ) -> Result<Self> {
+        if !pass_cache.is_empty() {
+            return Err(preparation_error(
+                "C07 graph preparation requires the typed device pass cache to remain empty",
+            ));
+        }
+        let selected = capabilities.resolve_effect_working_format(policy)?;
+        if selected != lowered.working_format {
+            return Err(preparation_error(
+                "the lowered graph working format does not match immutable device policy",
+            ));
+        }
+
+        let mut resource_by_id = BTreeMap::new();
+        let mut resource_formats = BTreeMap::new();
+        let mut resources = Vec::with_capacity(lowered.resources.len());
+        let mut allocation_preflights = Vec::with_capacity(lowered.resources.len());
+        for resource in &lowered.resources {
+            if resource_by_id.insert(resource.id, resource).is_some() {
+                return Err(preparation_error(
+                    "duplicate runtime resource reached graph preparation",
+                ));
+            }
+            if runtime_resource_format(resource.role, lowered.working_format) != resource.format {
+                return Err(preparation_error(
+                    "runtime resource role and working format are inconsistent",
+                ));
+            }
+            if resource.expected_reads == 0 {
+                return Err(preparation_error(
+                    "a prepared runtime resource has no scheduled reader",
+                ));
+            }
+            let extent = resource.spatial.device_extent;
+            if extent.width() == 0 || extent.height() == 0 {
+                return Err(preparation_error(
+                    "a concrete runtime resource has an empty allocation extent",
+                ));
+            }
+            capabilities.validate_effect_texture_extent(extent)?;
+
+            let allocation = match (&resource.format, &resource.import) {
+                (RuntimeResourceFormat::VelloCaptureRgba8Unorm, None)
+                    if resource.role == RuntimeResourceRole::CaptureWorkingImage
+                        && matches!(resource.producer, RuntimeResourceProducer::Pass(_)) =>
+                {
+                    let descriptor =
+                        EffectTextureDescriptor::try_capture(extent, VELLO_CAPTURE_TEXTURE_USAGES)?;
+                    capabilities.validate_effect_texture_allocation(
+                        extent,
+                        None,
+                        descriptor.texture_format(),
+                        descriptor.usage(),
+                    )?;
+                    RuntimeAllocationRequest::EffectTexture(descriptor)
+                }
+                (RuntimeResourceFormat::Working(format), None)
+                    if *format == lowered.working_format
+                        && resource.role != RuntimeResourceRole::CaptureWorkingImage
+                        && resource.role != RuntimeResourceRole::ImportedImage =>
+                {
+                    let descriptor = EffectTextureDescriptor::try_working(
+                        *format,
+                        extent,
+                        format.required_usages(),
+                    )?;
+                    capabilities.validate_effect_texture_allocation(
+                        extent,
+                        Some(*format),
+                        descriptor.texture_format(),
+                        descriptor.usage(),
+                    )?;
+                    RuntimeAllocationRequest::EffectTexture(descriptor)
+                }
+                (
+                    RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
+                    Some(RuntimeResourceImport::ResolvedAlphaMask(descriptor)),
+                ) if resource.role == RuntimeResourceRole::ImportedImage
+                    && matches!(resource.producer, RuntimeResourceProducer::Imported) =>
+                {
+                    if descriptor.physical_size() != extent {
+                        return Err(preparation_error(
+                            "resolved-mask upload extent differs from its runtime resource",
+                        ));
+                    }
+                    descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
+                    capabilities.validate_effect_texture_allocation(
+                        extent,
+                        None,
+                        wgpu::TextureFormat::Rgba8Unorm,
+                        RESOLVED_MASK_TEXTURE_USAGES,
+                    )?;
+                    RuntimeAllocationRequest::ResolvedMask(descriptor.clone())
+                }
+                _ => {
+                    return Err(preparation_error(
+                        "runtime resource has no exact concrete preparation request",
+                    ));
+                }
+            };
+            allocation_preflights.push(allocation.preflight()?);
+            resource_formats.insert(resource.id, resource.format);
+            resources.push(RuntimeResourcePreparationRequest {
+                runtime: resource.clone(),
+                allocation,
+            });
+        }
+
+        let mut pass_positions = BTreeMap::new();
+        for (position, pass) in lowered.passes.iter().enumerate() {
+            if pass_positions.insert(pass.id, position).is_some() {
+                return Err(preparation_error(
+                    "duplicate runtime pass reached graph preparation",
+                ));
+            }
+        }
+        let mut actual_reads = BTreeMap::<RuntimeResourceId, u32>::new();
+        let mut actual_last_reads = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
+        let mut release_passes = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
+        let mut produced_results = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
+        let mut kernel_by_pass = BTreeMap::<RuntimePassId, GaussianKernelKey>::new();
+        let mut kernels = BTreeMap::<GaussianKernelKey, RuntimeKernelPreparationRequest>::new();
+
+        for (position, pass) in lowered.passes.iter().enumerate() {
+            if pass.dependencies.iter().any(|dependency| {
+                pass_positions
+                    .get(dependency)
+                    .is_none_or(|dependency_position| *dependency_position >= position)
+            }) {
+                return Err(preparation_error(
+                    "prepared pass has a missing or forward dependency",
+                ));
+            }
+            let mut pass_reads = BTreeSet::new();
+            for read in &pass.reads {
+                if !pass_reads.insert(read.resource) {
+                    return Err(preparation_error(
+                        "prepared pass contains a duplicate runtime read binding",
+                    ));
+                }
+                let resource = resource_by_id.get(&read.resource).ok_or_else(|| {
+                    preparation_error("prepared pass names a missing runtime resource")
+                })?;
+                if let RuntimeResourceProducer::Pass(producer) = resource.producer
+                    && pass_positions
+                        .get(&producer)
+                        .is_none_or(|producer_position| *producer_position >= position)
+                {
+                    return Err(preparation_error(
+                        "prepared pass reads before its runtime resource producer",
+                    ));
+                }
+                let reads = actual_reads.entry(read.resource).or_default();
+                *reads = reads
+                    .checked_add(1)
+                    .ok_or_else(|| preparation_error("prepared runtime read count overflowed"))?;
+                actual_last_reads.insert(read.resource, pass.id);
+            }
+            match pass.result {
+                RuntimeResultBinding::Resource(resource_id) => {
+                    let resource = resource_by_id.get(&resource_id).ok_or_else(|| {
+                        preparation_error("prepared pass result resource is missing")
+                    })?;
+                    if resource.producer != RuntimeResourceProducer::Pass(pass.id)
+                        || pass_reads.contains(&resource_id)
+                        || produced_results.insert(resource_id, pass.id).is_some()
+                    {
+                        return Err(preparation_error(
+                            "prepared pass result binding has no unique matching producer",
+                        ));
+                    }
+                }
+                RuntimeResultBinding::Output(format) => {
+                    if !matches!(pass.kind, RuntimePassKind::Present)
+                        || format != lowered.output_format
+                    {
+                        return Err(preparation_error(
+                            "prepared output binding differs from the terminal present target",
+                        ));
+                    }
+                }
+                RuntimeResultBinding::Empty => {}
+            }
+            let expected_cache_keys = runtime_pass_cache_keys(
+                &pass.kind,
+                &pass.reads,
+                pass.result,
+                lowered.working_format,
+                lowered.output_format,
+                &resource_formats,
+            )?;
+            if expected_cache_keys != pass.cache_keys {
+                return Err(preparation_error(
+                    "prepared pass cache keys differ from exact runtime lowering",
+                ));
+            }
+            for resource in &pass.releases {
+                if !pass_reads.contains(resource)
+                    || release_passes.insert(*resource, pass.id).is_some()
+                {
+                    return Err(preparation_error(
+                        "prepared pass release is missing, duplicate, or not a last read",
+                    ));
+                }
+            }
+
+            if let Some(blur) = runtime_blur_for_kernel(&pass.kind) {
+                let kernel_plan = GaussianKernelPlan::try_new(
+                    blur.standard_deviation,
+                    blur.spatial.result.raster_scale,
+                    CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS,
+                    GaussianKernelSamplingForm::PairedLinear,
+                )?;
+                if kernel_plan.key() != blur.kernel
+                    || kernel_plan.byte_len() == 0
+                    || kernel_plan.byte_len() > device.limits().max_buffer_size
+                {
+                    return Err(preparation_error(
+                        "Gaussian kernel preparation differs from the exact runtime blur plan",
+                    ));
+                }
+                kernel_by_pass.insert(pass.id, blur.kernel);
+                match kernels.entry(blur.kernel) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        entry.insert(RuntimeKernelPreparationRequest {
+                            key: blur.kernel,
+                            plan: kernel_plan,
+                            last_use: pass.id,
+                        });
+                    }
+                    std::collections::btree_map::Entry::Occupied(mut entry) => {
+                        if entry.get().plan != kernel_plan {
+                            return Err(preparation_error(
+                                "one Gaussian kernel identity names conflicting plans",
+                            ));
+                        }
+                        entry.get_mut().last_use = pass.id;
+                    }
+                }
+            }
+        }
+
+        for resource in &lowered.resources {
+            if actual_reads.get(&resource.id).copied().unwrap_or(0) != resource.expected_reads
+                || actual_last_reads.get(&resource.id).copied() != Some(resource.last_use)
+                || release_passes.get(&resource.id).copied() != Some(resource.last_use)
+            {
+                return Err(preparation_error(
+                    "prepared runtime resource lifetime differs from exact lowering",
+                ));
+            }
+            match resource.producer {
+                RuntimeResourceProducer::Imported if resource.import.is_some() => {}
+                RuntimeResourceProducer::Pass(pass)
+                    if resource.import.is_none()
+                        && produced_results.get(&resource.id).copied() == Some(pass) => {}
+                RuntimeResourceProducer::Imported | RuntimeResourceProducer::Pass(_) => {
+                    return Err(preparation_error(
+                        "prepared runtime resource producer/import binding is inconsistent",
+                    ));
+                }
+            }
+        }
+
+        let root = resource_by_id
+            .get(&lowered.root_working_image)
+            .ok_or_else(|| preparation_error("prepared root working resource is missing"))?;
+        if root.format != RuntimeResourceFormat::Working(lowered.working_format) {
+            return Err(preparation_error(
+                "prepared root resource does not use the selected working format",
+            ));
+        }
+        if lowered.passes.last().is_none_or(|pass| {
+            pass.id != lowered.final_present
+                || !matches!(pass.kind, RuntimePassKind::Present)
+                || pass.result != RuntimeResultBinding::Output(lowered.output_format)
+        }) {
+            return Err(preparation_error(
+                "prepared graph has no exact terminal present binding",
+            ));
+        }
+
+        let kernel_releases = kernels
+            .values()
+            .map(|kernel| (kernel.last_use, kernel.key))
+            .fold(
+                BTreeMap::<RuntimePassId, Vec<GaussianKernelKey>>::new(),
+                |mut releases, (pass, kernel)| {
+                    releases.entry(pass).or_default().push(kernel);
+                    releases
+                },
+            );
+        let passes = lowered
+            .passes
+            .iter()
+            .map(|pass| {
+                let spatial_uniform = prepared_pass_spatial_uniform(
+                    pass,
+                    &resource_by_id,
+                    lowered.root_working_image,
+                )?;
+                if spatial_uniform.is_some() != pass.cache_keys.is_some() {
+                    return Err(preparation_error(
+                        "prepared pass spatial bytes and executable cache keys disagree",
+                    ));
+                }
+                Ok(RuntimePassPreparationRequest {
+                    runtime: pass.clone(),
+                    spatial_uniform,
+                    cache_keys: pass.cache_keys.clone(),
+                    kernel: kernel_by_pass.get(&pass.id).copied(),
+                    kernel_releases: kernel_releases.get(&pass.id).cloned().unwrap_or_default(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let kernels = kernels.into_values().collect::<Vec<_>>();
+        for kernel in &kernels {
+            allocation_preflights.push(ResourceAllocationPreflight::gaussian_kernel(&kernel.plan)?);
+        }
+
+        Ok(Self {
+            generation: lowered.generation,
+            working_format: lowered.working_format,
+            output_format: lowered.output_format,
+            resources,
+            kernels,
+            passes,
+            root_working_image: lowered.root_working_image,
+            final_present: lowered.final_present,
+            allocation_preflights,
+        })
+    }
+}
+
+fn runtime_blur_for_kernel(kind: &RuntimePassKind) -> Option<&RuntimeBlur> {
+    match kind {
+        RuntimePassKind::BlurHorizontal(Some(blur)) | RuntimePassKind::BlurVertical(Some(blur)) => {
+            Some(blur)
+        }
+        _ => None,
+    }
+}
+
+fn prepared_pass_spatial_uniform(
+    pass: &RuntimePass,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    root_working_image: RuntimeResourceId,
+) -> Result<Option<PassSpatialUniformBytes>> {
+    if pass.cache_keys.is_none() {
+        return Ok(None);
+    }
+    let result_spatial = || -> Result<RuntimeSpatialDescriptor> {
+        let RuntimeResultBinding::Resource(resource) = pass.result else {
+            return Err(preparation_error(
+                "custom pass has no concrete runtime result resource",
+            ));
+        };
+        resources
+            .get(&resource)
+            .map(|resource| resource.spatial)
+            .ok_or_else(|| preparation_error("custom pass result spatial binding is missing"))
+    };
+    let read_spatial = |role| -> Result<RuntimeSpatialDescriptor> {
+        let resource = pass
+            .reads
+            .iter()
+            .find(|read| read.role == role)
+            .map(|read| read.resource)
+            .ok_or_else(|| preparation_error("custom pass source spatial binding is missing"))?;
+        resources
+            .get(&resource)
+            .map(|resource| resource.spatial)
+            .ok_or_else(|| preparation_error("custom pass source resource is missing"))
+    };
+
+    let (source, destination) = match &pass.kind {
+        RuntimePassKind::CanonicalizeCapture => (
+            read_spatial(RuntimeReadRole::CaptureSource)?,
+            result_spatial()?,
+        ),
+        RuntimePassKind::CopyBackdrop => (
+            read_spatial(RuntimeReadRole::CompletedParent)?,
+            result_spatial()?,
+        ),
+        RuntimePassKind::ColorFilter(Some(filter)) => {
+            (filter.spatial.source, filter.spatial.result)
+        }
+        RuntimePassKind::BlurHorizontal(Some(blur)) | RuntimePassKind::BlurVertical(Some(blur)) => {
+            (blur.spatial.source, blur.spatial.result)
+        }
+        RuntimePassKind::DropShadowColorize(Some(shadow)) => {
+            (shadow.spatial.source, shadow.spatial.result)
+        }
+        RuntimePassKind::Composite(Some(_)) => (
+            read_spatial(RuntimeReadRole::CompositeSource)?,
+            result_spatial()?,
+        ),
+        RuntimePassKind::Present => {
+            let source = read_spatial(RuntimeReadRole::FinalWorkingImage)?;
+            let destination = resources
+                .get(&root_working_image)
+                .map(|resource| resource.spatial)
+                .ok_or_else(|| preparation_error("present destination spatial is missing"))?;
+            (source, destination)
+        }
+        RuntimePassKind::ClearRoot { .. }
+        | RuntimePassKind::VelloCapture(_)
+        | RuntimePassKind::ColorFilter(None)
+        | RuntimePassKind::BlurHorizontal(None)
+        | RuntimePassKind::BlurVertical(None)
+        | RuntimePassKind::DropShadowColorize(None)
+        | RuntimePassKind::Composite(None) => {
+            return Err(preparation_error(
+                "non-executable pass unexpectedly requested spatial serialization",
+            ));
+        }
+    };
+    PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(source, destination).map(Some)
+}
+
+fn preparation_error(message: &'static str) -> Error {
+    Error::new(BackendErrorCode::RenderFailed, message)
+}
+
+struct PreparedResourceBinding {
+    allocation: RuntimeAllocationRequest,
+    lease: Option<ResourceLease>,
+}
+
+struct PreparedKernelBinding {
+    lease: Option<ResourceLease>,
+}
+
+/// One allocation-backed, generation-bound C07 handoff. Its lifetime prevents
+/// the ready device bundle from transitioning while C08 owns its frame scope.
+pub(crate) struct PreparedGraph<'device> {
+    plan: RuntimeGraphPreparationPlan,
+    resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
+    kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
+    frame_scope: Option<FrameResourceScope>,
+    next_pass: usize,
+    _ready_device: PhantomData<(
+        &'device wgpu::Device,
+        &'device wgpu::Queue,
+        &'device ResourceManager,
+        &'device DevicePassCache,
+    )>,
+}
+
+impl<'device> PreparedGraph<'device> {
+    pub(crate) fn try_prepare(
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache: &'device DevicePassCache,
+    ) -> Result<Self> {
+        let plan = RuntimeGraphPreparationPlan::try_derive(
+            lowered,
+            policy,
+            capabilities,
+            device,
+            pass_cache,
+        )?;
+        resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
+
+        let mut frame_scope = resources.begin_frame()?;
+        let mut resource_bindings = BTreeMap::new();
+        for request in &plan.resources {
+            let lease =
+                request
+                    .allocation
+                    .acquire(&mut frame_scope, device, queue, capabilities)?;
+            if resource_bindings
+                .insert(
+                    request.runtime.id,
+                    PreparedResourceBinding {
+                        allocation: request.allocation.clone(),
+                        lease: Some(lease),
+                    },
+                )
+                .is_some()
+            {
+                return Err(preparation_error(
+                    "one runtime resource acquired more than one concrete binding",
+                ));
+            }
+        }
+        let mut kernel_bindings = BTreeMap::new();
+        for request in &plan.kernels {
+            let lease = frame_scope.acquire_gaussian_kernel_buffer(device, &request.plan)?;
+            if kernel_bindings
+                .insert(request.key, PreparedKernelBinding { lease: Some(lease) })
+                .is_some()
+            {
+                return Err(preparation_error(
+                    "one Gaussian kernel acquired more than one concrete binding",
+                ));
+            }
+        }
+
+        Ok(Self {
+            plan,
+            resource_bindings,
+            kernel_bindings,
+            frame_scope: Some(frame_scope),
+            next_pass: 0,
+            _ready_device: PhantomData,
+        })
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 consumes the typed prepared graph generation for stale-binding checks"
+        )
+    )]
+    pub(crate) const fn generation(&self) -> RuntimeGraphGeneration {
+        self.plan.generation
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 consumes the selected prepared working format"
+        )
+    )]
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.plan.working_format
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "C08 consumes the prepared output format")
+    )]
+    pub(crate) const fn output_format(&self) -> Format {
+        self.plan.output_format
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 consumes the typed prepared root and terminal identities"
+        )
+    )]
+    pub(crate) const fn root_and_final(&self) -> (RuntimeResourceId, RuntimePassId) {
+        (self.plan.root_working_image, self.plan.final_present)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 consumes prepared pass requests through this narrow iterator"
+        )
+    )]
+    pub(crate) fn current_pass(&self) -> Option<PreparedPassView<'_>> {
+        self.plan
+            .passes
+            .get(self.next_pass)
+            .map(|request| PreparedPassView { request })
+    }
+
+    fn require_current_pass(&self, pass: RuntimePassId) -> Result<&RuntimePassPreparationRequest> {
+        let request = self
+            .plan
+            .passes
+            .get(self.next_pass)
+            .ok_or_else(|| preparation_error("prepared graph has no remaining pass"))?;
+        if request.runtime.id != pass {
+            return Err(preparation_error(
+                "prepared pass request is missing, stale, duplicate, or out of order",
+            ));
+        }
+        Ok(request)
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 inspects exact prepared texture bindings before encoding each pass"
+        )
+    )]
+    pub(crate) fn texture_binding_for_pass(
+        &self,
+        pass: RuntimePassId,
+        resource: RuntimeResourceId,
+    ) -> Result<PreparedTextureBinding<'_>> {
+        let request = self.require_current_pass(pass)?;
+        let bound = request
+            .runtime
+            .reads
+            .iter()
+            .any(|read| read.resource == resource)
+            || request.runtime.result == RuntimeResultBinding::Resource(resource);
+        if !bound {
+            return Err(preparation_error(
+                "runtime resource is not bound to the requested prepared pass",
+            ));
+        }
+        let binding = self
+            .resource_bindings
+            .get(&resource)
+            .ok_or_else(|| preparation_error("prepared runtime resource binding is missing"))?;
+        let lease = binding.lease.as_ref().ok_or_else(|| {
+            preparation_error("prepared runtime resource binding is stale or already released")
+        })?;
+        let frame_scope = self
+            .frame_scope
+            .as_ref()
+            .ok_or_else(|| preparation_error("prepared frame resource scope is closed"))?;
+        let (texture, view) = match &binding.allocation {
+            RuntimeAllocationRequest::EffectTexture(_) => frame_scope.effect_texture(lease)?,
+            RuntimeAllocationRequest::ResolvedMask(_) => {
+                frame_scope.resolved_mask_texture(lease)?
+            }
+        };
+        Ok(PreparedTextureBinding {
+            runtime_resource: resource,
+            allocation_resource: lease.resource_identity(),
+            texture,
+            view,
+        })
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 inspects exact prepared Gaussian bindings before blur encoding"
+        )
+    )]
+    pub(crate) fn gaussian_kernel_binding_for_pass(
+        &self,
+        pass: RuntimePassId,
+    ) -> Result<Option<PreparedGaussianKernelBinding<'_>>> {
+        let request = self.require_current_pass(pass)?;
+        let Some(kernel) = request.kernel else {
+            return Ok(None);
+        };
+        let binding = self
+            .kernel_bindings
+            .get(&kernel)
+            .ok_or_else(|| preparation_error("prepared Gaussian kernel binding is missing"))?;
+        let lease = binding.lease.as_ref().ok_or_else(|| {
+            preparation_error("prepared Gaussian kernel binding is stale or already released")
+        })?;
+        let frame_scope = self
+            .frame_scope
+            .as_ref()
+            .ok_or_else(|| preparation_error("prepared frame resource scope is closed"))?;
+        Ok(Some(PreparedGaussianKernelBinding {
+            key: kernel,
+            allocation_resource: lease.resource_identity(),
+            buffer: frame_scope.gaussian_kernel_buffer(lease)?,
+        }))
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 resolves prepared leases at each validated runtime last-use point"
+        )
+    )]
+    pub(crate) fn complete_pass(&mut self, pass: RuntimePassId) -> Result<()> {
+        let request = self.require_current_pass(pass)?;
+        let resource_releases = request.runtime.releases.clone();
+        let kernel_releases = request.kernel_releases.clone();
+
+        for resource in &resource_releases {
+            let binding = self
+                .resource_bindings
+                .get(resource)
+                .ok_or_else(|| preparation_error("prepared runtime release binding is missing"))?;
+            if binding.lease.is_none() {
+                return Err(preparation_error(
+                    "prepared runtime release is stale or duplicate",
+                ));
+            }
+        }
+        for kernel in &kernel_releases {
+            let binding = self
+                .kernel_bindings
+                .get(kernel)
+                .ok_or_else(|| preparation_error("prepared Gaussian release binding is missing"))?;
+            if binding.lease.is_none() {
+                return Err(preparation_error(
+                    "prepared Gaussian release is stale or duplicate",
+                ));
+            }
+        }
+
+        let Self {
+            resource_bindings,
+            kernel_bindings,
+            frame_scope,
+            ..
+        } = self;
+        let mut leases = Vec::with_capacity(resource_releases.len() + kernel_releases.len());
+        for resource in &resource_releases {
+            let lease = resource_bindings
+                .get(resource)
+                .and_then(|binding| binding.lease.as_ref())
+                .expect("prepared resource releases were validated before atomic resolution");
+            leases.push(lease);
+        }
+        for kernel in &kernel_releases {
+            let lease = kernel_bindings
+                .get(kernel)
+                .and_then(|binding| binding.lease.as_ref())
+                .expect("prepared kernel releases were validated before atomic resolution");
+            leases.push(lease);
+        }
+        frame_scope
+            .as_mut()
+            .ok_or_else(|| preparation_error("prepared frame resource scope is closed"))?
+            .resolve_leases_atomically(&leases)?;
+        for resource in resource_releases {
+            let _ = resource_bindings
+                .get_mut(&resource)
+                .and_then(|binding| binding.lease.take())
+                .expect("atomically resolved prepared resource must remain bound");
+        }
+        for kernel in kernel_releases {
+            let _ = kernel_bindings
+                .get_mut(&kernel)
+                .and_then(|binding| binding.lease.take())
+                .expect("atomically resolved prepared kernel must remain bound");
+        }
+        self.next_pass = self.next_pass.saturating_add(1);
+        Ok(())
+    }
+
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 finishes a completely released prepared frame scope after execution"
+        )
+    )]
+    pub(crate) fn finish(mut self) -> Result<FrameCleanup> {
+        if self.next_pass != self.plan.passes.len()
+            || self
+                .resource_bindings
+                .values()
+                .any(|binding| binding.lease.is_some())
+            || self
+                .kernel_bindings
+                .values()
+                .any(|binding| binding.lease.is_some())
+        {
+            return Err(preparation_error(
+                "prepared graph cannot finish before every pass and last-use release",
+            ));
+        }
+        self.frame_scope
+            .take()
+            .ok_or_else(|| preparation_error("prepared frame resource scope is already closed"))
+            .map(FrameResourceScope::finish)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn allocation_identities_for_test(&self) -> PreparedAllocationIdentitiesForTest {
+        PreparedAllocationIdentitiesForTest {
+            resources: self
+                .resource_bindings
+                .iter()
+                .map(|(runtime, binding)| {
+                    (
+                        *runtime,
+                        binding
+                            .lease
+                            .as_ref()
+                            .expect("new prepared resources must own live leases")
+                            .resource_identity(),
+                    )
+                })
+                .collect(),
+            kernels: self
+                .kernel_bindings
+                .iter()
+                .map(|(kernel, binding)| {
+                    (
+                        *kernel,
+                        binding
+                            .lease
+                            .as_ref()
+                            .expect("new prepared kernels must own live leases")
+                            .resource_identity(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn exercise_for_test(&mut self) -> Result<PreparedGraphExerciseObservationForTest> {
+        let _ = (
+            self.generation(),
+            self.working_format(),
+            self.output_format(),
+            self.root_and_final(),
+        );
+        let mut vocabulary = [false; 10];
+        for pass in &self.plan.passes {
+            vocabulary[runtime_pass_kind_index(&pass.runtime.kind)] = true;
+        }
+        let complete_resource_and_pass_handoff = self
+            .plan
+            .resources
+            .iter()
+            .find(|resource| resource.runtime.role == RuntimeResourceRole::RootWorkingImage)
+            .map(|resource| resource.runtime.id)
+            == Some(self.plan.root_working_image)
+            && self
+                .plan
+                .passes
+                .last()
+                .is_some_and(|pass| pass.runtime.id == self.plan.final_present)
+            && vocabulary.into_iter().all(|present| present)
+            && !self.plan.resources.is_empty()
+            && !self.plan.kernels.is_empty();
+
+        let mut has_capture = false;
+        let mut has_working = false;
+        let mut has_mask = false;
+        let exact_resources = self.plan.resources.iter().all(|request| {
+            match (&request.runtime.format, &request.allocation) {
+                (
+                    RuntimeResourceFormat::VelloCaptureRgba8Unorm,
+                    RuntimeAllocationRequest::EffectTexture(descriptor),
+                ) => {
+                    has_capture = true;
+                    descriptor.role() == EffectTextureRole::Capture
+                        && descriptor.working_format().is_none()
+                        && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
+                        && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
+                }
+                (
+                    RuntimeResourceFormat::Working(format),
+                    RuntimeAllocationRequest::EffectTexture(descriptor),
+                ) => {
+                    has_working = true;
+                    descriptor.role() == EffectTextureRole::Working
+                        && descriptor.working_format() == Some(*format)
+                        && descriptor.texture_format() == format.texture_format()
+                        && descriptor.usage() == format.required_usages()
+                }
+                (
+                    RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
+                    RuntimeAllocationRequest::ResolvedMask(descriptor),
+                ) => {
+                    has_mask = true;
+                    matches!(
+                        &request.runtime.import,
+                        Some(RuntimeResourceImport::ResolvedAlphaMask(runtime))
+                            if runtime.cache_key() == descriptor.cache_key()
+                                && runtime.physical_size() == descriptor.physical_size()
+                    )
+                }
+                _ => false,
+            }
+        });
+        let exact_kernels = self.plan.kernels.iter().all(|kernel| {
+            kernel.key == kernel.plan.key()
+                && kernel.plan.byte_len() > 0
+                && self
+                    .plan
+                    .passes
+                    .iter()
+                    .any(|pass| pass.kernel == Some(kernel.key))
+        });
+        let exact_capture_working_mask_and_kernel_allocations =
+            has_capture && has_working && has_mask && exact_resources && exact_kernels;
+        let spatial_bytes_and_cache_keys_preserved = self.plan.passes.iter().all(|pass| {
+            pass.cache_keys == pass.runtime.cache_keys
+                && pass.spatial_uniform.is_some() == pass.cache_keys.is_some()
+                && pass
+                    .spatial_uniform
+                    .as_ref()
+                    .is_none_or(|bytes| bytes.as_bytes().len() == 48)
+        });
+
+        let initial_pass = self
+            .current_pass()
+            .ok_or_else(|| preparation_error("prepared test graph has no first pass"))?
+            .id();
+        let initial_outstanding = self.outstanding_lease_count_for_test();
+        let out_of_order_rejected = (self.plan.final_present != initial_pass)
+            && self.complete_pass(self.plan.final_present).is_err()
+            && self.next_pass == 0
+            && self.outstanding_lease_count_for_test() == initial_outstanding;
+        let unrelated_resource = self.plan.resources.iter().find_map(|resource| {
+            let bound = self.plan.passes[0]
+                .runtime
+                .reads
+                .iter()
+                .any(|read| read.resource == resource.runtime.id)
+                || self.plan.passes[0].runtime.result
+                    == RuntimeResultBinding::Resource(resource.runtime.id);
+            (!bound).then_some(resource.runtime.id)
+        });
+        let missing_binding_rejected = unrelated_resource.is_some_and(|resource| {
+            self.texture_binding_for_pass(initial_pass, resource)
+                .is_err()
+                && self.next_pass == 0
+                && self.outstanding_lease_count_for_test() == initial_outstanding
+        });
+
+        let mut all_bindings_inspected = true;
+        let mut releases_are_exact = true;
+        let mut duplicate_release_rejected = false;
+        let mut completed = 0_usize;
+        while let Some(pass) = self.current_pass() {
+            let pass_id = pass.id();
+            let _ = (pass.kind(), pass.dependencies(), pass.result());
+            all_bindings_inspected &= pass.reads().iter().all(|read| {
+                let _ = (
+                    read.role(),
+                    read.resource(),
+                    read.sampling_filter(),
+                    read.sampling_edge(),
+                    read.sampler_key(),
+                );
+                true
+            });
+            all_bindings_inspected &= pass
+                .spatial_uniform()
+                .is_some_and(|bytes| bytes.as_bytes().len() == 48)
+                == pass.cache_keys().is_some();
+            if let Some(keys) = pass.cache_keys() {
+                let _ = (
+                    keys.samplers(),
+                    keys.layout(),
+                    keys.shader(),
+                    keys.pipeline(),
+                );
+            }
+            let bound_resources = pass.bound_resources_for_test();
+            let resource_releases = pass.resource_releases_for_test().to_vec();
+            let kernel_releases = pass.kernel_releases_for_test().to_vec();
+            for resource in bound_resources {
+                let binding = self.texture_binding_for_pass(pass_id, resource)?;
+                all_bindings_inspected &= binding.runtime_resource() == resource
+                    && binding.allocation_resource().get() > 0
+                    && binding.texture().width() > 0;
+                let _ = binding.view();
+            }
+            if let Some(binding) = self.gaussian_kernel_binding_for_pass(pass_id)? {
+                all_bindings_inspected &= binding.allocation_resource().get() > 0
+                    && self
+                        .plan
+                        .passes
+                        .get(self.next_pass)
+                        .is_some_and(|request| request.kernel == Some(binding.key()));
+                let _ = binding.buffer();
+            }
+            self.complete_pass(pass_id)?;
+            releases_are_exact &= resource_releases.iter().all(|resource| {
+                self.resource_bindings
+                    .get(resource)
+                    .is_some_and(|binding| binding.lease.is_none())
+            }) && kernel_releases.iter().all(|kernel| {
+                self.kernel_bindings
+                    .get(kernel)
+                    .is_some_and(|binding| binding.lease.is_none())
+            });
+            if completed == 0 {
+                let after_first = self.outstanding_lease_count_for_test();
+                duplicate_release_rejected = self.complete_pass(pass_id).is_err()
+                    && self.outstanding_lease_count_for_test() == after_first
+                    && self.next_pass == 1;
+            }
+            completed = completed.saturating_add(1);
+        }
+        let typed_bindings_and_last_use_releases = out_of_order_rejected
+            && missing_binding_rejected
+            && duplicate_release_rejected
+            && all_bindings_inspected
+            && releases_are_exact
+            && completed == self.plan.passes.len()
+            && self.outstanding_lease_count_for_test() == 0;
+
+        Ok(PreparedGraphExerciseObservationForTest {
+            complete_resource_and_pass_handoff,
+            exact_capture_working_mask_and_kernel_allocations,
+            typed_bindings_and_last_use_releases,
+            spatial_bytes_and_cache_keys_preserved,
+        })
+    }
+
+    #[cfg(test)]
+    fn outstanding_lease_count_for_test(&self) -> usize {
+        self.resource_bindings
+            .values()
+            .filter(|binding| binding.lease.is_some())
+            .count()
+            + self
+                .kernel_bindings
+                .values()
+                .filter(|binding| binding.lease.is_some())
+                .count()
+    }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 consumes this immutable view of the current prepared runtime pass"
+    )
+)]
+pub(crate) struct PreparedPassView<'prepared> {
+    request: &'prepared RuntimePassPreparationRequest,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 consumes these narrow immutable prepared-pass facts"
+    )
+)]
+impl PreparedPassView<'_> {
+    pub(crate) const fn id(&self) -> RuntimePassId {
+        self.request.runtime.id
+    }
+
+    pub(crate) const fn kind(&self) -> &RuntimePassKind {
+        &self.request.runtime.kind
+    }
+
+    pub(crate) fn dependencies(&self) -> &[RuntimePassId] {
+        &self.request.runtime.dependencies
+    }
+
+    pub(crate) fn reads(&self) -> &[RuntimeReadBinding] {
+        &self.request.runtime.reads
+    }
+
+    pub(crate) const fn result(&self) -> RuntimeResultBinding {
+        self.request.runtime.result
+    }
+
+    pub(crate) const fn spatial_uniform(&self) -> Option<&PassSpatialUniformBytes> {
+        self.request.spatial_uniform.as_ref()
+    }
+
+    pub(crate) const fn cache_keys(&self) -> Option<&RuntimePassCacheKeys> {
+        self.request.cache_keys.as_ref()
+    }
+
+    #[cfg(test)]
+    fn bound_resources_for_test(&self) -> Vec<RuntimeResourceId> {
+        let mut resources = self
+            .request
+            .runtime
+            .reads
+            .iter()
+            .map(|read| read.resource)
+            .collect::<Vec<_>>();
+        if let RuntimeResultBinding::Resource(resource) = self.request.runtime.result {
+            resources.push(resource);
+        }
+        resources
+    }
+
+    #[cfg(test)]
+    fn resource_releases_for_test(&self) -> &[RuntimeResourceId] {
+        &self.request.runtime.releases
+    }
+
+    #[cfg(test)]
+    fn kernel_releases_for_test(&self) -> &[GaussianKernelKey] {
+        &self.request.kernel_releases
+    }
+}
+
+pub(crate) struct PreparedTextureBinding<'prepared> {
+    runtime_resource: RuntimeResourceId,
+    allocation_resource: ResourceIdentity,
+    texture: &'prepared wgpu::Texture,
+    view: &'prepared wgpu::TextureView,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 reads these exact typed texture binding facts during pass encoding"
+    )
+)]
+impl<'prepared> PreparedTextureBinding<'prepared> {
+    pub(crate) const fn runtime_resource(&self) -> RuntimeResourceId {
+        self.runtime_resource
+    }
+
+    pub(crate) const fn allocation_resource(&self) -> ResourceIdentity {
+        self.allocation_resource
+    }
+
+    pub(crate) const fn texture(&self) -> &'prepared wgpu::Texture {
+        self.texture
+    }
+
+    pub(crate) const fn view(&self) -> &'prepared wgpu::TextureView {
+        self.view
+    }
+}
+
+pub(crate) struct PreparedGaussianKernelBinding<'prepared> {
+    key: GaussianKernelKey,
+    allocation_resource: ResourceIdentity,
+    buffer: &'prepared wgpu::Buffer,
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "C08 reads these exact typed Gaussian binding facts during blur encoding"
+    )
+)]
+impl<'prepared> PreparedGaussianKernelBinding<'prepared> {
+    pub(crate) const fn key(&self) -> GaussianKernelKey {
+        self.key
+    }
+
+    pub(crate) const fn allocation_resource(&self) -> ResourceIdentity {
+        self.allocation_resource
+    }
+
+    pub(crate) const fn buffer(&self) -> &'prepared wgpu::Buffer {
+        self.buffer
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedAllocationIdentitiesForTest {
+    resources: Vec<(RuntimeResourceId, ResourceIdentity)>,
+    kernels: Vec<(GaussianKernelKey, ResourceIdentity)>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PreparedGraphExerciseObservationForTest {
+    pub(crate) complete_resource_and_pass_handoff: bool,
+    pub(crate) exact_capture_working_mask_and_kernel_allocations: bool,
+    pub(crate) typed_bindings_and_last_use_releases: bool,
+    pub(crate) spatial_bytes_and_cache_keys_preserved: bool,
 }
 
 fn lowering_error(message: &'static str) -> Error {

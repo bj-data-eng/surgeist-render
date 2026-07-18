@@ -10064,6 +10064,168 @@ fn runtime_lowering_derives_exact_sampler_layout_shader_and_pipeline_keys() {
 }
 
 #[test]
+fn resource_preparation_is_private_allocation_safe_and_submission_free() {
+    let options = Options::default()
+        .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+        .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
+    let mut renderer = pollster::block_on(Renderer::new(options))
+        .expect("resource preparation coverage requires a real selected WGPU device");
+    let surface = pollster::block_on(renderer.create_headless(Size::new(16.0, 12.0), 1.0))
+        .expect("resource preparation coverage requires a device-backed headless surface");
+    let stats_before = renderer.stats();
+    let capabilities_before = renderer.runtime_capabilities(&surface);
+    let surface_state_before = surface.resource_state();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("resource preparation coverage requires one ready device bundle")
+        .internal_resource_manager_observation_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+
+    let observed = renderer
+        .resource_preparation_observation_for_test(
+            runtime_lowering_commands_for_test(),
+            Size::new(16.0, 12.0),
+            1.0,
+            Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+            Format::Rgba8,
+        )
+        .expect("the representative graph must reach the private preparation observation");
+
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("resource preparation must leave the selected device ready")
+        .internal_resource_manager_observation_for_test();
+    let public_state_unchanged = renderer.stats() == stats_before
+        && renderer.runtime_capabilities(&surface) == capabilities_before
+        && surface.resource_state() == surface_state_before
+        && surface.last_parameters.is_none();
+    let bounded_after_cleanup = resources_before.leased_count == 0
+        && resources_after.leased_count == 0
+        && resources_after.entry_count > 0
+        && resources_after.retained_bytes <= options.resource_cache_budget().bytes();
+
+    assert!(
+        observed.complete_resource_and_pass_handoff
+            && observed.exact_capture_working_mask_and_kernel_allocations
+            && observed.typed_bindings_and_last_use_releases
+            && observed.spatial_bytes_and_cache_keys_preserved
+            && observed.allocation_preflight_is_atomic
+            && observed.failure_and_drop_cleanup
+            && observed.repeated_reuse_is_exact_and_bounded
+            && observed.pass_cache_remains_empty
+            && submission.queue_submission_count_for_test() == 0
+            && submission.readback_queue_submission_count_for_test() == 0
+            && public_state_unchanged
+            && bounded_after_cleanup,
+        "C08 has no complete private resource and pass preparation handoff"
+    );
+}
+
+#[test]
+fn resource_budget_and_device_loss_preserve_public_stats_contract() {
+    let commands = runtime_lowering_commands_for_test();
+    let route_before = super::frame::frame_plan_result_observation_for_test(
+        commands.clone(),
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::BLACK,
+    );
+
+    let ordinary_options = Options::default()
+        .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+        .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
+    let mut ordinary = pollster::block_on(Renderer::new(ordinary_options))
+        .expect("ordinary-budget preparation coverage requires a real selected WGPU device");
+    let ordinary_surface = pollster::block_on(ordinary.create_headless(Size::new(16.0, 12.0), 1.0))
+        .expect("ordinary-budget coverage requires a device-backed headless surface");
+    let ordinary_stats = ordinary.stats();
+    let ordinary_capabilities = ordinary.runtime_capabilities(&ordinary_surface);
+    let ordinary_observation = ordinary
+        .resource_preparation_observation_for_test(
+            commands.clone(),
+            Size::new(16.0, 12.0),
+            1.0,
+            Color::BLACK,
+            Format::Rgba8,
+        )
+        .expect("ordinary-budget preparation must reach the private handoff");
+    let ordinary_resources = ordinary
+        .default_ready_device_state_borrow_for_test()
+        .expect("ordinary-budget preparation must retain one ready device")
+        .internal_resource_manager_observation_for_test();
+    let ordinary_public_unchanged = ordinary.stats() == ordinary_stats
+        && ordinary.runtime_capabilities(&ordinary_surface) == ordinary_capabilities
+        && ordinary_surface.resource_state() == SurfaceResourceState::PendingAllocation;
+
+    let disabled_options =
+        ordinary_options.with_resource_cache_budget(ResourceCacheBudget::DISABLED);
+    let mut disabled = pollster::block_on(Renderer::new(disabled_options))
+        .expect("zero-budget preparation coverage requires a real selected WGPU device");
+    let disabled_surface = pollster::block_on(disabled.create_headless(Size::new(16.0, 12.0), 1.0))
+        .expect("zero-budget coverage requires a device-backed headless surface");
+    let disabled_stats = disabled.stats();
+    let disabled_capabilities = disabled.runtime_capabilities(&disabled_surface);
+    let disabled_observation = disabled
+        .resource_preparation_observation_for_test(
+            commands.clone(),
+            Size::new(16.0, 12.0),
+            1.0,
+            Color::BLACK,
+            Format::Rgba8,
+        )
+        .expect("zero-budget preparation must reach the private handoff");
+    let zero_budget_resources = disabled
+        .default_ready_device_state_borrow_for_test()
+        .expect("zero-budget preparation must retain one ready device before loss")
+        .internal_resource_manager_observation_for_test();
+    let drop_witness = disabled
+        .default_ready_device_state_borrow_for_test()
+        .expect("terminal cleanup coverage requires the same ready device bundle")
+        .drop_witness_for_test();
+    let disabled_public_before_loss = disabled.stats() == disabled_stats
+        && disabled.runtime_capabilities(&disabled_surface) == disabled_capabilities
+        && disabled_surface.resource_state() == SurfaceResourceState::PendingAllocation;
+
+    disabled.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    disabled.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
+    let terminal_capabilities = disabled.runtime_capabilities(&disabled_surface);
+    let terminal_cleanup_once = disabled.default_device_renderer_released_for_test()
+        && disabled.default_device_renderer_released_for_test()
+        && drop_witness.was_dropped_for_test();
+    let route_after = super::frame::frame_plan_result_observation_for_test(
+        commands,
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::BLACK,
+    );
+
+    assert!(
+        ordinary_observation.failure_and_drop_cleanup
+            && disabled_observation.failure_and_drop_cleanup
+            && ordinary_public_unchanged
+            && disabled_public_before_loss
+            && ordinary_resources.leased_count == 0
+            && ordinary_resources.entry_count > 0
+            && zero_budget_resources.leased_count == 0
+            && zero_budget_resources.idle_count == 0
+            && zero_budget_resources.retained_bytes == 0
+            && disabled.stats() == disabled_stats
+            && terminal_capabilities
+                == RuntimeCapabilities::Unavailable(
+                    RuntimeCapabilityUnavailableReason::DeviceLost {
+                        reason: DeviceLossReason::Destroyed,
+                    },
+                )
+            && terminal_cleanup_once
+            && route_after == route_before,
+        "resource lifecycle leaked into final public stats"
+    );
+}
+
+#[test]
 fn pass_spatial_uniform_bytes_match_the_exact_little_endian_layout_without_pod() {
     let source_extent = PhysicalSize::new(0x0102_0304, 0x0a0b_0c0d);
     let destination_extent = PhysicalSize::new(0x1020_3040, 0x5060_7080);

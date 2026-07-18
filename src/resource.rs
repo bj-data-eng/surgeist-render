@@ -111,20 +111,20 @@ impl AllocationGeneration {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T5 consumes the C07 Gaussian sampling forms during pass lowering"
-    )
-)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) enum GaussianKernelSamplingForm {
     PairedLinear,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 retains the validated non-filtering kernel route for exact sampling"
+        )
+    )]
     FullNearest,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct GaussianKernelKey {
     standard_deviation_bits: u64,
     raster_scale_bits: u64,
@@ -134,13 +134,6 @@ pub(crate) struct GaussianKernelKey {
 }
 
 impl GaussianKernelKey {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 constructs exact Gaussian kernel plans during pass lowering"
-        )
-    )]
     pub(crate) const fn from_exact_plan(
         standard_deviation_bits: u64,
         raster_scale_bits: u64,
@@ -166,13 +159,6 @@ pub(crate) struct GaussianKernelPlan {
 }
 
 impl GaussianKernelPlan {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 constructs exact Gaussian kernel plans during pass lowering"
-        )
-    )]
     pub(crate) fn try_new(
         standard_deviation: f64,
         raster_scale: f64,
@@ -382,13 +368,6 @@ impl GaussianKernelPlan {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T5 constructs exact Gaussian kernel plans during pass lowering"
-    )
-)]
 fn append_kernel_sample(bytes: &mut Vec<u8>, offset: f64, weight: f64) -> Result<()> {
     let offset = offset as f32;
     let weight = weight as f32;
@@ -440,6 +419,13 @@ impl ResourceCacheKey {
         matches!(self, Self::VelloImage(key) if key.is_persistent_atlas())
     }
 
+    const fn accepts_graph_preparation(self) -> bool {
+        matches!(
+            self,
+            Self::EffectTexture(_) | Self::ResolvedMaskUpload(_) | Self::GaussianKernelBuffer(_)
+        )
+    }
+
     #[cfg(test)]
     const fn is_vello_buffer(self) -> bool {
         matches!(self, Self::VelloBuffer(_))
@@ -448,6 +434,39 @@ impl ResourceCacheKey {
     #[cfg(test)]
     const fn is_transient_vello_image(self) -> bool {
         matches!(self, Self::VelloImage(key) if !key.is_persistent_atlas())
+    }
+}
+
+/// Immutable concrete-allocation facts used to preflight a complete graph
+/// before opening its frame resource scope.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ResourceAllocationPreflight {
+    key: ResourceCacheKey,
+    byte_len: u64,
+}
+
+impl ResourceAllocationPreflight {
+    pub(crate) fn effect_texture(descriptor: EffectTextureDescriptor) -> Result<Self> {
+        Ok(Self {
+            key: ResourceCacheKey::EffectTexture(descriptor.cache_key()),
+            byte_len: descriptor.checked_byte_len()?,
+        })
+    }
+
+    pub(crate) fn resolved_mask(descriptor: &ResolvedMaskUploadDescriptor) -> Result<Self> {
+        descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
+        Ok(Self {
+            key: ResourceCacheKey::ResolvedMaskUpload(descriptor.cache_key()),
+            byte_len: descriptor.byte_len(),
+        })
+    }
+
+    pub(crate) fn gaussian_kernel(plan: &GaussianKernelPlan) -> Result<Self> {
+        plan.validate_upload_byte_len(plan.upload_bytes().len())?;
+        Ok(Self {
+            key: ResourceCacheKey::GaussianKernelBuffer(plan.key()),
+            byte_len: plan.byte_len(),
+        })
     }
 }
 
@@ -665,6 +684,68 @@ impl ResourceManagerState {
         ))
     }
 
+    fn preflight_graph_acquisitions(&self, requests: &[ResourceAllocationPreflight]) -> Result<()> {
+        let mut selected_idle = BTreeSet::new();
+        let mut retained_bytes = self.retained_bytes;
+        let mut next_resource = self.next_resource;
+
+        for request in requests {
+            if !request.key.accepts_graph_preparation() {
+                return Err(Error::invalid_value(
+                    "graph resource preflight key",
+                    format!("{:?}", request.key),
+                    "must use an effect texture, resolved mask, or Gaussian kernel namespace",
+                ));
+            }
+            if request.byte_len == 0 {
+                return Err(Error::invalid_value(
+                    "graph resource preflight byte length",
+                    request.byte_len,
+                    "must be greater than zero",
+                ));
+            }
+
+            let reusable = self
+                .entries
+                .iter()
+                .filter_map(|(identity, entry)| match entry.state {
+                    ResourceEntryState::Idle { last_used_frame }
+                        if entry.key == request.key
+                            && entry.byte_len == request.byte_len
+                            && !selected_idle.contains(identity) =>
+                    {
+                        Some((last_used_frame, *identity))
+                    }
+                    ResourceEntryState::Idle { .. } | ResourceEntryState::Leased { .. } => None,
+                })
+                .min()
+                .map(|(_, identity)| identity);
+            if let Some(identity) = reusable {
+                selected_idle.insert(identity);
+                continue;
+            }
+
+            next_resource = next_resource.checked_add(1).ok_or_else(|| {
+                Error::invalid_value(
+                    "resource identity",
+                    next_resource,
+                    "must have remaining identity space for every prepared allocation",
+                )
+            })?;
+            retained_bytes = retained_bytes
+                .checked_add(request.byte_len)
+                .ok_or_else(|| {
+                    Error::invalid_value(
+                        "retained resource byte length",
+                        format!("{retained_bytes} + {}", request.byte_len),
+                        "must fit in u64",
+                    )
+                })?;
+        }
+
+        Ok(())
+    }
+
     #[cfg(test)]
     fn acquire(
         &mut self,
@@ -748,6 +829,31 @@ impl ResourceManagerState {
         self.resolved_leases
             .insert((frame, token.resource_identity));
         self.stats.releases = self.stats.releases.saturating_add(1);
+        Ok(())
+    }
+
+    fn resolve_leases_atomically(
+        &mut self,
+        manager_identity: &ManagerIdentity,
+        frame: FrameIdentity,
+        tokens: &[&ResourceLeaseToken],
+    ) -> Result<()> {
+        let mut resources = BTreeSet::new();
+        for token in tokens {
+            if !resources.insert(token.resource_identity) {
+                return Err(Self::invalid_lease(
+                    token.resource_identity,
+                    "must occur at most once in one atomic release",
+                ));
+            }
+            self.validate_lease(manager_identity, frame, token)?;
+        }
+
+        for token in tokens {
+            self.resolved_leases
+                .insert((frame, token.resource_identity));
+            self.stats.releases = self.stats.releases.saturating_add(1);
+        }
         Ok(())
     }
 
@@ -974,6 +1080,13 @@ impl ResourceManager {
             frame,
             cleaned: false,
         })
+    }
+
+    pub(crate) fn preflight_graph_acquisitions(
+        &self,
+        requests: &[ResourceAllocationPreflight],
+    ) -> Result<()> {
+        lock_state(&self.state).preflight_graph_acquisitions(requests)
     }
 
     #[cfg(test)]
@@ -1317,10 +1430,6 @@ impl FrameResourceScope {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T4 consumes concrete effect texture leases")
-    )]
     pub(crate) fn effect_texture<'scope>(
         &'scope self,
         lease: &'scope ResourceLease,
@@ -1335,10 +1444,6 @@ impl FrameResourceScope {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T5 consumes retained mask upload leases")
-    )]
     pub(crate) fn resolved_mask_texture<'scope>(
         &'scope self,
         lease: &'scope ResourceLease,
@@ -1353,10 +1458,6 @@ impl FrameResourceScope {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "T5 consumes immutable Gaussian kernel leases")
-    )]
     pub(crate) fn gaussian_kernel_buffer<'scope>(
         &'scope self,
         lease: &'scope ResourceLease,
@@ -1371,13 +1472,6 @@ impl FrameResourceScope {
         }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T4 connects C07 effect texture leases to the ready-device manager"
-        )
-    )]
     pub(crate) fn acquire_effect_texture(
         &mut self,
         device: &wgpu::Device,
@@ -1433,13 +1527,6 @@ impl FrameResourceScope {
         self.acquire_effect_texture(device, capabilities, descriptor)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 consumes retained mask-upload leases during runtime pass lowering"
-        )
-    )]
     pub(crate) fn acquire_resolved_mask_upload(
         &mut self,
         device: &wgpu::Device,
@@ -1510,13 +1597,6 @@ impl FrameResourceScope {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 consumes immutable Gaussian kernel leases during runtime pass lowering"
-        )
-    )]
     pub(crate) fn acquire_gaussian_kernel_buffer(
         &mut self,
         device: &wgpu::Device,
@@ -1551,6 +1631,15 @@ impl FrameResourceScope {
 
     pub(crate) fn release(&mut self, lease: ResourceLease) -> Result<()> {
         lock_state(&self.state).release(&self.manager_identity, self.frame, lease.token)
+    }
+
+    pub(crate) fn resolve_leases_atomically(&mut self, leases: &[&ResourceLease]) -> Result<()> {
+        let tokens = leases.iter().map(|lease| &lease.token).collect::<Vec<_>>();
+        lock_state(&self.state).resolve_leases_atomically(
+            &self.manager_identity,
+            self.frame,
+            &tokens,
+        )
     }
 
     pub(crate) fn record_vello_atlas_recovery(&mut self, outcome: VelloAtlasOutcome) {

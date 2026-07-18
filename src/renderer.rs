@@ -54,6 +54,19 @@ pub(crate) struct PreexecutionFrameGateObservationForTest {
     pub(crate) plan_count_at_transitional_effect_execution: Option<u8>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ResourcePreparationObservationForTest {
+    pub(crate) complete_resource_and_pass_handoff: bool,
+    pub(crate) exact_capture_working_mask_and_kernel_allocations: bool,
+    pub(crate) typed_bindings_and_last_use_releases: bool,
+    pub(crate) spatial_bytes_and_cache_keys_preserved: bool,
+    pub(crate) allocation_preflight_is_atomic: bool,
+    pub(crate) failure_and_drop_cleanup: bool,
+    pub(crate) repeated_reuse_is_exact_and_bounded: bool,
+    pub(crate) pass_cache_remains_empty: bool,
+}
+
 struct RenderPublication {
     frame: SurfaceFrameCommit,
     stats: Stats,
@@ -1224,6 +1237,172 @@ impl Renderer {
         self.backend
             .as_mut()?
             .ready_device_state_borrow_for_test(device_identity)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resource_preparation_observation_for_test(
+        &mut self,
+        commands: RenderCommands,
+        surface_size: Size,
+        surface_scale: f64,
+        base_color: Color,
+        output_format: Format,
+    ) -> Result<ResourcePreparationObservationForTest> {
+        let context = FrameContext::try_new(
+            surface_size,
+            surface_scale,
+            self.options.antialiasing(),
+            base_color,
+        )?;
+        let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "the resource preparation fixture did not produce a GPU graph",
+            ));
+        };
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::EffectRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "resource preparation coverage requires a ready default device",
+            )
+        })?;
+        let policy = self.options.effect_quality_policy();
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::EffectRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "resource preparation coverage requires a renderer backend",
+            )
+        })?;
+        let capabilities = backend
+            .device_capabilities(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "resource preparation coverage requires immutable device capabilities",
+                )
+            })?;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let lowered = super::pass::LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            output_format,
+            &capabilities,
+        )?;
+
+        let preflight_before = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared before preparation preflight",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        let invalid = lowered.with_duplicate_preparation_resource_for_test();
+        let preflight_rejected = backend
+            .prepare_graph_resources(device_identity, invalid, policy)
+            .is_err();
+        let preflight_after = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared after preparation preflight",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        let allocation_preflight_is_atomic =
+            preflight_rejected && preflight_before == preflight_after;
+
+        let (first_exercise, first_identities) = {
+            let mut prepared =
+                backend.prepare_graph_resources(device_identity, lowered.clone(), policy)?;
+            let identities = prepared.allocation_identities_for_test();
+            let exercise = prepared.exercise_for_test()?;
+            let _ = prepared.finish()?;
+            (exercise, identities)
+        };
+        let after_first = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared after first complete preparation",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+
+        let second_identities = {
+            let mut prepared =
+                backend.prepare_graph_resources(device_identity, lowered.clone(), policy)?;
+            let identities = prepared.allocation_identities_for_test();
+            let _ = prepared.exercise_for_test()?;
+            let _ = prepared.finish()?;
+            identities
+        };
+        let after_second = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared after repeated complete preparation",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        let repeated_reuse_is_exact_and_bounded = first_identities == second_identities
+            && after_second.payload_creation_attempts == after_first.payload_creation_attempts
+            && after_second.entry_count == after_first.entry_count
+            && after_second.retained_bytes == after_first.retained_bytes;
+
+        let early_finish_failed = {
+            let prepared =
+                backend.prepare_graph_resources(device_identity, lowered.clone(), policy)?;
+            prepared.finish().is_err()
+        };
+        let after_failed_finish = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared after failed prepared finish",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        {
+            let prepared = backend.prepare_graph_resources(device_identity, lowered, policy)?;
+            drop(prepared);
+        }
+        let after_drop = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "ready device disappeared after prepared cancellation",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        let failure_and_drop_cleanup = early_finish_failed
+            && after_failed_finish.leased_count == 0
+            && after_drop.leased_count == 0;
+        let pass_cache_remains_empty = backend
+            .ready_device_state_borrow_for_test(device_identity)
+            .is_some_and(|ready| ready.device_pass_cache_is_empty_for_test());
+
+        Ok(ResourcePreparationObservationForTest {
+            complete_resource_and_pass_handoff: first_exercise.complete_resource_and_pass_handoff,
+            exact_capture_working_mask_and_kernel_allocations: first_exercise
+                .exact_capture_working_mask_and_kernel_allocations,
+            typed_bindings_and_last_use_releases: first_exercise
+                .typed_bindings_and_last_use_releases,
+            spatial_bytes_and_cache_keys_preserved: first_exercise
+                .spatial_bytes_and_cache_keys_preserved,
+            allocation_preflight_is_atomic,
+            failure_and_drop_cleanup,
+            repeated_reuse_is_exact_and_bounded,
+            pass_cache_remains_empty,
+        })
     }
 
     #[cfg(test)]

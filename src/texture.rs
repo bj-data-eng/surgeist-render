@@ -1,16 +1,16 @@
 use super::{Error, Format, PhysicalSize, Result, resource::WorkingFormat};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 connects C07 effect texture roles to the ready-device manager"
-    )
-)]
 pub(crate) enum EffectTextureRole {
     Capture,
     Working,
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 allocates Vello-rendered outer clip coverage through this role"
+        )
+    )]
     Coverage,
 }
 
@@ -44,13 +44,6 @@ pub(crate) struct EffectTextureDescriptor {
     usage: wgpu::TextureUsages,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 connects C07 effect texture requests to the ready-device manager"
-    )
-)]
 impl EffectTextureDescriptor {
     pub(crate) fn try_capture(
         physical_size: PhysicalSize,
@@ -79,6 +72,13 @@ impl EffectTextureDescriptor {
         )
     }
 
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 acquires Vello-rendered outer clip coverage through this descriptor"
+        )
+    )]
     pub(crate) fn try_coverage(
         physical_size: PhysicalSize,
         usage: wgpu::TextureUsages,
@@ -135,6 +135,11 @@ impl EffectTextureDescriptor {
 
     pub(crate) const fn working_format(self) -> Option<WorkingFormat> {
         self.working_format
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn role(self) -> EffectTextureRole {
+        self.role
     }
 
     pub(crate) const fn texture_format(self) -> wgpu::TextureFormat {

@@ -265,6 +265,14 @@ impl DevicePassCache {
         self.shaders.clear();
         self.pipelines.clear();
     }
+
+    #[must_use]
+    pub(crate) fn is_empty(&self) -> bool {
+        self.samplers.is_empty()
+            && self.layouts.is_empty()
+            && self.shaders.is_empty()
+            && self.pipelines.is_empty()
+    }
 }
 
 #[cfg(test)]
@@ -290,22 +298,9 @@ pub(crate) fn device_pass_cache_owns_exact_key_spaces_for_test() -> bool {
 }
 
 /// Exact 48-byte WGSL spatial uniform with explicit little-endian encoding.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C08 writes serialized spatial uniforms for executable passes"
-    )
-)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct PassSpatialUniformBytes([u8; 48]);
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C08 writes serialized spatial uniforms for executable passes"
-    )
-)]
 impl PassSpatialUniformBytes {
     pub(crate) fn try_from_runtime_spatial_descriptors(
         source: RuntimeSpatialDescriptor,
@@ -343,6 +338,18 @@ impl PassSpatialUniformBytes {
         bytes[40..44].copy_from_slice(&destination_extent.width().to_le_bytes());
         bytes[44..48].copy_from_slice(&destination_extent.height().to_le_bytes());
         Ok(Self(bytes))
+    }
+
+    #[must_use]
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "C08 writes the validated prepared spatial bytes into uniform buffers"
+        )
+    )]
+    pub(crate) const fn as_bytes(&self) -> &[u8; 48] {
+        &self.0
     }
 
     #[cfg(test)]
