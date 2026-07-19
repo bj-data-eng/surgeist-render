@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     BackendErrorCode, Error, PhysicalSize, Result,
     gpu_transaction::VelloResourceCommitProof,
-    resource::{FrameResourceScope, ResourceLease, ResourceManager},
+    resource::{FrameCleanup, FrameResourceScope, ResourceLease, ResourceManager},
 };
 
 use super::encoder::ActiveVelloEncodingScope;
@@ -162,11 +162,18 @@ impl PendingPersistentAtlas {
 
 struct PendingVelloResources {
     frame_scope: Option<FrameResourceScope>,
+    clean_retention: CleanVelloResourceRetention,
     buffers: HashMap<BufferHandle, ManagedBuffer>,
     images: HashMap<ImageHandle, ManagedImage>,
     persistent_image_atlas: PendingPersistentAtlas,
     released_buffers: HashSet<BufferHandle>,
     released_images: HashSet<ImageHandle>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum CleanVelloResourceRetention {
+    DirectAtlasOnly,
+    ReusableGraphFrame,
 }
 
 #[cfg(test)]
@@ -266,12 +273,9 @@ pub(crate) struct ScopeResolvedVelloResourceLeaseAggregate {
 }
 
 #[must_use]
-#[cfg(not(test))]
-pub(crate) struct CommittedVelloResources;
-
-#[must_use]
-#[cfg(test)]
 pub(crate) struct CommittedVelloResources {
+    frame_cleanup: FrameCleanup,
+    #[cfg(test)]
     atlas_outcome: VelloAtlasOutcome,
 }
 
@@ -317,10 +321,12 @@ impl PendingVelloResourceCommit {
         self.leases.len()
     }
 
-    pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) {
+    pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) -> FrameCleanup {
+        let mut cleanup = FrameCleanup::default();
         for lease in self.leases.drain(..) {
-            let _ = lease.commit();
+            cleanup = cleanup.followed_by(lease.commit().into_frame_cleanup());
         }
+        cleanup
     }
 }
 
@@ -342,15 +348,31 @@ pub(crate) struct AbortedVelloResources {
 }
 
 impl VelloResourceLease {
+    #[cfg(test)]
     pub(super) fn allocate(
         scope: &ActiveVelloEncodingScope<'_>,
         manager: &ResourceManager,
         intents: &[ResourceIntent],
     ) -> Result<Self> {
+        Self::allocate_with_retention(
+            scope,
+            manager,
+            intents,
+            CleanVelloResourceRetention::DirectAtlasOnly,
+        )
+    }
+
+    pub(super) fn allocate_with_retention(
+        scope: &ActiveVelloEncodingScope<'_>,
+        manager: &ResourceManager,
+        intents: &[ResourceIntent],
+        clean_retention: CleanVelloResourceRetention,
+    ) -> Result<Self> {
         let device = scope.device();
         preflight_resource_intents(&device.limits(), intents)?;
         let mut pending = PendingVelloResources {
             frame_scope: Some(manager.begin_frame()?),
+            clean_retention,
             buffers: HashMap::new(),
             images: HashMap::new(),
             persistent_image_atlas: PendingPersistentAtlas::NoAtlas,
@@ -697,11 +719,14 @@ impl AbortedVelloResources {
 }
 
 impl CommittedVelloResources {
+    pub(crate) fn into_frame_cleanup(self) -> FrameCleanup {
+        self.frame_cleanup
+    }
+
     #[cfg(test)]
     pub(crate) const fn atlas_outcome(&self) -> VelloAtlasOutcome {
         self.atlas_outcome
     }
-
 }
 
 impl PendingVelloResources {
@@ -733,9 +758,14 @@ impl PendingVelloResources {
             .expect("a pending Vello commit must own its resource frame");
 
         for (_, managed) in self.buffers.drain() {
-            frame_scope
-                .discard(managed.lease)
-                .expect("a Vello buffer must remain leased by its resource frame");
+            match self.clean_retention {
+                CleanVelloResourceRetention::DirectAtlasOnly => frame_scope
+                    .discard(managed.lease)
+                    .expect("a Vello buffer must remain leased by its resource frame"),
+                CleanVelloResourceRetention::ReusableGraphFrame => frame_scope
+                    .release(managed.lease)
+                    .expect("a reusable graph Vello buffer must remain leased by its frame"),
+            }
         }
 
         let mut retained_atlas = None;
@@ -743,26 +773,30 @@ impl PendingVelloResources {
             if Some(handle) == atlas_handle {
                 retained_atlas = Some(managed.lease);
             } else {
-                frame_scope
-                    .discard(managed.lease)
-                    .expect("a transient Vello image must remain leased by its resource frame");
+                match self.clean_retention {
+                    CleanVelloResourceRetention::DirectAtlasOnly => frame_scope
+                        .discard(managed.lease)
+                        .expect("a transient Vello image must remain leased by its resource frame"),
+                    CleanVelloResourceRetention::ReusableGraphFrame => frame_scope
+                        .release(managed.lease)
+                        .expect("a reusable graph Vello image must remain leased by its frame"),
+                }
             }
         }
         if let Some(atlas) = retained_atlas {
-            frame_scope.retire_idle_vello_atlases();
+            if self.clean_retention == CleanVelloResourceRetention::DirectAtlasOnly {
+                frame_scope.retire_idle_vello_atlases();
+            }
             frame_scope
                 .release(atlas)
                 .expect("the persistent Vello atlas must remain leased by its resource frame");
         }
-        let _ = frame_scope.finish();
+        let frame_cleanup = frame_scope.finish();
 
-        #[cfg(not(test))]
-        {
-            CommittedVelloResources
-        }
-        #[cfg(test)]
-        {
-            CommittedVelloResources { atlas_outcome }
+        CommittedVelloResources {
+            frame_cleanup,
+            #[cfg(test)]
+            atlas_outcome,
         }
     }
 
@@ -889,9 +923,16 @@ fn allocate_buffer(
             "internal Vello resource allocation repeats a buffer identity",
         ));
     }
-    let lease = pending
-        .frame_scope_mut()?
-        .acquire_vello_buffer(device, VelloBufferKey::from_intent(intent))?;
+    let key = VelloBufferKey::from_intent(intent);
+    let retention = pending.clean_retention;
+    let lease = match retention {
+        CleanVelloResourceRetention::DirectAtlasOnly => {
+            pending.frame_scope_mut()?.acquire_vello_buffer(device, key)?
+        }
+        CleanVelloResourceRetention::ReusableGraphFrame => pending
+            .frame_scope_mut()?
+            .acquire_reusable_vello_buffer(device, key)?,
+    };
     pending.buffers.insert(
         intent.resource,
         ManagedBuffer {
@@ -927,9 +968,15 @@ fn allocate_image(
 
     let key = VelloImageKey::from_intent(intent);
     let byte_len = image_byte_len(intent.extent, intent.format)?;
-    let lease = pending
-        .frame_scope_mut()?
-        .acquire_vello_image(device, key, byte_len)?;
+    let retention = pending.clean_retention;
+    let lease = match retention {
+        CleanVelloResourceRetention::DirectAtlasOnly => pending
+            .frame_scope_mut()?
+            .acquire_vello_image(device, key, byte_len)?,
+        CleanVelloResourceRetention::ReusableGraphFrame => pending
+            .frame_scope_mut()?
+            .acquire_reusable_vello_image(device, key, byte_len)?,
+    };
     if intent.retention == ImageRetention::PersistentImageAtlas {
         pending.persistent_image_atlas = PendingPersistentAtlas::NewlyAllocated(intent.resource);
     }

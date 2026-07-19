@@ -327,6 +327,11 @@ impl DevicePassCacheCountsForTest {
             && self.shader_count == 0
             && self.pipeline_count == 0
     }
+
+    #[must_use]
+    pub(crate) const fn has_render_pipelines(self) -> bool {
+        self.pipeline_count > 0
+    }
 }
 
 impl DevicePassCache {
@@ -1102,13 +1107,6 @@ impl PassSpatialUniformBytes {
     }
 
     #[must_use]
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 writes the validated prepared spatial bytes into uniform buffers"
-        )
-    )]
     pub(crate) const fn as_bytes(&self) -> &[u8; 48] {
         &self.0
     }

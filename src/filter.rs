@@ -698,13 +698,6 @@ pub(crate) struct AlgorithmColorFilterRun {
 }
 
 impl AlgorithmColorFilterRun {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C06 T3 records authored color operations for C07 lowering."
-        )
-    )]
     #[must_use]
     pub(crate) fn operations(&self) -> &[ClampedColorFilterOperation] {
         &self.operations
@@ -723,25 +716,11 @@ pub(crate) struct ClampedColorFilterOperation {
 }
 
 impl ClampedColorFilterOperation {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C06 T3 records each authored color operation for C07 lowering."
-        )
-    )]
     #[must_use]
     pub(crate) const fn operation(self) -> ColorFilterOp {
         self.operation
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C06 T3 records each authored clamp boundary for C07 lowering."
-        )
-    )]
     #[must_use]
     pub(crate) const fn clamp_boundary(self) -> ColorClampBoundary {
         self.clamp_boundary

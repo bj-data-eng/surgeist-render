@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::resource::WorkingFormat;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -10,17 +12,13 @@ use super::{
     frame::{FrameContext, FramePlan},
     geometry::physical_size,
     gpu_transaction::{GpuOperationDraft, GpuOperationStage},
+    pass::{C08GraphDispatchEligibility, C08GraphWorkingFormatRequest, C08PreparableGraph},
     readback::read_texture_rgba,
     stats::collect_render_stats,
     surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
     validation::*,
     vello_engine::scene::VelloScene,
     *,
-};
-#[cfg(test)]
-use super::{
-    pass::{C08PreparableGraph, LoweredGraphPlan},
-    resource::WorkingFormat,
 };
 #[cfg(test)]
 use std::{cell::RefCell, sync::Arc};
@@ -50,6 +48,21 @@ pub struct Renderer {
     default_device: Option<DeviceSlotIdentity>,
     #[cfg(test)]
     preexecution_frame_gate_observation: PreexecutionFrameGateObservationForTest,
+    #[cfg(test)]
+    dispatch_observation: RendererDispatchObservationForTest,
+}
+
+#[must_use = "the renderer dispatch boundary must resolve to exactly one execution route"]
+enum RendererFrameDispatch {
+    DirectVello(RenderCommands),
+    ExactC08Graph(C08PreparableGraph),
+    LaterCycleTransitional,
+}
+
+#[must_use = "prepared renderer execution must reach its selected GPU transaction"]
+enum PreparedRendererExecution {
+    DirectVello(VelloScene),
+    ExactC08Graph(C08PreparableGraph),
 }
 
 #[cfg(test)]
@@ -57,6 +70,15 @@ pub struct Renderer {
 pub(crate) struct PreexecutionFrameGateObservationForTest {
     pub(crate) validated_plan_count: u8,
     pub(crate) plan_count_at_transitional_effect_execution: Option<u8>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct RendererDispatchObservationForTest {
+    pub(crate) boundary_invocations: usize,
+    pub(crate) direct_vello_routes: usize,
+    pub(crate) exact_c08_graph_routes: usize,
+    pub(crate) transitional_graph_routes: usize,
 }
 
 #[cfg(test)]
@@ -197,6 +219,8 @@ impl Renderer {
             default_device,
             #[cfg(test)]
             preexecution_frame_gate_observation: PreexecutionFrameGateObservationForTest::default(),
+            #[cfg(test)]
+            dispatch_observation: RendererDispatchObservationForTest::default(),
         })
     }
 
@@ -621,6 +645,61 @@ impl Renderer {
         Ok(created)
     }
 
+    fn classify_frame_dispatch(
+        &mut self,
+        plan: FramePlan,
+        output_format: Format,
+        working_format: C08GraphWorkingFormatRequest,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<RendererFrameDispatch> {
+        #[cfg(test)]
+        {
+            self.dispatch_observation.boundary_invocations = self
+                .dispatch_observation
+                .boundary_invocations
+                .saturating_add(1);
+        }
+        match plan {
+            FramePlan::DirectVello(plan) => {
+                #[cfg(test)]
+                {
+                    self.dispatch_observation.direct_vello_routes = self
+                        .dispatch_observation
+                        .direct_vello_routes
+                        .saturating_add(1);
+                }
+                Ok(RendererFrameDispatch::DirectVello(plan.into_commands()))
+            }
+            FramePlan::GpuGraph(graph) => match C08GraphDispatchEligibility::try_classify(
+                &graph,
+                output_format,
+                working_format,
+                capabilities,
+            )? {
+                C08GraphDispatchEligibility::Exact(preparable) => {
+                    #[cfg(test)]
+                    {
+                        self.dispatch_observation.exact_c08_graph_routes = self
+                            .dispatch_observation
+                            .exact_c08_graph_routes
+                            .saturating_add(1);
+                    }
+                    Ok(RendererFrameDispatch::ExactC08Graph(preparable))
+                }
+                C08GraphDispatchEligibility::LaterCycleTransitional => {
+                    #[cfg(test)]
+                    {
+                        self.dispatch_observation.transitional_graph_routes = self
+                            .dispatch_observation
+                            .transitional_graph_routes
+                            .saturating_add(1);
+                    }
+                    Ok(RendererFrameDispatch::LaterCycleTransitional)
+                }
+            },
+        }
+    }
+
     /// Submits one render operation for an available surface.
     ///
     /// Awaiting this future returns render statistics after scene validation and
@@ -680,11 +759,37 @@ impl Renderer {
             self.preexecution_frame_gate_observation
                 .validated_plan_count += 1;
         }
+        let capabilities = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.device_capabilities(device_identity))
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the renderer dispatch boundary lost immutable device capabilities",
+                )
+            })?;
+        let dispatch = self.classify_frame_dispatch(
+            frame_plan,
+            runtime_surface_format(surface),
+            C08GraphWorkingFormatRequest::ConfiguredPolicy(self.options.effect_quality_policy()),
+            &capabilities,
+        )?;
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
             .await?;
-        let (normalized, validated_graph_plan) = match frame_plan {
-            FramePlan::DirectVello(plan) => (plan.into_commands(), None),
-            FramePlan::GpuGraph(plan) => {
+        let (normalized, execution) = match dispatch {
+            RendererFrameDispatch::DirectVello(normalized) => {
+                let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
+                (
+                    normalized,
+                    PreparedRendererExecution::DirectVello(vello_scene),
+                )
+            }
+            RendererFrameDispatch::ExactC08Graph(preparable) => (
+                transitional_source,
+                PreparedRendererExecution::ExactC08Graph(preparable),
+            ),
+            RendererFrameDispatch::LaterCycleTransitional => {
                 #[cfg(test)]
                 {
                     self.preexecution_frame_gate_observation
@@ -711,12 +816,15 @@ impl Renderer {
                     )
                     .await?,
                 );
-                (normalized, Some(plan))
+                let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
+                (
+                    normalized,
+                    PreparedRendererExecution::DirectVello(vello_scene),
+                )
             }
         };
         let mut uploaded_images = self.uploaded_images.clone();
         collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
-        let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
         stats.encode_time = encode_start.elapsed();
 
         if parameters.debug || self.options.debug() {
@@ -727,24 +835,63 @@ impl Renderer {
                 .backend
                 .as_mut()
                 .expect("surface preflight confirmed the renderer backend is available");
-            let transaction = backend.begin_gpu_operation(
-                device_identity,
-                GpuOperationStage::Render,
-                RuntimeOperation::SurfaceRendering,
-            )?;
-            let frame = render_internal_vello_surface(
-                backend,
-                transaction,
-                surface,
-                &vello_scene,
-                parameters,
-                self.options.antialiasing(),
-            )
-            .await;
+            let frame = match execution {
+                PreparedRendererExecution::DirectVello(vello_scene) => {
+                    let transaction = backend.begin_gpu_operation(
+                        device_identity,
+                        GpuOperationStage::Render,
+                        RuntimeOperation::SurfaceRendering,
+                    )?;
+                    render_internal_vello_surface(
+                        backend,
+                        transaction,
+                        surface,
+                        &vello_scene,
+                        parameters,
+                        self.options.antialiasing(),
+                    )
+                    .await
+                }
+                PreparedRendererExecution::ExactC08Graph(preparable) => {
+                    let working_format = preparable.working_format();
+                    #[cfg(any(
+                        feature = "render-window",
+                        all(feature = "render-web", target_arch = "wasm32")
+                    ))]
+                    let frame = if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                        render_c08_presented_graph_surface(
+                            backend,
+                            surface,
+                            preparable,
+                            working_format,
+                        )
+                        .await
+                    } else {
+                        render_c08_headless_graph_surface(
+                            backend,
+                            surface,
+                            preparable,
+                            working_format,
+                        )
+                        .await
+                    };
+                    #[cfg(not(any(
+                        feature = "render-window",
+                        all(feature = "render-web", target_arch = "wasm32")
+                    )))]
+                    let frame = render_c08_headless_graph_surface(
+                        backend,
+                        surface,
+                        preparable,
+                        working_format,
+                    )
+                    .await;
+                    frame
+                }
+            };
             backend.observe_device_terminal(device_identity);
             frame
         };
-        drop(validated_graph_plan);
         let frame = match frame {
             Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
                 self.configure_presented_surface_if_needed(
@@ -882,19 +1029,21 @@ impl Renderer {
                 )
             })?;
         let output_format = runtime_surface_format(surface);
-        capabilities.validate_supported_working_format(working_format)?;
-        let lowered = LoweredGraphPlan::try_lower_validated_graph(
-            &graph,
-            working_format,
+        let preparable = match self.classify_frame_dispatch(
+            FramePlan::GpuGraph(graph),
             output_format,
+            C08GraphWorkingFormatRequest::Exact(working_format),
             &capabilities,
-        )?;
-        let preparable = C08PreparableGraph::try_from_lowered(lowered).map_err(|_| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "the private forced graph is outside the exact executable C08 subset",
-            )
-        })?;
+        )? {
+            RendererFrameDispatch::ExactC08Graph(preparable) => preparable,
+            RendererFrameDispatch::DirectVello(_)
+            | RendererFrameDispatch::LaterCycleTransitional => {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private forced graph is outside the exact executable C08 subset",
+                ));
+            }
+        };
         let output_extent = preparable.output_extent()?;
         let prepared_capture_grids = preparable.capture_grids_for_test();
         if captures.len() != prepared_capture_grids.len()
@@ -1295,6 +1444,11 @@ impl Renderer {
         &self,
     ) -> PreexecutionFrameGateObservationForTest {
         self.preexecution_frame_gate_observation
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn dispatch_observation_for_test(&self) -> RendererDispatchObservationForTest {
+        self.dispatch_observation
     }
 
     #[must_use]

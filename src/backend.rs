@@ -611,13 +611,6 @@ impl DeviceCapabilities {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C07 pass lowering consumes the resolved private format after resource convergence"
-        )
-    )]
     pub(crate) fn resolve_effect_working_format(
         &self,
         policy: EffectQualityPolicy,
@@ -3298,13 +3291,6 @@ impl SurfaceFrameCommit {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T8 dispatches eligible production graph plans through the T5 executor"
-    )
-)]
 pub(crate) async fn render_c08_headless_graph_surface(
     backend: &mut Backend,
     surface: &Surface,
@@ -3453,13 +3439,6 @@ pub(crate) async fn render_c08_headless_graph_surface(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T8 dispatches eligible production graph plans through the T7 presented executor"
-    )
-)]
 pub(crate) async fn render_c08_presented_graph_surface(
     backend: &mut Backend,
     surface: &mut Surface,

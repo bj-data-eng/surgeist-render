@@ -1032,6 +1032,37 @@ impl ResourceManagerState {
             self.stats.evictions = self.stats.evictions.saturating_add(1);
             cleanup.evicted_resources.push(identity);
         }
+        let (retained_count, retained_byte_len) = self
+            .entries
+            .values()
+            .filter_map(|entry| match entry.state {
+                ResourceEntryState::Idle { .. } => Some(entry.byte_len),
+                ResourceEntryState::Leased { .. } => None,
+            })
+            .fold((0_usize, 0_u64), |(count, bytes), byte_len| {
+                (
+                    count.saturating_add(1),
+                    bytes
+                        .checked_add(byte_len)
+                        .expect("idle resource bytes must fit retained accounting"),
+                )
+            });
+        cleanup.retention = if cleanup.evicted_resources.is_empty() {
+            if retained_count == 0 {
+                ResourceRetentionOutcome::NoIdleResources
+            } else {
+                ResourceRetentionOutcome::RetainedReusable {
+                    resource_count: retained_count,
+                    byte_len: retained_byte_len,
+                }
+            }
+        } else {
+            ResourceRetentionOutcome::Trimmed {
+                released_count: cleanup.evicted_resources.len(),
+                retained_count,
+                retained_byte_len,
+            }
+        };
         cleanup
     }
 }
@@ -1329,13 +1360,30 @@ impl FrameResourceScope {
         device: &wgpu::Device,
         key: VelloBufferKey,
     ) -> Result<ResourceLease> {
+        self.acquire_vello_buffer_with_reuse(device, key, IdleReuse::Fresh)
+    }
+
+    pub(crate) fn acquire_reusable_vello_buffer(
+        &mut self,
+        device: &wgpu::Device,
+        key: VelloBufferKey,
+    ) -> Result<ResourceLease> {
+        self.acquire_vello_buffer_with_reuse(device, key, IdleReuse::Allowed)
+    }
+
+    fn acquire_vello_buffer_with_reuse(
+        &mut self,
+        device: &wgpu::Device,
+        key: VelloBufferKey,
+        idle_reuse: IdleReuse,
+    ) -> Result<ResourceLease> {
         let byte_len = key.byte_len();
         lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             ResourceCacheKey::VelloBuffer(key),
             byte_len,
-            IdleReuse::Fresh,
+            idle_reuse,
             || {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("Surgeist internal Vello buffer"),
@@ -1354,12 +1402,31 @@ impl FrameResourceScope {
         key: VelloImageKey,
         byte_len: u64,
     ) -> Result<ResourceLease> {
+        self.acquire_vello_image_with_reuse(device, key, byte_len, IdleReuse::Fresh)
+    }
+
+    pub(crate) fn acquire_reusable_vello_image(
+        &mut self,
+        device: &wgpu::Device,
+        key: VelloImageKey,
+        byte_len: u64,
+    ) -> Result<ResourceLease> {
+        self.acquire_vello_image_with_reuse(device, key, byte_len, IdleReuse::Allowed)
+    }
+
+    fn acquire_vello_image_with_reuse(
+        &mut self,
+        device: &wgpu::Device,
+        key: VelloImageKey,
+        byte_len: u64,
+        idle_reuse: IdleReuse,
+    ) -> Result<ResourceLease> {
         lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             ResourceCacheKey::VelloImage(key),
             byte_len,
-            IdleReuse::Fresh,
+            idle_reuse,
             || {
                 let format = key.texture_format();
                 let extent = key.extent();
@@ -1716,12 +1783,66 @@ impl Drop for FrameResourceScope {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) enum ResourceRetentionOutcome {
+    #[default]
+    NoIdleResources,
+    RetainedReusable {
+        resource_count: usize,
+        byte_len: u64,
+    },
+    Trimmed {
+        released_count: usize,
+        retained_count: usize,
+        retained_byte_len: u64,
+    },
+}
+
+#[cfg(test)]
+impl ResourceRetentionOutcome {
+    pub(crate) const fn retains_reusable_resources(self) -> bool {
+        matches!(
+            self,
+            Self::RetainedReusable {
+                resource_count: 1..,
+                ..
+            } | Self::Trimmed {
+                retained_count: 1..,
+                ..
+            }
+        )
+    }
+
+    pub(crate) const fn released_all_idle_resources(self) -> bool {
+        matches!(
+            self,
+            Self::Trimmed {
+                released_count: 1..,
+                retained_count: 0,
+                retained_byte_len: 0,
+            }
+        )
+    }
+}
+
 #[derive(Debug, Default, Eq, PartialEq)]
 pub(crate) struct FrameCleanup {
     evicted_resources: Vec<ResourceIdentity>,
+    retention: ResourceRetentionOutcome,
 }
 
 impl FrameCleanup {
+    pub(crate) fn followed_by(mut self, mut later: Self) -> Self {
+        self.evicted_resources.append(&mut later.evicted_resources);
+        self.retention = later.retention;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn retention(&self) -> ResourceRetentionOutcome {
+        self.retention
+    }
+
     #[cfg(test)]
     pub(crate) fn evicted_resources(&self) -> &[ResourceIdentity] {
         &self.evicted_resources

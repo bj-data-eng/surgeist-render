@@ -640,6 +640,7 @@ struct C08GraphSubmissionObservationStateForTest {
     prepared_frame_committed: bool,
     capture_resources_committed: bool,
     committed_output: Option<C08GraphCommittedOutputForTest>,
+    resource_retention: Option<C08GraphResourceRetentionForTest>,
 }
 
 #[cfg(test)]
@@ -651,6 +652,13 @@ enum C08GraphCommittedOutputForTest {
         all(feature = "render-web", target_arch = "wasm32")
     ))]
     Presented,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum C08GraphResourceRetentionForTest {
+    RetainedReusable,
+    ReleasedAllIdle,
 }
 
 #[cfg(test)]
@@ -689,7 +697,11 @@ impl C08GraphSubmissionObservationForTest {
             .presentation_scopes_resolved = true;
     }
 
-    fn record_commit(&self, output: C08GraphCommittedOutputForTest) {
+    fn record_commit(
+        &self,
+        output: C08GraphCommittedOutputForTest,
+        retention: super::resource::ResourceRetentionOutcome,
+    ) {
         let mut state = self
             .state
             .lock()
@@ -697,6 +709,13 @@ impl C08GraphSubmissionObservationForTest {
         state.prepared_frame_committed = true;
         state.capture_resources_committed = true;
         state.committed_output = Some(output);
+        state.resource_retention = if retention.retains_reusable_resources() {
+            Some(C08GraphResourceRetentionForTest::RetainedReusable)
+        } else if retention.released_all_idle_resources() {
+            Some(C08GraphResourceRetentionForTest::ReleasedAllIdle)
+        } else {
+            None
+        };
     }
 
     pub(crate) fn queue_submission_count_for_test(&self) -> usize {
@@ -762,6 +781,13 @@ impl C08GraphSubmissionObservationForTest {
             .expect("C08 graph submission observation must remain available")
             .committed_output
             == Some(C08GraphCommittedOutputForTest::Headless)
+    }
+
+    pub(crate) fn resource_retention_for_test(&self) -> Option<C08GraphResourceRetentionForTest> {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .resource_retention
     }
 
     #[cfg(feature = "render-window")]
@@ -1643,11 +1669,15 @@ impl GpuOperationTransaction {
             }
         };
 
-        let frame_cleanup = prepared_frame.commit(pass_cache)?;
-        capture_resources.commit(VelloResourceCommitProof { _private: () });
+        let frame_cleanup = prepared_frame
+            .commit(pass_cache)?
+            .followed_by(capture_resources.commit(VelloResourceCommitProof { _private: () }));
         #[cfg(test)]
         if let Some(observation) = graph_submission_observation {
-            observation.record_commit(output.observation_kind_for_test());
+            observation.record_commit(
+                output.observation_kind_for_test(),
+                frame_cleanup.retention(),
+            );
         }
         Ok(C08GraphSubmissionCommit {
             output,

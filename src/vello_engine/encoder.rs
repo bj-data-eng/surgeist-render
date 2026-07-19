@@ -6,7 +6,7 @@ use peniko::ImageFormat;
 use crate::{BackendErrorCode, Error, PhysicalSize, Result, resource::ResourceManager};
 
 use super::resources::{
-    AbortedVelloResources, ScopeResolvedVelloResourceLease,
+    AbortedVelloResources, CleanVelloResourceRetention, ScopeResolvedVelloResourceLease,
     ScopeResolvedVelloResourceLeaseAggregate, VelloResourceLease, VelloResourceLeaseAggregate,
 };
 use super::{
@@ -106,6 +106,7 @@ pub(crate) struct TransactionEncodingState<'state, 'device> {
     command_encoder: &'state mut wgpu::CommandEncoder,
     target_view: &'state wgpu::TextureView,
     target: TransactionTargetIntent,
+    clean_resource_retention: CleanVelloResourceRetention,
 }
 
 impl<'state, 'device> TransactionEncodingState<'state, 'device> {
@@ -122,6 +123,24 @@ impl<'state, 'device> TransactionEncodingState<'state, 'device> {
             command_encoder,
             target_view,
             target,
+            clean_resource_retention: CleanVelloResourceRetention::DirectAtlasOnly,
+        }
+    }
+
+    pub(crate) fn new_reusable_graph_capture(
+        scope: &'state mut ActiveVelloEncodingScope<'device>,
+        queue: &'state wgpu::Queue,
+        command_encoder: &'state mut wgpu::CommandEncoder,
+        target_view: &'state wgpu::TextureView,
+        target: TransactionTargetIntent,
+    ) -> Self {
+        Self {
+            scope,
+            queue,
+            command_encoder,
+            target_view,
+            target,
+            clean_resource_retention: CleanVelloResourceRetention::ReusableGraphFrame,
         }
     }
 
@@ -238,8 +257,13 @@ pub(crate) fn encode_recording(
     log::trace!("encoding checked internal Vello raster recording");
     preflight_recording(recording, resource_intents, state)
         .map_err(VelloEncodingFailure::before_resource_allocation)?;
-    let mut lease = VelloResourceLease::allocate(state.active_scope(), resources, resource_intents)
-        .map_err(VelloEncodingFailure::before_resource_allocation)?;
+    let mut lease = VelloResourceLease::allocate_with_retention(
+        state.active_scope(),
+        resources,
+        resource_intents,
+        state.clean_resource_retention,
+    )
+    .map_err(VelloEncodingFailure::before_resource_allocation)?;
     let result = recording
         .commands
         .iter()

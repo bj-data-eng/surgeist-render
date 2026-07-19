@@ -25836,6 +25836,267 @@ fn graph_render_path_submits_without_map_or_cpu_wait() {
     );
 }
 
+#[test]
+fn repeated_frames_reuse_resources_without_growth_or_readback() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("repeated C08 reuse coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
+        .expect("repeated C08 reuse coverage requires a headless surface");
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.25, 0.5, 5.5, 3.75),
+            Color::try_rgba(0.75, 0.25, 0.125, 0.625).unwrap(),
+        )
+        .stroke(
+            Shape::rect(Rect::new(1.0, 1.0, 4.0, 3.0)),
+            Stroke::try_new(0.75).unwrap(),
+            Color::BLACK,
+        );
+
+    for _ in 0..2 {
+        pollster::block_on(renderer.render_forced_c08_graph_for_test(
+            &mut surface,
+            &scene,
+            Parameters::default(),
+            working_format,
+        ))
+        .expect("C08 reuse warm-up frames must succeed");
+    }
+    let expected = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the warmed C08 publication must be readable");
+    let warmed_resources = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the warmed C08 device must remain ready")
+        .internal_resource_manager_observation_for_test();
+    let warmed_cache = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the warmed C08 device must retain its pass cache")
+        .device_pass_cache_counts_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let mut resource_observations = Vec::new();
+    let mut cache_observations = Vec::new();
+    let mut public_stats = Vec::new();
+    for _ in 0..3 {
+        let result = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+            &mut surface,
+            &scene,
+            Parameters::default(),
+            working_format,
+        ))
+        .expect("repeated exact C08 frames must succeed");
+        public_stats.push(C08PublicStatsForTest::from(result.stats));
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("repeated exact C08 frames must retain the ready device");
+        resource_observations.push(ready.internal_resource_manager_observation_for_test());
+        cache_observations.push(ready.device_pass_cache_counts_for_test());
+    }
+
+    let no_post_warmup_growth = resource_observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.next_resource == warmed_resources.next_resource
+            && observation.entry_count == warmed_resources.entry_count
+            && observation.retained_bytes == warmed_resources.retained_bytes
+            && observation.payload_creation_attempts == warmed_resources.payload_creation_attempts
+            && observation.committed_transient_buffer_count_for_test()
+                == warmed_resources.committed_transient_buffer_count_for_test()
+            && observation.committed_transient_image_count_for_test()
+                == warmed_resources.committed_transient_image_count_for_test()
+    });
+    let reusable_vello_resources_are_retained =
+        warmed_resources.committed_transient_buffer_count_for_test() > 0
+            && warmed_resources.committed_transient_image_count_for_test() > 0;
+    let reusable_graph_frame_resources_are_retained = warmed_resources.entry_count
+        > warmed_resources
+            .committed_transient_buffer_count_for_test()
+            .saturating_add(warmed_resources.committed_transient_image_count_for_test())
+            .saturating_add(warmed_resources.retained_atlas_count_for_test());
+    let stable_cache_and_pipelines = warmed_cache.has_render_pipelines()
+        && cache_observations
+            .iter()
+            .all(|observation| *observation == warmed_cache);
+    let stable_public_report = public_stats
+        .first()
+        .is_some_and(|first| public_stats.iter().all(|actual| actual == first));
+    let production_frames_have_one_submission_and_no_readback =
+        submission.queue_submission_count_for_test() == 3
+            && submission.readback_queue_submission_count_for_test() == 0
+            && graph_submission.queue_submission_count_for_test() == 3
+            && direct_submission.queue_submission_count_for_test() == 0;
+    let explicit_retention = graph_submission.resource_retention_for_test()
+        == Some(super::gpu_transaction::C08GraphResourceRetentionForTest::RetainedReusable);
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let actual = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated C08 publication must remain readable");
+
+    assert!(
+        no_post_warmup_growth
+            && reusable_vello_resources_are_retained
+            && reusable_graph_frame_resources_are_retained
+            && stable_cache_and_pipelines
+            && stable_public_report
+            && production_frames_have_one_submission_and_no_readback
+            && explicit_retention
+            && actual.rgba() == expected.rgba(),
+        "repeated C08 frames grew resources or entered readback"
+    );
+}
+
+#[test]
+fn budget_zero_releases_idle_resources_without_changing_pixels() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("zero-retention C08 coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
+        .expect("zero-retention C08 coverage requires a headless surface");
+    let mut scene = Scene::new();
+    scene.fill(
+        Rect::new(0.0, 0.0, 6.0, 4.0),
+        Color::try_rgba(0.125, 0.5, 0.875, 0.75).unwrap(),
+    );
+
+    let first = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the first zero-retention C08 frame must succeed");
+    let expected = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the first zero-retention C08 publication must be readable");
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the first zero-retention frame must retain the ready device")
+        .device_pass_cache_counts_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let second = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the repeated zero-retention C08 frame must succeed");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the repeated zero-retention frame must retain the ready device");
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let released_all_idle = resources.leased_count == 0
+        && resources.idle_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
+        && graph_submission.resource_retention_for_test()
+            == Some(super::gpu_transaction::C08GraphResourceRetentionForTest::ReleasedAllIdle);
+    let no_hidden_submission_or_readback = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let actual = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated zero-retention C08 publication must be readable");
+
+    assert!(
+        released_all_idle
+            && no_hidden_submission_or_readback
+            && cache_before == cache_after
+            && cache_after.has_render_pipelines()
+            && C08PublicStatsForTest::from(first.stats)
+                == C08PublicStatsForTest::from(second.stats)
+            && actual.rgba() == expected.rgba(),
+        "zero retention changed C08 pixels or retained idle resources"
+    );
+}
+
+#[test]
+fn renderer_dispatch_routes_only_closed_c08_graph_subset_to_gpu_executor() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("renderer dispatch coverage requires a selected device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+
+    let mut direct_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("direct dispatch coverage requires a headless surface");
+    let mut direct_scene = Scene::new();
+    direct_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    let direct = pollster::block_on(renderer.render(
+        &mut direct_surface,
+        &direct_scene,
+        Parameters::default(),
+    ));
+
+    let mut exact_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("exact C08 dispatch coverage requires a headless surface");
+    let exact = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut exact_surface,
+        &direct_scene,
+        Parameters::default(),
+        working_format,
+    ));
+
+    let mut later_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("later-cycle dispatch coverage requires a headless surface");
+    let masked = Layer::new()
+        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
+        .expect("the later-cycle dispatch mask must be valid");
+    let mut later_scene = Scene::new();
+    later_scene.layer(masked, |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            Color::try_rgba(0.25, 0.5, 0.75, 1.0).unwrap(),
+        );
+    });
+    let later = pollster::block_on(renderer.render(
+        &mut later_surface,
+        &later_scene,
+        Parameters::default(),
+    ));
+
+    let dispatch = renderer.dispatch_observation_for_test();
+    let frame_gate = renderer.preexecution_frame_gate_observation_for_test();
+    assert!(
+        direct.is_ok()
+            && exact.is_ok()
+            && later.is_ok()
+            && dispatch.boundary_invocations == 3
+            && dispatch.direct_vello_routes == 1
+            && dispatch.exact_c08_graph_routes == 1
+            && dispatch.transitional_graph_routes == 1
+            && graph_submission.queue_submission_count_for_test() == 1
+            && frame_gate.validated_plan_count == 1
+            && frame_gate.plan_count_at_transitional_effect_execution == Some(1),
+        "renderer has no closed C08 graph dispatch boundary"
+    );
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum C08ParityFixtureForTest {
     SolidShape,

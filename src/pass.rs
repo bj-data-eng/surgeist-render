@@ -819,13 +819,6 @@ pub(crate) struct RuntimePassCacheKeys {
     pipeline: RenderPipelineKey,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C08 consumes these exact immutable device pass-cache keys"
-    )
-)]
 impl RuntimePassCacheKeys {
     pub(crate) fn samplers(&self) -> &[SamplerKey] {
         &self.samplers
@@ -864,6 +857,12 @@ pub(crate) struct LoweredGraphPlan {
     passes: Vec<RuntimePass>,
     root_working_image: RuntimeResourceId,
     final_present: RuntimePassId,
+}
+
+#[derive(Clone, Copy)]
+enum GraphLoweringCapabilityValidation<'capabilities> {
+    Required(&'capabilities DeviceCapabilities),
+    ClassificationOnly,
 }
 
 #[must_use]
@@ -1083,18 +1082,38 @@ fn c08_pass_class(kind: &RuntimePassKind) -> Option<C08PassClass> {
 }
 
 impl LoweredGraphPlan {
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 consumes the complete private runtime lowering entry point"
-        )
-    )]
     pub(crate) fn try_lower_validated_graph(
         graph: &GpuRenderGraph,
         working_format: WorkingFormat,
         output_format: Format,
         capabilities: &DeviceCapabilities,
+    ) -> Result<Self> {
+        Self::try_lower_validated_graph_inner(
+            graph,
+            working_format,
+            output_format,
+            GraphLoweringCapabilityValidation::Required(capabilities),
+        )
+    }
+
+    fn try_lower_for_dispatch_classification(
+        graph: &GpuRenderGraph,
+        working_format: WorkingFormat,
+        output_format: Format,
+    ) -> Result<Self> {
+        Self::try_lower_validated_graph_inner(
+            graph,
+            working_format,
+            output_format,
+            GraphLoweringCapabilityValidation::ClassificationOnly,
+        )
+    }
+
+    fn try_lower_validated_graph_inner(
+        graph: &GpuRenderGraph,
+        working_format: WorkingFormat,
+        output_format: Format,
+        capability_validation: GraphLoweringCapabilityValidation<'_>,
     ) -> Result<Self> {
         let view = graph.lowering_view()?;
         let resource_views = view.resources();
@@ -1114,9 +1133,16 @@ impl LoweredGraphPlan {
             }
             let role = runtime_resource_role(resource.role());
             let spatial = RuntimeSpatialDescriptor::from_graph(resource.spatial());
-            capabilities.validate_effect_texture_extent(spatial.device_extent)?;
             let format = runtime_resource_format(role, working_format);
-            if let RuntimeResourceFormat::Working(format) = format {
+            if let GraphLoweringCapabilityValidation::Required(capabilities) = capability_validation
+            {
+                capabilities.validate_effect_texture_extent(spatial.device_extent)?;
+            }
+            if let (
+                GraphLoweringCapabilityValidation::Required(capabilities),
+                RuntimeResourceFormat::Working(format),
+            ) = (capability_validation, format)
+            {
                 capabilities.validate_effect_texture_allocation(
                     spatial.device_extent,
                     Some(format),
@@ -2566,6 +2592,75 @@ enum PrePreparationGraphClassification {
     Ineligible(GraphPreparationIneligibility),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum C08GraphWorkingFormatRequest {
+    ConfiguredPolicy(EffectQualityPolicy),
+    #[cfg(test)]
+    Exact(WorkingFormat),
+}
+
+impl C08GraphWorkingFormatRequest {
+    fn resolve(self, capabilities: &DeviceCapabilities) -> Result<WorkingFormat> {
+        match self {
+            Self::ConfiguredPolicy(policy) => capabilities.resolve_effect_working_format(policy),
+            #[cfg(test)]
+            Self::Exact(working_format) => {
+                capabilities.validate_supported_working_format(working_format)?;
+                Ok(working_format)
+            }
+        }
+    }
+}
+
+#[must_use = "the closed graph dispatch result must select exactly one renderer route"]
+pub(crate) enum C08GraphDispatchEligibility {
+    Exact(C08PreparableGraph),
+    LaterCycleTransitional,
+}
+
+impl C08GraphDispatchEligibility {
+    pub(crate) fn try_classify(
+        graph: &GpuRenderGraph,
+        output_format: Format,
+        working_format: C08GraphWorkingFormatRequest,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<Self> {
+        let classification = PrePreparationGraphClassification::classify(
+            LoweredGraphPlan::try_lower_for_dispatch_classification(
+                graph,
+                WorkingFormat::HighPrecision,
+                output_format,
+            )?,
+        );
+        match classification {
+            PrePreparationGraphClassification::LaterCycleTransitional(_) => {
+                Ok(Self::LaterCycleTransitional)
+            }
+            PrePreparationGraphClassification::Ineligible(ineligibility) => {
+                Err(ineligibility.into_error())
+            }
+            PrePreparationGraphClassification::ExactC08(_) => {
+                let working_format = working_format.resolve(capabilities)?;
+                let lowered = LoweredGraphPlan::try_lower_validated_graph(
+                    graph,
+                    working_format,
+                    output_format,
+                    capabilities,
+                )?;
+                match PrePreparationGraphClassification::classify(lowered) {
+                    PrePreparationGraphClassification::ExactC08(preparable) => {
+                        Ok(Self::Exact(preparable))
+                    }
+                    PrePreparationGraphClassification::LaterCycleTransitional(_)
+                    | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
+                        "checked C08 dispatch lowering changed its closed eligibility result",
+                    )),
+                }
+            }
+        }
+    }
+}
+
 impl PrePreparationGraphClassification {
     fn classify(lowered: LoweredGraphPlan) -> Self {
         let lowered = match C08PreparableGraph::try_from_lowered(lowered) {
@@ -2681,13 +2776,6 @@ impl GraphPreparationSource {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 consumes the explicit bounded C08 Vello-capture encoding handoff"
-    )
-)]
 pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
     pass: RuntimePassId,
     target: RuntimeResourceId,
@@ -2713,13 +2801,6 @@ pub(crate) struct C08VelloCaptureCompletionReceipt {
     _seal: C08VelloCaptureCompletionSeal,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 consumes the exact C08 Vello-capture encoding facts and target"
-    )
-)]
 impl C08VelloCaptureEncodingHandoff<'_> {
     pub(crate) const fn target(&self) -> RuntimeResourceId {
         self.target
@@ -2776,26 +2857,12 @@ impl C08VelloCaptureEncodingHandoff<'_> {
     }
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T5 supplies the exact external graph-output view to the C08 encoder"
-    )
-)]
 pub(crate) struct C08ExternalOutputView<'output> {
     view: &'output wgpu::TextureView,
     format: Format,
     extent: PhysicalSize,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T5 constructs the transaction-owned C08 external output binding"
-    )
-)]
 impl<'output> C08ExternalOutputView<'output> {
     pub(crate) fn try_new(
         view: &'output wgpu::TextureView,
@@ -2832,13 +2899,6 @@ enum C08CustomSpineEncodingState {
     AbortOnly,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "T4 and T5 consume the completed custom-spine encoding phase"
-    )
-)]
 pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) encodes_custom_passes_in_order: bool,
     pub(crate) clears_full_root_once: bool,
@@ -3433,21 +3493,10 @@ impl<'device> PreparedGraph<'device> {
         self.plan.generation
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 consumes the selected prepared working format"
-        )
-    )]
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         self.plan.working_format
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "C08 consumes the prepared output format")
-    )]
     pub(crate) const fn output_format(&self) -> Format {
         self.plan.output_format
     }
@@ -3463,25 +3512,11 @@ impl<'device> PreparedGraph<'device> {
         (self.plan.root_working_image, self.plan.final_present)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T5 binds the exact prepared root extent to its external output draft"
-        )
-    )]
     pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
         self.resource_request(self.plan.root_working_image)
             .map(|resource| resource.spatial.device_extent)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "T4 supplies bounded Vello capture encoding while this C08 scheduler owns custom passes"
-        )
-    )]
     pub(crate) async fn encode_c08_custom_spine(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3808,7 +3843,7 @@ impl<'device> PreparedGraph<'device> {
         #[cfg(test)]
         let target_view_identity = std::ptr::from_ref(handoff.view()) as usize;
         let encoded = {
-            let mut encoding = TransactionEncodingState::new(
+            let mut encoding = TransactionEncodingState::new_reusable_graph_capture(
                 capture_encoding.scope,
                 capture_encoding.queue,
                 encoder,
@@ -4320,13 +4355,6 @@ impl<'device> PreparedGraph<'device> {
         Ok(request)
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 inspects exact prepared texture bindings before encoding each pass"
-        )
-    )]
     pub(crate) fn texture_binding_for_pass(
         &self,
         pass: RuntimePassId,
@@ -4915,13 +4943,6 @@ pub(crate) struct PreparedTextureBinding<'prepared> {
     view: &'prepared wgpu::TextureView,
 }
 
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "C08 reads these exact typed texture binding facts during pass encoding"
-    )
-)]
 impl<'prepared> PreparedTextureBinding<'prepared> {
     pub(crate) const fn runtime_resource(&self) -> RuntimeResourceId {
         self.runtime_resource
