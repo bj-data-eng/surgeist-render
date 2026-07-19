@@ -10,7 +10,7 @@ use super::{
         DevicePixelConversionPolicy, FilterOutset, FilterRegionPlan, FilterSourceBounds,
     },
     geometry::{PhysicalSize, Point, Rect, Size, Transform},
-    image::ResolvedMaskUploadDescriptor,
+    image::{Extend, ImageQuality, ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
     paint::Color,
     renderer::Antialiasing,
     style::{ColorFilterOp, FilterBlur, FilterDropShadow, FilterList},
@@ -1516,17 +1516,32 @@ struct SemanticClipCoverage {
     antialiasing: Antialiasing,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DestinationToLayerLocalMapping {
+    affine: Transform,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct SemanticResolvedAlphaMaskComposition {
+    resource: SemanticResourceId,
+    bounds: Rect,
+    image_dimensions: PhysicalSize,
+    quality: ImageQuality,
+    extend: Extend,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum SemanticCompositeKind {
     SpanSourceOver,
     Layer {
         transform: Transform,
+        destination_to_layer_local: DestinationToLayerLocalMapping,
         opacity: f32,
         blend: super::layer::BlendMode,
         clip: Option<Box<RenderClip>>,
         outer_clips: Vec<SemanticOuterClip>,
         clip_coverage: Option<SemanticResourceId>,
-        alpha_mask: Option<SemanticResourceId>,
+        alpha_mask: Option<Box<SemanticResolvedAlphaMaskComposition>>,
     },
     DropShadow,
 }
@@ -2046,17 +2061,66 @@ impl GraphLoweringOuterClip {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GraphLoweringDestinationToLayerLocal {
+    affine: Transform,
+}
+
+impl GraphLoweringDestinationToLayerLocal {
+    #[must_use]
+    pub(crate) const fn affine(self) -> Transform {
+        self.affine
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct GraphLoweringResolvedAlphaMaskComposition {
+    resource: GraphLoweringResourceId,
+    bounds: Rect,
+    image_dimensions: PhysicalSize,
+    quality: ImageQuality,
+    extend: Extend,
+}
+
+impl GraphLoweringResolvedAlphaMaskComposition {
+    #[must_use]
+    pub(crate) const fn resource(self) -> GraphLoweringResourceId {
+        self.resource
+    }
+
+    #[must_use]
+    pub(crate) const fn bounds(self) -> Rect {
+        self.bounds
+    }
+
+    #[must_use]
+    pub(crate) const fn image_dimensions(self) -> PhysicalSize {
+        self.image_dimensions
+    }
+
+    #[must_use]
+    pub(crate) const fn quality(self) -> ImageQuality {
+        self.quality
+    }
+
+    #[must_use]
+    pub(crate) const fn extend(self) -> Extend {
+        self.extend
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum GraphLoweringCompositeKind {
     SpanSourceOver,
     Layer {
         transform: Transform,
+        destination_to_layer_local: GraphLoweringDestinationToLayerLocal,
         opacity: f32,
         blend: super::layer::BlendMode,
         clip: Option<Box<RenderClip>>,
         outer_clips: Vec<GraphLoweringOuterClip>,
         clip_coverage: Option<GraphLoweringResourceId>,
-        alpha_mask: Option<GraphLoweringResourceId>,
+        alpha_mask: Option<Box<GraphLoweringResolvedAlphaMaskComposition>>,
     },
     DropShadow,
 }
@@ -3019,6 +3083,7 @@ struct SemanticFrameGraphPlanner {
     filter_steps: Vec<SemanticFilterStepPlan>,
     backdrop_reads: Vec<SemanticBackdropRead>,
     imports: Vec<SemanticImportPlan>,
+    resolved_mask_imports: Vec<(ResolvedMaskUploadKey, PlannedGraphResource)>,
     capture_bounds_coordinate_space: CaptureBoundsCoordinateSpace,
 }
 
@@ -3059,6 +3124,7 @@ impl SemanticFrameGraphPlanner {
             filter_steps: Vec::new(),
             backdrop_reads: Vec::new(),
             imports: Vec::new(),
+            resolved_mask_imports: Vec::new(),
             capture_bounds_coordinate_space,
         };
         let root_id = graph_build(planner.builder.declare_resource(
@@ -3243,6 +3309,9 @@ impl SemanticFrameGraphPlanner {
         } else {
             SemanticCompositeKind::Layer {
                 transform: Transform::identity(),
+                destination_to_layer_local: DestinationToLayerLocalMapping {
+                    affine: Transform::identity(),
+                },
                 opacity: 1.0,
                 blend: super::layer::BlendMode::Normal,
                 clip: None,
@@ -3293,6 +3362,12 @@ impl SemanticFrameGraphPlanner {
             return self.plan_commands(children, parent, child_state);
         }
 
+        let Some(destination_to_layer_local) =
+            destination_to_layer_local_mapping(layer_to_surface)?
+        else {
+            return Ok(parent);
+        };
+
         let mut source = self.plan_layer_source(children, layer_to_surface)?;
         if let Some(backdrop) = layer.backdrop.as_deref() {
             source = self.plan_backdrop_group(backdrop, source, parent, layer_to_surface)?;
@@ -3303,23 +3378,38 @@ impl SemanticFrameGraphPlanner {
 
         let alpha_mask = match layer.mask.as_ref() {
             Some(mask) => {
-                let spatial = self.plan_alpha_mask_spatial(&layer, source, layer_to_surface)?;
-                Some(self.import_alpha_mask(mask, spatial)?)
+                let imported = self.import_alpha_mask(mask)?;
+                Some((
+                    SemanticResolvedAlphaMaskComposition {
+                        resource: imported.id,
+                        bounds: mask.bounds(),
+                        image_dimensions: mask.upload().physical_size(),
+                        quality: mask.upload().quality(),
+                        extend: mask.upload().extend(),
+                    },
+                    imported,
+                ))
             }
             None => None,
         };
+        let additional_sources = alpha_mask
+            .as_ref()
+            .map(|(_, resource)| *resource)
+            .into_iter()
+            .collect::<Vec<_>>();
         self.composite_into_parent(
             parent,
             source,
-            alpha_mask.as_slice(),
+            &additional_sources,
             SemanticCompositeKind::Layer {
                 transform: layer_transform,
+                destination_to_layer_local,
                 opacity: layer.opacity,
                 blend: layer.blend,
                 clip: layer.clip.map(Box::new),
                 outer_clips: state.outer_clips.clone(),
                 clip_coverage: None,
-                alpha_mask: alpha_mask.map(|mask| mask.id),
+                alpha_mask: alpha_mask.map(|(mask, _)| Box::new(mask)),
             },
             true,
         )
@@ -3448,6 +3538,9 @@ impl SemanticFrameGraphPlanner {
             &[],
             SemanticCompositeKind::Layer {
                 transform: Transform::identity(),
+                destination_to_layer_local: DestinationToLayerLocalMapping {
+                    affine: Transform::identity(),
+                },
                 opacity: 1.0,
                 blend: super::layer::BlendMode::Normal,
                 clip: backdrop.clip().cloned().map(Box::new),
@@ -3607,38 +3700,16 @@ impl SemanticFrameGraphPlanner {
         })
     }
 
-    fn plan_alpha_mask_spatial(
-        &self,
-        layer: &NormalizedLayer,
-        source: PlannedGraphResource,
-        layer_to_surface: Transform,
-    ) -> Result<NonEmptyFrameSpatialPlan> {
-        if layer.clip.is_none() {
-            return Ok(source.spatial);
+    fn import_alpha_mask(&mut self, mask: &RenderLayerMask) -> Result<PlannedGraphResource> {
+        let key = mask.upload().cache_key();
+        if let Some((_, resource)) = self
+            .resolved_mask_imports
+            .iter()
+            .find(|(existing, _)| *existing == key)
+        {
+            return Ok(*resource);
         }
-        let bounds = layer.pass_plan.bounds().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "a clipped resolved mask reached graph planning without offscreen bounds",
-            )
-        })?;
-        match self.context.plan_local_bounds(
-            LogicalBounds::try_from_rect(bounds.rect(), "resolved layer mask bounds")?,
-            layer_to_surface,
-        )? {
-            FrameSpatialPlan::NonEmpty(spatial) => Ok(spatial),
-            FrameSpatialPlan::Empty(_) => Err(Error::new(
-                BackendErrorCode::RenderFailed,
-                "an empty clipped resolved mask survived semantic contribution pruning",
-            )),
-        }
-    }
-
-    fn import_alpha_mask(
-        &mut self,
-        mask: &RenderLayerMask,
-        spatial: NonEmptyFrameSpatialPlan,
-    ) -> Result<PlannedGraphResource> {
+        let spatial = mask_upload_spatial(mask.upload().physical_size())?;
         let resource = graph_build(
             self.builder
                 .import_resource(SemanticResourceDescriptor::new(
@@ -3653,12 +3724,14 @@ impl SemanticFrameGraphPlanner {
                 upload: mask.upload().clone(),
             },
         });
-        Ok(PlannedGraphResource {
+        let planned = PlannedGraphResource {
             id: resource,
             producer: None,
             logical_bounds: spatial.logical_bounds,
             spatial,
-        })
+        };
+        self.resolved_mask_imports.push((key, planned));
+        Ok(planned)
     }
 
     fn declare_unary_resource_pass(
@@ -4510,6 +4583,7 @@ fn graph_lowering_composite(composite: &SemanticCompositePlan) -> GraphLoweringC
             SemanticCompositeKind::SpanSourceOver => GraphLoweringCompositeKind::SpanSourceOver,
             SemanticCompositeKind::Layer {
                 transform,
+                destination_to_layer_local,
                 opacity,
                 blend,
                 clip,
@@ -4518,6 +4592,9 @@ fn graph_lowering_composite(composite: &SemanticCompositePlan) -> GraphLoweringC
                 alpha_mask,
             } => GraphLoweringCompositeKind::Layer {
                 transform: *transform,
+                destination_to_layer_local: GraphLoweringDestinationToLayerLocal {
+                    affine: destination_to_layer_local.affine,
+                },
                 opacity: *opacity,
                 blend: *blend,
                 clip: clip.clone(),
@@ -4529,7 +4606,15 @@ fn graph_lowering_composite(composite: &SemanticCompositePlan) -> GraphLoweringC
                     })
                     .collect(),
                 clip_coverage: clip_coverage.map(GraphLoweringResourceId::from_semantic),
-                alpha_mask: alpha_mask.map(GraphLoweringResourceId::from_semantic),
+                alpha_mask: alpha_mask.as_deref().map(|mask| {
+                    Box::new(GraphLoweringResolvedAlphaMaskComposition {
+                        resource: GraphLoweringResourceId::from_semantic(mask.resource),
+                        bounds: mask.bounds,
+                        image_dimensions: mask.image_dimensions,
+                        quality: mask.quality,
+                        extend: mask.extend,
+                    })
+                }),
             },
             SemanticCompositeKind::DropShadow => GraphLoweringCompositeKind::DropShadow,
         },
@@ -4668,7 +4753,7 @@ fn graph_lowering_read_bindings(
                         GraphLoweringSamplingFilter::ImportedMask,
                         GraphLoweringSamplingEdge::ClampToExtent,
                     )?;
-                    if binding.resource != *alpha_mask {
+                    if binding.resource != alpha_mask.resource() {
                         return Err(GraphValidationError::InvalidPassArity);
                     }
                     bindings.push(binding);
@@ -4808,6 +4893,120 @@ fn linear_transform_is_rank_deficient(transform: Transform) -> Result<bool> {
         "frame transform normalized determinant",
     )?;
     Ok(determinant == 0.0)
+}
+
+fn destination_to_layer_local_mapping(
+    layer_to_destination: Transform,
+) -> Result<Option<DestinationToLayerLocalMapping>> {
+    let [a, b, c, d, e, f] = layer_to_destination.as_array();
+    let coefficient_scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
+    if coefficient_scale == 0.0 {
+        return Ok(None);
+    }
+    let normalized_a = checked_div(
+        a,
+        coefficient_scale,
+        "composition normalized affine coefficient a",
+    )?;
+    let normalized_b = checked_div(
+        b,
+        coefficient_scale,
+        "composition normalized affine coefficient b",
+    )?;
+    let normalized_c = checked_div(
+        c,
+        coefficient_scale,
+        "composition normalized affine coefficient c",
+    )?;
+    let normalized_d = checked_div(
+        d,
+        coefficient_scale,
+        "composition normalized affine coefficient d",
+    )?;
+    let normalized_determinant = checked_sub(
+        checked_mul(
+            normalized_a,
+            normalized_d,
+            "composition normalized affine determinant ad",
+        )?,
+        checked_mul(
+            normalized_b,
+            normalized_c,
+            "composition normalized affine determinant bc",
+        )?,
+        "composition normalized affine determinant",
+    )?;
+    if normalized_determinant == 0.0 {
+        return Ok(None);
+    }
+    let inverse_denominator = checked_mul(
+        coefficient_scale,
+        normalized_determinant,
+        "composition affine inverse denominator",
+    )?;
+    let inverse_a = checked_div(
+        normalized_d,
+        inverse_denominator,
+        "composition inverse affine coefficient a",
+    )?;
+    let inverse_b = checked_div(
+        -normalized_b,
+        inverse_denominator,
+        "composition inverse affine coefficient b",
+    )?;
+    let inverse_c = checked_div(
+        -normalized_c,
+        inverse_denominator,
+        "composition inverse affine coefficient c",
+    )?;
+    let inverse_d = checked_div(
+        normalized_a,
+        inverse_denominator,
+        "composition inverse affine coefficient d",
+    )?;
+    let inverse_e = checked_sub(
+        0.0,
+        checked_add(
+            checked_mul(inverse_a, e, "composition inverse affine translation ae")?,
+            checked_mul(inverse_c, f, "composition inverse affine translation cf")?,
+            "composition inverse affine translation x",
+        )?,
+        "composition inverse affine translation x",
+    )?;
+    let inverse_f = checked_sub(
+        0.0,
+        checked_add(
+            checked_mul(inverse_b, e, "composition inverse affine translation be")?,
+            checked_mul(inverse_d, f, "composition inverse affine translation df")?,
+            "composition inverse affine translation y",
+        )?,
+        "composition inverse affine translation y",
+    )?;
+    Ok(Some(DestinationToLayerLocalMapping {
+        affine: Transform::try_new([
+            inverse_a, inverse_b, inverse_c, inverse_d, inverse_e, inverse_f,
+        ])?,
+    }))
+}
+
+fn mask_upload_spatial(image_dimensions: PhysicalSize) -> Result<NonEmptyFrameSpatialPlan> {
+    let width = image_dimensions.width();
+    let height = image_dimensions.height();
+    let logical_bounds = non_empty_logical_bounds(
+        Rect::new(0.0, 0.0, f64::from(width), f64::from(height)),
+        "resolved mask image pixel bounds",
+    )?;
+    let device_origin = SignedDeviceOrigin::new(0, 0);
+    let device_extent = PositiveDeviceExtent::try_new(width, height)?;
+    let raster_scale = RasterScale::try_new(1.0)?;
+    let texel_center_mapping = TexelCenterMapping::try_new(device_origin, raster_scale)?;
+    Ok(NonEmptyFrameSpatialPlan {
+        logical_bounds,
+        device_origin,
+        device_extent,
+        raster_scale,
+        texel_center_mapping,
+    })
 }
 
 fn transform_point(transform: Transform, x: f64, y: f64, name: &str) -> Result<Point> {

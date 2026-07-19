@@ -453,12 +453,23 @@ impl ResourceAllocationPreflight {
         })
     }
 
-    pub(crate) fn resolved_mask(descriptor: &ResolvedMaskUploadDescriptor) -> Result<Self> {
+    pub(crate) fn resolved_mask(descriptor: &ResolvedMaskUploadDescriptor) -> Result<Option<Self>> {
+        let size = descriptor.physical_size();
+        if size.width() == 0 || size.height() == 0 {
+            return Ok(None);
+        }
         descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
-        Ok(Self {
+        Ok(Some(Self {
             key: ResourceCacheKey::ResolvedMaskUpload(descriptor.cache_key()),
             byte_len: descriptor.byte_len(),
-        })
+        }))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn zero_sized_mask_is_explicitly_empty_for_test(
+        descriptor: &ResolvedMaskUploadDescriptor,
+    ) -> bool {
+        Self::resolved_mask(descriptor).is_ok_and(|preflight| preflight.is_none())
     }
 
     pub(crate) fn gaussian_kernel(plan: &GaussianKernelPlan) -> Result<Self> {
@@ -575,6 +586,7 @@ struct ResourceManagerState {
     accounting_fault: Option<ResourceAccountingFault>,
     active_frames: BTreeSet<FrameIdentity>,
     resolved_leases: BTreeSet<(FrameIdentity, ResourceIdentity)>,
+    provisional_allocations: BTreeSet<(FrameIdentity, ResourceIdentity)>,
     entries: BTreeMap<ResourceIdentity, ResourceEntry>,
     pending_vello_atlas_recovery: Option<VelloAtlasOutcome>,
     stats: ResourceLifecycleStats,
@@ -796,6 +808,7 @@ impl ResourceManagerState {
                     payload: payload.clone(),
                 },
             );
+            self.provisional_allocations.insert((frame, resource));
             self.stats.misses = self.stats.misses.saturating_add(1);
             self.stats.allocations = self.stats.allocations.saturating_add(1);
             (resource, allocation_generation, payload)
@@ -1190,10 +1203,38 @@ impl ResourceManagerState {
                 }
             }
         }
+        self.provisional_allocations
+            .retain(|(provisional_frame, _)| *provisional_frame != frame);
         if let Some(fault) = self.accounting_fault {
             return FrameCleanup::accounting_fault(fault);
         }
         self.trim_idle()
+    }
+
+    fn abort_provisional_frame(
+        &mut self,
+        manager_identity: &ManagerIdentity,
+        frame: FrameIdentity,
+    ) -> FrameCleanup {
+        if self.identity != *manager_identity || !self.active_frames.contains(&frame) {
+            return FrameCleanup::default();
+        }
+
+        for (resource_identity, entry) in &mut self.entries {
+            if entry.state == (ResourceEntryState::Leased { frame })
+                && !self
+                    .provisional_allocations
+                    .contains(&(frame, *resource_identity))
+            {
+                entry.state = ResourceEntryState::Idle {
+                    last_used_frame: frame,
+                };
+                if !self.resolved_leases.remove(&(frame, *resource_identity)) {
+                    self.stats.releases = self.stats.releases.saturating_add(1);
+                }
+            }
+        }
+        self.discard_frame(manager_identity, frame)
     }
 
     fn discard_frame(
@@ -1240,6 +1281,8 @@ impl ResourceManagerState {
         }
         self.resolved_leases
             .retain(|(resolved_frame, _)| *resolved_frame != frame);
+        self.provisional_allocations
+            .retain(|(provisional_frame, _)| *provisional_frame != frame);
 
         if detected_fault.is_none() && self.accounting_fault.is_none() {
             detected_fault = match (
@@ -1386,6 +1429,7 @@ impl ResourceManager {
                 accounting_fault: None,
                 active_frames: BTreeSet::new(),
                 resolved_leases: BTreeSet::new(),
+                provisional_allocations: BTreeSet::new(),
                 entries: BTreeMap::new(),
                 pending_vello_atlas_recovery: None,
                 stats: ResourceLifecycleStats::default(),
@@ -1684,6 +1728,7 @@ pub(crate) struct FrameResourceScope {
 #[derive(Clone, Copy)]
 enum FrameResourceDisposition {
     ReleaseReusable,
+    AbortProvisional,
     Discard,
 }
 
@@ -2142,6 +2187,12 @@ impl FrameResourceScope {
         }
     }
 
+    pub(crate) fn abort_provisional_on_drop(&mut self) {
+        if self.pending_drop_disposition.is_some() {
+            self.pending_drop_disposition = Some(FrameResourceDisposition::AbortProvisional);
+        }
+    }
+
     pub(crate) fn finish(mut self) -> FrameCleanup {
         self.resolve(FrameResourceDisposition::ReleaseReusable)
     }
@@ -2169,6 +2220,9 @@ impl FrameResourceScope {
         match disposition {
             FrameResourceDisposition::ReleaseReusable => {
                 state.cleanup_frame(&self.manager_identity, self.frame)
+            }
+            FrameResourceDisposition::AbortProvisional => {
+                state.abort_provisional_frame(&self.manager_identity, self.frame)
             }
             FrameResourceDisposition::Discard => {
                 state.discard_frame(&self.manager_identity, self.frame)

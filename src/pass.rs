@@ -30,10 +30,11 @@ use super::{
         ResourceManager, WorkingFormat,
     },
     shader::{
-        BindGroupLayoutKey, DevicePassCache, PassSpatialUniformBytes, ProvisionalC08PassObjects,
-        ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
-        ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey, ShaderModuleKey,
-        ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
+        BindGroupLayoutKey, CompositeParameterBytes, DevicePassCache, PassSpatialUniformBytes,
+        ProvisionalC08PassObjects, ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey,
+        ShaderBindingRoleKey, ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey,
+        ShaderMaskQualityKey, ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey,
+        ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
     style::ColorFilterOp,
     texture::EffectTextureDescriptor,
@@ -653,6 +654,100 @@ pub(crate) fn pass_spatial_uniform_bytes_for_test(
     .map(super::shader::PassSpatialUniformBytes::into_bytes_for_test)
 }
 
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MaskUploadAllocationObservationForTest {
+    pub(crate) allocation_extents: Vec<PhysicalSize>,
+    pub(crate) retained_upload_count: usize,
+}
+
+#[cfg(test)]
+pub(crate) fn mask_upload_allocation_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+) -> MaskUploadAllocationObservationForTest {
+    let Some(lowered) = lowered_c09_mask_plan_for_test(commands, context) else {
+        return MaskUploadAllocationObservationForTest::default();
+    };
+    let allocation_extents = lowered
+        .resources
+        .iter()
+        .filter(|resource| {
+            matches!(
+                resource.import,
+                Some(RuntimeResourceImport::ResolvedAlphaMask(_))
+            )
+        })
+        .map(|resource| resource.spatial.device_extent)
+        .collect::<Vec<_>>();
+    MaskUploadAllocationObservationForTest {
+        retained_upload_count: allocation_extents.len(),
+        allocation_extents,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn composite_parameter_bytes_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+) -> Option<[u8; 112]> {
+    let plan = lowered_c09_mask_plan_for_test(commands, context)?;
+    plan.passes.iter().find_map(|pass| {
+        let RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::Layer { parameters, .. },
+            ..
+        })) = &pass.kind
+        else {
+            return None;
+        };
+        parameters
+            .alpha_mask()
+            .and_then(|_| CompositeParameterBytes::try_from_runtime_layer(parameters).ok())
+            .map(CompositeParameterBytes::into_bytes_for_test)
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn mask_pipeline_keys_exclude_image_identity_for_test(
+    first: RenderCommands,
+    second: RenderCommands,
+    context: FrameContext,
+) -> bool {
+    fn first_mask_keys(plan: &LoweredGraphPlan) -> Option<&RuntimePassCacheKeys> {
+        plan.passes.iter().find_map(|pass| match &pass.kind {
+            RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::Layer { parameters, .. },
+                ..
+            })) if parameters.alpha_mask().is_some() => pass.cache_keys.as_ref(),
+            _ => None,
+        })
+    }
+
+    let Some(first) = lowered_c09_mask_plan_for_test(first, context) else {
+        return false;
+    };
+    let Some(second) = lowered_c09_mask_plan_for_test(second, context) else {
+        return false;
+    };
+    first_mask_keys(&first) == first_mask_keys(&second)
+}
+
+#[cfg(test)]
+fn lowered_c09_mask_plan_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+) -> Option<LoweredGraphPlan> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
+        return None;
+    };
+    LoweredGraphPlan::try_lower_for_dispatch_classification(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+    )
+    .ok()
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RuntimeGraphGeneration(GraphLoweringGeneration);
 
@@ -890,17 +985,222 @@ pub(crate) struct RuntimeOuterClip {
     transform: Transform,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeDestinationToLayerLocal {
+    affine: Transform,
+}
+
+impl RuntimeDestinationToLayerLocal {
+    fn try_new(affine: Transform) -> Result<Self> {
+        if !runtime_affine_is_finite_and_non_singular(affine) {
+            return Err(Error::invalid_value(
+                "destination-to-layer-local affine mapping",
+                format!("{:?}", affine.as_array()),
+                "must be finite and non-singular",
+            ));
+        }
+        Ok(Self { affine })
+    }
+
+    #[must_use]
+    pub(crate) const fn affine(self) -> Transform {
+        self.affine
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeMaskTexelCenterFacts {
+    half_texel_normalized: [f64; 2],
+    texel_size_normalized: [f64; 2],
+}
+
+impl RuntimeMaskTexelCenterFacts {
+    fn try_new(image_dimensions: PhysicalSize) -> Result<Self> {
+        if image_dimensions.width() == 0 || image_dimensions.height() == 0 {
+            return Err(Error::invalid_value(
+                "composite mask image dimensions",
+                format!("{}x{}", image_dimensions.width(), image_dimensions.height()),
+                "must be positive before deriving texel-center facts",
+            ));
+        }
+        let texel_size_normalized = [
+            1.0 / f64::from(image_dimensions.width()),
+            1.0 / f64::from(image_dimensions.height()),
+        ];
+        let half_texel_normalized = [
+            texel_size_normalized[0] * 0.5,
+            texel_size_normalized[1] * 0.5,
+        ];
+        if texel_size_normalized
+            .into_iter()
+            .chain(half_texel_normalized)
+            .any(|value| !value.is_finite() || value <= 0.0)
+        {
+            return Err(lowering_error(
+                "composite mask texel-center facts must be finite and positive",
+            ));
+        }
+        Ok(Self {
+            half_texel_normalized,
+            texel_size_normalized,
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn half_texel_normalized(self) -> [f64; 2] {
+        self.half_texel_normalized
+    }
+
+    #[must_use]
+    pub(crate) const fn texel_size_normalized(self) -> [f64; 2] {
+        self.texel_size_normalized
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeResolvedAlphaMaskComposition {
+    resource: RuntimeResourceId,
+    bounds: Rect,
+    image_dimensions: PhysicalSize,
+    texel_center_facts: RuntimeMaskTexelCenterFacts,
+    sampling: ShaderMaskSamplingKey,
+}
+
+impl RuntimeResolvedAlphaMaskComposition {
+    fn try_new(
+        resource: RuntimeResourceId,
+        bounds: Rect,
+        image_dimensions: PhysicalSize,
+        sampling: ShaderMaskSamplingKey,
+    ) -> Result<Self> {
+        let maximum_x = bounds.x() + bounds.width();
+        let maximum_y = bounds.y() + bounds.height();
+        if !bounds.x().is_finite()
+            || !bounds.y().is_finite()
+            || !bounds.width().is_finite()
+            || !bounds.height().is_finite()
+            || bounds.width() <= 0.0
+            || bounds.height() <= 0.0
+            || !maximum_x.is_finite()
+            || !maximum_y.is_finite()
+        {
+            return Err(Error::invalid_value(
+                "composite mask semantic bounds",
+                format!(
+                    "({}, {}, {}, {})",
+                    bounds.x(),
+                    bounds.y(),
+                    bounds.width(),
+                    bounds.height()
+                ),
+                "must be a finite positive rectangle with a finite maximum",
+            ));
+        }
+        Ok(Self {
+            resource,
+            bounds,
+            image_dimensions,
+            texel_center_facts: RuntimeMaskTexelCenterFacts::try_new(image_dimensions)?,
+            sampling,
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn resource(self) -> RuntimeResourceId {
+        self.resource
+    }
+
+    #[must_use]
+    pub(crate) const fn bounds(self) -> Rect {
+        self.bounds
+    }
+
+    #[must_use]
+    pub(crate) const fn image_dimensions(self) -> PhysicalSize {
+        self.image_dimensions
+    }
+
+    #[must_use]
+    pub(crate) const fn texel_center_facts(self) -> RuntimeMaskTexelCenterFacts {
+        self.texel_center_facts
+    }
+
+    #[must_use]
+    pub(crate) const fn sampling(self) -> ShaderMaskSamplingKey {
+        self.sampling
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeLayerCompositeParameters {
+    destination_to_layer_local: RuntimeDestinationToLayerLocal,
+    opacity: f32,
+    blend: BlendMode,
+    has_clip: bool,
+    alpha_mask: Option<RuntimeResolvedAlphaMaskComposition>,
+}
+
+impl RuntimeLayerCompositeParameters {
+    fn try_new(
+        destination_to_layer_local: Transform,
+        opacity: f32,
+        blend: BlendMode,
+        has_clip: bool,
+        alpha_mask: Option<RuntimeResolvedAlphaMaskComposition>,
+    ) -> Result<Self> {
+        if !opacity.is_finite() {
+            return Err(Error::invalid_value(
+                "composite opacity",
+                opacity,
+                "must be finite before clamping",
+            ));
+        }
+        Ok(Self {
+            destination_to_layer_local: RuntimeDestinationToLayerLocal::try_new(
+                destination_to_layer_local,
+            )?,
+            opacity: opacity.clamp(0.0, 1.0),
+            blend,
+            has_clip,
+            alpha_mask,
+        })
+    }
+
+    #[must_use]
+    pub(crate) const fn destination_to_layer_local(self) -> RuntimeDestinationToLayerLocal {
+        self.destination_to_layer_local
+    }
+
+    #[must_use]
+    pub(crate) const fn opacity(self) -> f32 {
+        self.opacity
+    }
+
+    #[must_use]
+    pub(crate) const fn blend(self) -> BlendMode {
+        self.blend
+    }
+
+    #[must_use]
+    pub(crate) const fn has_clip(self) -> bool {
+        self.has_clip
+    }
+
+    #[must_use]
+    pub(crate) const fn alpha_mask(self) -> Option<RuntimeResolvedAlphaMaskComposition> {
+        self.alpha_mask
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum RuntimeCompositeKind {
     SpanSourceOver,
     Layer {
         transform: Transform,
-        opacity: f32,
-        blend: BlendMode,
+        parameters: Box<RuntimeLayerCompositeParameters>,
         clip: Option<Box<RenderClip>>,
         outer_clips: Vec<RuntimeOuterClip>,
         clip_coverage: Option<RuntimeResourceId>,
-        alpha_mask: Option<RuntimeResourceId>,
     },
     DropShadow,
 }
@@ -1543,7 +1843,7 @@ impl LoweredGraphPlan {
                 ));
             }
             let graph_kind = pass.kind()?;
-            let kind = runtime_pass_kind(graph_kind, working_format);
+            let kind = runtime_pass_kind(graph_kind, working_format)?;
             let graph_reads = pass.reads()?;
             let reads = lower_read_bindings(&graph_reads, &resource_by_id, &resource_formats)?;
             let result = match pass.result() {
@@ -2305,7 +2605,10 @@ fn runtime_read_sampler_is_exact(
     };
     let resolved_mask = match (&read.role, &resource.import) {
         (RuntimeReadRole::AlphaMask, Some(RuntimeResourceImport::ResolvedAlphaMask(upload))) => {
-            Some(upload.cache_key())
+            Some(ShaderMaskSamplingKey::new(
+                upload.quality(),
+                upload.extend(),
+            ))
         }
         (RuntimeReadRole::AlphaMask, None) => return false,
         (RuntimeReadRole::ClipCoverage, Some(_)) => return false,
@@ -2508,29 +2811,34 @@ fn validate_closed_composite(
         }
         RuntimeCompositeKind::Layer {
             transform,
-            opacity,
-            blend,
+            parameters,
             clip,
             outer_clips,
             clip_coverage,
-            alpha_mask,
         } => {
+            let opacity = parameters.opacity();
+            let blend = parameters.blend();
+            let alpha_mask = parameters.alpha_mask();
             if transform.as_array().iter().any(|value| !value.is_finite())
                 || !opacity.is_finite()
-                || !(0.0..=1.0).contains(opacity)
+                || !(0.0..=1.0).contains(&opacity)
+                || !runtime_affine_is_finite_and_non_singular(
+                    parameters.destination_to_layer_local().affine(),
+                )
                 || outer_clips.iter().any(|clip| {
                     clip.transform
                         .as_array()
                         .iter()
                         .any(|value| !value.is_finite())
                 })
-                || (clip.is_some() || !outer_clips.is_empty()) != clip_coverage.is_some()
+                || parameters.has_clip() != (clip.is_some() || !outer_clips.is_empty())
+                || parameters.has_clip() != clip_coverage.is_some()
                 || (requires_isolated_source && source.role != RuntimeResourceRole::CompositeResult)
                 || (!requires_isolated_source
                     && (source.role != RuntimeResourceRole::FilterIntermediate
                         || *transform != Transform::identity()
-                        || *opacity != 1.0
-                        || *blend != BlendMode::Normal
+                        || opacity != 1.0
+                        || blend != BlendMode::Normal
                         || clip.is_some()
                         || outer_clips.is_empty()
                         || alpha_mask.is_some()))
@@ -2564,22 +2872,34 @@ fn validate_closed_composite(
                 next_read = next_read.checked_add(1)?;
             }
             if let Some(mask) = alpha_mask {
-                let mask_resource = resources.get(mask).copied()?;
+                let mask_resource = resources.get(&mask.resource()).copied()?;
+                let Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) = &mask_resource.import
+                else {
+                    return None;
+                };
+                let mask_filter = match mask.sampling().quality() {
+                    ShaderMaskQualityKey::Low => RuntimeSamplingFilter::Nearest,
+                    ShaderMaskQualityKey::Medium | ShaderMaskQualityKey::High => {
+                        RuntimeSamplingFilter::Linear
+                    }
+                };
                 if !runtime_read_has_exact_facts(
                     &pass.reads[next_read],
                     RuntimeReadRole::AlphaMask,
                     mask_resource,
-                    RuntimeSamplingFilter::Linear,
+                    mask_filter,
                     RuntimeSamplingEdge::ClampToExtent,
                 ) || mask_resource.role != RuntimeResourceRole::ImportedImage
                     || mask_resource.format != RuntimeResourceFormat::ResolvedMaskRgba8Unorm
                     || mask_resource.producer != RuntimeResourceProducer::Imported
-                    || !matches!(
-                        &mask_resource.import,
-                        Some(RuntimeResourceImport::ResolvedAlphaMask(_))
-                    )
-                    || mask_resource.expected_reads != 1
-                    || mask_resource.last_use != pass.id
+                    || upload.physical_size() != mask.image_dimensions()
+                    || mask_resource.spatial.device_extent != mask.image_dimensions()
+                    || mask.sampling()
+                        != ShaderMaskSamplingKey::new(upload.quality(), upload.extend())
+                    || RuntimeMaskTexelCenterFacts::try_new(mask.image_dimensions()).ok()
+                        != Some(mask.texel_center_facts())
+                    || mask_resource.expected_reads == 0
+                    || mask_resource.last_use < pass.id
                 {
                     return None;
                 }
@@ -2589,7 +2909,7 @@ fn validate_closed_composite(
                 parent: parent.current,
                 source: source.id,
                 clip_coverage: *clip_coverage,
-                alpha_mask: *alpha_mask,
+                alpha_mask: alpha_mask.map(RuntimeResolvedAlphaMaskComposition::resource),
                 result,
                 composite: composite.clone(),
             }))
@@ -3086,21 +3406,22 @@ fn composition_graph_observation(
         .map(|layer| {
             let RuntimeCompositeKind::Layer {
                 transform,
-                opacity,
-                blend,
+                parameters,
                 clip,
                 outer_clips,
                 clip_coverage,
-                alpha_mask,
             } = &layer.composite.kind
             else {
                 return None;
             };
-            if clip_coverage != &layer.clip_coverage || alpha_mask != &layer.alpha_mask {
+            let alpha_mask = parameters
+                .alpha_mask()
+                .map(RuntimeResolvedAlphaMaskComposition::resource);
+            if clip_coverage != &layer.clip_coverage || alpha_mask != layer.alpha_mask {
                 return None;
             }
             if let Some(mask) = alpha_mask {
-                let resource = resources.get(mask).copied()?;
+                let resource = resources.get(&mask).copied()?;
                 let Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) = &resource.import
                 else {
                     return None;
@@ -3150,8 +3471,8 @@ fn composition_graph_observation(
             ]);
             Some(LayerCompositionObservationForTest {
                 transform: *transform,
-                opacity: *opacity,
-                blend: *blend,
+                opacity: parameters.opacity(),
+                blend: parameters.blend(),
                 has_own_clip: clip.is_some(),
                 inherited_outer_clip_count: outer_clips.len(),
                 inherited_outer_clip_transforms: outer_clips
@@ -3254,6 +3575,15 @@ fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPl
     else {
         return false;
     };
+    let Ok(layer_parameters) = RuntimeLayerCompositeParameters::try_new(
+        Transform::identity(),
+        1.0,
+        BlendMode::Normal,
+        false,
+        None,
+    ) else {
+        return false;
+    };
     let composite_payloads = [
         None,
         Some(RuntimeComposite {
@@ -3263,12 +3593,10 @@ fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPl
         Some(RuntimeComposite {
             kind: RuntimeCompositeKind::Layer {
                 transform: Transform::identity(),
-                opacity: 1.0,
-                blend: BlendMode::Normal,
+                parameters: Box::new(layer_parameters),
                 clip: None,
                 outer_clips: Vec::new(),
                 clip_coverage: None,
-                alpha_mask: None,
             },
             source_captured_before_outer_semantics: true,
         }),
@@ -3615,7 +3943,11 @@ impl RuntimeAllocationRequest {
                 ResourceAllocationPreflight::effect_texture(*descriptor)
             }
             Self::ResolvedMask(descriptor) => {
-                ResourceAllocationPreflight::resolved_mask(descriptor)
+                ResourceAllocationPreflight::resolved_mask(descriptor)?.ok_or_else(|| {
+                    preparation_error(
+                        "an explicitly empty resolved mask survived graph contribution pruning",
+                    )
+                })
             }
         }
     }
@@ -3655,6 +3987,7 @@ struct RuntimeKernelPreparationRequest {
 struct RuntimePassPreparationRequest {
     runtime: RuntimePass,
     spatial_uniform: Option<PassSpatialUniformBytes>,
+    composite_parameters: Option<CompositeParameterBytes>,
     cache_keys: Option<RuntimePassCacheKeys>,
     kernel: Option<GaussianKernelKey>,
     kernel_releases: Vec<GaussianKernelKey>,
@@ -3992,6 +4325,7 @@ impl RuntimeGraphPreparationPlan {
                     &resource_by_id,
                     lowered.root_working_image,
                 )?;
+                let composite_parameters = prepared_pass_composite_parameters(pass)?;
                 if spatial_uniform.is_some() != pass.cache_keys.is_some() {
                     return Err(preparation_error(
                         "prepared pass spatial bytes and executable cache keys disagree",
@@ -4000,6 +4334,7 @@ impl RuntimeGraphPreparationPlan {
                 Ok(RuntimePassPreparationRequest {
                     runtime: pass.clone(),
                     spatial_uniform,
+                    composite_parameters,
                     cache_keys: pass.cache_keys.clone(),
                     kernel: kernel_by_pass.get(&pass.id).copied(),
                     kernel_releases: kernel_releases.get(&pass.id).cloned().unwrap_or_default(),
@@ -4109,6 +4444,26 @@ fn prepared_pass_spatial_uniform(
         }
     };
     PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(source, destination).map(Some)
+}
+
+fn prepared_pass_composite_parameters(
+    pass: &RuntimePass,
+) -> Result<Option<CompositeParameterBytes>> {
+    match &pass.kind {
+        RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::Layer { parameters, .. },
+            ..
+        })) => {
+            let bytes = CompositeParameterBytes::try_from_runtime_layer(parameters)?;
+            if bytes.as_bytes().len() != 112 {
+                return Err(preparation_error(
+                    "composite parameter serialization changed its exact WGSL byte length",
+                ));
+            }
+            Ok(Some(bytes))
+        }
+        _ => Ok(None),
+    }
 }
 
 fn preparation_error(message: &'static str) -> Error {
@@ -4986,6 +5341,7 @@ impl<'device> PreparedGraph<'device> {
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
 
         let mut frame_scope = resources.begin_frame()?;
+        frame_scope.abort_provisional_on_drop();
         if c08_execution.is_some() {
             frame_scope.discard_on_drop();
         }
@@ -6423,6 +6779,16 @@ impl<'device> PreparedGraph<'device> {
                 .spatial_uniform()
                 .is_some_and(|bytes| bytes.as_bytes().len() == 48)
                 == pass.cache_keys().is_some();
+            all_bindings_inspected &= pass
+                .composite_parameters()
+                .is_some_and(|bytes| bytes.as_bytes().len() == 112)
+                == matches!(
+                    pass.kind(),
+                    RuntimePassKind::Composite(Some(RuntimeComposite {
+                        kind: RuntimeCompositeKind::Layer { .. },
+                        ..
+                    }))
+                );
             if let Some(keys) = pass.cache_keys() {
                 let _ = (
                     keys.samplers(),
@@ -6541,6 +6907,10 @@ impl PreparedPassView<'_> {
         self.request.spatial_uniform.as_ref()
     }
 
+    pub(crate) const fn composite_parameters(&self) -> Option<&CompositeParameterBytes> {
+        self.request.composite_parameters.as_ref()
+    }
+
     pub(crate) const fn cache_keys(&self) -> Option<&RuntimePassCacheKeys> {
         self.request.cache_keys.as_ref()
     }
@@ -6643,6 +7013,26 @@ fn lowering_error(message: &'static str) -> Error {
     Error::new(BackendErrorCode::RenderFailed, message)
 }
 
+fn runtime_affine_is_finite_and_non_singular(transform: Transform) -> bool {
+    let [a, b, c, d, e, f] = transform.as_array();
+    if [a, b, c, d, e, f]
+        .into_iter()
+        .any(|value| !value.is_finite())
+    {
+        return false;
+    }
+    let scale = a.abs().max(b.abs()).max(c.abs()).max(d.abs());
+    if scale == 0.0 {
+        return false;
+    }
+    let a = a / scale;
+    let b = b / scale;
+    let c = c / scale;
+    let d = d / scale;
+    let determinant = a * d - b * c;
+    determinant.is_finite() && determinant != 0.0
+}
+
 const fn runtime_resource_role(role: GraphLoweringResourceRole) -> RuntimeResourceRole {
     match role {
         GraphLoweringResourceRole::RootWorkingImage => RuntimeResourceRole::RootWorkingImage,
@@ -6679,8 +7069,8 @@ const fn runtime_resource_format(
 fn runtime_pass_kind(
     kind: GraphLoweringPassKind,
     working_format: WorkingFormat,
-) -> RuntimePassKind {
-    match kind {
+) -> Result<RuntimePassKind> {
+    Ok(match kind {
         GraphLoweringPassKind::ClearRoot {
             initialization,
             color,
@@ -6711,10 +7101,10 @@ fn runtime_pass_kind(
             RuntimePassKind::DropShadowColorize(shadow.map(runtime_drop_shadow))
         }
         GraphLoweringPassKind::Composite(composite) => {
-            RuntimePassKind::Composite(composite.map(runtime_composite))
+            RuntimePassKind::Composite(composite.map(runtime_composite).transpose()?)
         }
         GraphLoweringPassKind::Present => RuntimePassKind::Present,
-    }
+    })
 }
 
 fn runtime_vello_capture(capture: GraphLoweringVelloCapture) -> RuntimeVelloCapture {
@@ -6836,38 +7226,56 @@ fn runtime_drop_shadow(shadow: GraphLoweringDropShadow) -> RuntimeDropShadow {
     }
 }
 
-fn runtime_composite(composite: GraphLoweringComposite) -> RuntimeComposite {
+fn runtime_composite(composite: GraphLoweringComposite) -> Result<RuntimeComposite> {
     let kind = match composite.kind() {
         GraphLoweringCompositeKind::SpanSourceOver => RuntimeCompositeKind::SpanSourceOver,
         GraphLoweringCompositeKind::Layer {
             transform,
+            destination_to_layer_local,
             opacity,
             blend,
             clip,
             outer_clips,
             clip_coverage,
             alpha_mask,
-        } => RuntimeCompositeKind::Layer {
-            transform: *transform,
-            opacity: opacity.clamp(0.0, 1.0),
-            blend: *blend,
-            clip: clip.clone(),
-            outer_clips: outer_clips
-                .iter()
-                .map(|clip| RuntimeOuterClip {
-                    clip: clip.clip().clone(),
-                    transform: clip.transform(),
+        } => {
+            let alpha_mask = alpha_mask
+                .as_deref()
+                .map(|mask| {
+                    RuntimeResolvedAlphaMaskComposition::try_new(
+                        RuntimeResourceId(mask.resource()),
+                        mask.bounds(),
+                        mask.image_dimensions(),
+                        ShaderMaskSamplingKey::new(mask.quality(), mask.extend()),
+                    )
                 })
-                .collect(),
-            clip_coverage: clip_coverage.map(RuntimeResourceId),
-            alpha_mask: alpha_mask.map(RuntimeResourceId),
-        },
+                .transpose()?;
+            RuntimeCompositeKind::Layer {
+                transform: *transform,
+                parameters: Box::new(RuntimeLayerCompositeParameters::try_new(
+                    destination_to_layer_local.affine(),
+                    *opacity,
+                    *blend,
+                    clip.is_some() || !outer_clips.is_empty(),
+                    alpha_mask,
+                )?),
+                clip: clip.clone(),
+                outer_clips: outer_clips
+                    .iter()
+                    .map(|clip| RuntimeOuterClip {
+                        clip: clip.clip().clone(),
+                        transform: clip.transform(),
+                    })
+                    .collect(),
+                clip_coverage: clip_coverage.map(RuntimeResourceId),
+            }
+        }
         GraphLoweringCompositeKind::DropShadow => RuntimeCompositeKind::DropShadow,
     };
-    RuntimeComposite {
+    Ok(RuntimeComposite {
         kind,
         source_captured_before_outer_semantics: composite.source_captured_before_outer_semantics(),
-    }
+    })
 }
 
 fn lower_read_bindings(
@@ -6892,18 +7300,12 @@ fn lower_read_bindings(
                 .copied()
                 .ok_or_else(|| lowering_error("runtime read format is missing"))?;
             let role = runtime_read_role(read.role());
-            let sampling_filter = match read.sampling_filter() {
-                GraphLoweringSamplingFilter::Nearest => RuntimeSamplingFilter::Nearest,
-                GraphLoweringSamplingFilter::Linear
-                | GraphLoweringSamplingFilter::GaussianKernel
-                | GraphLoweringSamplingFilter::ImportedMask => RuntimeSamplingFilter::Linear,
-            };
             let sampling_edge = runtime_sampling_edge(read.sampling_edge());
             let resolved_mask_sampling = match read.sampling_filter() {
                 GraphLoweringSamplingFilter::ImportedMask => match &resource_request.import {
-                    Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) => {
-                        Some(upload.cache_key())
-                    }
+                    Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) => Some(
+                        ShaderMaskSamplingKey::new(upload.quality(), upload.extend()),
+                    ),
                     None => {
                         return Err(lowering_error(
                             "mask sampler is not bound to an imported resolved mask",
@@ -6913,6 +7315,24 @@ fn lower_read_bindings(
                 GraphLoweringSamplingFilter::Nearest
                 | GraphLoweringSamplingFilter::Linear
                 | GraphLoweringSamplingFilter::GaussianKernel => None,
+            };
+            let sampling_filter = match (read.sampling_filter(), resolved_mask_sampling) {
+                (GraphLoweringSamplingFilter::Nearest, _) => RuntimeSamplingFilter::Nearest,
+                (GraphLoweringSamplingFilter::ImportedMask, Some(sampling))
+                    if sampling.quality() == ShaderMaskQualityKey::Low =>
+                {
+                    RuntimeSamplingFilter::Nearest
+                }
+                (GraphLoweringSamplingFilter::Linear, _)
+                | (GraphLoweringSamplingFilter::GaussianKernel, _)
+                | (GraphLoweringSamplingFilter::ImportedMask, Some(_)) => {
+                    RuntimeSamplingFilter::Linear
+                }
+                (GraphLoweringSamplingFilter::ImportedMask, None) => {
+                    return Err(lowering_error(
+                        "mask sampling policy is missing from an imported mask read",
+                    ));
+                }
             };
             let sampler_key = SamplerKey::new(
                 shader_binding_role(role),
@@ -7092,16 +7512,15 @@ fn shader_composite_key(kind: &RuntimeCompositeKind) -> ShaderCompositeKey {
     match kind {
         RuntimeCompositeKind::SpanSourceOver => ShaderCompositeKey::SpanSourceOver,
         RuntimeCompositeKind::Layer {
-            blend,
+            parameters,
             clip,
             outer_clips,
-            alpha_mask,
             ..
         } => ShaderCompositeKey::Layer {
-            blend: shader_blend_key(*blend),
+            blend: shader_blend_key(parameters.blend()),
             has_clip: clip.is_some(),
             has_outer_clips: !outer_clips.is_empty(),
-            has_alpha_mask: alpha_mask.is_some(),
+            has_alpha_mask: parameters.alpha_mask().is_some(),
         },
         RuntimeCompositeKind::DropShadow => ShaderCompositeKey::DropShadow,
     }
@@ -7284,12 +7703,9 @@ pub(crate) fn runtime_lowering_observation_for_test(
         matches!(
             &pass.kind,
             RuntimePassKind::Composite(Some(RuntimeComposite {
-                kind: RuntimeCompositeKind::Layer {
-                    alpha_mask: Some(_),
-                    ..
-                },
+                kind: RuntimeCompositeKind::Layer { parameters, .. },
                 ..
-            }))
+            })) if parameters.alpha_mask().is_some()
         )
     });
 
@@ -7378,7 +7794,10 @@ pub(crate) fn runtime_lowering_observation_for_test(
                     Some(RuntimeResourceImport::ResolvedAlphaMask(upload))
                         if read.role == RuntimeReadRole::AlphaMask =>
                     {
-                        Some(upload.cache_key())
+                        Some(ShaderMaskSamplingKey::new(
+                            upload.quality(),
+                            upload.extend(),
+                        ))
                     }
                     Some(RuntimeResourceImport::ResolvedAlphaMask(_)) | None => None,
                 };

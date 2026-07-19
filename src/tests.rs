@@ -11737,6 +11737,220 @@ fn composition_isolation_starts_from_transparent_black() {
     );
 }
 
+fn c09_mask_image_for_composition_test(
+    size: PhysicalSize,
+    byte_seed: u8,
+    quality: ImageQuality,
+    extend: Extend,
+) -> Image {
+    let byte_len = usize::try_from(size.width())
+        .unwrap()
+        .checked_mul(usize::try_from(size.height()).unwrap())
+        .and_then(|pixels| pixels.checked_mul(4))
+        .unwrap();
+    let mut bytes = vec![byte_seed; byte_len];
+    for alpha in bytes.iter_mut().skip(3).step_by(4) {
+        *alpha = 255;
+    }
+    Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        bytes,
+    )
+    .unwrap()
+    .quality(quality)
+    .extend(extend)
+}
+
+fn c09_single_mask_composition_commands_for_test(
+    image: Image,
+    bounds: Rect,
+    transform: Transform,
+    opacity: f32,
+    blend: BlendMode,
+    with_clip: bool,
+) -> command::RenderCommands {
+    let mut layer = Layer::new()
+        .try_transform(transform)
+        .unwrap()
+        .try_opacity(opacity)
+        .unwrap()
+        .blend(blend)
+        .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(image, bounds).unwrap());
+    if with_clip {
+        layer = layer
+            .try_clip(Shape::rect(Rect::new(-3.0, -2.0, 12.0, 9.0)))
+            .unwrap();
+    }
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(-1.0, 0.5, 6.0, 3.0), Color::BLACK);
+    });
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
+fn c09_composition_frame_context_for_test() -> super::frame::FrameContext {
+    super::frame::FrameContext::try_new(
+        Size::new(64.0, 48.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::TRANSPARENT,
+    )
+    .unwrap()
+}
+
+#[test]
+fn mask_upload_allocation_uses_image_extent_not_local_bounds() {
+    let image = c09_mask_image_for_composition_test(
+        PhysicalSize::new(3, 2),
+        17,
+        ImageQuality::Medium,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    for (bounds, content) in [
+        (
+            Rect::new(-40.0, 10.0, 37.0, 19.0),
+            Rect::new(0.0, 0.0, 8.0, 6.0),
+        ),
+        (
+            Rect::new(12.0, -9.0, 23.0, 31.0),
+            Rect::new(1.0, 2.0, 11.0, 4.0),
+        ),
+    ] {
+        scene.layer(
+            Layer::new().with_resolved_alpha_mask(
+                ResolvedLayerAlphaMask::try_new(image.clone(), bounds).unwrap(),
+            ),
+            |scene| {
+                scene.fill(content, Color::BLACK);
+            },
+        );
+    }
+    let observed = super::pass::mask_upload_allocation_observation_for_test(
+        scene.normalize(Capabilities::CURRENT).unwrap(),
+        c09_composition_frame_context_for_test(),
+    );
+
+    assert!(
+        observed.retained_upload_count == 1
+            && observed.allocation_extents == [PhysicalSize::new(3, 2)],
+        "mask allocation still aliases semantic bounds"
+    );
+}
+
+fn expected_c09_composite_parameter_bytes_for_test() -> [u8; 112] {
+    fn write_f32(bytes: &mut [u8; 112], offset: usize, value: f32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    fn write_u32(bytes: &mut [u8; 112], offset: usize, value: u32) {
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+
+    let mut bytes = [0_u8; 112];
+    for (offset, value) in [0.48_f32, -0.16, 0.08, 0.64].into_iter().enumerate() {
+        write_f32(&mut bytes, offset * 4, value);
+    }
+    write_f32(&mut bytes, 16, -1.12);
+    write_f32(&mut bytes, 20, 3.04);
+    for (offset, value) in [-2.5_f32, 1.25, 7.5, 3.75].into_iter().enumerate() {
+        write_f32(&mut bytes, 32 + offset * 4, value);
+    }
+    write_u32(&mut bytes, 48, 3);
+    write_u32(&mut bytes, 52, 2);
+    for (offset, value) in [1.0_f32 / 6.0, 0.25, 1.0 / 3.0, 0.5]
+        .into_iter()
+        .enumerate()
+    {
+        write_f32(&mut bytes, 64 + offset * 4, value);
+    }
+    write_f32(&mut bytes, 80, 1.0);
+    write_u32(&mut bytes, 84, 3);
+    write_u32(&mut bytes, 88, 2);
+    write_u32(&mut bytes, 92, 2);
+    write_u32(&mut bytes, 96, 1);
+    write_u32(&mut bytes, 100, 1);
+    bytes
+}
+
+#[test]
+fn composite_parameter_bytes_preserve_affine_mask_mapping_quality_and_extend() {
+    let image = c09_mask_image_for_composition_test(
+        PhysicalSize::new(3, 2),
+        41,
+        ImageQuality::High,
+        Extend::Reflect,
+    );
+    let commands = c09_single_mask_composition_commands_for_test(
+        image,
+        Rect::new(-2.5, 1.25, 7.5, 3.75),
+        Transform::try_new([2.0, 0.5, -0.25, 1.5, 3.0, -4.0]).unwrap(),
+        1.25,
+        BlendMode::Overlay,
+        true,
+    );
+    let observed = super::pass::composite_parameter_bytes_for_test(
+        commands,
+        c09_composition_frame_context_for_test(),
+    );
+
+    assert!(
+        observed == Some(expected_c09_composite_parameter_bytes_for_test()),
+        "composite bytes lost typed mask mapping or sampling"
+    );
+}
+
+#[test]
+fn zero_sized_mask_image_annihilates_without_texture_allocation() {
+    let zero_image = Image::from_rgba(Size::new(0.0, 7.0), Vec::<u8>::new()).unwrap();
+    let descriptor = ResolvedMaskUploadDescriptor::try_from_image(zero_image).unwrap();
+
+    assert!(
+        super::resource::ResourceAllocationPreflight::zero_sized_mask_is_explicitly_empty_for_test(
+            &descriptor,
+        ),
+        "zero mask allocated a substitute texture"
+    );
+}
+
+#[test]
+fn mask_pipeline_keys_exclude_image_identity() {
+    let first = c09_single_mask_composition_commands_for_test(
+        c09_mask_image_for_composition_test(
+            PhysicalSize::new(4, 3),
+            13,
+            ImageQuality::Medium,
+            Extend::Repeat,
+        ),
+        Rect::new(-1.0, 2.0, 8.0, 6.0),
+        Transform::translation(2.0, -3.0).unwrap(),
+        0.75,
+        BlendMode::Screen,
+        false,
+    );
+    let second = c09_single_mask_composition_commands_for_test(
+        c09_mask_image_for_composition_test(
+            PhysicalSize::new(4, 3),
+            29,
+            ImageQuality::Medium,
+            Extend::Repeat,
+        ),
+        Rect::new(-1.0, 2.0, 8.0, 6.0),
+        Transform::translation(2.0, -3.0).unwrap(),
+        0.75,
+        BlendMode::Screen,
+        false,
+    );
+
+    assert!(
+        super::pass::mask_pipeline_keys_exclude_image_identity_for_test(
+            first,
+            second,
+            c09_composition_frame_context_for_test(),
+        ),
+        "pipeline caching is keyed by retained image identity"
+    );
+}
+
 #[test]
 fn c08_preparation_rejects_later_cycle_plan_without_resource_or_cache_mutation() {
     let policy = EffectQualityPolicy::AllowReducedPrecision;

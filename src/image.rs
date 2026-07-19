@@ -349,6 +349,14 @@ impl ResolvedMaskUploadDescriptor {
         self.byte_len
     }
 
+    pub(crate) const fn quality(&self) -> ImageQuality {
+        self.image.quality
+    }
+
+    pub(crate) const fn extend(&self) -> Extend {
+        self.image.extend
+    }
+
     pub(crate) fn bytes(&self) -> &[u8] {
         &self.image.bytes
     }

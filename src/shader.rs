@@ -1,7 +1,10 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use super::{
-    Error, Format, Result, image::ResolvedMaskUploadKey, pass::RuntimeSpatialDescriptor,
+    Error, Format, Result,
+    image::{Extend, ImageQuality},
+    layer::BlendMode,
+    pass::{RuntimeLayerCompositeParameters, RuntimeSpatialDescriptor},
     resource::WorkingFormat,
 };
 
@@ -99,6 +102,84 @@ pub(crate) enum ShaderSamplingEdgeKey {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderMaskQualityKey {
+    Low,
+    Medium,
+    High,
+}
+
+impl ShaderMaskQualityKey {
+    #[must_use]
+    pub(crate) const fn from_image_quality(quality: ImageQuality) -> Self {
+        match quality {
+            ImageQuality::Low => Self::Low,
+            ImageQuality::Medium => Self::Medium,
+            ImageQuality::High => Self::High,
+        }
+    }
+
+    const fn parameter_code(self) -> u32 {
+        match self {
+            Self::Low => 0,
+            Self::Medium => 1,
+            Self::High => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum ShaderMaskExtendKey {
+    Pad,
+    Repeat,
+    Reflect,
+}
+
+impl ShaderMaskExtendKey {
+    #[must_use]
+    pub(crate) const fn from_extend(extend: Extend) -> Self {
+        match extend {
+            Extend::Pad => Self::Pad,
+            Extend::Repeat => Self::Repeat,
+            Extend::Reflect => Self::Reflect,
+        }
+    }
+
+    const fn parameter_code(self) -> u32 {
+        match self {
+            Self::Pad => 0,
+            Self::Repeat => 1,
+            Self::Reflect => 2,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) struct ShaderMaskSamplingKey {
+    quality: ShaderMaskQualityKey,
+    extend: ShaderMaskExtendKey,
+}
+
+impl ShaderMaskSamplingKey {
+    #[must_use]
+    pub(crate) const fn new(quality: ImageQuality, extend: Extend) -> Self {
+        Self {
+            quality: ShaderMaskQualityKey::from_image_quality(quality),
+            extend: ShaderMaskExtendKey::from_extend(extend),
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn quality(self) -> ShaderMaskQualityKey {
+        self.quality
+    }
+
+    #[must_use]
+    pub(crate) const fn extend(self) -> ShaderMaskExtendKey {
+        self.extend
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ShaderDataBindingKey {
     SpatialUniform,
     ColorFilterOperations,
@@ -119,7 +200,7 @@ pub(crate) struct SamplerKey {
     source_format: ShaderTextureFormatKey,
     filter: ShaderSamplingFilterKey,
     edge: ShaderSamplingEdgeKey,
-    resolved_mask_sampling: Option<ResolvedMaskUploadKey>,
+    resolved_mask_sampling: Option<ShaderMaskSamplingKey>,
 }
 
 impl SamplerKey {
@@ -129,7 +210,7 @@ impl SamplerKey {
         source_format: ShaderTextureFormatKey,
         filter: ShaderSamplingFilterKey,
         edge: ShaderSamplingEdgeKey,
-        resolved_mask_sampling: Option<ResolvedMaskUploadKey>,
+        resolved_mask_sampling: Option<ShaderMaskSamplingKey>,
     ) -> Self {
         Self {
             binding_role,
@@ -149,7 +230,7 @@ impl SamplerKey {
         ShaderTextureFormatKey,
         ShaderSamplingFilterKey,
         ShaderSamplingEdgeKey,
-        Option<ResolvedMaskUploadKey>,
+        Option<ShaderMaskSamplingKey>,
     ) {
         (
             self.binding_role,
@@ -859,11 +940,19 @@ fn sampler_descriptor(key: SamplerKey) -> wgpu::SamplerDescriptor<'static> {
         ShaderSamplingFilterKey::Nearest => wgpu::FilterMode::Nearest,
         ShaderSamplingFilterKey::Linear => wgpu::FilterMode::Linear,
     };
+    let address_mode = match key
+        .resolved_mask_sampling
+        .map(ShaderMaskSamplingKey::extend)
+    {
+        None | Some(ShaderMaskExtendKey::Pad) => wgpu::AddressMode::ClampToEdge,
+        Some(ShaderMaskExtendKey::Repeat) => wgpu::AddressMode::Repeat,
+        Some(ShaderMaskExtendKey::Reflect) => wgpu::AddressMode::MirrorRepeat,
+    };
     wgpu::SamplerDescriptor {
         label: Some("Surgeist C08 sampled-image sampler"),
-        address_mode_u: wgpu::AddressMode::ClampToEdge,
-        address_mode_v: wgpu::AddressMode::ClampToEdge,
-        address_mode_w: wgpu::AddressMode::ClampToEdge,
+        address_mode_u: address_mode,
+        address_mode_v: address_mode,
+        address_mode_w: address_mode,
         mag_filter: filter,
         min_filter: filter,
         mipmap_filter: wgpu::MipmapFilterMode::Nearest,
@@ -1121,6 +1210,178 @@ impl PassSpatialUniformBytes {
     pub(crate) const fn into_bytes_for_test(self) -> [u8; 48] {
         self.0
     }
+}
+
+/// Exact 112-byte WGSL composite parameter block.
+///
+/// The byte ranges are fixed as follows: affine linear coefficients `0..16`,
+/// affine translation plus zero alignment bytes `16..32`, mask rectangle
+/// `32..48`, image dimensions plus zero alignment bytes `48..64`, normalized
+/// texel-center facts `64..80`, opacity/blend/quality/extend `80..96`, and
+/// exact clip/mask presence plus zero alignment bytes `96..112`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CompositeParameterBytes([u8; 112]);
+
+impl CompositeParameterBytes {
+    pub(crate) fn try_from_runtime_layer(
+        parameters: &RuntimeLayerCompositeParameters,
+    ) -> Result<Self> {
+        let [a, b, c, d, e, f] = parameters.destination_to_layer_local().affine().as_array();
+        let affine = [
+            narrow_composite_scalar("composite affine coefficient a", a)?,
+            narrow_composite_scalar("composite affine coefficient b", b)?,
+            narrow_composite_scalar("composite affine coefficient c", c)?,
+            narrow_composite_scalar("composite affine coefficient d", d)?,
+            narrow_composite_scalar("composite affine translation x", e)?,
+            narrow_composite_scalar("composite affine translation y", f)?,
+        ];
+        validate_narrowed_composite_affine(affine)?;
+
+        let opacity = parameters.opacity();
+        if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
+            return Err(Error::invalid_value(
+                "composite opacity",
+                opacity,
+                "must be finite and clamped to the inclusive unit interval",
+            ));
+        }
+
+        let mut bytes = [0_u8; 112];
+        write_f32(&mut bytes, 0, affine[0]);
+        write_f32(&mut bytes, 4, affine[1]);
+        write_f32(&mut bytes, 8, affine[2]);
+        write_f32(&mut bytes, 12, affine[3]);
+        write_f32(&mut bytes, 16, affine[4]);
+        write_f32(&mut bytes, 20, affine[5]);
+
+        if let Some(mask) = parameters.alpha_mask() {
+            let bounds = mask.bounds();
+            let bounds = [
+                narrow_composite_scalar("composite mask bounds x", bounds.x())?,
+                narrow_composite_scalar("composite mask bounds y", bounds.y())?,
+                narrow_positive_composite_scalar("composite mask bounds width", bounds.width())?,
+                narrow_positive_composite_scalar("composite mask bounds height", bounds.height())?,
+            ];
+            for (index, value) in bounds.into_iter().enumerate() {
+                write_f32(&mut bytes, 32 + index * 4, value);
+            }
+
+            let dimensions = mask.image_dimensions();
+            if dimensions.width() == 0 || dimensions.height() == 0 {
+                return Err(Error::invalid_value(
+                    "composite mask image dimensions",
+                    format!("{}x{}", dimensions.width(), dimensions.height()),
+                    "must be positive before parameter serialization",
+                ));
+            }
+            write_u32(&mut bytes, 48, dimensions.width());
+            write_u32(&mut bytes, 52, dimensions.height());
+
+            let texel_centers = mask.texel_center_facts();
+            let [half_x, half_y] = texel_centers.half_texel_normalized();
+            let [texel_x, texel_y] = texel_centers.texel_size_normalized();
+            for (index, value) in [half_x, half_y, texel_x, texel_y].into_iter().enumerate() {
+                write_f32(
+                    &mut bytes,
+                    64 + index * 4,
+                    narrow_positive_composite_scalar("composite mask texel fact", value)?,
+                );
+            }
+
+            let sampling = mask.sampling();
+            write_u32(&mut bytes, 88, sampling.quality().parameter_code());
+            write_u32(&mut bytes, 92, sampling.extend().parameter_code());
+            write_u32(&mut bytes, 100, 1);
+        }
+
+        write_f32(&mut bytes, 80, opacity);
+        write_u32(&mut bytes, 84, blend_parameter_code(parameters.blend()));
+        write_u32(&mut bytes, 96, u32::from(parameters.has_clip()));
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub(crate) const fn as_bytes(&self) -> &[u8; 112] {
+        &self.0
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn into_bytes_for_test(self) -> [u8; 112] {
+        self.0
+    }
+}
+
+fn validate_narrowed_composite_affine(affine: [f32; 6]) -> Result<()> {
+    let scale = affine[0]
+        .abs()
+        .max(affine[1].abs())
+        .max(affine[2].abs())
+        .max(affine[3].abs());
+    if scale == 0.0 {
+        return Err(Error::invalid_value(
+            "composite affine mapping",
+            "zero linear transform",
+            "must remain non-singular after f64-to-f32 narrowing",
+        ));
+    }
+    let a = affine[0] / scale;
+    let b = affine[1] / scale;
+    let c = affine[2] / scale;
+    let d = affine[3] / scale;
+    let determinant = a * d - b * c;
+    if !determinant.is_finite() || determinant == 0.0 {
+        return Err(Error::invalid_value(
+            "composite affine mapping",
+            determinant,
+            "must remain finite and non-singular after f64-to-f32 narrowing",
+        ));
+    }
+    Ok(())
+}
+
+const fn blend_parameter_code(blend: BlendMode) -> u32 {
+    match blend {
+        BlendMode::Normal => 0,
+        BlendMode::Multiply => 1,
+        BlendMode::Screen => 2,
+        BlendMode::Overlay => 3,
+        BlendMode::Darken => 4,
+        BlendMode::Lighten => 5,
+        BlendMode::Plus => 6,
+    }
+}
+
+fn write_f32(bytes: &mut [u8; 112], offset: usize, value: f32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn write_u32(bytes: &mut [u8; 112], offset: usize, value: u32) {
+    bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+}
+
+fn narrow_composite_scalar(field: &'static str, value: f64) -> Result<f32> {
+    let narrowed = value as f32;
+    if !narrowed.is_finite() {
+        return Err(Error::invalid_value(
+            field,
+            value,
+            "must remain finite after f64-to-f32 narrowing",
+        ));
+    }
+    Ok(narrowed)
+}
+
+fn narrow_positive_composite_scalar(field: &'static str, value: f64) -> Result<f32> {
+    let narrowed = narrow_composite_scalar(field, value)?;
+    if narrowed <= 0.0 {
+        return Err(Error::invalid_value(
+            field,
+            value,
+            "must remain strictly positive after f64-to-f32 narrowing",
+        ));
+    }
+    Ok(narrowed)
 }
 
 fn narrow_spatial_scalar(field: &'static str, value: f64) -> Result<f32> {
