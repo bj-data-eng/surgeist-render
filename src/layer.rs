@@ -1,11 +1,9 @@
 use super::{
-    BackdropFilterInput, ClipInput, Error, ImageBuffer, MaskMode, Paint, PhysicalSize, Point,
-    PrimitiveFamily, PrimitiveOperation, Result, Shape, Transform, UnsupportedPrimitive,
-    image::validate_image_buffer_rgba_len,
+    BackdropFilterInput, ClipInput, Error, Image, Paint, Point, Rect, Result, Shape, Transform,
     style::validate_clip_input,
     validation::{
         validate_filter, validate_finite_f64, validate_non_negative_f64, validate_paint,
-        validate_point, validate_shape, validate_transform,
+        validate_point, validate_positive_f64, validate_shape, validate_transform,
     },
 };
 
@@ -44,10 +42,21 @@ impl Layer {
         Ok(self)
     }
 
-    pub fn try_resolved_alpha_mask(mut self, alpha_mask: ImageBuffer) -> Result<Self> {
-        let mask = ResolvedLayerAlphaMask::try_new(alpha_mask)?;
-        self.mask = Some(LayerMask::ResolvedAlpha(mask));
-        Ok(self)
+    /// Installs an already validated resolved alpha mask.
+    #[must_use]
+    pub fn with_resolved_alpha_mask(mut self, alpha_mask: ResolvedLayerAlphaMask) -> Self {
+        self.mask = Some(LayerMask::ResolvedAlpha(alpha_mask));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_install_resolved_alpha_mask_contract_for_test(
+        self,
+        image: Image,
+        bounds: Rect,
+    ) -> Result<Self> {
+        let mask = ResolvedLayerAlphaMask::try_new(image, bounds)?;
+        Ok(self.with_resolved_alpha_mask(mask))
     }
 
     pub fn try_filter(mut self, filter: Filter) -> Result<Self> {
@@ -146,46 +155,33 @@ pub(crate) enum LayerMask {
     ResolvedAlpha(ResolvedLayerAlphaMask),
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// An image alpha channel mapped across finite positive layer-local bounds.
+#[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLayerAlphaMask {
-    alpha_mask: ImageBuffer,
-    mode: MaskMode,
+    image: Image,
+    bounds: Rect,
 }
 
 impl ResolvedLayerAlphaMask {
-    pub fn try_new(alpha_mask: ImageBuffer) -> Result<Self> {
-        Self::try_new_with_mode(alpha_mask, MaskMode::Alpha)
+    /// Creates a resolved mask with positive finite bounds in layer-local space.
+    pub fn try_new(image: Image, bounds: Rect) -> Result<Self> {
+        validate_point(bounds.origin(), "resolved layer alpha mask bounds")?;
+        validate_positive_f64(bounds.width(), "resolved layer alpha mask bounds width")?;
+        validate_positive_f64(bounds.height(), "resolved layer alpha mask bounds height")?;
+        validate_point(bounds.max(), "resolved layer alpha mask bounds maximum")?;
+        Ok(Self { image, bounds })
     }
 
-    pub fn try_new_with_mode(alpha_mask: ImageBuffer, mode: MaskMode) -> Result<Self> {
-        match mode {
-            MaskMode::Alpha => {}
-            MaskMode::Luminance => {
-                return Err(Error::unsupported_render_primitive(
-                    UnsupportedPrimitive::new(
-                        PrimitiveFamily::MasksAndClips,
-                        PrimitiveOperation::LuminanceMaskMode,
-                    ),
-                ));
-            }
-        }
-        validate_image_buffer_rgba_len(alpha_mask.size(), alpha_mask.rgba().len())?;
-        Ok(Self { alpha_mask, mode })
-    }
-
+    /// Returns the retained mask image, including its identity and sampling policy.
     #[must_use]
-    pub const fn size(&self) -> PhysicalSize {
-        self.alpha_mask.size()
+    pub const fn image(&self) -> &Image {
+        &self.image
     }
 
+    /// Returns the semantic rectangle in the owning layer's local coordinates.
     #[must_use]
-    pub const fn mode(&self) -> MaskMode {
-        self.mode
-    }
-
-    #[must_use]
-    pub const fn alpha_mask(&self) -> &ImageBuffer {
-        &self.alpha_mask
+    pub const fn bounds(&self) -> Rect {
+        self.bounds
     }
 }
 

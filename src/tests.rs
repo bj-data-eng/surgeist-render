@@ -4826,6 +4826,32 @@ fn image_buffer_accepts_exact_and_zero_area_lengths_and_round_trips_bytes() {
     }
 }
 
+fn image_from_buffer(buffer: ImageBuffer) -> Image {
+    let size = buffer.size();
+    Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        buffer.into_rgba(),
+    )
+    .unwrap()
+}
+
+fn resolved_layer_alpha_mask_from_buffer(buffer: ImageBuffer) -> ResolvedLayerAlphaMask {
+    let size = buffer.size();
+    ResolvedLayerAlphaMask::try_new(
+        image_from_buffer(buffer),
+        Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
+    )
+    .unwrap()
+}
+
+fn zero_sized_transparent_mask(bounds: Rect) -> ResolvedLayerAlphaMask {
+    ResolvedLayerAlphaMask::try_new(
+        Image::from_rgba(Size::new(0.0, 0.0), Vec::<u8>::new()).unwrap(),
+        bounds,
+    )
+    .unwrap()
+}
+
 #[test]
 fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
     let source = ImageBuffer::try_new(
@@ -4837,8 +4863,8 @@ fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
         ],
     )
     .unwrap();
-    let mask = ImageBuffer::try_new(
-        PhysicalSize::new(3, 1),
+    let mask = Image::from_rgba(
+        Size::new(3.0, 1.0),
         vec![
             0, 0, 0, 255, //
             0, 0, 0, 0, //
@@ -4847,10 +4873,13 @@ fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
     )
     .unwrap();
 
-    let masked = ResolvedAlphaMaskExecution::try_new(&source, &mask)
-        .unwrap()
-        .execute_to_image_buffer()
-        .unwrap();
+    let masked = image::execute_transitional_resolved_mask_bridge_for_test(
+        &source,
+        Rect::new(0.0, 0.0, 3.0, 1.0),
+        mask,
+        Rect::new(0.0, 0.0, 3.0, 1.0),
+    )
+    .unwrap();
 
     assert_eq!(masked.size(), source.size());
     assert_eq!(
@@ -4864,12 +4893,17 @@ fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
 }
 
 #[test]
-fn resolved_alpha_mask_execution_rejects_non_materialized_luminance_policy() {
-    let source = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 0, 0, 255]).unwrap();
-    let mask = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 255, 255, 255]).unwrap();
-
-    let error = ResolvedAlphaMaskExecution::try_new_with_mode(&source, &mask, MaskMode::Luminance)
-        .expect_err("luminance masks need an explicit conversion policy before execution");
+fn resolved_alpha_masks_leave_luminance_to_authored_mask_diagnostics() {
+    let mask = MaskLayerStack::single(
+        MaskInput::try_shape(
+            Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)),
+            MaskMode::Luminance,
+        )
+        .unwrap(),
+    );
+    let error = mask
+        .ensure_supported(Capabilities::CURRENT)
+        .expect_err("luminance masks remain an authored-mask diagnostic");
 
     assert_eq!(
         error.unsupported_primitive(),
@@ -4881,23 +4915,23 @@ fn resolved_alpha_mask_execution_rejects_non_materialized_luminance_policy() {
 }
 
 #[test]
-fn resolved_alpha_mask_execution_rejects_mismatched_buffers() {
+fn resolved_alpha_mask_execution_accepts_independent_image_extent() {
     let source = ImageBuffer::try_new(
         PhysicalSize::new(2, 1),
         vec![255, 0, 0, 255, 0, 255, 0, 255],
     )
     .unwrap();
-    let mask =
-        ImageBuffer::try_new(PhysicalSize::new(1, 2), vec![0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
+    let mask = Image::from_rgba(Size::new(1.0, 2.0), vec![0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
 
-    let error = ResolvedAlphaMaskExecution::try_new(&source, &mask)
-        .expect_err("materialized alpha masks must match source buffer size");
+    let masked = image::execute_transitional_resolved_mask_bridge_for_test(
+        &source,
+        Rect::new(0.0, 0.0, 2.0, 1.0),
+        mask,
+        Rect::new(0.0, 0.0, 2.0, 1.0),
+    )
+    .expect("mask storage extent must remain independent from semantic bounds");
 
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(
-        error.invalid_value_diagnostic().map(InvalidValue::field),
-        Some("resolved alpha mask size")
-    );
+    assert_eq!(masked, source);
 }
 
 #[test]
@@ -4914,7 +4948,7 @@ fn layer_resolved_alpha_mask_applies_after_children_before_parent_composite() {
         ],
     )
     .unwrap();
-    let layer = Layer::new().try_resolved_alpha_mask(mask).unwrap();
+    let layer = Layer::new().with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(mask));
     let mut scene = Scene::new();
     scene.layer(layer, |scene| {
         scene.fill(
@@ -4949,10 +4983,11 @@ fn nested_resolved_alpha_masked_layers_compose_in_child_then_parent_order() {
     .unwrap();
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new().try_resolved_alpha_mask(outer_mask).unwrap(),
+        Layer::new().with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(outer_mask)),
         |scene| {
             scene.layer(
-                Layer::new().try_resolved_alpha_mask(inner_mask).unwrap(),
+                Layer::new()
+                    .with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(inner_mask)),
                 |scene| {
                     scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
                 },
@@ -4977,11 +5012,13 @@ fn layer_resolved_alpha_mask_respects_layer_clip_before_masking() {
         vec![255, 255, 255, 255, 255, 255, 255, 255],
     )
     .unwrap();
+    let mask =
+        ResolvedLayerAlphaMask::try_new(image_from_buffer(mask), Rect::new(1.0, 0.0, 2.0, 1.0))
+            .unwrap();
     let layer = Layer::new()
         .try_clip(Shape::rect(Rect::new(1.0, 0.0, 2.0, 1.0)))
         .unwrap()
-        .try_resolved_alpha_mask(mask)
-        .unwrap();
+        .with_resolved_alpha_mask(mask);
     let mut scene = Scene::new();
     scene.layer(layer, |scene| {
         scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
@@ -5004,8 +5041,7 @@ fn layer_resolved_alpha_mask_composites_after_layer_transform() {
     let layer = Layer::new()
         .try_transform(Transform::translation(1.0, 0.0).unwrap())
         .unwrap()
-        .try_resolved_alpha_mask(mask)
-        .unwrap();
+        .with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(mask));
     let mut scene = Scene::new();
     scene.layer(layer, |scene| {
         scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
@@ -5028,8 +5064,7 @@ fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
     let layer = Layer::new()
         .try_opacity(0.5)
         .unwrap()
-        .try_resolved_alpha_mask(mask)
-        .unwrap();
+        .with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(mask));
     let mut scene = Scene::new();
     scene.layer(layer, |scene| {
         scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
@@ -5042,22 +5077,6 @@ fn layer_resolved_alpha_mask_combines_mask_child_opacity_and_layer_opacity() {
     let alpha = pixel_alpha(&output, 0, 0);
 
     assert!((24..=40).contains(&alpha), "unexpected alpha {alpha}");
-}
-
-#[test]
-fn layer_resolved_alpha_mask_rejects_luminance_mode_without_conversion_policy() {
-    let mask = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 255, 255, 255]).unwrap();
-
-    let error = ResolvedLayerAlphaMask::try_new_with_mode(mask, MaskMode::Luminance)
-        .expect_err("resolved layer masks do not implement luminance conversion");
-
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::LuminanceMaskMode,
-        ))
-    );
 }
 
 #[test]
@@ -7730,7 +7749,7 @@ fn retained_byte_overflow_preflights_all_concrete_payload_creation() {
     .unwrap();
     let mask_buffer = ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![0, 0, 0, 255]).unwrap();
     let mask_descriptor =
-        ResolvedMaskUploadDescriptor::from_resolved_alpha_mask(&mask_buffer).unwrap();
+        ResolvedMaskUploadDescriptor::try_from_image(image_from_buffer(mask_buffer)).unwrap();
     let kernel_plan =
         GaussianKernelPlan::try_new(1.0, 1.0, 2.5, GaussianKernelSamplingForm::PairedLinear)
             .unwrap();
@@ -8042,7 +8061,8 @@ fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
 
     let mask_bytes = vec![0, 0, 0, 255, 12, 34, 56, 128];
     let mask_buffer = ImageBuffer::try_new(PhysicalSize::new(2, 1), mask_bytes.clone()).unwrap();
-    let descriptor = ResolvedMaskUploadDescriptor::from_resolved_alpha_mask(&mask_buffer).unwrap();
+    let mask_image = image_from_buffer(mask_buffer.clone());
+    let descriptor = ResolvedMaskUploadDescriptor::try_from_image(mask_image.clone()).unwrap();
     assert_eq!(descriptor.physical_size(), mask_buffer.size());
     assert_eq!(descriptor.row_bytes(), 8);
     assert_eq!(descriptor.byte_len(), 8);
@@ -8063,9 +8083,9 @@ fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
 
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_resolved_alpha_mask(mask_buffer.clone())
-            .unwrap(),
+        Layer::new().with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(mask_image, Rect::new(0.0, 0.0, 2.0, 1.0)).unwrap(),
+        ),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
         },
@@ -8078,7 +8098,8 @@ fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
         .mask
         .as_ref()
         .expect("the normalized layer must retain its resolved alpha mask");
-    assert_eq!(normalized_mask.alpha_mask(), &mask_buffer);
+    assert_eq!(normalized_mask.image().bytes.as_ref(), mask_buffer.rgba());
+    assert_eq!(normalized_mask.bounds(), Rect::new(0.0, 0.0, 2.0, 1.0));
     assert_eq!(normalized_mask.upload().bytes(), mask_bytes);
     assert_eq!(normalized_mask.upload().cache_key(), descriptor.cache_key());
 
@@ -8148,6 +8169,225 @@ fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
         .expect_err("an over-limit mask upload must fail before texture allocation");
     assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
     assert_eq!(manager.stats(), stats_before_rejection);
+}
+
+#[test]
+fn resolved_alpha_mask_requires_finite_positive_local_bounds() {
+    let image =
+        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 255, 255, 255])).unwrap();
+    let invalid_bounds = [
+        Rect::new(f64::NAN, 0.0, 1.0, 1.0),
+        Rect::new(0.0, f64::INFINITY, 1.0, 1.0),
+        Rect::new(0.0, 0.0, f64::NEG_INFINITY, 1.0),
+        Rect::new(0.0, 0.0, 1.0, f64::NAN),
+        Rect::new(0.0, 0.0, 0.0, 1.0),
+        Rect::new(0.0, 0.0, 1.0, 0.0),
+        Rect::new(0.0, 0.0, -1.0, 1.0),
+        Rect::new(0.0, 0.0, 1.0, -1.0),
+    ];
+    let rejects_invalid_bounds = invalid_bounds.into_iter().all(|bounds| {
+        Layer::new()
+            .try_install_resolved_alpha_mask_contract_for_test(image.clone(), bounds)
+            .is_err()
+    });
+    let zero_sized_image = Image::from_rgba(Size::new(0.0, 0.0), Arc::<[u8]>::from([])).unwrap();
+    let accepts_zero_sized_image = Layer::new()
+        .try_install_resolved_alpha_mask_contract_for_test(
+            zero_sized_image,
+            Rect::new(2.0, 3.0, 4.0, 5.0),
+        )
+        .is_ok();
+
+    assert!(
+        rejects_invalid_bounds && accepts_zero_sized_image,
+        "resolved masks accept invalid local bounds"
+    );
+}
+
+#[test]
+fn resolved_alpha_mask_public_model_uses_image_bounds_and_infallible_layer_installation() {
+    let image = Image::from_rgba(
+        Size::new(2.0, 1.0),
+        Arc::<[u8]>::from([255, 255, 255, 255, 0, 0, 0, 0]),
+    )
+    .unwrap();
+    let installs_valid_mask = Layer::new()
+        .try_install_resolved_alpha_mask_contract_for_test(image, Rect::new(-2.0, 4.0, 8.0, 3.0))
+        .is_ok();
+
+    let layer_source = include_str!("layer.rs");
+    let image_source = include_str!("image.rs");
+    let lib_source = include_str!("lib.rs");
+    let mask_struct =
+        source_braced_block_from_marker(layer_source, "pub struct ResolvedLayerAlphaMask");
+    let mask_impl = source_braced_block_from_marker(layer_source, "impl ResolvedLayerAlphaMask");
+    let layer_impl = source_braced_block_from_marker(layer_source, "impl Layer");
+    let public_model_is_exact = mask_struct
+        .lines()
+        .filter(|line| line.starts_with("    ") && line.ends_with(','))
+        .eq(["    image: Image,", "    bounds: Rect,"])
+        && layer_source
+            .contains("#[derive(Clone, Debug, PartialEq)]\npub struct ResolvedLayerAlphaMask")
+        && mask_impl.contains("pub fn try_new(image: Image, bounds: Rect) -> Result<Self>")
+        && mask_impl.contains("pub const fn image(&self) -> &Image")
+        && mask_impl.contains("pub const fn bounds(&self) -> Rect")
+        && !mask_impl.contains("try_new_with_mode")
+        && !mask_impl.contains("pub const fn size(")
+        && !mask_impl.contains("pub const fn mode(")
+        && !mask_impl.contains("pub const fn alpha_mask(")
+        && layer_impl.contains(
+            "pub fn with_resolved_alpha_mask(mut self, alpha_mask: ResolvedLayerAlphaMask) -> Self",
+        )
+        && !layer_impl.contains("pub fn try_resolved_alpha_mask(")
+        && !image_source.contains(concat!("pub struct ResolvedAlphaMask", "Execution"))
+        && !lib_source.contains("ResolvedAlphaMaskExecution");
+
+    assert!(
+        installs_valid_mask && public_model_is_exact,
+        "resolved mask public phases still expose buffer or mode semantics"
+    );
+}
+
+#[test]
+fn resolved_mask_normalization_preserves_image_identity_sampling_and_local_bounds() {
+    let image = Image::from_rgba(
+        Size::new(3.0, 2.0),
+        Arc::<[u8]>::from([
+            255, 255, 255, 255, 0, 0, 0, 64, 0, 0, 0, 128, 0, 0, 0, 192, 0, 0, 0, 224, 0, 0, 0, 255,
+        ]),
+    )
+    .unwrap()
+    .quality(ImageQuality::High)
+    .extend(Extend::Reflect);
+    let bounds = Rect::new(10.0, -4.0, 6.0, 3.0);
+    let expected_id = image.id();
+    let expected_bytes = image.bytes.clone();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_install_resolved_alpha_mask_contract_for_test(image, bounds)
+            .expect("the valid resolved-mask normalization fixture must install"),
+        |scene| {
+            scene.fill(bounds, Color::BLACK);
+        },
+    );
+    let normalized = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the valid resolved-mask fixture must normalize");
+    let [command::RenderCommand::Layer { layer, .. }] = normalized.commands.as_slice() else {
+        panic!("the resolved-mask fixture must normalize to one layer");
+    };
+    let mask = layer
+        .mask
+        .as_ref()
+        .expect("the normalized layer must retain its resolved mask");
+    let upload = mask.upload();
+    let key = upload.cache_key();
+    let preserves_contract = key.image_id() == expected_id
+        && key.physical_size() == PhysicalSize::new(3, 2)
+        && key.quality() == ImageQuality::High
+        && key.extend() == Extend::Reflect
+        && upload.bytes() == expected_bytes.as_ref()
+        && upload.row_bytes() == 12
+        && upload.byte_len() == 24
+        && mask.semantic_bounds_for_contract_test() == bounds;
+
+    assert!(
+        preserves_contract,
+        "mask normalization collapsed storage and semantic bounds"
+    );
+}
+
+#[test]
+fn transitional_resolved_mask_bridge_preserves_bounds_quality_extend_and_transform() {
+    let source =
+        ImageBuffer::try_new(PhysicalSize::new(9, 1), [255, 255, 255, 255].repeat(9)).unwrap();
+    let mask_bytes = [128_u8, 0, 64, 128, 192, 48, 160, 255, 64]
+        .into_iter()
+        .flat_map(|alpha| [0, 0, 0, alpha])
+        .collect::<Vec<_>>();
+    let source_bounds = Rect::new(0.0, 0.0, 9.0, 1.0);
+    let mask_bounds = Rect::new(1.4, 0.0, 6.2, 1.0);
+    let mut outputs = Vec::new();
+    for quality in [ImageQuality::Low, ImageQuality::Medium, ImageQuality::High] {
+        for extend in [Extend::Pad, Extend::Repeat, Extend::Reflect] {
+            let image = Image::from_rgba(Size::new(9.0, 1.0), mask_bytes.clone())
+                .unwrap()
+                .quality(quality)
+                .extend(extend);
+            let output = image::execute_transitional_resolved_mask_bridge_for_test(
+                &source,
+                source_bounds,
+                image,
+                mask_bounds,
+            )
+            .expect("the staged resolved-mask fixture must execute");
+            outputs.push((
+                quality,
+                extend,
+                (0..9)
+                    .map(|x| pixel_alpha(&output, x, 0))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+    }
+    let observed = |quality, extend| {
+        outputs
+            .iter()
+            .find_map(|(candidate_quality, candidate_extend, alpha)| {
+                (*candidate_quality == quality && *candidate_extend == extend).then_some(alpha)
+            })
+            .expect("every quality/extend pair must have one staged result")
+    };
+    let low_pad = observed(ImageQuality::Low, Extend::Pad);
+    let low_repeat = observed(ImageQuality::Low, Extend::Repeat);
+    let low_reflect = observed(ImageQuality::Low, Extend::Reflect);
+    let medium_pad = observed(ImageQuality::Medium, Extend::Pad);
+    let medium_repeat = observed(ImageQuality::Medium, Extend::Repeat);
+    let medium_reflect = observed(ImageQuality::Medium, Extend::Reflect);
+    let high_pad = observed(ImageQuality::High, Extend::Pad);
+    let high_repeat = observed(ImageQuality::High, Extend::Repeat);
+    let high_reflect = observed(ImageQuality::High, Extend::Reflect);
+
+    let transform = Transform::translation(3.0, -2.0).unwrap();
+    let transformed_mask = Image::from_rgba(Size::new(9.0, 1.0), mask_bytes)
+        .unwrap()
+        .quality(ImageQuality::High)
+        .extend(Extend::Reflect);
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_transform(transform)
+            .unwrap()
+            .try_install_resolved_alpha_mask_contract_for_test(transformed_mask, mask_bounds)
+            .expect("the transformed staged mask fixture must install"),
+        |scene| {
+            scene.fill(source_bounds, Color::BLACK);
+        },
+    );
+    let normalized = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the transformed staged mask fixture must normalize");
+    let [command::RenderCommand::Layer { layer, .. }] = normalized.commands.as_slice() else {
+        panic!("the transformed mask fixture must normalize to one layer");
+    };
+
+    let outside_is_transparent = outputs
+        .iter()
+        .all(|(_, _, alpha)| alpha[0] == 0 && alpha[8] == 0);
+    let sampling_is_preserved = low_pad == low_repeat
+        && low_pad == low_reflect
+        && medium_pad == medium_reflect
+        && medium_pad != medium_repeat
+        && high_pad != high_repeat
+        && high_pad != high_reflect
+        && high_repeat != high_reflect
+        && low_pad != medium_pad
+        && medium_pad != high_pad;
+    assert!(
+        outside_is_transparent && sampling_is_preserved && layer.transform == transform,
+        "the staged bridge changed new mask semantics"
+    );
 }
 
 #[test]
@@ -10793,9 +11033,8 @@ fn runtime_lowering_commands_for_test() -> command::RenderCommands {
             .unwrap(),
         )
         .unwrap();
-    let masked = Layer::new()
-        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-        .unwrap();
+    let masked =
+        Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)));
     let mut scene = Scene::new();
     scene
         .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
@@ -11796,22 +12035,22 @@ fn add_planning_text(scene: &mut Scene, bounds: TextRunBounds) {
     scene.text_run(run);
 }
 
-fn opaque_planning_mask(size: PhysicalSize) -> ImageBuffer {
+fn opaque_planning_mask(size: PhysicalSize) -> ResolvedLayerAlphaMask {
     let byte_len = usize::try_from(size.width())
         .unwrap()
         .checked_mul(usize::try_from(size.height()).unwrap())
         .and_then(|pixels| pixels.checked_mul(4))
         .unwrap();
-    ImageBuffer::try_new(size, vec![255; byte_len]).unwrap()
+    resolved_layer_alpha_mask_from_buffer(ImageBuffer::try_new(size, vec![255; byte_len]).unwrap())
 }
 
-fn transparent_planning_mask(size: PhysicalSize) -> ImageBuffer {
-    let byte_len = usize::try_from(size.width())
-        .unwrap()
-        .checked_mul(usize::try_from(size.height()).unwrap())
-        .and_then(|pixels| pixels.checked_mul(4))
-        .unwrap();
-    ImageBuffer::try_new(size, vec![0; byte_len]).unwrap()
+fn transparent_planning_mask(size: PhysicalSize) -> ResolvedLayerAlphaMask {
+    zero_sized_transparent_mask(Rect::new(
+        0.0,
+        0.0,
+        f64::from(size.width()),
+        f64::from(size.height()),
+    ))
 }
 
 fn bounded_planning_backdrop() -> Layer {
@@ -11865,9 +12104,7 @@ fn direct_vello_is_the_least_powerful_plan_for_effect_free_scenes() {
 fn nested_non_normal_blend_stays_in_masked_layer_source_vello_span() {
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-            .unwrap(),
+        Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4))),
         |scene| {
             scene.layer(Layer::new().blend(BlendMode::Multiply), |scene| {
                 scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
@@ -11902,15 +12139,12 @@ fn nested_non_normal_blend_stays_in_masked_layer_source_vello_span() {
 fn nested_mask_boundary_makes_following_multiply_an_ordered_graph_composite() {
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-            .unwrap(),
+        Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4))),
         |scene| {
             scene
                 .layer(
                     Layer::new()
-                        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-                        .unwrap(),
+                        .with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4))),
                     |scene| {
                         scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
                     },
@@ -11958,15 +12192,12 @@ fn nested_mask_boundary_makes_following_multiply_an_ordered_graph_composite() {
 fn clip_only_wrapper_does_not_make_nested_multiply_capture_local() {
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-            .unwrap(),
+        Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4))),
         |scene| {
             scene
                 .layer(
                     Layer::new()
-                        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-                        .unwrap(),
+                        .with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4))),
                     |scene| {
                         scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
                     },
@@ -12019,15 +12250,12 @@ fn clip_only_wrapper_does_not_make_nested_multiply_capture_local() {
 
 #[test]
 fn transparent_resolved_alpha_mask_annihilates_unspecified_text_without_graph_selection() {
-    let transparent_mask =
-        ImageBuffer::try_new(PhysicalSize::new(2, 2), [255, 127, 63, 0].repeat(4)).unwrap();
+    let transparent_mask = zero_sized_transparent_mask(Rect::new(0.0, 0.0, 2.0, 2.0));
     let mut scene = Scene::new();
     scene
         .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
         .layer(
-            Layer::new()
-                .try_resolved_alpha_mask(transparent_mask)
-                .unwrap(),
+            Layer::new().with_resolved_alpha_mask(transparent_mask),
             |scene| add_planning_text(scene, TextRunBounds::unspecified()),
         );
 
@@ -12060,8 +12288,7 @@ fn clipped_known_mask_source_uses_post_clip_extent_for_validation_and_import() {
         Layer::new()
             .try_clip(Shape::rect(Rect::new(1.0, 0.0, 2.0, 1.0)))
             .unwrap()
-            .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(2, 1)))
-            .unwrap(),
+            .with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(2, 1))),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
         },
@@ -12098,8 +12325,7 @@ fn transparent_mask_under_nonempty_clip_prunes_mixed_unresolved_source() {
             Layer::new()
                 .try_clip(Shape::rect(Rect::new(0.0, 0.0, 2.0, 1.0)))
                 .unwrap()
-                .try_resolved_alpha_mask(transparent_planning_mask(PhysicalSize::new(2, 1)))
-                .unwrap(),
+                .with_resolved_alpha_mask(transparent_planning_mask(PhysicalSize::new(2, 1))),
             |scene| {
                 scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
                 add_planning_text(scene, TextRunBounds::unspecified());
@@ -12137,8 +12363,7 @@ fn exact_empty_outer_clip_skips_mask_size_validation_and_preserves_sibling() {
             Layer::new()
                 .try_clip(Shape::rect(Rect::new(0.0, 0.0, 0.0, 1.0)))
                 .unwrap()
-                .try_resolved_alpha_mask(transparent_planning_mask(PhysicalSize::new(7, 3)))
-                .unwrap(),
+                .with_resolved_alpha_mask(transparent_planning_mask(PhysicalSize::new(7, 3))),
             |scene| {
                 scene.fill(Rect::new(0.0, 0.0, 3.0, 1.0), Color::BLACK);
             },
@@ -12167,14 +12392,11 @@ fn exact_empty_outer_clip_skips_mask_size_validation_and_preserves_sibling() {
 }
 
 #[test]
-fn transparent_mismatched_resolved_alpha_mask_reports_typed_size_error() {
-    let transparent_mask =
-        ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 127, 63, 0]).unwrap();
+fn transparent_resolved_mask_image_extent_is_independent_from_local_bounds() {
+    let transparent_mask = zero_sized_transparent_mask(Rect::new(0.0, 0.0, 4.0, 4.0));
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_resolved_alpha_mask(transparent_mask)
-            .unwrap(),
+        Layer::new().with_resolved_alpha_mask(transparent_mask),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
         },
@@ -12189,38 +12411,18 @@ fn transparent_mismatched_resolved_alpha_mask_reports_typed_size_error() {
         Color::TRANSPARENT,
     )
     .expect("the mismatched transparent-mask frame context must resolve");
-    let result = normalized.plan_for(context);
-    let observed = result.as_ref().err().map(|error| {
-        let diagnostic = error.invalid_value_diagnostic();
-        (
-            error.code(),
-            diagnostic.map(InvalidValue::field),
-            diagnostic.map(InvalidValue::value),
-            diagnostic.map(InvalidValue::invariant),
-        )
-    });
-
-    assert_eq!(
-        observed,
-        Some((
-            ErrorCode::InvalidInput,
-            Some("resolved layer alpha mask size"),
-            Some("1x1"),
-            Some("must match the offscreen layer bounds in device pixels"),
-        )),
-        "transparent mask annihilation suppressed the typed resolved-mask-size error"
+    assert!(
+        normalized.plan_for(context).is_ok(),
+        "mask image extent was incorrectly coupled to layer-local bounds"
     );
 }
 
 #[test]
-fn transparent_mask_smaller_than_known_mixed_source_reports_typed_size_error() {
-    let transparent_mask =
-        ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![255, 127, 63, 0]).unwrap();
+fn transparent_resolved_mask_prunes_mixed_source_independent_of_image_extent() {
+    let transparent_mask = zero_sized_transparent_mask(Rect::new(0.0, 0.0, 4.0, 4.0));
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_resolved_alpha_mask(transparent_mask)
-            .unwrap(),
+        Layer::new().with_resolved_alpha_mask(transparent_mask),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
             add_planning_text(scene, TextRunBounds::unspecified());
@@ -12236,26 +12438,9 @@ fn transparent_mask_smaller_than_known_mixed_source_reports_typed_size_error() {
         Color::TRANSPARENT,
     )
     .expect("the mixed-source transparent-mask frame context must resolve");
-    let result = normalized.plan_for(context);
-    let observed = result.as_ref().err().map(|error| {
-        let diagnostic = error.invalid_value_diagnostic();
-        (
-            error.code(),
-            diagnostic.map(InvalidValue::field),
-            diagnostic.map(InvalidValue::value),
-            diagnostic.map(InvalidValue::invariant),
-        )
-    });
-
-    assert_eq!(
-        observed,
-        Some((
-            ErrorCode::InvalidInput,
-            Some("resolved layer alpha mask size"),
-            Some("1x1"),
-            Some("must match the offscreen layer bounds in device pixels"),
-        )),
-        "mixed source bounds discarded the known extent before transparent-mask validation"
+    assert!(
+        normalized.plan_for(context).is_ok(),
+        "transparent mask image extent prevented semantic source pruning"
     );
 }
 
@@ -12505,9 +12690,7 @@ fn empty_masked_subtree_does_not_select_graph_or_split_vello_span() {
     scene
         .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
         .layer(
-            Layer::new()
-                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
-                .unwrap(),
+            Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1))),
             |scene| add_planning_text(scene, TextRunBounds::empty()),
         )
         .stroke(
@@ -12549,9 +12732,7 @@ fn zero_area_masked_source_does_not_select_graph_or_split_vello_span() {
     scene
         .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
         .layer(
-            Layer::new()
-                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
-                .unwrap(),
+            Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1))),
             |scene| {
                 scene.fill(Rect::new(0.0, 3.0, 0.0, 2.0), Color::BLACK);
             },
@@ -12598,8 +12779,7 @@ fn rank_deficient_masked_source_does_not_select_graph_or_split_vello_span() {
             Layer::new()
                 .try_transform(Transform::scale(0.0, 1.0).unwrap())
                 .unwrap()
-                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
-                .unwrap(),
+                .with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1))),
             |scene| {
                 scene.fill(Rect::new(0.0, 3.0, 2.0, 2.0), Color::BLACK);
             },
@@ -12643,9 +12823,7 @@ fn empty_stroked_path_mask_source_does_not_select_graph_or_split_vello_span() {
     scene
         .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
         .layer(
-            Layer::new()
-                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-                .unwrap(),
+            Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4))),
             |scene| {
                 scene.stroke(
                     Shape::path(Path::new()),
@@ -12693,9 +12871,7 @@ fn empty_clip_short_circuits_unresolved_masked_text_bounds() {
     scene
         .fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK)
         .layer(
-            Layer::new()
-                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1)))
-                .unwrap(),
+            Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(1, 1))),
             |scene| {
                 scene.layer(
                     Layer::new()
@@ -12742,12 +12918,9 @@ fn empty_clip_short_circuits_unresolved_masked_text_bounds() {
 fn gpu_graph_is_selected_only_for_supported_custom_requirements() {
     let mask = opaque_planning_mask(PhysicalSize::new(4, 4));
     let mut scene = Scene::new();
-    scene.layer(
-        Layer::new().try_resolved_alpha_mask(mask).unwrap(),
-        |scene| {
-            scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
-        },
-    );
+    scene.layer(Layer::new().with_resolved_alpha_mask(mask), |scene| {
+        scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    });
 
     let result = observe_frame_plan(
         &scene,
@@ -12806,9 +12979,7 @@ fn maximal_vello_spans_preserve_authored_command_order() {
             scene.fill(Rect::new(4.0, 0.0, 2.0, 2.0), Color::BLACK);
         })
         .layer(
-            Layer::new()
-                .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(3, 3)))
-                .unwrap(),
+            Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(3, 3))),
             |scene| {
                 scene
                     .fill(Rect::new(0.0, 3.0, 1.0, 1.0), Color::BLACK)
@@ -12992,8 +13163,7 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
         .layer(bounded_planning_backdrop(), |scene| {
             scene.layer(
                 Layer::new()
-                    .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(8, 6)))
-                    .unwrap(),
+                    .with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(8, 6))),
                 |scene| {
                     scene.fill(Rect::new(1.0, 1.0, 4.0, 3.0), Color::BLACK);
                 },
@@ -15030,10 +15200,13 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
         vec![255, 255, 255, 255, 0, 0, 0, 128],
     )
     .unwrap();
-    let masked = ResolvedAlphaMaskExecution::try_new(&source, &mask)
-        .unwrap()
-        .execute_to_image_buffer()
-        .unwrap();
+    let masked = image::execute_transitional_resolved_mask_bridge_for_test(
+        &source,
+        Rect::new(0.0, 0.0, 2.0, 1.0),
+        image_from_buffer(mask.clone()),
+        Rect::new(0.0, 0.0, 2.0, 1.0),
+    )
+    .unwrap();
     assert_eq!(masked.rgba(), &[255, 0, 0, 255, 0, 255, 0, 128]);
 
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
@@ -15041,7 +15214,7 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
         pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0)).unwrap();
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new().try_resolved_alpha_mask(mask).unwrap(),
+        Layer::new().with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(mask)),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
         },
@@ -17180,6 +17353,41 @@ fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution
     assert!(!capabilities.supports_luminance_mask_mode());
     assert!(!capabilities.supports_multi_layer_mask_composition());
     assert!(!capabilities.supports_mask_composite_modes());
+}
+
+#[test]
+fn affected_capability_queries_map_one_to_one_to_primitive_operations() {
+    let capabilities = Capabilities::CURRENT;
+    let offscreen = capabilities.offscreen_pipeline();
+    let cases = [
+        (
+            capabilities
+                .masks_clips()
+                .supports_materialized_alpha_mask_execution(),
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaterializedAlphaMaskExecution,
+        ),
+        (
+            offscreen.supports_rect_fullscreen_shader_passes(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::RectFullscreenShaderPass,
+        ),
+        (
+            offscreen.supports_nested_opacity_planning(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::NestedOpacityPlanning,
+        ),
+    ];
+
+    for (query, family, operation) in cases {
+        assert_eq!(
+            capabilities
+                .ensure_supported(UnsupportedPrimitive::new(family, operation))
+                .is_ok(),
+            query,
+            "capability query must map one-to-one to {operation:?}",
+        );
+    }
 }
 
 #[test]
@@ -27537,9 +27745,8 @@ fn renderer_dispatch_routes_only_closed_c08_graph_subset_to_gpu_executor() {
 
     let mut later_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .expect("later-cycle dispatch coverage requires a headless surface");
-    let masked = Layer::new()
-        .try_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)))
-        .expect("the later-cycle dispatch mask must be valid");
+    let masked =
+        Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)));
     let mut later_scene = Scene::new();
     later_scene.layer(masked, |scene| {
         scene.fill(
@@ -29543,7 +29750,7 @@ fn materialized_mask_render_preserves_final_transaction_generation() {
     .unwrap();
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new().try_resolved_alpha_mask(mask).unwrap(),
+        Layer::new().with_resolved_alpha_mask(resolved_layer_alpha_mask_from_buffer(mask)),
         |scene| {
             scene.fill(Rect::new(0.0, 0.0, 2.0, 1.0), Color::BLACK);
         },

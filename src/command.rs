@@ -148,9 +148,9 @@ pub(crate) struct NormalizedLayer {
     pub(crate) pass_plan: LayerPassPlan,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RenderLayerMask {
-    alpha_mask: ImageBuffer,
+    bounds: Rect,
     upload: ResolvedMaskUploadDescriptor,
     annihilates_source: bool,
 }
@@ -161,22 +161,24 @@ impl RenderLayerMask {
             PrimitiveFamily::MasksAndClips,
             PrimitiveOperation::MaterializedAlphaMaskExecution,
         ))?;
-        let annihilates_source = mask
-            .alpha_mask()
-            .rgba()
-            .chunks_exact(4)
-            .all(|pixel| pixel[3] == 0);
-        let upload = ResolvedMaskUploadDescriptor::from_resolved_alpha_mask(mask.alpha_mask())?;
+        let image_size = mask.image().size();
+        let annihilates_source = image_size.width() == 0.0 || image_size.height() == 0.0;
+        let upload = ResolvedMaskUploadDescriptor::try_from_image(mask.image().clone())?;
         Ok(Self {
-            alpha_mask: mask.alpha_mask().clone(),
+            bounds: mask.bounds(),
             upload,
             annihilates_source,
         })
     }
 
     #[must_use]
-    pub(crate) const fn alpha_mask(&self) -> &ImageBuffer {
-        &self.alpha_mask
+    pub(crate) const fn image(&self) -> &Image {
+        self.upload.image()
+    }
+
+    #[must_use]
+    pub(crate) const fn bounds(&self) -> Rect {
+        self.bounds
     }
 
     #[must_use]
@@ -189,29 +191,9 @@ impl RenderLayerMask {
         self.annihilates_source
     }
 
-    pub(crate) fn validate_expected_physical_size(&self, expected: PhysicalSize) -> Result<()> {
-        let physical_size = self.alpha_mask.size();
-        if physical_size != expected {
-            return Err(self.physical_size_error());
-        }
-        Ok(())
-    }
-
-    pub(crate) fn validate_minimum_physical_size(&self, minimum: PhysicalSize) -> Result<()> {
-        let physical_size = self.alpha_mask.size();
-        if physical_size.width() < minimum.width() || physical_size.height() < minimum.height() {
-            return Err(self.physical_size_error());
-        }
-        Ok(())
-    }
-
-    fn physical_size_error(&self) -> Error {
-        let physical_size = self.alpha_mask.size();
-        Error::invalid_value(
-            "resolved layer alpha mask size",
-            format!("{}x{}", physical_size.width(), physical_size.height()),
-            "must match the offscreen layer bounds in device pixels",
-        )
+    #[cfg(test)]
+    pub(crate) const fn semantic_bounds_for_contract_test(&self) -> Rect {
+        self.bounds
     }
 }
 

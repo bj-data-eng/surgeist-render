@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::{
-    Error, PhysicalSize, Result,
+    Error, Extend, Image, ImageQuality, PhysicalSize, Rect, Result,
     filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
     layer::BlendMode,
     style::{ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow},
@@ -464,6 +464,28 @@ impl ReferencePremultipliedRgba8Buffer {
         Self::from_pixels(self.physical_size, pixels)
     }
 
+    pub(crate) fn apply_resolved_alpha_mask(
+        &self,
+        source_bounds: Rect,
+        mask: &Image,
+        mask_bounds: Rect,
+    ) -> Result<Self> {
+        let width = self.physical_size.width();
+        let height = self.physical_size.height();
+        let mut pixels = Vec::with_capacity(self.pixels.len());
+        for y in 0..height {
+            let local_y = source_bounds.y()
+                + (f64::from(y) + 0.5) * source_bounds.height() / f64::from(height);
+            for x in 0..width {
+                let local_x = source_bounds.x()
+                    + (f64::from(x) + 0.5) * source_bounds.width() / f64::from(width);
+                let mask_alpha = sample_resolved_mask_alpha(mask, mask_bounds, local_x, local_y);
+                pixels.push(self.pixel(x, y)?.apply_opacity_amount(mask_alpha));
+            }
+        }
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
     pub(crate) fn apply_blur(&self, blur: FilterBlur, policy: BlurPolicy) -> Result<Self> {
         let Some(kernel) = BlurKernel::from_policy(blur, policy)? else {
             return Ok(self.clone());
@@ -841,6 +863,118 @@ fn offset_index(index: usize, offset: i32, len: usize) -> Option<usize> {
         return None;
     }
     usize::try_from(sample).ok()
+}
+
+fn sample_resolved_mask_alpha(mask: &Image, bounds: Rect, x: f64, y: f64) -> f64 {
+    let max = bounds.max();
+    if x < bounds.x() || x > max.x() || y < bounds.y() || y > max.y() {
+        return 0.0;
+    }
+
+    let width = mask.data.width;
+    let height = mask.data.height;
+    if width == 0 || height == 0 {
+        return 0.0;
+    }
+
+    let sample_x = ((x - bounds.x()) / bounds.width()).mul_add(f64::from(width), -0.5);
+    let sample_y = ((y - bounds.y()) / bounds.height()).mul_add(f64::from(height), -0.5);
+    match mask.quality {
+        ImageQuality::Low => mask_alpha_tap(
+            mask,
+            (sample_x + 0.5).floor() as i64,
+            (sample_y + 0.5).floor() as i64,
+        ),
+        ImageQuality::Medium => {
+            let left = sample_x.floor() as i64;
+            let top = sample_y.floor() as i64;
+            let horizontal = sample_x - left as f64;
+            let vertical = sample_y - top as f64;
+            let top_alpha = mask_alpha_tap(mask, left, top).mul_add(
+                1.0 - horizontal,
+                mask_alpha_tap(mask, left + 1, top) * horizontal,
+            );
+            let bottom_alpha = mask_alpha_tap(mask, left, top + 1).mul_add(
+                1.0 - horizontal,
+                mask_alpha_tap(mask, left + 1, top + 1) * horizontal,
+            );
+            top_alpha.mul_add(1.0 - vertical, bottom_alpha * vertical)
+        }
+        ImageQuality::High => {
+            let base_x = sample_x.floor() as i64;
+            let base_y = sample_y.floor() as i64;
+            let mut alpha = 0.0;
+            for offset_y in -1_i64..=2 {
+                let tap_y = base_y + offset_y;
+                let weight_y = mitchell_netravali(sample_y - tap_y as f64);
+                for offset_x in -1_i64..=2 {
+                    let tap_x = base_x + offset_x;
+                    let weight_x = mitchell_netravali(sample_x - tap_x as f64);
+                    alpha += mask_alpha_tap(mask, tap_x, tap_y) * weight_x * weight_y;
+                }
+            }
+            alpha.clamp(0.0, 1.0)
+        }
+    }
+}
+
+fn mask_alpha_tap(mask: &Image, x: i64, y: i64) -> f64 {
+    let Some(x) = extend_mask_index(x, mask.data.width, mask.extend) else {
+        return 0.0;
+    };
+    let Some(y) = extend_mask_index(y, mask.data.height, mask.extend) else {
+        return 0.0;
+    };
+    let alpha_index = u64::from(y)
+        .checked_mul(u64::from(mask.data.width))
+        .and_then(|row| row.checked_add(u64::from(x)))
+        .and_then(|pixel| pixel.checked_mul(4))
+        .and_then(|byte| byte.checked_add(3))
+        .and_then(|byte| usize::try_from(byte).ok());
+    alpha_index
+        .and_then(|index| mask.bytes.get(index))
+        .map_or(0.0, |alpha| f64::from(*alpha) / 255.0)
+}
+
+fn extend_mask_index(index: i64, length: u32, extend: Extend) -> Option<u32> {
+    if length == 0 {
+        return None;
+    }
+    let length = i64::from(length);
+    let extended = match extend {
+        Extend::Pad => index.clamp(0, length - 1),
+        Extend::Repeat => index.rem_euclid(length),
+        Extend::Reflect => {
+            let period = length * 2;
+            let reflected = index.rem_euclid(period);
+            if reflected < length {
+                reflected
+            } else {
+                period - reflected - 1
+            }
+        }
+    };
+    u32::try_from(extended).ok()
+}
+
+fn mitchell_netravali(distance: f64) -> f64 {
+    const B: f64 = 1.0 / 3.0;
+    const C: f64 = 1.0 / 3.0;
+    let distance = distance.abs();
+    if distance < 1.0 {
+        ((12.0 - 9.0 * B - 6.0 * C) * distance.powi(3)
+            + (-18.0 + 12.0 * B + 6.0 * C) * distance.powi(2)
+            + (6.0 - 2.0 * B))
+            / 6.0
+    } else if distance < 2.0 {
+        ((-B - 6.0 * C) * distance.powi(3)
+            + (6.0 * B + 30.0 * C) * distance.powi(2)
+            + (-12.0 * B - 48.0 * C) * distance
+            + (8.0 * B + 24.0 * C))
+            / 6.0
+    } else {
+        0.0
+    }
 }
 
 fn validate_size(physical_size: PhysicalSize) -> Result<u64> {

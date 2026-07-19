@@ -706,59 +706,11 @@ impl SemanticSourceContribution {
                     }
                 }
 
-                let known_source_spatial = if layer.mask.is_some() {
-                    source_bounds
-                        .known_non_empty_extent()
-                        .map(|bounds| {
-                            context.plan_local_bounds(
-                                LogicalBounds::NonEmpty(bounds),
-                                layer_to_surface,
-                            )
-                        })
-                        .transpose()?
-                } else {
-                    None
-                };
-
                 if let Some(clip) = layer.clip.as_ref() {
                     source_bounds = source_bounds.try_intersect(
                         SemanticSourceBounds::try_for_clip(clip)?,
                         "layer clip intersection",
                     )?;
-                }
-                if let Some(mask) = layer.mask.as_ref()
-                    && !source_bounds.is_exactly_empty()
-                {
-                    if layer.clip.is_some() {
-                        let mask_bounds = layer.pass_plan.bounds().ok_or_else(|| {
-                            Error::new(
-                                BackendErrorCode::RenderFailed,
-                                "a clipped resolved mask has no normalized offscreen bounds",
-                            )
-                        })?;
-                        if let FrameSpatialPlan::NonEmpty(spatial) = context.plan_local_bounds(
-                            LogicalBounds::try_from_rect(
-                                mask_bounds.rect(),
-                                "resolved layer mask bounds",
-                            )?,
-                            layer_to_surface,
-                        )? {
-                            mask.validate_expected_physical_size(PhysicalSize::new(
-                                spatial.device_extent.width,
-                                spatial.device_extent.height,
-                            ))?;
-                        }
-                    } else if let Some(FrameSpatialPlan::NonEmpty(spatial)) = known_source_spatial {
-                        let known_physical_size = PhysicalSize::new(
-                            spatial.device_extent.width,
-                            spatial.device_extent.height,
-                        );
-                        if source_bounds.contains_unresolved_content() {
-                            mask.validate_minimum_physical_size(known_physical_size)?;
-                        } else {
-                            mask.validate_expected_physical_size(known_physical_size)?;
-                        }
-                    }
                 }
                 if layer
                     .mask

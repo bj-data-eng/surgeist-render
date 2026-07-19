@@ -1,6 +1,7 @@
+#[cfg(test)]
+use super::ResolvedLayerAlphaMask;
 use super::{
-    BackendErrorCode, Error, FilterList, FilteredImagePaint, MaskMode, PhysicalSize,
-    PrimitiveFamily, PrimitiveOperation, Result, Size, UnsupportedPrimitive,
+    BackendErrorCode, Error, FilterList, FilteredImagePaint, PhysicalSize, Rect, Result, Size,
     filter::{
         BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
         FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
@@ -266,10 +267,7 @@ impl ImageBuffer {
     }
 }
 
-/// Backend-phase upload facts for one normalized resolved alpha mask.
-///
-/// The public mask remains an `ImageBuffer`; this private descriptor retains an
-/// `Image` so identity and sampling facts travel with the exact validated bytes.
+/// Backend-phase upload facts for one normalized resolved alpha-mask image.
 #[derive(Clone, Debug)]
 pub(crate) struct ResolvedMaskUploadDescriptor {
     image: Image,
@@ -287,18 +285,6 @@ impl PartialEq for ResolvedMaskUploadDescriptor {
 impl Eq for ResolvedMaskUploadDescriptor {}
 
 impl ResolvedMaskUploadDescriptor {
-    pub(crate) fn from_resolved_alpha_mask(alpha_mask: &ImageBuffer) -> Result<Self> {
-        let physical_size = alpha_mask.size();
-        let image = Image::from_rgba(
-            Size::new(
-                f64::from(physical_size.width()),
-                f64::from(physical_size.height()),
-            ),
-            Arc::<[u8]>::from(alpha_mask.rgba()),
-        )?;
-        Self::try_from_image(image)
-    }
-
     pub(crate) fn try_from_image(image: Image) -> Result<Self> {
         let width = image_dimension(image.size.width(), "width")?;
         let height = image_dimension(image.size.height(), "height")?;
@@ -347,7 +333,6 @@ impl ResolvedMaskUploadDescriptor {
         Ok(())
     }
 
-    #[cfg(test)]
     pub(crate) const fn image(&self) -> &Image {
         &self.image
     }
@@ -378,63 +363,64 @@ impl ResolvedMaskUploadDescriptor {
     }
 }
 
-/// Executable boundary for an already-resolved alpha mask over materialized pixels.
-///
-/// This type does not resolve CSS mask sources, resource references, placement,
-/// shape rasterization, transforms, or luminance conversion. Callers must supply
-/// the source pixels and the alpha-mask pixels at the same physical size.
+/// Temporary full-semantics staging bridge retained through C09 T6.
 #[derive(Debug)]
-pub struct ResolvedAlphaMaskExecution<'a> {
+pub(crate) struct StagedResolvedAlphaMaskExecution<'a> {
     source: &'a ImageBuffer,
-    alpha_mask: &'a ImageBuffer,
+    source_bounds: Rect,
+    mask_image: &'a Image,
+    mask_bounds: Rect,
 }
 
-impl<'a> ResolvedAlphaMaskExecution<'a> {
-    pub fn try_new(source: &'a ImageBuffer, alpha_mask: &'a ImageBuffer) -> Result<Self> {
-        Self::try_new_with_mode(source, alpha_mask, MaskMode::Alpha)
-    }
-
-    pub fn try_new_with_mode(
+impl<'a> StagedResolvedAlphaMaskExecution<'a> {
+    pub(crate) fn try_new(
         source: &'a ImageBuffer,
-        alpha_mask: &'a ImageBuffer,
-        mode: MaskMode,
+        source_bounds: Rect,
+        mask_image: &'a Image,
+        mask_bounds: Rect,
     ) -> Result<Self> {
-        match mode {
-            MaskMode::Alpha => {}
-            MaskMode::Luminance => {
-                return Err(Error::unsupported_render_primitive(
-                    UnsupportedPrimitive::new(
-                        PrimitiveFamily::MasksAndClips,
-                        PrimitiveOperation::LuminanceMaskMode,
-                    ),
-                ));
-            }
-        }
-
         validate_image_buffer_rgba_len(source.size(), source.rgba().len())?;
-        validate_image_buffer_rgba_len(alpha_mask.size(), alpha_mask.rgba().len())?;
-        if source.size() != alpha_mask.size() {
-            return Err(Error::invalid_value(
-                "resolved alpha mask size",
-                format!(
-                    "{}x{}",
-                    alpha_mask.size().width(),
-                    alpha_mask.size().height()
-                ),
-                "must match source size",
-            ));
-        }
-
-        Ok(Self { source, alpha_mask })
+        super::validation::validate_point(
+            source_bounds.origin(),
+            "staged resolved-mask source bounds",
+        )?;
+        super::validation::validate_positive_f64(
+            source_bounds.width(),
+            "staged resolved-mask source bounds width",
+        )?;
+        super::validation::validate_positive_f64(
+            source_bounds.height(),
+            "staged resolved-mask source bounds height",
+        )?;
+        Ok(Self {
+            source,
+            source_bounds,
+            mask_image,
+            mask_bounds,
+        })
     }
 
-    pub fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
+    pub(crate) fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
         let source = straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(self.source)?;
-        let alpha_mask =
-            straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(self.alpha_mask)?;
-        let masked = source.apply_alpha_mask(&alpha_mask)?;
+        let masked = source.apply_resolved_alpha_mask(
+            self.source_bounds,
+            self.mask_image,
+            self.mask_bounds,
+        )?;
         premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&masked)
     }
+}
+
+#[cfg(test)]
+pub(crate) fn execute_transitional_resolved_mask_bridge_for_test(
+    source: &ImageBuffer,
+    source_bounds: Rect,
+    image: Image,
+    mask_bounds: Rect,
+) -> Result<ImageBuffer> {
+    let mask = ResolvedLayerAlphaMask::try_new(image, mask_bounds)?;
+    StagedResolvedAlphaMaskExecution::try_new(source, source_bounds, mask.image(), mask.bounds())?
+        .execute_to_image_buffer()
 }
 
 /// Render-local boundary for a resolved image/filter intent plus materialized RGBA bytes.

@@ -2309,17 +2309,6 @@ impl Renderer {
             )
         })?;
         let physical_size = physical_size(bounds.rect().size(), scale)?;
-        if mask.alpha_mask().size() != physical_size {
-            return Err(Error::invalid_value(
-                "resolved layer alpha mask size",
-                format!(
-                    "{}x{}",
-                    mask.alpha_mask().size().width(),
-                    mask.alpha_mask().size().height()
-                ),
-                "must match the offscreen layer bounds in device pixels",
-            ));
-        }
 
         let local_scene = self.mask_source_scene(&layer, children, bounds, scale)?;
         let request =
@@ -2364,8 +2353,13 @@ impl Renderer {
             .await?
         };
         rendered.release()?;
-        let masked = ResolvedAlphaMaskExecution::try_new(&source, mask.alpha_mask())?
-            .execute_to_image_buffer()?;
+        let masked = image::StagedResolvedAlphaMaskExecution::try_new(
+            &source,
+            bounds.rect(),
+            mask.image(),
+            mask.bounds(),
+        )?
+        .execute_to_image_buffer()?;
         let masked_size = masked.size();
         let image = Image::from_rgba(
             Size::new(
