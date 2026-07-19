@@ -306,6 +306,43 @@ pub(crate) fn forced_c08_graph_for_test(
     commands: RenderCommands,
     context: FrameContext,
 ) -> Result<GpuRenderGraph> {
+    forced_c08_graph_with_capture_mapping_for_test(
+        commands,
+        context,
+        ForcedC08CaptureMappingForTest::identity(),
+    )
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ForcedC08CaptureMappingForTest {
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+}
+
+#[cfg(test)]
+impl ForcedC08CaptureMappingForTest {
+    pub(crate) const fn identity() -> Self {
+        Self {
+            capture_transform: Transform::IDENTITY,
+            parent_to_surface: Transform::IDENTITY,
+        }
+    }
+
+    pub(crate) const fn new(capture_transform: Transform, parent_to_surface: Transform) -> Self {
+        Self {
+            capture_transform,
+            parent_to_surface,
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn forced_c08_graph_with_capture_mapping_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    mapping: ForcedC08CaptureMappingForTest,
+) -> Result<GpuRenderGraph> {
     let output_spatial = match context.output_spatial_plan()? {
         FrameSpatialPlan::NonEmpty(spatial) => spatial,
         FrameSpatialPlan::Empty(_) => {
@@ -316,7 +353,15 @@ pub(crate) fn forced_c08_graph_for_test(
             ));
         }
     };
-    SemanticFrameGraphPlanner::build(commands, context, output_spatial, Vec::new())
+    SemanticFrameGraphPlanner::build_with_capture_mapping(
+        commands,
+        context,
+        output_spatial,
+        Vec::new(),
+        mapping.capture_transform,
+        mapping.parent_to_surface,
+        CaptureBoundsCoordinateSpace::ForcedMappedForTest,
+    )
 }
 
 fn graph_selection_requirements(commands: &[RenderCommand]) -> Vec<GraphSelectionRequirement> {
@@ -2199,10 +2244,59 @@ impl<'graph> GraphLoweringView<'graph> {
     }
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ForcedC08GraphCaptureObservationForTest {
+    pub(crate) antialiasing: Antialiasing,
+    pub(crate) capture_transform: Transform,
+    pub(crate) parent_to_surface: Transform,
+    pub(crate) device_origin: (i32, i32),
+    pub(crate) texel_origin: Point,
+    pub(crate) extent: PhysicalSize,
+    pub(crate) raster_scale: f64,
+}
+
 impl GpuRenderGraph {
     pub(crate) fn lowering_view(&self) -> Result<GraphLoweringView<'_>> {
         graph_build(validate_graph_for_lowering(self))?;
         Ok(GraphLoweringView { graph: self })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn forced_capture_observations_for_test(
+        &self,
+    ) -> Vec<ForcedC08GraphCaptureObservationForTest> {
+        self.vello_spans
+            .iter()
+            .map(|span| {
+                let pass = self
+                    .passes
+                    .iter()
+                    .find(|pass| pass.id == span.capture_pass)
+                    .expect("a validated C08 span must retain its capture pass");
+                let SemanticPassResult::Resource(resource_id) = pass.result else {
+                    unreachable!("a validated C08 capture pass must produce one resource");
+                };
+                let resource = self
+                    .resources
+                    .iter()
+                    .find(|resource| resource.id == resource_id)
+                    .expect("a validated C08 capture must retain its output resource");
+                let spatial = resource.descriptor;
+                ForcedC08GraphCaptureObservationForTest {
+                    antialiasing: span.antialiasing,
+                    capture_transform: span.capture_transform,
+                    parent_to_surface: span.parent_to_surface,
+                    device_origin: (spatial.device_origin.x, spatial.device_origin.y),
+                    texel_origin: spatial.texel_center_mapping.origin,
+                    extent: PhysicalSize::new(
+                        spatial.device_extent.width,
+                        spatial.device_extent.height,
+                    ),
+                    raster_scale: spatial.texel_center_mapping.raster_scale.0,
+                }
+            })
+            .collect()
     }
 }
 
@@ -2871,6 +2965,34 @@ struct SemanticCommandPlanningState {
     outer_clips: Vec<SemanticOuterClip>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureBoundsCoordinateSpace {
+    Local,
+    #[cfg(test)]
+    ForcedMappedForTest,
+}
+
+impl CaptureBoundsCoordinateSpace {
+    fn resolve(
+        self,
+        bounds: NonEmptyLogicalBounds,
+        _transform: Transform,
+    ) -> Result<Option<NonEmptyLogicalBounds>> {
+        match self {
+            Self::Local => Ok(Some(bounds)),
+            #[cfg(test)]
+            Self::ForcedMappedForTest => {
+                match LogicalBounds::NonEmpty(bounds)
+                    .try_transform(_transform, "forced C08 mapped capture bounds")?
+                {
+                    LogicalBounds::Empty(_) => Ok(None),
+                    LogicalBounds::NonEmpty(bounds) => Ok(Some(bounds)),
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct VelloSpanFlush {
     parent: PlannedGraphParent,
@@ -2886,6 +3008,7 @@ struct SemanticFrameGraphPlanner {
     filter_steps: Vec<SemanticFilterStepPlan>,
     backdrop_reads: Vec<SemanticBackdropRead>,
     imports: Vec<SemanticImportPlan>,
+    capture_bounds_coordinate_space: CaptureBoundsCoordinateSpace,
 }
 
 impl SemanticFrameGraphPlanner {
@@ -2894,6 +3017,26 @@ impl SemanticFrameGraphPlanner {
         context: FrameContext,
         output_spatial: NonEmptyFrameSpatialPlan,
         selection_requirements: Vec<GraphSelectionRequirement>,
+    ) -> Result<GpuRenderGraph> {
+        Self::build_with_capture_mapping(
+            commands,
+            context,
+            output_spatial,
+            selection_requirements,
+            Transform::identity(),
+            Transform::identity(),
+            CaptureBoundsCoordinateSpace::Local,
+        )
+    }
+
+    fn build_with_capture_mapping(
+        commands: RenderCommands,
+        context: FrameContext,
+        output_spatial: NonEmptyFrameSpatialPlan,
+        selection_requirements: Vec<GraphSelectionRequirement>,
+        capture_transform: Transform,
+        parent_to_surface: Transform,
+        capture_bounds_coordinate_space: CaptureBoundsCoordinateSpace,
     ) -> Result<GpuRenderGraph> {
         let mut planner = Self {
             context,
@@ -2904,6 +3047,7 @@ impl SemanticFrameGraphPlanner {
             filter_steps: Vec::new(),
             backdrop_reads: Vec::new(),
             imports: Vec::new(),
+            capture_bounds_coordinate_space,
         };
         let root_id = graph_build(planner.builder.declare_resource(
             SemanticResourceDescriptor::new(
@@ -2936,8 +3080,8 @@ impl SemanticFrameGraphPlanner {
             SemanticCommandPlanningState {
                 parent_locality: CaptureParentLocality::External,
                 span_scope: SemanticVelloSpanScope::CurrentParent,
-                capture_transform: Transform::identity(),
-                parent_to_surface: Transform::identity(),
+                capture_transform,
+                parent_to_surface,
                 outer_clips: Vec::new(),
             },
         )?;
@@ -3021,6 +3165,15 @@ impl SemanticFrameGraphPlanner {
         let Some(logical_bounds) = contribution
             .source_bounds
             .require_non_empty_for_graph("Vello span bounds")?
+        else {
+            return Ok(VelloSpanFlush {
+                parent,
+                next_parent_locality: state.parent_locality,
+            });
+        };
+        let Some(logical_bounds) = self
+            .capture_bounds_coordinate_space
+            .resolve(logical_bounds, raster_transform)?
         else {
             return Ok(VelloSpanFlush {
                 parent,

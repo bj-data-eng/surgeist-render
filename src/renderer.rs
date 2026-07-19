@@ -19,7 +19,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{
-    pass::{C08CaptureGridForTest, C08PreparableGraph, LoweredGraphPlan},
+    pass::{C08PreparableGraph, LoweredGraphPlan},
     resource::WorkingFormat,
 };
 #[cfg(test)]
@@ -78,7 +78,19 @@ pub(crate) struct C08ForcedGraphRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
-    pub(crate) capture_grids: Vec<C08CaptureGridForTest>,
+    pub(crate) captures: Vec<C08ForcedGraphCaptureForTest>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct C08ForcedGraphCaptureForTest {
+    pub(crate) antialiasing: Antialiasing,
+    pub(crate) capture_transform: Transform,
+    pub(crate) parent_to_surface: Transform,
+    pub(crate) device_origin: (i32, i32),
+    pub(crate) texel_origin: Point,
+    pub(crate) extent: PhysicalSize,
+    pub(crate) raster_scale: f64,
 }
 
 struct RenderPublication {
@@ -800,6 +812,27 @@ impl Renderer {
         parameters: Parameters,
         working_format: WorkingFormat,
     ) -> Result<C08ForcedGraphRenderResultForTest> {
+        self.render_forced_c08_graph_with_capture_mapping_for_test(
+            surface,
+            scene,
+            parameters,
+            working_format,
+            super::frame::ForcedC08CaptureMappingForTest::identity(),
+        )
+        .await
+    }
+
+    /// Private T6 entry that keeps capture and parent mappings distinct while
+    /// executing the same production C08 graph path.
+    #[cfg(test)]
+    pub(crate) async fn render_forced_c08_graph_with_capture_mapping_for_test(
+        &mut self,
+        surface: &mut Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+        capture_mapping: super::frame::ForcedC08CaptureMappingForTest,
+    ) -> Result<C08ForcedGraphRenderResultForTest> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
@@ -828,7 +861,12 @@ impl Renderer {
             self.options.antialiasing(),
             parameters.base_color,
         )?;
-        let graph = super::frame::forced_c08_graph_for_test(normalized.clone(), context)?;
+        let graph = super::frame::forced_c08_graph_with_capture_mapping_for_test(
+            normalized.clone(),
+            context,
+            capture_mapping,
+        )?;
+        let captures = graph.forced_capture_observations_for_test();
         let capabilities = self
             .backend
             .as_mut()
@@ -860,7 +898,34 @@ impl Renderer {
             )
         })?;
         let output_extent = preparable.output_extent()?;
-        let capture_grids = preparable.capture_grids_for_test();
+        let prepared_capture_grids = preparable.capture_grids_for_test();
+        if captures.len() != prepared_capture_grids.len()
+            || captures
+                .iter()
+                .zip(&prepared_capture_grids)
+                .any(|(capture, prepared)| {
+                    capture.texel_origin != prepared.texel_origin
+                        || capture.extent != prepared.extent
+                        || capture.raster_scale != prepared.raster_scale
+                })
+        {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "the prepared C08 capture grid differs from the validated semantic graph",
+            ));
+        }
+        let captures = captures
+            .into_iter()
+            .map(|capture| C08ForcedGraphCaptureForTest {
+                antialiasing: capture.antialiasing,
+                capture_transform: capture.capture_transform,
+                parent_to_surface: capture.parent_to_surface,
+                device_origin: capture.device_origin,
+                texel_origin: capture.texel_origin,
+                extent: capture.extent,
+                raster_scale: capture.raster_scale,
+            })
+            .collect();
         let mut stats = Stats {
             encode_time: encode_start.elapsed(),
             render_time: Duration::ZERO,
@@ -898,7 +963,7 @@ impl Renderer {
             stats,
             working_format,
             output_extent,
-            capture_grids,
+            captures,
         })
     }
 

@@ -25216,7 +25216,7 @@ fn c08_alpha_vector_has_exact_grid_for_test(
 ) -> bool {
     graph.output_extent == PhysicalSize::new(width, 1)
         && matches!(
-            graph.capture_grids.as_slice(),
+            graph.captures.as_slice(),
             [capture]
                 if capture.texel_origin == Point::new(0.0, 0.0)
                     && capture.extent == PhysicalSize::new(width, 1)
@@ -25411,6 +25411,1455 @@ fn graph_render_path_submits_without_map_or_cpu_wait() {
     assert!(
         production_graph_transaction && has_no_cpu_visible_synchronization,
         "production C08 graph reached CPU-visible synchronization"
+    );
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08ParityFixtureForTest {
+    SolidShape,
+    StableAhemGlyph,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08ParityConfigurationForTest {
+    antialiasing: Antialiasing,
+    scale: f64,
+}
+
+const C08_PARITY_CONFIGURATIONS_FOR_TEST: [C08ParityConfigurationForTest; 9] = [
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Area,
+        scale: 1.0,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Area,
+        scale: 1.25,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Area,
+        scale: 2.0,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa8,
+        scale: 1.0,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa8,
+        scale: 1.25,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa8,
+        scale: 2.0,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa16,
+        scale: 1.0,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa16,
+        scale: 1.25,
+    },
+    C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa16,
+        scale: 2.0,
+    },
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08ParityScenarioForTest {
+    Matrix,
+    CaptureTransform,
+    ParentTransform,
+    OrderedCaptureThenParent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08ParityCaseForTest {
+    fixture: C08ParityFixtureForTest,
+    scenario: C08ParityScenarioForTest,
+    antialiasing: Antialiasing,
+    scale: f64,
+    working_format: WorkingFormat,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08ParityFailureStageForTest {
+    Setup,
+    RequestedAntialiasing,
+    OutputDimensions,
+    CaptureGrid,
+    DirectRoute,
+    GraphRoute,
+    PublicStats,
+    InteriorPixels,
+    AntialiasedBoundaryPixels,
+    InkSupport,
+    AlphaWeightedCentroid,
+    MatrixCoverage,
+}
+
+#[derive(Debug)]
+struct C08ParityFailureForTest {
+    case: C08ParityCaseForTest,
+    stage: C08ParityFailureStageForTest,
+    detail: String,
+}
+
+impl C08ParityFailureForTest {
+    fn new(
+        case: C08ParityCaseForTest,
+        stage: C08ParityFailureStageForTest,
+        detail: impl Into<String>,
+    ) -> Self {
+        Self {
+            case,
+            stage,
+            detail: detail.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for C08ParityFailureForTest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "case={:?} stage={:?}: {}",
+            self.case, self.stage, self.detail
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08PixelMetricForTest {
+    HighPrecisionStraightRgba8,
+    ReducedPrecisionAlphaAndPremul8,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08ParityToleranceForTest {
+    metric: C08PixelMetricForTest,
+    interior_levels: u8,
+    boundary_levels: u8,
+    centroid_device_pixels: f64,
+}
+
+impl C08ParityToleranceForTest {
+    const fn for_working_format(working_format: WorkingFormat) -> Self {
+        match working_format {
+            WorkingFormat::HighPrecision => Self {
+                metric: C08PixelMetricForTest::HighPrecisionStraightRgba8,
+                interior_levels: 2,
+                boundary_levels: 4,
+                centroid_device_pixels: 0.25,
+            },
+            WorkingFormat::ReducedPrecision => Self {
+                metric: C08PixelMetricForTest::ReducedPrecisionAlphaAndPremul8,
+                interior_levels: 2,
+                boundary_levels: 4,
+                centroid_device_pixels: 0.35,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08CaptureMappingForTest {
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+}
+
+impl C08CaptureMappingForTest {
+    const fn identity() -> Self {
+        Self {
+            capture_transform: Transform::IDENTITY,
+            parent_to_surface: Transform::IDENTITY,
+        }
+    }
+
+    fn combined(self) -> Transform {
+        self.capture_transform
+            .then(self.parent_to_surface)
+            .expect("source-readable C08 fixture transforms must compose")
+    }
+
+    const fn as_frame_mapping(self) -> super::frame::ForcedC08CaptureMappingForTest {
+        super::frame::ForcedC08CaptureMappingForTest::new(
+            self.capture_transform,
+            self.parent_to_surface,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08ExpectedCaptureGridForTest {
+    device_origin: (i32, i32),
+    texel_origin: Point,
+    extent: PhysicalSize,
+    raster_scale: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C08PublicStatsForTest {
+    commands: usize,
+    fills: usize,
+    strokes: usize,
+    shadows: usize,
+    images: usize,
+    glyphs: usize,
+    layers: usize,
+    cache_hits: usize,
+    cache_misses: usize,
+    uploaded_bytes: u64,
+}
+
+impl From<Stats> for C08PublicStatsForTest {
+    fn from(stats: Stats) -> Self {
+        Self {
+            commands: stats.commands,
+            fills: stats.fills,
+            strokes: stats.strokes,
+            shadows: stats.shadows,
+            images: stats.images,
+            glyphs: stats.glyphs,
+            layers: stats.layers,
+            cache_hits: stats.cache_hits,
+            cache_misses: stats.cache_misses,
+            uploaded_bytes: stats.uploaded_bytes,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct C08DirectParityOutputForTest {
+    image: ImageBuffer,
+    stats: C08PublicStatsForTest,
+    planned_antialiasing: Antialiasing,
+}
+
+#[derive(Debug)]
+struct C08GraphParityOutputForTest {
+    image: ImageBuffer,
+    result: super::renderer::C08ForcedGraphRenderResultForTest,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08PixelComparisonProfileForTest {
+    FixtureInteriorAndBoundary,
+    PlacementBoundary,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C08DeviceRegionForTest {
+    min_x: u32,
+    min_y: u32,
+    max_x_exclusive: u32,
+    max_y_exclusive: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C08PixelCoordinateForTest {
+    x: u32,
+    y: u32,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C08PixelMismatchForTest {
+    coordinate: C08PixelCoordinateForTest,
+    direct: [u8; 4],
+    graph: [u8; 4],
+    metric_error: [u8; 4],
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C08PixelMismatchSummaryForTest {
+    mismatch_count: usize,
+    maximum_metric_error: [u8; 4],
+    first: Option<C08PixelMismatchForTest>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct C08TileTranslationMismatchForTest {
+    surface_coordinate: C08PixelCoordinateForTest,
+    capture_coordinate: C08PixelCoordinateForTest,
+    surface_pixel: [u8; 4],
+    capture_pixel: [u8; 4],
+    metric_error: [u8; 4],
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08AlphaWeightedCentroidForTest {
+    x: f64,
+    y: f64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08NonEmptyAlphaSupportForTest {
+    min_x: u32,
+    min_y: u32,
+    max_x: u32,
+    max_y: u32,
+    alpha_sum: u64,
+    centroid: C08AlphaWeightedCentroidForTest,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum C08AlphaSupportForTest {
+    Empty,
+    NonEmpty(C08NonEmptyAlphaSupportForTest),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08GraphCaptureRequestForTest {
+    Identity,
+    DistinctMapping,
+}
+
+fn c08_parity_surface_size_for_test() -> Size {
+    Size::new(32.0, 24.0)
+}
+
+fn c08_transformed_parity_surface_size_for_test() -> Size {
+    Size::new(20.0, 16.0)
+}
+
+fn c08_parity_ink_bounds_for_test(fixture: C08ParityFixtureForTest) -> Rect {
+    match fixture {
+        C08ParityFixtureForTest::SolidShape => Rect::new(4.25, 3.5, 13.5, 11.25),
+        C08ParityFixtureForTest::StableAhemGlyph => Rect::new(8.25, 8.5, 10.0, 10.0),
+    }
+}
+
+fn c08_parity_interior_bounds_for_test(fixture: C08ParityFixtureForTest) -> Rect {
+    match fixture {
+        C08ParityFixtureForTest::SolidShape => Rect::new(7.0, 6.0, 7.0, 5.0),
+        C08ParityFixtureForTest::StableAhemGlyph => Rect::new(11.0, 11.0, 4.0, 4.0),
+    }
+}
+
+fn c08_parity_scene_for_test(fixture: C08ParityFixtureForTest) -> Scene {
+    let mut scene = Scene::new();
+    match fixture {
+        C08ParityFixtureForTest::SolidShape => {
+            scene.fill(
+                Rect::new(4.25, 3.5, 13.5, 11.25),
+                Color::try_rgba(0.8, 0.2, 0.1, 0.75).unwrap(),
+            );
+        }
+        C08ParityFixtureForTest::StableAhemGlyph => {
+            assert_eq!(
+                AHEM_GLYPH_X, 58,
+                "the parity fixture must retain the proven Ahem X glyph id"
+            );
+            let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 8.25, 16.5, 10.0).unwrap()];
+            scene.text_run(
+                TextRun::try_new(
+                    ahem_font("C08 direct graph stable Ahem glyph"),
+                    10.0,
+                    Transform::identity(),
+                    TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+                    &glyphs,
+                    TextRunBounds::try_ink(Rect::new(8.25, 8.5, 10.0, 10.0)).unwrap(),
+                )
+                .unwrap(),
+            );
+        }
+    }
+    scene
+}
+
+fn c08_supported_working_formats_for_test(renderer: &mut Renderer) -> Vec<WorkingFormat> {
+    let precision = renderer
+        .default_device_capabilities_for_test()
+        .effect_precisions();
+    let mut formats = Vec::with_capacity(2);
+    if precision.supports_high_precision() {
+        formats.push(WorkingFormat::HighPrecision);
+    }
+    if precision.supports_reduced_precision() {
+        formats.push(WorkingFormat::ReducedPrecision);
+    }
+    assert!(
+        !formats.is_empty(),
+        "C08 parity requires at least one real supported working format"
+    );
+    formats
+}
+
+fn c08_frame_plan_antialiasing_for_test(
+    scene: &Scene,
+    size: Size,
+    configuration: C08ParityConfigurationForTest,
+) -> Option<Antialiasing> {
+    let commands = scene.normalize(Capabilities::CURRENT).ok()?;
+    super::frame::frame_plan_result_observation_for_test(
+        commands,
+        size,
+        configuration.scale,
+        configuration.antialiasing,
+        Color::TRANSPARENT,
+    )
+    .plan
+    .and_then(|plan| {
+        (plan.route == super::frame::FramePlanRouteObservation::DirectVello)
+            .then_some(plan.antialiasing)
+            .flatten()
+    })
+}
+
+fn c08_render_direct_parity_for_test(
+    renderer: &mut Renderer,
+    scene: &Scene,
+    size: Size,
+    configuration: C08ParityConfigurationForTest,
+    case: C08ParityCaseForTest,
+) -> std::result::Result<C08DirectParityOutputForTest, C08ParityFailureForTest> {
+    let planned_antialiasing = c08_frame_plan_antialiasing_for_test(scene, size, configuration)
+        .ok_or_else(|| {
+            C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::RequestedAntialiasing,
+                "the fixture did not produce one direct plan with an observable AA request",
+            )
+        })?;
+    let mut surface = pollster::block_on(renderer.create_headless(size, configuration.scale))
+        .map_err(|error| {
+            C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::Setup,
+                format!("direct headless surface creation failed: {error}"),
+            )
+        })?;
+    let publication_before = surface.headless_publication_count_for_test();
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("a created headless surface must retain its ready device")
+        .device_pass_cache_counts_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let effect_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
+        .map_err(|error| {
+            C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::DirectRoute,
+                format!("production direct rendering failed: {error}"),
+            )
+        })?;
+    let cache_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("a clean direct frame must retain its ready device")
+        .device_pass_cache_counts_for_test();
+    let publication_count = surface
+        .headless_publication_count_for_test()
+        .saturating_sub(publication_before);
+    let effect_acquire_count = effect_acquires.acquire_count_for_test();
+    let direct_route_is_exact = direct_submission.queue_submission_count_for_test() == 1
+        && direct_submission.payload_raster_pass_count_for_test() == 1
+        && direct_submission.transaction_generation_for_test()
+            == direct_submission.active_generation_for_test()
+        && graph_submission.queue_submission_count_for_test() == 0
+        && effect_acquire_count == 0
+        && cache_before == cache_after
+        && publication_count == 1
+        && renderer.stats() == stats;
+    drop(effect_acquires);
+    drop(graph_scope);
+    drop(direct_scope);
+    if !direct_route_is_exact {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::DirectRoute,
+            format!(
+                "direct route changed: submissions={}, raster_passes={}, graph_submissions={}, effect_acquires={}, publication_count={}, cache_before={cache_before:?}, cache_after={cache_after:?}",
+                direct_submission.queue_submission_count_for_test(),
+                direct_submission.payload_raster_pass_count_for_test(),
+                graph_submission.queue_submission_count_for_test(),
+                effect_acquire_count,
+                publication_count,
+            ),
+        ));
+    }
+    let image = pollster::block_on(renderer.read_headless(&surface)).map_err(|error| {
+        C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::DirectRoute,
+            format!("direct publication readback failed: {error}"),
+        )
+    })?;
+    Ok(C08DirectParityOutputForTest {
+        image,
+        stats: stats.into(),
+        planned_antialiasing,
+    })
+}
+
+fn c08_render_graph_parity_for_test(
+    renderer: &mut Renderer,
+    scene: &Scene,
+    size: Size,
+    configuration: C08ParityConfigurationForTest,
+    case: C08ParityCaseForTest,
+    mapping: C08CaptureMappingForTest,
+    request: C08GraphCaptureRequestForTest,
+) -> std::result::Result<C08GraphParityOutputForTest, C08ParityFailureForTest> {
+    let mut surface = pollster::block_on(renderer.create_headless(size, configuration.scale))
+        .map_err(|error| {
+            C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::Setup,
+                format!("graph headless surface creation failed: {error}"),
+            )
+        })?;
+    let publication_before = surface.headless_publication_count_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let result = match request {
+        C08GraphCaptureRequestForTest::Identity => {
+            pollster::block_on(renderer.render_forced_c08_graph_for_test(
+                &mut surface,
+                scene,
+                Parameters::default(),
+                case.working_format,
+            ))
+        }
+        C08GraphCaptureRequestForTest::DistinctMapping => pollster::block_on(
+            renderer.render_forced_c08_graph_with_capture_mapping_for_test(
+                &mut surface,
+                scene,
+                Parameters::default(),
+                case.working_format,
+                mapping.as_frame_mapping(),
+            ),
+        ),
+    }
+    .map_err(|error| {
+        C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::GraphRoute,
+            format!("production forced-graph rendering failed: {error}"),
+        )
+    })?;
+    let publication_count = surface
+        .headless_publication_count_for_test()
+        .saturating_sub(publication_before);
+    let graph_route_is_exact = graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.transaction_generation_for_test()
+            == graph_submission.active_generation_for_test()
+        && graph_submission.capture_lease_count_for_test() == 1
+        && graph_submission.scopes_resolved_for_test()
+        && graph_submission.prepared_frame_committed_for_test()
+        && graph_submission.capture_resources_committed_for_test()
+        && graph_submission.headless_draft_released_for_test()
+        && direct_submission.queue_submission_count_for_test() == 0
+        && publication_count == 1
+        && result.stats == renderer.stats()
+        && result.working_format == case.working_format;
+    drop(direct_scope);
+    drop(graph_scope);
+    if !graph_route_is_exact {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::GraphRoute,
+            format!(
+                "graph route changed: submissions={}, direct_submissions={}, capture_leases={}, scopes_resolved={}, frame_committed={}, captures_committed={}, draft_released={}, publication_count={}",
+                graph_submission.queue_submission_count_for_test(),
+                direct_submission.queue_submission_count_for_test(),
+                graph_submission.capture_lease_count_for_test(),
+                graph_submission.scopes_resolved_for_test(),
+                graph_submission.prepared_frame_committed_for_test(),
+                graph_submission.capture_resources_committed_for_test(),
+                graph_submission.headless_draft_released_for_test(),
+                publication_count,
+            ),
+        ));
+    }
+    let image = pollster::block_on(renderer.read_headless(&surface)).map_err(|error| {
+        C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::GraphRoute,
+            format!("graph publication readback failed: {error}"),
+        )
+    })?;
+    Ok(C08GraphParityOutputForTest { image, result })
+}
+
+fn c08_transform_point_for_test(transform: Transform, point: Point) -> Point {
+    let [a, b, c, d, e, f] = transform.as_array();
+    Point::new(
+        a * point.x() + c * point.y() + e,
+        b * point.x() + d * point.y() + f,
+    )
+}
+
+fn c08_transform_rect_for_test(rect: Rect, transform: Transform) -> Rect {
+    let corners = [
+        Point::new(rect.x(), rect.y()),
+        Point::new(rect.x() + rect.width(), rect.y()),
+        Point::new(rect.x(), rect.y() + rect.height()),
+        Point::new(rect.x() + rect.width(), rect.y() + rect.height()),
+    ]
+    .map(|point| c08_transform_point_for_test(transform, point));
+    let min_x = corners
+        .iter()
+        .map(|point| point.x())
+        .fold(f64::INFINITY, f64::min);
+    let min_y = corners
+        .iter()
+        .map(|point| point.y())
+        .fold(f64::INFINITY, f64::min);
+    let max_x = corners
+        .iter()
+        .map(|point| point.x())
+        .fold(f64::NEG_INFINITY, f64::max);
+    let max_y = corners
+        .iter()
+        .map(|point| point.y())
+        .fold(f64::NEG_INFINITY, f64::max);
+    Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
+}
+
+fn c08_largest_singular_value_for_test(transform: Transform) -> f64 {
+    let [a, b, c, d, _, _] = transform.as_array();
+    let frobenius_squared = a * a + b * b + c * c + d * d;
+    let determinant = a * d - b * c;
+    let discriminant =
+        (frobenius_squared * frobenius_squared - 4.0 * determinant * determinant).max(0.0);
+    ((frobenius_squared + discriminant.sqrt()) * 0.5).sqrt()
+}
+
+fn c08_expected_capture_grid_for_test(
+    local_bounds: Rect,
+    mapping: C08CaptureMappingForTest,
+    surface_scale: f64,
+) -> C08ExpectedCaptureGridForTest {
+    let combined = mapping.combined();
+    let mapped_bounds = c08_transform_rect_for_test(local_bounds, combined);
+    let raster_scale = surface_scale * c08_largest_singular_value_for_test(combined);
+    let device_min_x = (mapped_bounds.x() * raster_scale).floor() as i32;
+    let device_min_y = (mapped_bounds.y() * raster_scale).floor() as i32;
+    let device_max_x = ((mapped_bounds.x() + mapped_bounds.width()) * raster_scale).ceil() as i32;
+    let device_max_y = ((mapped_bounds.y() + mapped_bounds.height()) * raster_scale).ceil() as i32;
+    C08ExpectedCaptureGridForTest {
+        device_origin: (device_min_x, device_min_y),
+        texel_origin: Point::new(
+            f64::from(device_min_x) / raster_scale,
+            f64::from(device_min_y) / raster_scale,
+        ),
+        extent: PhysicalSize::new(
+            u32::try_from(device_max_x - device_min_x)
+                .expect("the bounded parity width must be positive"),
+            u32::try_from(device_max_y - device_min_y)
+                .expect("the bounded parity height must be positive"),
+        ),
+        raster_scale,
+    }
+}
+
+fn c08_device_region_for_test(
+    logical: Rect,
+    scale: f64,
+    output: PhysicalSize,
+) -> C08DeviceRegionForTest {
+    C08DeviceRegionForTest {
+        min_x: ((logical.x() * scale).floor().max(0.0) as u32).min(output.width()),
+        min_y: ((logical.y() * scale).floor().max(0.0) as u32).min(output.height()),
+        max_x_exclusive: (((logical.x() + logical.width()) * scale).ceil().max(0.0) as u32)
+            .min(output.width()),
+        max_y_exclusive: (((logical.y() + logical.height()) * scale).ceil().max(0.0) as u32)
+            .min(output.height()),
+    }
+}
+
+fn c08_metric_error_for_test(
+    direct: [u8; 4],
+    graph: [u8; 4],
+    metric: C08PixelMetricForTest,
+) -> [u8; 4] {
+    match metric {
+        C08PixelMetricForTest::HighPrecisionStraightRgba8 => {
+            // Straight RGB has no defined color at zero alpha. Canonicalize that
+            // one semantic value before comparing independently quantized RGBA8
+            // outputs; nonzero alpha always retains the straight RGB oracle.
+            let direct = c08_canonical_pixel_for_test(direct);
+            let graph = c08_canonical_pixel_for_test(graph);
+            [
+                direct[0].abs_diff(graph[0]),
+                direct[1].abs_diff(graph[1]),
+                direct[2].abs_diff(graph[2]),
+                direct[3].abs_diff(graph[3]),
+            ]
+        }
+        C08PixelMetricForTest::ReducedPrecisionAlphaAndPremul8 => [
+            c08_premul8_for_test(direct[0], direct[3])
+                .abs_diff(c08_premul8_for_test(graph[0], graph[3])),
+            c08_premul8_for_test(direct[1], direct[3])
+                .abs_diff(c08_premul8_for_test(graph[1], graph[3])),
+            c08_premul8_for_test(direct[2], direct[3])
+                .abs_diff(c08_premul8_for_test(graph[2], graph[3])),
+            direct[3].abs_diff(graph[3]),
+        ],
+    }
+}
+
+fn c08_compare_pixel_region_for_test(
+    direct: &ImageBuffer,
+    graph: &ImageBuffer,
+    region: C08DeviceRegionForTest,
+    metric: C08PixelMetricForTest,
+    tolerance: u8,
+) -> Option<C08PixelMismatchSummaryForTest> {
+    let mut mismatch_count = 0_usize;
+    let mut maximum_metric_error = [0_u8; 4];
+    let mut first = None;
+    for y in region.min_y..region.max_y_exclusive {
+        for x in region.min_x..region.max_x_exclusive {
+            let direct_pixel = pixel_rgba(direct, x, y);
+            let graph_pixel = pixel_rgba(graph, x, y);
+            let metric_error = c08_metric_error_for_test(direct_pixel, graph_pixel, metric);
+            let mismatched = metric_error.iter().any(|error| *error > tolerance);
+            if !mismatched {
+                continue;
+            }
+            mismatch_count = mismatch_count.saturating_add(1);
+            for channel in 0..4 {
+                maximum_metric_error[channel] =
+                    maximum_metric_error[channel].max(metric_error[channel]);
+            }
+            first.get_or_insert(C08PixelMismatchForTest {
+                coordinate: C08PixelCoordinateForTest { x, y },
+                direct: direct_pixel,
+                graph: graph_pixel,
+                metric_error,
+            });
+        }
+    }
+    (mismatch_count > 0).then_some(C08PixelMismatchSummaryForTest {
+        mismatch_count,
+        maximum_metric_error,
+        first,
+    })
+}
+
+fn c08_alpha_support_for_test(image: &ImageBuffer) -> C08AlphaSupportForTest {
+    let mut min_x = u32::MAX;
+    let mut min_y = u32::MAX;
+    let mut max_x = 0_u32;
+    let mut max_y = 0_u32;
+    let mut alpha_sum = 0_u64;
+    let mut weighted_x = 0.0_f64;
+    let mut weighted_y = 0.0_f64;
+    for y in 0..image.size().height() {
+        for x in 0..image.size().width() {
+            let alpha = u64::from(pixel_alpha(image, x, y));
+            if alpha == 0 {
+                continue;
+            }
+            min_x = min_x.min(x);
+            min_y = min_y.min(y);
+            max_x = max_x.max(x);
+            max_y = max_y.max(y);
+            alpha_sum = alpha_sum.saturating_add(alpha);
+            weighted_x += alpha as f64 * (f64::from(x) + 0.5);
+            weighted_y += alpha as f64 * (f64::from(y) + 0.5);
+        }
+    }
+    if alpha_sum == 0 {
+        C08AlphaSupportForTest::Empty
+    } else {
+        C08AlphaSupportForTest::NonEmpty(C08NonEmptyAlphaSupportForTest {
+            min_x,
+            min_y,
+            max_x,
+            max_y,
+            alpha_sum,
+            centroid: C08AlphaWeightedCentroidForTest {
+                x: weighted_x / alpha_sum as f64,
+                y: weighted_y / alpha_sum as f64,
+            },
+        })
+    }
+}
+
+fn c08_has_antialiased_boundary_for_test(image: &ImageBuffer) -> bool {
+    let maximum_alpha = image
+        .rgba()
+        .chunks_exact(4)
+        .map(|pixel| pixel[3])
+        .max()
+        .unwrap_or(0);
+    maximum_alpha > 0
+        && image
+            .rgba()
+            .chunks_exact(4)
+            .any(|pixel| pixel[3] > 0 && pixel[3] < maximum_alpha)
+}
+
+fn c08_compare_support_for_test(
+    case: C08ParityCaseForTest,
+    direct: C08AlphaSupportForTest,
+    graph: C08AlphaSupportForTest,
+    centroid_tolerance: f64,
+) -> std::result::Result<(), C08ParityFailureForTest> {
+    let (C08AlphaSupportForTest::NonEmpty(direct), C08AlphaSupportForTest::NonEmpty(graph)) =
+        (direct, graph)
+    else {
+        return match (direct, graph) {
+            (C08AlphaSupportForTest::Empty, C08AlphaSupportForTest::Empty) => Ok(()),
+            _ => Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::InkSupport,
+                format!("support emptiness differs: direct={direct:?}, graph={graph:?}"),
+            )),
+        };
+    };
+    for (axis, direct_edge, graph_edge) in [
+        ("min_x", direct.min_x, graph.min_x),
+        ("min_y", direct.min_y, graph.min_y),
+        ("max_x", direct.max_x, graph.max_x),
+        ("max_y", direct.max_y, graph.max_y),
+    ] {
+        if direct_edge.abs_diff(graph_edge) > 1 {
+            return Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::InkSupport,
+                format!(
+                    "nonzero support {axis} differs by more than one pixel: direct={direct:?}, graph={graph:?}"
+                ),
+            ));
+        }
+    }
+    let centroid_delta_x = (direct.centroid.x - graph.centroid.x).abs();
+    let centroid_delta_y = (direct.centroid.y - graph.centroid.y).abs();
+    if centroid_delta_x > centroid_tolerance || centroid_delta_y > centroid_tolerance {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::AlphaWeightedCentroid,
+            format!(
+                "centroid delta=({centroid_delta_x:.6},{centroid_delta_y:.6}) exceeds {centroid_tolerance:.2}; direct={direct:?}, graph={graph:?}"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn c08_compare_parity_outputs_for_test(
+    case: C08ParityCaseForTest,
+    direct: C08DirectParityOutputForTest,
+    graph: C08GraphParityOutputForTest,
+    surface_size: Size,
+    expected_capture: C08ExpectedCaptureGridForTest,
+    expected_mapping: C08CaptureMappingForTest,
+    profile: C08PixelComparisonProfileForTest,
+) -> std::result::Result<(), C08ParityFailureForTest> {
+    let tolerance = C08ParityToleranceForTest::for_working_format(case.working_format);
+    if direct.planned_antialiasing != case.antialiasing
+        || !matches!(
+            graph.result.captures.as_slice(),
+            [capture] if capture.antialiasing == case.antialiasing
+        )
+    {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::RequestedAntialiasing,
+            format!(
+                "requested={:?}, direct_plan={:?}, graph_captures={:?}",
+                case.antialiasing, direct.planned_antialiasing, graph.result.captures
+            ),
+        ));
+    }
+
+    let expected_output = PhysicalSize::try_from_logical(surface_size, case.scale)
+        .expect("the source-readable parity surface size must be valid");
+    if direct.image.size() != expected_output
+        || graph.image.size() != expected_output
+        || graph.result.output_extent != expected_output
+    {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::OutputDimensions,
+            format!(
+                "expected={expected_output:?}, direct={:?}, graph={:?}, graph_root={:?}",
+                direct.image.size(),
+                graph.image.size(),
+                graph.result.output_extent
+            ),
+        ));
+    }
+
+    let [capture] = graph.result.captures.as_slice() else {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::CaptureGrid,
+            format!(
+                "expected one capture grid, observed {}",
+                graph.result.captures.len()
+            ),
+        ));
+    };
+    let scale_tolerance = f64::EPSILON * expected_capture.raster_scale.abs().max(1.0) * 32.0;
+    let origin_tolerance = f64::EPSILON
+        * expected_capture
+            .texel_origin
+            .x()
+            .abs()
+            .max(expected_capture.texel_origin.y().abs())
+            .max(1.0)
+        * 32.0;
+    if capture.device_origin != expected_capture.device_origin
+        || capture.extent != expected_capture.extent
+        || (capture.raster_scale - expected_capture.raster_scale).abs() > scale_tolerance
+        || (capture.texel_origin.x() - expected_capture.texel_origin.x()).abs() > origin_tolerance
+        || (capture.texel_origin.y() - expected_capture.texel_origin.y()).abs() > origin_tolerance
+        || capture.capture_transform != expected_mapping.capture_transform
+        || capture.parent_to_surface != expected_mapping.parent_to_surface
+    {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::CaptureGrid,
+            format!(
+                "expected_grid={expected_capture:?}, actual_capture={capture:?}, expected_mapping={expected_mapping:?}"
+            ),
+        ));
+    }
+
+    let graph_stats = C08PublicStatsForTest::from(graph.result.stats);
+    let expected_direct_stats = match profile {
+        C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary => graph_stats,
+        C08PixelComparisonProfileForTest::PlacementBoundary => C08PublicStatsForTest {
+            commands: graph_stats.commands.saturating_add(1),
+            layers: graph_stats.layers.saturating_add(1),
+            ..graph_stats
+        },
+    };
+    if direct.stats != expected_direct_stats {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::PublicStats,
+            format!(
+                "direct={:?}, graph={graph_stats:?}, expected_direct={expected_direct_stats:?}",
+                direct.stats
+            ),
+        ));
+    }
+
+    let full_output = C08DeviceRegionForTest {
+        min_x: 0,
+        min_y: 0,
+        max_x_exclusive: expected_output.width(),
+        max_y_exclusive: expected_output.height(),
+    };
+    if let Some(summary) = c08_compare_pixel_region_for_test(
+        &direct.image,
+        &graph.image,
+        full_output,
+        tolerance.metric,
+        tolerance.boundary_levels,
+    ) {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::AntialiasedBoundaryPixels,
+            format!(
+                "metric={:?}, tolerance={}, summary={summary:?}",
+                tolerance.metric, tolerance.boundary_levels
+            ),
+        ));
+    }
+
+    if profile == C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary {
+        let interior = c08_device_region_for_test(
+            c08_parity_interior_bounds_for_test(case.fixture),
+            case.scale,
+            expected_output,
+        );
+        let contains_ink = (interior.min_y..interior.max_y_exclusive).any(|y| {
+            (interior.min_x..interior.max_x_exclusive).any(|x| pixel_alpha(&direct.image, x, y) > 0)
+        });
+        if !contains_ink {
+            return Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::InteriorPixels,
+                format!("fixture interior contains no direct ink: {interior:?}"),
+            ));
+        }
+        if let Some(summary) = c08_compare_pixel_region_for_test(
+            &direct.image,
+            &graph.image,
+            interior,
+            tolerance.metric,
+            tolerance.interior_levels,
+        ) {
+            return Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::InteriorPixels,
+                format!(
+                    "metric={:?}, tolerance={}, region={interior:?}, summary={summary:?}",
+                    tolerance.metric, tolerance.interior_levels
+                ),
+            ));
+        }
+    }
+
+    if !c08_has_antialiased_boundary_for_test(&direct.image)
+        || !c08_has_antialiased_boundary_for_test(&graph.image)
+    {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::AntialiasedBoundaryPixels,
+            "the fixture did not retain an observable partial-alpha AA boundary",
+        ));
+    }
+    c08_compare_support_for_test(
+        case,
+        c08_alpha_support_for_test(&direct.image),
+        c08_alpha_support_for_test(&graph.image),
+        tolerance.centroid_device_pixels,
+    )
+}
+
+fn c08_run_fixture_parity_matrix_for_test(
+    fixture: C08ParityFixtureForTest,
+) -> std::result::Result<Vec<C08ParityCaseForTest>, C08ParityFailureForTest> {
+    let scene = c08_parity_scene_for_test(fixture);
+    let mapping = C08CaptureMappingForTest::identity();
+    let mut completed = Vec::new();
+    let mut configuration_index = 0_usize;
+    for antialiasing in [
+        Antialiasing::Area,
+        Antialiasing::Msaa8,
+        Antialiasing::Msaa16,
+    ] {
+        let mut renderer = pollster::block_on(Renderer::new(
+            Options::default()
+                .with_antialiasing(antialiasing)
+                .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+        ))
+        .expect("C08 parity matrix requires a real selected WGPU device");
+        let working_formats = c08_supported_working_formats_for_test(&mut renderer);
+        for scale in [1.0, 1.25, 2.0] {
+            let configuration = C08ParityConfigurationForTest {
+                antialiasing,
+                scale,
+            };
+            if C08_PARITY_CONFIGURATIONS_FOR_TEST[configuration_index] != configuration {
+                let case = C08ParityCaseForTest {
+                    fixture,
+                    scenario: C08ParityScenarioForTest::Matrix,
+                    antialiasing,
+                    scale,
+                    working_format: working_formats[0],
+                };
+                return Err(C08ParityFailureForTest::new(
+                    case,
+                    C08ParityFailureStageForTest::MatrixCoverage,
+                    "the source-readable AA/scale registry no longer matches execution order",
+                ));
+            }
+            configuration_index += 1;
+            for working_format in working_formats.iter().copied() {
+                let case = C08ParityCaseForTest {
+                    fixture,
+                    scenario: C08ParityScenarioForTest::Matrix,
+                    antialiasing,
+                    scale,
+                    working_format,
+                };
+                let direct = c08_render_direct_parity_for_test(
+                    &mut renderer,
+                    &scene,
+                    c08_parity_surface_size_for_test(),
+                    configuration,
+                    case,
+                )?;
+                let graph = c08_render_graph_parity_for_test(
+                    &mut renderer,
+                    &scene,
+                    c08_parity_surface_size_for_test(),
+                    configuration,
+                    case,
+                    mapping,
+                    C08GraphCaptureRequestForTest::Identity,
+                )?;
+                c08_compare_parity_outputs_for_test(
+                    case,
+                    direct,
+                    graph,
+                    c08_parity_surface_size_for_test(),
+                    c08_expected_capture_grid_for_test(
+                        c08_parity_ink_bounds_for_test(fixture),
+                        mapping,
+                        scale,
+                    ),
+                    mapping,
+                    C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary,
+                )?;
+                completed.push(case);
+            }
+        }
+    }
+    Ok(completed)
+}
+
+fn c08_expected_matrix_cases_for_test() -> Vec<C08ParityCaseForTest> {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("C08 parity matrix completeness requires a real selected WGPU device");
+    let working_formats = c08_supported_working_formats_for_test(&mut renderer);
+    let mut expected = Vec::new();
+    for fixture in [
+        C08ParityFixtureForTest::SolidShape,
+        C08ParityFixtureForTest::StableAhemGlyph,
+    ] {
+        for configuration in C08_PARITY_CONFIGURATIONS_FOR_TEST {
+            for working_format in working_formats.iter().copied() {
+                expected.push(C08ParityCaseForTest {
+                    fixture,
+                    scenario: C08ParityScenarioForTest::Matrix,
+                    antialiasing: configuration.antialiasing,
+                    scale: configuration.scale,
+                    working_format,
+                });
+            }
+        }
+    }
+    expected
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C08TransformedPlacementCaseForTest {
+    scenario: C08ParityScenarioForTest,
+    mapping: C08CaptureMappingForTest,
+}
+
+fn c08_transformed_placement_cases_for_test() -> [C08TransformedPlacementCaseForTest; 3] {
+    let capture = Transform::try_new([0.0, 1.0, -1.0, 0.0, 10.375, -6.125]).unwrap();
+    let parent = Transform::try_new([0.0, -1.0, 1.0, 0.0, -6.25, 14.375]).unwrap();
+    [
+        C08TransformedPlacementCaseForTest {
+            scenario: C08ParityScenarioForTest::CaptureTransform,
+            mapping: C08CaptureMappingForTest {
+                capture_transform: capture,
+                parent_to_surface: Transform::identity(),
+            },
+        },
+        C08TransformedPlacementCaseForTest {
+            scenario: C08ParityScenarioForTest::ParentTransform,
+            mapping: C08CaptureMappingForTest {
+                capture_transform: Transform::identity(),
+                parent_to_surface: parent,
+            },
+        },
+        C08TransformedPlacementCaseForTest {
+            scenario: C08ParityScenarioForTest::OrderedCaptureThenParent,
+            mapping: C08CaptureMappingForTest {
+                capture_transform: capture,
+                parent_to_surface: parent,
+            },
+        },
+    ]
+}
+
+fn c08_transformed_direct_solid_scene_for_test(mapping: C08CaptureMappingForTest) -> Scene {
+    let bounds = c08_parity_ink_bounds_for_test(C08ParityFixtureForTest::SolidShape);
+    let transform = mapping.combined();
+    let mut scene = Scene::new();
+    scene.transform(transform, |scene| {
+        scene.fill(bounds, Color::try_rgba(0.8, 0.2, 0.1, 0.75).unwrap());
+    });
+    scene
+}
+
+fn c08_run_transformed_parity_for_test()
+-> std::result::Result<Vec<C08ParityCaseForTest>, C08ParityFailureForTest> {
+    let configuration = C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa16,
+        scale: 1.25,
+    };
+    let graph_scene = c08_parity_scene_for_test(C08ParityFixtureForTest::SolidShape);
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_antialiasing(configuration.antialiasing)
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("transformed C08 parity requires a real selected WGPU device");
+    let working_formats = c08_supported_working_formats_for_test(&mut renderer);
+    let mut completed = Vec::new();
+    for transformed in c08_transformed_placement_cases_for_test() {
+        let expected_grid = c08_expected_capture_grid_for_test(
+            c08_parity_ink_bounds_for_test(C08ParityFixtureForTest::SolidShape),
+            transformed.mapping,
+            configuration.scale,
+        );
+        if expected_grid.device_origin.0 >= 0 && expected_grid.device_origin.1 >= 0 {
+            let case = C08ParityCaseForTest {
+                fixture: C08ParityFixtureForTest::SolidShape,
+                scenario: transformed.scenario,
+                antialiasing: configuration.antialiasing,
+                scale: configuration.scale,
+                working_format: working_formats[0],
+            };
+            return Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::CaptureGrid,
+                format!("transformed fixture did not retain a signed origin: {expected_grid:?}"),
+            ));
+        }
+        let fractional_origin = expected_grid.texel_origin.x().fract().abs() > f64::EPSILON
+            || expected_grid.texel_origin.y().fract().abs() > f64::EPSILON;
+        if !fractional_origin {
+            let case = C08ParityCaseForTest {
+                fixture: C08ParityFixtureForTest::SolidShape,
+                scenario: transformed.scenario,
+                antialiasing: configuration.antialiasing,
+                scale: configuration.scale,
+                working_format: working_formats[0],
+            };
+            return Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::CaptureGrid,
+                format!(
+                    "transformed fixture did not retain a fractional texel origin: {expected_grid:?}"
+                ),
+            ));
+        }
+        if transformed.scenario == C08ParityScenarioForTest::OrderedCaptureThenParent {
+            let reverse = transformed
+                .mapping
+                .parent_to_surface
+                .then(transformed.mapping.capture_transform)
+                .expect("the reverse-order probe transforms must compose");
+            if transformed.mapping.combined() == reverse {
+                let case = C08ParityCaseForTest {
+                    fixture: C08ParityFixtureForTest::SolidShape,
+                    scenario: transformed.scenario,
+                    antialiasing: configuration.antialiasing,
+                    scale: configuration.scale,
+                    working_format: working_formats[0],
+                };
+                return Err(C08ParityFailureForTest::new(
+                    case,
+                    C08ParityFailureStageForTest::CaptureGrid,
+                    "the ordered transform probe accidentally commutes",
+                ));
+            }
+        }
+        let direct_scene = c08_transformed_direct_solid_scene_for_test(transformed.mapping);
+        for working_format in working_formats.iter().copied() {
+            let case = C08ParityCaseForTest {
+                fixture: C08ParityFixtureForTest::SolidShape,
+                scenario: transformed.scenario,
+                antialiasing: configuration.antialiasing,
+                scale: configuration.scale,
+                working_format,
+            };
+            let direct = c08_render_direct_parity_for_test(
+                &mut renderer,
+                &direct_scene,
+                c08_transformed_parity_surface_size_for_test(),
+                configuration,
+                case,
+            )?;
+            let graph = c08_render_graph_parity_for_test(
+                &mut renderer,
+                &graph_scene,
+                c08_transformed_parity_surface_size_for_test(),
+                configuration,
+                case,
+                transformed.mapping,
+                C08GraphCaptureRequestForTest::DistinctMapping,
+            )?;
+            c08_compare_parity_outputs_for_test(
+                case,
+                direct,
+                graph,
+                c08_transformed_parity_surface_size_for_test(),
+                expected_grid,
+                transformed.mapping,
+                C08PixelComparisonProfileForTest::PlacementBoundary,
+            )?;
+            completed.push(case);
+        }
+    }
+    Ok(completed)
+}
+
+#[test]
+fn solid_shape_direct_and_graph_routes_match_on_interior_and_aa_edges() {
+    if let Err(failure) =
+        c08_run_fixture_parity_matrix_for_test(C08ParityFixtureForTest::SolidShape)
+    {
+        panic!("solid direct/graph pixels exceed S34 tolerance: {failure}");
+    }
+}
+
+#[test]
+fn ahem_glyph_direct_and_graph_routes_share_ink_extent_and_capture_grid() {
+    if let Err(failure) =
+        c08_run_fixture_parity_matrix_for_test(C08ParityFixtureForTest::StableAhemGlyph)
+    {
+        panic!("Ahem direct/graph capture grids or ink extents differ: {failure}");
+    }
+}
+
+#[test]
+fn direct_graph_parity_covers_every_antialiasing_and_scale_pair() {
+    let mut actual =
+        match c08_run_fixture_parity_matrix_for_test(C08ParityFixtureForTest::SolidShape) {
+            Ok(cases) => cases,
+            Err(failure) => panic!("direct/graph parity matrix is incomplete: {failure}"),
+        };
+    actual.extend(
+        c08_run_fixture_parity_matrix_for_test(C08ParityFixtureForTest::StableAhemGlyph)
+            .unwrap_or_else(|failure| {
+                panic!("direct/graph parity matrix is incomplete: {failure}")
+            }),
+    );
+    let expected = c08_expected_matrix_cases_for_test();
+    assert_eq!(
+        actual,
+        expected,
+        "direct/graph parity matrix is incomplete: actual_count={}, expected_count={}",
+        actual.len(),
+        expected.len()
+    );
+}
+
+#[test]
+fn negative_bounds_and_subpixel_transforms_do_not_shift_capture() {
+    let completed = c08_run_transformed_parity_for_test().unwrap_or_else(|failure| {
+        panic!("transformed signed capture placement exceeds S34 tolerance: {failure}")
+    });
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("transformed parity coverage requires a real selected WGPU device");
+    let expected_count = c08_supported_working_formats_for_test(&mut renderer).len() * 3;
+    assert_eq!(
+        completed.len(),
+        expected_count,
+        "transformed signed capture placement exceeds S34 tolerance: completed_count={}, expected_count={expected_count}",
+        completed.len()
+    );
+}
+
+#[test]
+fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
+    let fixture = C08ParityFixtureForTest::SolidShape;
+    let configuration = C08ParityConfigurationForTest {
+        antialiasing: Antialiasing::Msaa8,
+        scale: 1.25,
+    };
+    let case = C08ParityCaseForTest {
+        fixture,
+        scenario: C08ParityScenarioForTest::Matrix,
+        antialiasing: configuration.antialiasing,
+        scale: configuration.scale,
+        working_format: WorkingFormat::HighPrecision,
+    };
+    let scene = c08_parity_scene_for_test(fixture);
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_antialiasing(configuration.antialiasing),
+    ))
+    .expect("the focused Vello tile-translation regression requires a real selected device");
+    let direct = c08_render_direct_parity_for_test(
+        &mut renderer,
+        &scene,
+        c08_parity_surface_size_for_test(),
+        configuration,
+        case,
+    )
+    .unwrap_or_else(|failure| panic!("focused direct Vello setup failed: {failure}"));
+    let normalized = scene
+        .normalize(renderer.capabilities())
+        .expect("the focused solid fixture must normalize");
+    let grid = c08_expected_capture_grid_for_test(
+        c08_parity_ink_bounds_for_test(fixture),
+        C08CaptureMappingForTest::identity(),
+        configuration.scale,
+    );
+    let initial_transform = Transform::translation(-grid.texel_origin.x(), -grid.texel_origin.y())
+        .and_then(|translation| {
+            translation.then(Transform::scale(configuration.scale, configuration.scale)?)
+        })
+        .expect("the focused capture transform must remain finite");
+    let local_scene = encode_vello_scene_with_initial_transform(&normalized, initial_transform)
+        .expect("the focused capture scene must encode");
+    let local_bounds = command::OffscreenBounds::try_new(Rect::new(
+        0.0,
+        0.0,
+        f64::from(grid.extent.width()),
+        f64::from(grid.extent.height()),
+    ))
+    .expect("the focused capture extent must form positive offscreen bounds");
+    let options = renderer.options();
+    let context = renderer
+        .default_offscreen_render_context()
+        .expect("the focused Vello tile-translation regression requires its selected device");
+    let local = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
+        Some(context),
+        options,
+        &local_scene,
+        OffscreenLocalSceneRenderRequest::new(
+            local_bounds,
+            1.0,
+            Format::Rgba8,
+            Parameters::default(),
+        ),
+    ))
+    .expect("the focused bounded Vello capture must render");
+    let local_image = pollster::block_on(
+        renderer.read_render_texture_for_test(
+            local
+                .texture()
+                .expect("the focused capture lease must own its texture"),
+            grid.extent,
+        ),
+    )
+    .expect("the focused bounded Vello capture must be readable after submission");
+
+    let mut mismatch_count = 0_usize;
+    let mut first = None;
+    for local_y in 0..grid.extent.height() {
+        for local_x in 0..grid.extent.width() {
+            let surface_x = u32::try_from(i64::from(grid.device_origin.0) + i64::from(local_x))
+                .expect("the focused identity capture must remain on the positive surface");
+            let surface_y = u32::try_from(i64::from(grid.device_origin.1) + i64::from(local_y))
+                .expect("the focused identity capture must remain on the positive surface");
+            let direct_pixel = pixel_rgba(&direct.image, surface_x, surface_y);
+            let local_pixel = pixel_rgba(&local_image, local_x, local_y);
+            let error = c08_metric_error_for_test(
+                direct_pixel,
+                local_pixel,
+                C08PixelMetricForTest::HighPrecisionStraightRgba8,
+            );
+            if error.iter().any(|channel| *channel > 4) {
+                mismatch_count = mismatch_count.saturating_add(1);
+                first.get_or_insert(C08TileTranslationMismatchForTest {
+                    surface_coordinate: C08PixelCoordinateForTest {
+                        x: surface_x,
+                        y: surface_y,
+                    },
+                    capture_coordinate: C08PixelCoordinateForTest {
+                        x: local_x,
+                        y: local_y,
+                    },
+                    surface_pixel: direct_pixel,
+                    capture_pixel: local_pixel,
+                    metric_error: error,
+                });
+            }
+        }
+    }
+    local
+        .release()
+        .expect("the focused capture lease must release");
+    assert_eq!(
+        mismatch_count, 0,
+        "internal Vello MSAA8 LUT-boundary coverage changed under integer tile translation: first={first:?}"
     );
 }
 

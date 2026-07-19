@@ -167,6 +167,31 @@ impl CheckedComputePipeline {
     }
 }
 
+/// Keeps endpoint half-plane ties aligned with the MSAA mask LUT convention.
+/// Upstream Vello 0.9 rounds an endpoint exactly on a sample into the extra
+/// covered sample while the interior LUT selects the lower-coverage side;
+/// translating the same edge across a 16px tile boundary can therefore change
+/// one sample. The one-sided robust epsilon affects only that f32 tie.
+fn robust_msaa8_mask_shader(shader: &ComputeShader<'static>) -> Result<ComputeShader<'static>> {
+    let sample_count = "8.0";
+    let mut code = shader.wgsl.code.to_string();
+    for endpoint in ["xy0", "xy1"] {
+        let upstream = format!("round({sample_count} * ({endpoint}.y - f32(y)))");
+        let robust = format!(
+            "round({sample_count} * ({endpoint}.y - f32(y)) - {sample_count} * ROBUST_EPSILON)"
+        );
+        if code.match_indices(&upstream).count() != 2 {
+            return Err(render_failed(
+                "internal Vello MSAA shader no longer has both checked endpoint quantizers",
+            ));
+        }
+        code = code.replace(&upstream, &robust);
+    }
+    let mut shader = shader.clone();
+    shader.wgsl.code = std::borrow::Cow::Owned(code);
+    Ok(shader)
+}
+
 pub(super) struct CheckedShaderSet {
     pathtag_reduce: CheckedComputePipeline,
     pathtag_reduce2: CheckedComputePipeline,
@@ -195,6 +220,7 @@ pub(super) struct CheckedShaderSet {
 impl CheckedShaderSet {
     pub(super) async fn create(device: &wgpu::Device) -> Result<Self> {
         checked_wgpu_build(device, || {
+            let fine_msaa8 = robust_msaa8_mask_shader(&SHADERS.fine_msaa8)?;
             Ok(Self {
                 pathtag_reduce: CheckedComputePipeline::create(device, &SHADERS.pathtag_reduce)?,
                 pathtag_reduce2: CheckedComputePipeline::create(device, &SHADERS.pathtag_reduce2)?,
@@ -225,7 +251,7 @@ impl CheckedShaderSet {
                 )?,
                 path_tiling: CheckedComputePipeline::create(device, &SHADERS.path_tiling)?,
                 fine_area: CheckedComputePipeline::create(device, &SHADERS.fine_area)?,
-                fine_msaa8: CheckedComputePipeline::create(device, &SHADERS.fine_msaa8)?,
+                fine_msaa8: CheckedComputePipeline::create(device, &fine_msaa8)?,
                 fine_msaa16: CheckedComputePipeline::create(device, &SHADERS.fine_msaa16)?,
             })
         })
