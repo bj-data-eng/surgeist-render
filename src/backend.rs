@@ -257,6 +257,27 @@ pub(crate) struct C08MultipleVelloCaptureEncodingObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum C08TwoCaptureFailureForTest {
+    LaterCaptureEncoding,
+    SharedScopeResolution,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C08TwoCaptureFailureObservationForTest {
+    pub(crate) acquired_capture_lease_count: usize,
+    pub(crate) failure_is_reported: bool,
+    pub(crate) produces_no_pending_commit: bool,
+    pub(crate) retry_is_rejected: bool,
+    pub(crate) resource_creation_was_observed: bool,
+    pub(crate) remaining_leased_resource_count: usize,
+    pub(crate) remaining_resource_count: usize,
+    pub(crate) atlas_recovery_outcome: Option<VelloAtlasOutcome>,
+    pub(crate) transaction_lease_is_released: bool,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct C08VelloCaptureRasterContractObservationForTest {
     pub(crate) lowers_with_exact_initial_transform: bool,
@@ -2438,6 +2459,156 @@ impl Backend {
             aborts_every_capture_on_drop: aborted_lease_count == 2
                 && after_abort.leased_count == 0
                 && after_abort.recovery_outcome_for_test() == Some(VelloAtlasOutcome::Recreate),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c08_two_capture_failure_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        donor_commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+        failure: C08TwoCaptureFailureForTest,
+    ) -> Result<C08TwoCaptureFailureObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "two-capture failure coverage requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let lowered = super::pass::c08_two_capture_spine_lowered_for_test(
+            commands,
+            donor_commands,
+            context,
+            capabilities,
+            policy,
+        )?;
+        let resources_before = self
+            .ready_device_state_borrow_for_test(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "two-capture failure coverage lost its initial resource manager",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "two-capture failure coverage lost its ready device",
+            )?
+            .device
+            .clone();
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surgeist C08 two-capture failure output"),
+            size: wgpu::Extent3d {
+                width: output_extent.width(),
+                height: output_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        match failure {
+            C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
+                prepared.fail_capture_encoding_after_for_test(1);
+            }
+            C08TwoCaptureFailureForTest::SharedScopeResolution => {
+                prepared.fail_scope_resolution_for_test();
+            }
+        }
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 two-capture failure encoder"),
+        });
+        let encoding_result = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await;
+        let acquired_capture_lease_count = prepared.acquired_capture_lease_count_for_test();
+        let (failure_is_reported, produces_no_pending_commit) = match encoding_result {
+            Ok(pending) => {
+                drop(pending);
+                (false, false)
+            }
+            Err(error) => (
+                match failure {
+                    C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
+                        error.message() == "injected C08 Vello capture encoding failure"
+                    }
+                    C08TwoCaptureFailureForTest::SharedScopeResolution => {
+                        error.message()
+                            == "checked internal Vello resource or command encoding failed"
+                    }
+                },
+                true,
+            ),
+        };
+        let mut retry_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 forbidden two-capture retry encoder"),
+        });
+        let retry_is_rejected = prepared
+            .encode_c08_custom_spine(
+                &mut retry_encoder,
+                C08ExternalOutputView::try_new(
+                    &output_view,
+                    Format::Rgba8,
+                    output_extent,
+                )?,
+            )
+            .await
+            .is_err_and(|error| {
+                error.message()
+                    == "the C08 custom encoding is one-shot; discard this prepared graph and its encoder"
+            });
+        drop(retry_encoder.finish());
+        drop(encoder.finish());
+        drop(prepared);
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        let transaction_lease_is_released = self
+            .active_operation_generation_for_test(identity)
+            .is_none();
+        let resources_after = self
+            .ready_device_state_borrow_for_test(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "two-capture failure coverage lost its cleanup resource manager",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+
+        Ok(C08TwoCaptureFailureObservationForTest {
+            acquired_capture_lease_count,
+            failure_is_reported,
+            produces_no_pending_commit,
+            retry_is_rejected,
+            resource_creation_was_observed: resources_after.payload_creation_attempts
+                > resources_before.payload_creation_attempts,
+            remaining_leased_resource_count: resources_after.leased_count,
+            remaining_resource_count: resources_after.entry_count,
+            atlas_recovery_outcome: resources_after.recovery_outcome_for_test(),
+            transaction_lease_is_released,
         })
     }
 

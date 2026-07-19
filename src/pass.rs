@@ -3090,7 +3090,11 @@ pub(crate) struct PreparedGraph<'device> {
     next_pass: usize,
     c08_encoding_state: Option<C08CustomSpineEncodingState>,
     #[cfg(test)]
-    fail_capture_encoding_for_test: bool,
+    fail_capture_encoding_after_for_test: Option<usize>,
+    #[cfg(test)]
+    fail_scope_resolution_for_test: bool,
+    #[cfg(test)]
+    acquired_capture_lease_count_for_test: usize,
     device: &'device wgpu::Device,
     queue: &'device wgpu::Queue,
     vello_engine: Option<&'device VelloEngineState>,
@@ -3264,7 +3268,11 @@ impl<'device> PreparedGraph<'device> {
             next_pass: 0,
             c08_encoding_state,
             #[cfg(test)]
-            fail_capture_encoding_for_test: false,
+            fail_capture_encoding_after_for_test: None,
+            #[cfg(test)]
+            fail_scope_resolution_for_test: false,
+            #[cfg(test)]
+            acquired_capture_lease_count_for_test: 0,
             device,
             queue,
             vello_engine: None,
@@ -3281,7 +3289,22 @@ impl<'device> PreparedGraph<'device> {
 
     #[cfg(test)]
     pub(crate) fn fail_capture_encoding_for_test(&mut self) {
-        self.fail_capture_encoding_for_test = true;
+        self.fail_capture_encoding_after_for_test = Some(0);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_capture_encoding_after_for_test(&mut self, successful_capture_count: usize) {
+        self.fail_capture_encoding_after_for_test = Some(successful_capture_count);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_scope_resolution_for_test(&mut self) {
+        self.fail_scope_resolution_for_test = true;
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn acquired_capture_lease_count_for_test(&self) -> usize {
+        self.acquired_capture_lease_count_for_test
     }
 
     pub(crate) const fn c08_execution_facts(&self) -> Option<&C08ExecutionFacts> {
@@ -3431,6 +3454,10 @@ impl<'device> PreparedGraph<'device> {
                 };
             }
         };
+        #[cfg(test)]
+        if self.fail_scope_resolution_for_test {
+            scope.inject_validation_error_for_test();
+        }
         let leases = match scope.finish_with_leases(leases).await {
             Ok(leases) => leases,
             Err(failure) => {
@@ -3490,7 +3517,7 @@ impl<'device> PreparedGraph<'device> {
                 }
                 RuntimePassKind::VelloCapture(Some(_)) => {
                     #[cfg(test)]
-                    if self.fail_capture_encoding_for_test {
+                    if self.fail_capture_encoding_after_for_test == Some(capture_count) {
                         return Err(preparation_error(
                             "injected C08 Vello capture encoding failure",
                         ));
@@ -3519,6 +3546,11 @@ impl<'device> PreparedGraph<'device> {
                     capture_observations.push(encoded.observation);
                     self.complete_c08_capture(pass, target, session, encoded.receipt)?;
                     capture_count = capture_count.saturating_add(1);
+                    #[cfg(test)]
+                    {
+                        self.acquired_capture_lease_count_for_test =
+                            self.acquired_capture_lease_count_for_test.saturating_add(1);
+                    }
                     validated_capture_receipts = validated_capture_receipts.saturating_add(1);
                 }
                 RuntimePassKind::CanonicalizeCapture => {

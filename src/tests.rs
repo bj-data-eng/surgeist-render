@@ -10761,6 +10761,80 @@ fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
 }
 
 #[test]
+fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_submission() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let vello_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let vello_submission = vello_submission_scope.observation_for_test();
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("later C08 capture failure requires backend selection")
+        .expect("later C08 capture failure requires a host adapter");
+    let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
+        identity,
+        c08_shader_commands_for_test(),
+        runtime_lowering_commands_for_test(),
+        c08_shader_frame_context_for_test(),
+        C08TwoCaptureFailureForTest::LaterCaptureEncoding,
+    ))
+    .expect("later C08 capture failure must reach its private observation");
+    let no_queue_submission = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0
+        && vello_submission.queue_submission_count_for_test() == 0;
+
+    assert!(
+        observed.acquired_capture_lease_count == 1
+            && observed.failure_is_reported
+            && observed.produces_no_pending_commit
+            && observed.retry_is_rejected
+            && observed.resource_creation_was_observed
+            && observed.remaining_leased_resource_count == 0
+            && observed.remaining_resource_count == 0
+            && observed.atlas_recovery_outcome == Some(VelloAtlasOutcome::Recreate)
+            && observed.transaction_lease_is_released
+            && no_queue_submission,
+        "later two-capture encode failure did not abort every acquired lease and resource"
+    );
+}
+
+#[test]
+fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_submission() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let vello_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let vello_submission = vello_submission_scope.observation_for_test();
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("shared C08 scope failure requires backend selection")
+        .expect("shared C08 scope failure requires a host adapter");
+    let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
+        identity,
+        c08_shader_commands_for_test(),
+        runtime_lowering_commands_for_test(),
+        c08_shader_frame_context_for_test(),
+        C08TwoCaptureFailureForTest::SharedScopeResolution,
+    ))
+    .expect("shared C08 scope failure must reach its private observation");
+    let no_queue_submission = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0
+        && vello_submission.queue_submission_count_for_test() == 0;
+
+    assert!(
+        observed.acquired_capture_lease_count == 2
+            && observed.failure_is_reported
+            && observed.produces_no_pending_commit
+            && observed.retry_is_rejected
+            && observed.resource_creation_was_observed
+            && observed.remaining_leased_resource_count == 0
+            && observed.remaining_resource_count == 0
+            && observed.atlas_recovery_outcome == Some(VelloAtlasOutcome::Recreate)
+            && observed.transaction_lease_is_released
+            && no_queue_submission,
+        "shared two-capture scope failure did not abort every acquired lease and resource"
+    );
+}
+
+#[test]
 fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
