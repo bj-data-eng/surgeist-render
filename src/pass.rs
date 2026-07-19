@@ -8,17 +8,18 @@ use super::{
     BackendErrorCode, Color, Error, Format, PhysicalSize, Point, Rect, Result, Transform,
     backend::DeviceCapabilities,
     command::{RenderClip, RenderCommands},
-    encode::encode_vello_scene_with_initial_transform,
+    encode::{encode_vello_clip_coverage_scene, encode_vello_scene_with_initial_transform},
     filter::{CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS, ColorClampBoundary},
     frame::{
-        GpuRenderGraph, GraphLoweringBlur, GraphLoweringBlurInput, GraphLoweringColorFilter,
-        GraphLoweringComposite, GraphLoweringCompositeKind, GraphLoweringDropShadow,
-        GraphLoweringEdgePolicy, GraphLoweringGeneration, GraphLoweringImportView,
-        GraphLoweringInitialization, GraphLoweringPassId, GraphLoweringPassKind,
-        GraphLoweringPassResult, GraphLoweringReadBinding, GraphLoweringReadRole,
-        GraphLoweringResourceId, GraphLoweringResourceProducer, GraphLoweringResourceRole,
-        GraphLoweringSamplingEdge, GraphLoweringSamplingFilter, GraphLoweringSpatialDescriptor,
-        GraphLoweringVelloSpan, GraphLoweringVelloSpanScope,
+        GpuRenderGraph, GraphLoweringBlur, GraphLoweringBlurInput, GraphLoweringClipCoverage,
+        GraphLoweringColorFilter, GraphLoweringComposite, GraphLoweringCompositeKind,
+        GraphLoweringDropShadow, GraphLoweringEdgePolicy, GraphLoweringGeneration,
+        GraphLoweringImportView, GraphLoweringInitialization, GraphLoweringPassId,
+        GraphLoweringPassKind, GraphLoweringPassResult, GraphLoweringReadBinding,
+        GraphLoweringReadRole, GraphLoweringResourceId, GraphLoweringResourceProducer,
+        GraphLoweringResourceRole, GraphLoweringSamplingEdge, GraphLoweringSamplingFilter,
+        GraphLoweringSpatialDescriptor, GraphLoweringVelloCapture, GraphLoweringVelloSpan,
+        GraphLoweringVelloSpanScope,
     },
     image::ResolvedMaskUploadDescriptor,
     layer::BlendMode,
@@ -90,7 +91,41 @@ pub(crate) enum CompositionOuterOperationObservationForTest {
 pub(crate) enum CompositionReadObservationForTest {
     Parent,
     Source,
+    ClipCoverage,
     AlphaMask,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClipCoverageElementObservationForTest {
+    pub(crate) clip: RenderClip,
+    pub(crate) transform: Transform,
+    pub(crate) effective_transform: Transform,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ClipCoverageCaptureObservationForTest {
+    pub(crate) elements: Vec<ClipCoverageElementObservationForTest>,
+    pub(crate) antialiasing: Antialiasing,
+    pub(crate) device_origin: (i32, i32),
+    pub(crate) target_extent: PhysicalSize,
+    pub(crate) texel_origin: Point,
+    pub(crate) raster_scale: f64,
+    pub(crate) first_texel_center: Point,
+    pub(crate) initial_transform: Transform,
+    pub(crate) uses_coverage_resource_role: bool,
+    pub(crate) uses_rgba8_target: bool,
+    pub(crate) uses_transparent_base: bool,
+    pub(crate) paints_opaque_white: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct GraphClipCoverageObservationForTest {
+    pub(crate) captures: Vec<ClipCoverageCaptureObservationForTest>,
+    pub(crate) all_vello_capture_count: usize,
+    pub(crate) composite_coverage_read_count: usize,
 }
 
 #[cfg(test)]
@@ -143,6 +178,15 @@ pub(crate) fn composition_graph_observation_for_test(
     capabilities: DeviceCapabilities,
 ) -> CompositionGraphObservationForTest {
     composition_graph_observation(commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn graph_clip_coverage_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> GraphClipCoverageObservationForTest {
+    graph_clip_coverage_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -616,6 +660,7 @@ pub(crate) struct RuntimePassId(GraphLoweringPassId);
 pub(crate) enum RuntimeResourceRole {
     RootWorkingImage,
     CaptureWorkingImage,
+    ClipCoverage,
     IsolationWorkingImage,
     ImportedImage,
     BackdropCopy,
@@ -627,6 +672,7 @@ pub(crate) enum RuntimeResourceRole {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum RuntimeResourceFormat {
     VelloCaptureRgba8Unorm,
+    ClipCoverageRgba8Unorm,
     Working(WorkingFormat),
     ResolvedMaskRgba8Unorm,
 }
@@ -634,7 +680,9 @@ pub(crate) enum RuntimeResourceFormat {
 impl RuntimeResourceFormat {
     const fn shader_key(self) -> ShaderTextureFormatKey {
         match self {
-            Self::VelloCaptureRgba8Unorm => ShaderTextureFormatKey::VelloCaptureRgba8Unorm,
+            Self::VelloCaptureRgba8Unorm | Self::ClipCoverageRgba8Unorm => {
+                ShaderTextureFormatKey::VelloCaptureRgba8Unorm
+            }
             Self::Working(format) => ShaderTextureFormatKey::working(format),
             Self::ResolvedMaskRgba8Unorm => ShaderTextureFormatKey::ResolvedMaskRgba8Unorm,
         }
@@ -720,6 +768,47 @@ pub(crate) struct RuntimeVelloSpan {
     parent_to_surface: Transform,
     antialiasing: Antialiasing,
     captured_before_outer_semantics: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RuntimeClipCoverageElement {
+    clip: RenderClip,
+    transform: Transform,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct RuntimeClipCoverage {
+    elements: Vec<RuntimeClipCoverageElement>,
+    antialiasing: Antialiasing,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum RuntimeVelloCapture {
+    Span(RuntimeVelloSpan),
+    ClipCoverage(RuntimeClipCoverage),
+}
+
+impl RuntimeVelloCapture {
+    const fn antialiasing(&self) -> Antialiasing {
+        match self {
+            Self::Span(span) => span.antialiasing,
+            Self::ClipCoverage(coverage) => coverage.antialiasing,
+        }
+    }
+
+    fn span(&self) -> Option<&RuntimeVelloSpan> {
+        match self {
+            Self::Span(span) => Some(span),
+            Self::ClipCoverage(_) => None,
+        }
+    }
+
+    fn clip_coverage(&self) -> Option<&RuntimeClipCoverage> {
+        match self {
+            Self::Span(_) => None,
+            Self::ClipCoverage(coverage) => Some(coverage),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -822,7 +911,7 @@ pub(crate) enum RuntimePassKind {
         initialization: RuntimeInitialization,
         color: Color,
     },
-    VelloCapture(Option<RuntimeVelloSpan>),
+    VelloCapture(Option<RuntimeVelloCapture>),
     CanonicalizeCapture,
     CopyBackdrop,
     ColorFilter(Option<RuntimeColorFilter>),
@@ -841,6 +930,7 @@ pub(crate) enum RuntimeReadRole {
     BlurredSourceAlpha,
     CompositeParent,
     CompositeSource,
+    ClipCoverage,
     AlphaMask,
     Shadow,
     FinalWorkingImage,
@@ -1010,10 +1100,9 @@ impl ClosedExecutableGraphFacts {
                 pass.id == capture.pass()
                     && matches!(
                         &pass.kind,
-                        RuntimePassKind::VelloCapture(Some(span))
-                            if span.scope == capture.scope()
-                                && &span.commands == capture.commands()
-                                && span.antialiasing == capture.antialiasing()
+                        RuntimePassKind::VelloCapture(Some(work))
+                            if work == capture.work()
+                                && work.antialiasing() == capture.antialiasing()
                     )
                     && pass.result == RuntimeResultBinding::Resource(capture.target())
             })
@@ -1085,7 +1174,11 @@ impl C08ExecutionFacts {
             let Some(pass) = plan.passes.iter().find(|pass| pass.id == capture.pass()) else {
                 return false;
             };
-            let RuntimePassKind::VelloCapture(Some(span)) = &pass.kind else {
+            let RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(span))) = &pass.kind
+            else {
+                return false;
+            };
+            let Some(capture_span) = capture.span() else {
                 return false;
             };
             let Some(target) = plan
@@ -1097,8 +1190,8 @@ impl C08ExecutionFacts {
             };
             passes.insert(capture.pass())
                 && targets.insert(capture.target())
-                && capture.scope() == RuntimeVelloSpanScope::CurrentParent
-                && capture.commands() == &span.commands
+                && capture_span.scope == RuntimeVelloSpanScope::CurrentParent
+                && capture_span == span
                 && capture
                     .initial_transform()
                     .as_array()
@@ -1132,11 +1225,11 @@ impl C08PreparableGraph {
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
         if closed.has_layer_composition()
             || closed.facts.captures.is_empty()
-            || closed
-                .facts
-                .captures
-                .iter()
-                .any(|capture| capture.scope() != RuntimeVelloSpanScope::CurrentParent)
+            || closed.facts.captures.iter().any(|capture| {
+                capture
+                    .span()
+                    .is_none_or(|span| span.scope != RuntimeVelloSpanScope::CurrentParent)
+            })
         {
             return Err(Box::new(closed));
         }
@@ -1201,8 +1294,7 @@ pub(crate) struct C08CaptureGridForTest {
 pub(crate) struct ExecutableVelloCaptureFacts {
     pass: RuntimePassId,
     target: RuntimeResourceId,
-    scope: RuntimeVelloSpanScope,
-    commands: RenderCommands,
+    work: RuntimeVelloCapture,
     initial_transform: Transform,
     antialiasing: Antialiasing,
     target_extent: PhysicalSize,
@@ -1222,13 +1314,18 @@ impl ExecutableVelloCaptureFacts {
     }
 
     #[must_use]
-    const fn scope(&self) -> RuntimeVelloSpanScope {
-        self.scope
+    fn span(&self) -> Option<&RuntimeVelloSpan> {
+        self.work.span()
+    }
+
+    #[cfg(test)]
+    fn commands(&self) -> Option<&RenderCommands> {
+        self.span().map(|span| &span.commands)
     }
 
     #[must_use]
-    pub(crate) fn commands(&self) -> &RenderCommands {
-        &self.commands
+    const fn work(&self) -> &RuntimeVelloCapture {
+        &self.work
     }
 
     #[must_use]
@@ -1722,9 +1819,22 @@ impl LoweredGraphPlan {
                     });
                     cursor = cursor.checked_add(1)?;
                 }
-                RuntimePassKind::VelloCapture(Some(span)) => {
+                RuntimePassKind::VelloCapture(Some(work)) if work.span().is_some() => {
+                    let span = work.span()?;
                     let canonicalize = self.passes.get(cursor.checked_add(1)?)?;
-                    let composite = self.passes.get(cursor.checked_add(2)?)?;
+                    let after_canonicalize = self.passes.get(cursor.checked_add(2)?)?;
+                    let (coverage_pass, composite, pass_count) = if matches!(
+                        after_canonicalize.kind,
+                        RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::ClipCoverage(_)))
+                    ) {
+                        (
+                            Some(after_canonicalize),
+                            self.passes.get(cursor.checked_add(3)?)?,
+                            4,
+                        )
+                    } else {
+                        (None, after_canonicalize, 3)
+                    };
                     let RuntimeResultBinding::Resource(capture_target) = pass.result else {
                         return None;
                     };
@@ -1755,7 +1865,7 @@ impl LoweredGraphPlan {
                     let capture_facts = executable_vello_capture_facts(
                         pass.id,
                         capture_target,
-                        span,
+                        work,
                         capture_resource.spatial,
                     )?;
 
@@ -1790,6 +1900,15 @@ impl LoweredGraphPlan {
                         return None;
                     }
 
+                    let coverage_facts = match coverage_pass {
+                        Some(coverage_pass) => Some(validate_closed_clip_coverage_capture(
+                            coverage_pass,
+                            composite.id,
+                            &resource_by_id,
+                        )?),
+                        None => None,
+                    };
+
                     let parent = *contexts.last()?;
                     let layer = validate_closed_composite(
                         composite,
@@ -1808,13 +1927,28 @@ impl LoweredGraphPlan {
                     context.contains_captured_source = true;
                     expected_resources.extend([capture_target, canonical_target, result]);
                     captures.push(capture_facts);
+                    if let Some((coverage, facts)) = coverage_facts {
+                        expected_resources.insert(coverage);
+                        captures.push(facts);
+                    }
                     if let Some(layer) = layer {
+                        if let Some(coverage) = layer.clip_coverage {
+                            expected_resources.insert(coverage);
+                        }
                         if let Some(mask) = layer.alpha_mask {
                             expected_resources.insert(mask);
                         }
                         layer_compositions.push(layer);
                     }
-                    cursor = cursor.checked_add(3)?;
+                    cursor = cursor.checked_add(pass_count)?;
+                }
+                RuntimePassKind::VelloCapture(Some(work)) if work.clip_coverage().is_some() => {
+                    let composite = self.passes.get(cursor.checked_add(1)?)?;
+                    let (coverage, facts) =
+                        validate_closed_clip_coverage_capture(pass, composite.id, &resource_by_id)?;
+                    expected_resources.insert(coverage);
+                    captures.push(facts);
+                    cursor = cursor.checked_add(1)?;
                 }
                 RuntimePassKind::Composite(Some(composite))
                     if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
@@ -1885,6 +2019,7 @@ impl LoweredGraphPlan {
                     ..
                 }
                 | RuntimePassKind::VelloCapture(None)
+                | RuntimePassKind::VelloCapture(Some(_))
                 | RuntimePassKind::CanonicalizeCapture
                 | RuntimePassKind::CopyBackdrop
                 | RuntimePassKind::ColorFilter(_)
@@ -1894,8 +2029,18 @@ impl LoweredGraphPlan {
                 | RuntimePassKind::Composite(_) => return None,
             }
         }
+        let clip_coverages_are_exact = layer_compositions
+            .iter()
+            .all(|layer| layer_has_exact_clip_coverage_capture(layer, &captures))
+            && captures.iter().all(|capture| {
+                capture.work().clip_coverage().is_none()
+                    || layer_compositions
+                        .iter()
+                        .any(|layer| layer.clip_coverage == Some(capture.target()))
+            });
         if captures.is_empty()
             || contexts.len() != 1
+            || !clip_coverages_are_exact
             || expected_resources.len() != self.resources.len()
             || expected_resources
                 .iter()
@@ -1969,7 +2114,9 @@ impl LoweredGraphPlan {
         {
             let canonicalize = self.passes.get(cursor.checked_add(1)?)?;
             let composite = self.passes.get(cursor.checked_add(2)?)?;
-            let RuntimePassKind::VelloCapture(Some(span)) = &capture.kind else {
+            let RuntimePassKind::VelloCapture(Some(work @ RuntimeVelloCapture::Span(_))) =
+                &capture.kind
+            else {
                 return None;
             };
             let RuntimeResultBinding::Resource(capture_target) = capture.result else {
@@ -2068,7 +2215,7 @@ impl LoweredGraphPlan {
             captures.push(executable_vello_capture_facts(
                 capture.id,
                 capture_target,
-                span,
+                work,
                 capture_resource.spatial,
             )?);
             parent = composite_resource;
@@ -2155,6 +2302,8 @@ fn runtime_read_sampler_is_exact(
             Some(upload.cache_key())
         }
         (RuntimeReadRole::AlphaMask, None) => return false,
+        (RuntimeReadRole::ClipCoverage, Some(_)) => return false,
+        (RuntimeReadRole::ClipCoverage, None) => None,
         (_, _) => None,
     };
     read.sampler_key
@@ -2184,6 +2333,88 @@ fn runtime_read_has_exact_facts(
         && runtime_read_sampler_is_exact(read, &BTreeMap::from([(resource.id, resource)]))
 }
 
+fn validate_closed_clip_coverage_capture(
+    pass: &RuntimePass,
+    composite: RuntimePassId,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+) -> Option<(RuntimeResourceId, ExecutableVelloCaptureFacts)> {
+    let RuntimePassKind::VelloCapture(Some(work @ RuntimeVelloCapture::ClipCoverage(_))) =
+        &pass.kind
+    else {
+        return None;
+    };
+    let RuntimeResultBinding::Resource(target) = pass.result else {
+        return None;
+    };
+    if !pass.dependencies.is_empty()
+        || !pass.reads.is_empty()
+        || !pass.releases.is_empty()
+        || pass.cache_keys.is_some()
+    {
+        return None;
+    }
+    let resource = resources.get(&target).copied()?;
+    if !c08_resource_has_fixed_facts(
+        resource,
+        RuntimeResourceRole::ClipCoverage,
+        RuntimeResourceFormat::ClipCoverageRgba8Unorm,
+        RuntimeResourceProducer::Pass(pass.id),
+    ) || resource.expected_reads != 1
+        || resource.last_use != composite
+    {
+        return None;
+    }
+    Some((
+        target,
+        executable_vello_capture_facts(pass.id, target, work, resource.spatial)?,
+    ))
+}
+
+fn layer_has_exact_clip_coverage_capture(
+    layer: &ExecutableLayerCompositionFacts,
+    captures: &[ExecutableVelloCaptureFacts],
+) -> bool {
+    let RuntimeCompositeKind::Layer {
+        transform,
+        clip,
+        outer_clips,
+        clip_coverage,
+        ..
+    } = &layer.composite.kind
+    else {
+        return false;
+    };
+    let mut expected = outer_clips
+        .iter()
+        .map(|outer| RuntimeClipCoverageElement {
+            clip: outer.clip.clone(),
+            transform: outer.transform,
+        })
+        .collect::<Vec<_>>();
+    if let Some(clip) = clip {
+        expected.push(RuntimeClipCoverageElement {
+            clip: (**clip).clone(),
+            transform: *transform,
+        });
+    }
+    match (expected.is_empty(), clip_coverage) {
+        (true, None) => true,
+        (false, Some(coverage)) => {
+            let mut matching = captures
+                .iter()
+                .filter(|capture| capture.target() == *coverage);
+            let exact = matching.next().is_some_and(|capture| {
+                capture
+                    .work()
+                    .clip_coverage()
+                    .is_some_and(|coverage| coverage.elements == expected)
+            });
+            exact && matching.next().is_none() && layer.clip_coverage == Some(*coverage)
+        }
+        (true, Some(_)) | (false, None) => false,
+    }
+}
+
 fn validate_closed_composite(
     pass: &RuntimePass,
     parent: ExecutableCompositionContext,
@@ -2202,7 +2433,19 @@ fn validate_closed_composite(
     let RuntimeResourceProducer::Pass(source_producer) = source.producer else {
         return None;
     };
-    if pass.dependencies.as_slice() != [parent.producer, source_producer]
+    let mut expected_dependencies = vec![parent.producer, source_producer];
+    if let RuntimeCompositeKind::Layer {
+        clip_coverage: Some(coverage),
+        ..
+    } = &composite.kind
+    {
+        let coverage_resource = resources.get(coverage).copied()?;
+        let RuntimeResourceProducer::Pass(coverage_producer) = coverage_resource.producer else {
+            return None;
+        };
+        expected_dependencies.push(coverage_producer);
+    }
+    if pass.dependencies != expected_dependencies
         || pass.reads.len() < 2
         || !runtime_read_has_exact_facts(
             &pass.reads[0],
@@ -2275,7 +2518,7 @@ fn validate_closed_composite(
                         .iter()
                         .any(|value| !value.is_finite())
                 })
-                || clip_coverage.is_some()
+                || (clip.is_some() || !outer_clips.is_empty()) != clip_coverage.is_some()
                 || (requires_isolated_source && source.role != RuntimeResourceRole::CompositeResult)
                 || (!requires_isolated_source
                     && (source.role != RuntimeResourceRole::FilterIntermediate
@@ -2288,14 +2531,36 @@ fn validate_closed_composite(
             {
                 return None;
             }
-            let expected_read_count = 2usize.checked_add(usize::from(alpha_mask.is_some()))?;
+            let expected_read_count = 2usize
+                .checked_add(usize::from(clip_coverage.is_some()))?
+                .checked_add(usize::from(alpha_mask.is_some()))?;
             if pass.reads.len() != expected_read_count {
                 return None;
+            }
+            let mut next_read = 2;
+            if let Some(coverage) = clip_coverage {
+                let coverage_resource = resources.get(coverage).copied()?;
+                if !runtime_read_has_exact_facts(
+                    &pass.reads[next_read],
+                    RuntimeReadRole::ClipCoverage,
+                    coverage_resource,
+                    RuntimeSamplingFilter::Linear,
+                    RuntimeSamplingEdge::TransparentBlack,
+                ) || coverage_resource.role != RuntimeResourceRole::ClipCoverage
+                    || coverage_resource.format != RuntimeResourceFormat::ClipCoverageRgba8Unorm
+                    || !matches!(coverage_resource.producer, RuntimeResourceProducer::Pass(_))
+                    || coverage_resource.import.is_some()
+                    || coverage_resource.expected_reads != 1
+                    || coverage_resource.last_use != pass.id
+                {
+                    return None;
+                }
+                next_read = next_read.checked_add(1)?;
             }
             if let Some(mask) = alpha_mask {
                 let mask_resource = resources.get(mask).copied()?;
                 if !runtime_read_has_exact_facts(
-                    &pass.reads[2],
+                    &pass.reads[next_read],
                     RuntimeReadRole::AlphaMask,
                     mask_resource,
                     RuntimeSamplingFilter::Linear,
@@ -2368,11 +2633,25 @@ fn c08_read_is_exact(
 fn executable_vello_capture_facts(
     pass: RuntimePassId,
     target: RuntimeResourceId,
-    span: &RuntimeVelloSpan,
+    work: &RuntimeVelloCapture,
     spatial: RuntimeSpatialDescriptor,
 ) -> Option<ExecutableVelloCaptureFacts> {
-    if span.commands.commands.is_empty()
-        || !span.captured_before_outer_semantics
+    let valid_work = match work {
+        RuntimeVelloCapture::Span(span) => {
+            !span.commands.commands.is_empty() && span.captured_before_outer_semantics
+        }
+        RuntimeVelloCapture::ClipCoverage(coverage) => {
+            !coverage.elements.is_empty()
+                && coverage.elements.iter().all(|element| {
+                    element
+                        .transform
+                        .as_array()
+                        .iter()
+                        .all(|value| value.is_finite())
+                })
+        }
+    };
+    if !valid_work
         || spatial.device_extent.width() == 0
         || spatial.device_extent.height() == 0
         || !spatial.texel_origin.x().is_finite()
@@ -2397,21 +2676,26 @@ fn executable_vello_capture_facts(
     {
         return None;
     }
-    let initial_transform = span
-        .capture_transform
-        .then(span.parent_to_surface)
-        .ok()?
-        .then(Transform::translation(-spatial.texel_origin.x(), -spatial.texel_origin.y()).ok()?)
-        .ok()?
-        .then(Transform::scale(spatial.raster_scale, spatial.raster_scale).ok()?)
-        .ok()?;
+    let grid_transform =
+        Transform::translation(-spatial.texel_origin.x(), -spatial.texel_origin.y())
+            .ok()?
+            .then(Transform::scale(spatial.raster_scale, spatial.raster_scale).ok()?)
+            .ok()?;
+    let initial_transform = match work {
+        RuntimeVelloCapture::Span(span) => span
+            .capture_transform
+            .then(span.parent_to_surface)
+            .ok()?
+            .then(grid_transform)
+            .ok()?,
+        RuntimeVelloCapture::ClipCoverage(_) => grid_transform,
+    };
     Some(ExecutableVelloCaptureFacts {
         pass,
         target,
-        scope: span.scope,
-        commands: span.commands.clone(),
+        work: work.clone(),
         initial_transform,
-        antialiasing: span.antialiasing,
+        antialiasing: work.antialiasing(),
         target_extent: spatial.device_extent,
         texel_origin: spatial.texel_origin,
         raster_scale: spatial.raster_scale,
@@ -2549,15 +2833,16 @@ fn c09_executable_graph_observation(
                     (RuntimeReadRole::CompositeParent, layer.parent),
                     (RuntimeReadRole::CompositeSource, layer.source),
                 ];
+                if let Some(coverage) = layer.clip_coverage {
+                    expected.push((RuntimeReadRole::ClipCoverage, coverage));
+                }
                 if let Some(mask) = layer.alpha_mask {
                     expected.push((RuntimeReadRole::AlphaMask, mask));
                 }
-                layer.clip_coverage.is_none()
-                    && pass
-                        .reads
-                        .iter()
-                        .map(|read| (read.role, read.resource))
-                        .eq(expected)
+                pass.reads
+                    .iter()
+                    .map(|read| (read.role, read.resource))
+                    .eq(expected)
             })
         });
 
@@ -2657,6 +2942,98 @@ fn c09_executable_graph_observation(
 }
 
 #[cfg(test)]
+fn graph_clip_coverage_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    _capabilities: DeviceCapabilities,
+) -> Option<GraphClipCoverageObservationForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
+        return None;
+    };
+    let lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+    )
+    .ok()?;
+    let closed = ClosedExecutableGraph::try_from_lowered(lowered).ok()?;
+    let all_vello_capture_count = closed
+        .lowered
+        .passes
+        .iter()
+        .filter(|pass| matches!(pass.kind, RuntimePassKind::VelloCapture(Some(_))))
+        .count();
+    let composite_coverage_read_count = closed
+        .lowered
+        .passes
+        .iter()
+        .flat_map(|pass| &pass.reads)
+        .filter(|read| read.role == RuntimeReadRole::ClipCoverage)
+        .count();
+    let resources = closed
+        .lowered
+        .resources
+        .iter()
+        .map(|resource| (resource.id, resource))
+        .collect::<BTreeMap<_, _>>();
+    let captures = closed
+        .facts
+        .captures
+        .iter()
+        .filter_map(|capture| {
+            let coverage = capture.work().clip_coverage()?;
+            let resource = resources.get(&capture.target()).copied()?;
+            let elements = coverage
+                .elements
+                .iter()
+                .map(|element| (element.clip.clone(), element.transform))
+                .collect::<Vec<_>>();
+            let effective_transforms = super::encode::clip_coverage_effective_transforms_for_test(
+                &elements,
+                capture.initial_transform(),
+                capture.target_extent(),
+            )
+            .ok()?;
+            let elements = coverage
+                .elements
+                .iter()
+                .zip(effective_transforms)
+                .map(
+                    |(element, effective_transform)| ClipCoverageElementObservationForTest {
+                        clip: element.clip.clone(),
+                        transform: element.transform,
+                        effective_transform,
+                    },
+                )
+                .collect();
+            Some(ClipCoverageCaptureObservationForTest {
+                elements,
+                antialiasing: capture.antialiasing(),
+                device_origin: resource.spatial.device_origin,
+                target_extent: capture.target_extent(),
+                texel_origin: capture.texel_origin(),
+                raster_scale: capture.raster_scale(),
+                first_texel_center: Point::new(
+                    (f64::from(resource.spatial.device_origin.0) + 0.5) / capture.raster_scale(),
+                    (f64::from(resource.spatial.device_origin.1) + 0.5) / capture.raster_scale(),
+                ),
+                initial_transform: capture.initial_transform(),
+                uses_coverage_resource_role: resource.role == RuntimeResourceRole::ClipCoverage,
+                uses_rgba8_target: resource.format == RuntimeResourceFormat::ClipCoverageRgba8Unorm,
+                uses_transparent_base: true,
+                paints_opaque_white: true,
+            })
+        })
+        .collect();
+
+    Some(GraphClipCoverageObservationForTest {
+        captures,
+        all_vello_capture_count,
+        composite_coverage_read_count,
+    })
+}
+
+#[cfg(test)]
 fn composition_graph_observation(
     commands: RenderCommands,
     context: FrameContext,
@@ -2722,6 +3099,9 @@ fn composition_graph_observation(
                     }
                     RuntimeReadRole::CompositeSource => {
                         Some(CompositionReadObservationForTest::Source)
+                    }
+                    RuntimeReadRole::ClipCoverage => {
+                        Some(CompositionReadObservationForTest::ClipCoverage)
                     }
                     RuntimeReadRole::AlphaMask => {
                         Some(CompositionReadObservationForTest::AlphaMask)
@@ -3019,13 +3399,17 @@ fn c08_rejects_malformed_bindings(plan: &LoweredGraphPlan) -> bool {
     invalid_plans.push(invalid);
 
     let mut invalid = plan.clone();
-    if let RuntimePassKind::VelloCapture(Some(span)) = &mut invalid.passes[capture_index].kind {
+    if let RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(span))) =
+        &mut invalid.passes[capture_index].kind
+    {
         span.scope = RuntimeVelloSpanScope::LayerSource;
     }
     invalid_plans.push(invalid);
 
     let mut invalid = plan.clone();
-    if let RuntimePassKind::VelloCapture(Some(span)) = &mut invalid.passes[capture_index].kind {
+    if let RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(span))) =
+        &mut invalid.passes[capture_index].kind
+    {
         span.captured_before_outer_semantics = false;
     }
     invalid_plans.push(invalid);
@@ -3072,7 +3456,9 @@ fn bounded_capture_transform_observation(
             .passes
             .iter()
             .find(|pass| pass.id == actual_capture.pass())?;
-        let RuntimePassKind::VelloCapture(Some(actual_span)) = &capture_pass.kind else {
+        let RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(actual_span))) =
+            &capture_pass.kind
+        else {
             return None;
         };
         let mut span = actual_span.clone();
@@ -3088,7 +3474,12 @@ fn bounded_capture_transform_observation(
         spatial.device_origin = (-3, -2);
         spatial.texel_origin = Point::new(-3.0 / raster_scale, -2.0 / raster_scale);
         spatial.raster_scale = raster_scale;
-        let facts = executable_vello_capture_facts(capture_pass.id, target, &span, spatial)?;
+        let facts = executable_vello_capture_facts(
+            capture_pass.id,
+            target,
+            &RuntimeVelloCapture::Span(span),
+            spatial,
+        )?;
 
         let expected_transform = capture_transform
             .then(parent_to_surface)
@@ -3120,13 +3511,13 @@ fn bounded_capture_transform_observation(
 
         preserves_capture_execution_facts &= facts.pass() == capture_pass.id
             && facts.target() == target
-            && facts.commands() == &commands
+            && facts.commands() == Some(&commands)
             && facts.antialiasing() == antialiasing
             && facts.target_extent() == spatial.device_extent
             && facts.raster_scale() == raster_scale;
 
         let encoded = super::encode::encode_vello_scene_with_initial_transform(
-            facts.commands(),
+            facts.commands()?,
             facts.initial_transform(),
         )
         .ok()?;
@@ -3317,9 +3708,26 @@ impl RuntimeGraphPreparationPlan {
                     )?;
                     RuntimeAllocationRequest::EffectTexture(descriptor)
                 }
+                (RuntimeResourceFormat::ClipCoverageRgba8Unorm, None)
+                    if resource.role == RuntimeResourceRole::ClipCoverage
+                        && matches!(resource.producer, RuntimeResourceProducer::Pass(_)) =>
+                {
+                    let descriptor = EffectTextureDescriptor::try_coverage(
+                        extent,
+                        VELLO_CAPTURE_TEXTURE_USAGES,
+                    )?;
+                    capabilities.validate_effect_texture_allocation(
+                        extent,
+                        None,
+                        descriptor.texture_format(),
+                        descriptor.usage(),
+                    )?;
+                    RuntimeAllocationRequest::EffectTexture(descriptor)
+                }
                 (RuntimeResourceFormat::Working(format), None)
                     if *format == lowered.working_format
                         && resource.role != RuntimeResourceRole::CaptureWorkingImage
+                        && resource.role != RuntimeResourceRole::ClipCoverage
                         && resource.role != RuntimeResourceRole::ImportedImage =>
                 {
                     let descriptor = EffectTextureDescriptor::try_working(
@@ -3842,7 +4250,7 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
             initialization: RuntimeInitialization::Transparent,
             ..
         } => None,
-        RuntimePassKind::VelloCapture(Some(span))
+        RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(span)))
             if !span.commands.commands.is_empty()
                 && span.captured_before_outer_semantics
                 && span
@@ -3855,6 +4263,18 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
                     .as_array()
                     .iter()
                     .all(|value| value.is_finite()) =>
+        {
+            Some(TransitionalPassSemantics::ClosedExecutable)
+        }
+        RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::ClipCoverage(coverage)))
+            if !coverage.elements.is_empty()
+                && coverage.elements.iter().all(|element| {
+                    element
+                        .transform
+                        .as_array()
+                        .iter()
+                        .all(|value| value.is_finite())
+                }) =>
         {
             Some(TransitionalPassSemantics::ClosedExecutable)
         }
@@ -3909,7 +4329,7 @@ impl GraphPreparationSource {
 pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
     pass: RuntimePassId,
     target: RuntimeResourceId,
-    commands: &'prepared RenderCommands,
+    work: &'prepared RuntimeVelloCapture,
     initial_transform: Transform,
     antialiasing: Antialiasing,
     target_extent: PhysicalSize,
@@ -3936,8 +4356,15 @@ impl C08VelloCaptureEncodingHandoff<'_> {
         self.target
     }
 
-    pub(crate) const fn commands(&self) -> &RenderCommands {
-        self.commands
+    const fn work(&self) -> &RuntimeVelloCapture {
+        self.work
+    }
+
+    fn has_bounded_work(&self) -> bool {
+        match self.work() {
+            RuntimeVelloCapture::Span(span) => !span.commands.commands.is_empty(),
+            RuntimeVelloCapture::ClipCoverage(coverage) => !coverage.elements.is_empty(),
+        }
     }
 
     pub(crate) const fn initial_transform(&self) -> Transform {
@@ -4844,7 +5271,7 @@ impl<'device> PreparedGraph<'device> {
                     }
                     let handoff = self.c08_vello_capture_handoff(&request, session)?;
                     let target = handoff.target();
-                    bounded_capture_handoffs &= !handoff.commands().commands.is_empty()
+                    bounded_capture_handoffs &= handoff.has_bounded_work()
                         && handoff.target_extent().width() > 0
                         && handoff.target_extent().height() > 0
                         && handoff.texture().width() == handoff.target_extent().width()
@@ -4991,18 +5418,32 @@ impl<'device> PreparedGraph<'device> {
             ));
         }
         let initial_transform = handoff.initial_transform();
-        let scene =
-            encode_vello_scene_with_initial_transform(handoff.commands(), initial_transform)?;
-        #[cfg(test)]
-        let lowers_with_exact_initial_transform = scene
-            .observation_for_test()
-            .first_glyph_run_for_test()
-            .is_some_and(|run| {
-                run.transform_components_for_test()
+        let scene = match handoff.work() {
+            RuntimeVelloCapture::Span(span) => {
+                encode_vello_scene_with_initial_transform(&span.commands, initial_transform)?
+            }
+            RuntimeVelloCapture::ClipCoverage(coverage) => {
+                let elements = coverage
+                    .elements
                     .iter()
-                    .zip(initial_transform.as_array())
-                    .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5)
-            });
+                    .map(|element| (element.clip.clone(), element.transform))
+                    .collect::<Vec<_>>();
+                encode_vello_clip_coverage_scene(&elements, initial_transform, target_extent)?
+            }
+        };
+        #[cfg(test)]
+        let lowers_with_exact_initial_transform = match handoff.work() {
+            RuntimeVelloCapture::Span(_) => scene
+                .observation_for_test()
+                .first_glyph_run_for_test()
+                .is_some_and(|run| {
+                    run.transform_components_for_test()
+                        .iter()
+                        .zip(initial_transform.as_array())
+                        .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5)
+                }),
+            RuntimeVelloCapture::ClipCoverage(_) => true,
+        };
         let prepared = scene.prepare_raster(RasterParameters::try_new(
             target_extent,
             peniko::Color::TRANSPARENT,
@@ -5085,6 +5526,7 @@ impl<'device> PreparedGraph<'device> {
         let texture = binding.texture();
         let expected_format = match request.format {
             RuntimeResourceFormat::VelloCaptureRgba8Unorm
+            | RuntimeResourceFormat::ClipCoverageRgba8Unorm
             | RuntimeResourceFormat::ResolvedMaskRgba8Unorm => wgpu::TextureFormat::Rgba8Unorm,
             RuntimeResourceFormat::Working(format) => format.texture_format(),
         };
@@ -5164,7 +5606,7 @@ impl<'device> PreparedGraph<'device> {
         Ok(C08VelloCaptureEncodingHandoff {
             pass: request.id,
             target,
-            commands: capture.commands(),
+            work: capture.work(),
             initial_transform: capture.initial_transform(),
             antialiasing: capture.antialiasing(),
             target_extent: capture.target_extent(),
@@ -6184,6 +6626,7 @@ const fn runtime_resource_role(role: GraphLoweringResourceRole) -> RuntimeResour
     match role {
         GraphLoweringResourceRole::RootWorkingImage => RuntimeResourceRole::RootWorkingImage,
         GraphLoweringResourceRole::CaptureWorkingImage => RuntimeResourceRole::CaptureWorkingImage,
+        GraphLoweringResourceRole::ClipCoverage => RuntimeResourceRole::ClipCoverage,
         GraphLoweringResourceRole::IsolationWorkingImage => {
             RuntimeResourceRole::IsolationWorkingImage
         }
@@ -6201,6 +6644,7 @@ const fn runtime_resource_format(
 ) -> RuntimeResourceFormat {
     match role {
         RuntimeResourceRole::CaptureWorkingImage => RuntimeResourceFormat::VelloCaptureRgba8Unorm,
+        RuntimeResourceRole::ClipCoverage => RuntimeResourceFormat::ClipCoverageRgba8Unorm,
         RuntimeResourceRole::ImportedImage => RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
         RuntimeResourceRole::RootWorkingImage
         | RuntimeResourceRole::IsolationWorkingImage
@@ -6228,8 +6672,8 @@ fn runtime_pass_kind(
             },
             color,
         },
-        GraphLoweringPassKind::VelloCapture(span) => {
-            RuntimePassKind::VelloCapture(span.map(runtime_vello_span))
+        GraphLoweringPassKind::VelloCapture(work) => {
+            RuntimePassKind::VelloCapture(work.map(runtime_vello_capture))
         }
         GraphLoweringPassKind::CanonicalizeCapture => RuntimePassKind::CanonicalizeCapture,
         GraphLoweringPassKind::CopyBackdrop => RuntimePassKind::CopyBackdrop,
@@ -6252,6 +6696,17 @@ fn runtime_pass_kind(
     }
 }
 
+fn runtime_vello_capture(capture: GraphLoweringVelloCapture) -> RuntimeVelloCapture {
+    match capture {
+        GraphLoweringVelloCapture::Span(span) => {
+            RuntimeVelloCapture::Span(runtime_vello_span(span))
+        }
+        GraphLoweringVelloCapture::ClipCoverage(coverage) => {
+            RuntimeVelloCapture::ClipCoverage(runtime_clip_coverage(coverage))
+        }
+    }
+}
+
 fn runtime_vello_span(span: GraphLoweringVelloSpan) -> RuntimeVelloSpan {
     RuntimeVelloSpan {
         scope: match span.scope() {
@@ -6263,6 +6718,20 @@ fn runtime_vello_span(span: GraphLoweringVelloSpan) -> RuntimeVelloSpan {
         parent_to_surface: span.parent_to_surface(),
         antialiasing: span.antialiasing(),
         captured_before_outer_semantics: span.captured_before_outer_semantics(),
+    }
+}
+
+fn runtime_clip_coverage(coverage: GraphLoweringClipCoverage) -> RuntimeClipCoverage {
+    RuntimeClipCoverage {
+        elements: coverage
+            .elements()
+            .iter()
+            .map(|element| RuntimeClipCoverageElement {
+                clip: element.clip().clone(),
+                transform: element.transform(),
+            })
+            .collect(),
+        antialiasing: coverage.antialiasing(),
     }
 }
 
@@ -6453,6 +6922,7 @@ const fn runtime_read_role(role: GraphLoweringReadRole) -> RuntimeReadRole {
         GraphLoweringReadRole::BlurredSourceAlpha => RuntimeReadRole::BlurredSourceAlpha,
         GraphLoweringReadRole::CompositeParent => RuntimeReadRole::CompositeParent,
         GraphLoweringReadRole::CompositeSource => RuntimeReadRole::CompositeSource,
+        GraphLoweringReadRole::ClipCoverage => RuntimeReadRole::ClipCoverage,
         GraphLoweringReadRole::AlphaMask => RuntimeReadRole::AlphaMask,
         GraphLoweringReadRole::Shadow => RuntimeReadRole::Shadow,
         GraphLoweringReadRole::FinalWorkingImage => RuntimeReadRole::FinalWorkingImage,
@@ -6477,6 +6947,7 @@ const fn shader_binding_role(role: RuntimeReadRole) -> ShaderBindingRoleKey {
         RuntimeReadRole::BlurredSourceAlpha => ShaderBindingRoleKey::BlurredSourceAlpha,
         RuntimeReadRole::CompositeParent => ShaderBindingRoleKey::CompositeParent,
         RuntimeReadRole::CompositeSource => ShaderBindingRoleKey::CompositeSource,
+        RuntimeReadRole::ClipCoverage => ShaderBindingRoleKey::AlphaMask,
         RuntimeReadRole::AlphaMask => ShaderBindingRoleKey::AlphaMask,
         RuntimeReadRole::Shadow => ShaderBindingRoleKey::Shadow,
         RuntimeReadRole::FinalWorkingImage => ShaderBindingRoleKey::FinalWorkingImage,
@@ -6771,7 +7242,7 @@ pub(crate) fn runtime_lowering_observation_for_test(
     let preserves_semantic_pass_facts = plan.passes.iter().any(|pass| {
         matches!(
             &pass.kind,
-            RuntimePassKind::VelloCapture(Some(span))
+            RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(span)))
                 if !span.commands.commands.is_empty()
                     && span.captured_before_outer_semantics
         )

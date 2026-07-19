@@ -4,13 +4,6 @@ use super::{Error, Format, PhysicalSize, Result, resource::WorkingFormat};
 pub(crate) enum EffectTextureRole {
     Capture,
     Working,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 allocates Vello-rendered outer clip coverage through this role"
-        )
-    )]
     Coverage,
 }
 
@@ -72,13 +65,6 @@ impl EffectTextureDescriptor {
         )
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 acquires Vello-rendered outer clip coverage through this descriptor"
-        )
-    )]
     pub(crate) fn try_coverage(
         physical_size: PhysicalSize,
         usage: wgpu::TextureUsages,

@@ -11160,6 +11160,297 @@ fn c09_composition_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
+fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
+    let transforms = [
+        Transform::translation(0.25, 0.5).unwrap(),
+        Transform::translation(0.5, 0.25).unwrap(),
+        Transform::translation(0.125, 0.25).unwrap(),
+        Transform::translation(0.25, 0.125).unwrap(),
+        Transform::translation(0.125, 0.125).unwrap(),
+    ];
+    let mut path = Path::new();
+    path.move_to(Point::new(1.0, 1.0))
+        .line_to(Point::new(7.0, 1.0))
+        .line_to(Point::new(7.0, 7.0))
+        .line_to(Point::new(1.0, 7.0))
+        .close()
+        .move_to(Point::new(3.0, 3.0))
+        .line_to(Point::new(5.0, 3.0))
+        .line_to(Point::new(5.0, 5.0))
+        .line_to(Point::new(3.0, 5.0))
+        .close();
+    let path_clip =
+        ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::EvenOdd).unwrap()).unwrap();
+
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_clip(Shape::rect(Rect::new(0.0, 0.0, 8.0, 8.0)))
+            .unwrap()
+            .try_transform(transforms[0])
+            .unwrap(),
+        |scene| {
+            scene.layer(
+                Layer::new()
+                    .try_clip(
+                        Shape::try_rounded_rect(
+                            Rect::new(0.25, 0.25, 7.5, 7.5),
+                            Radii::new(0.5, 0.75, 1.0, 1.25),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap()
+                    .try_transform(transforms[1])
+                    .unwrap(),
+                |scene| {
+                    scene.layer(
+                        Layer::new()
+                            .try_clip(Shape::try_circle(Point::new(4.0, 4.0), 3.5).unwrap())
+                            .unwrap()
+                            .try_transform(transforms[2])
+                            .unwrap(),
+                        |scene| {
+                            scene.layer(
+                                Layer::new()
+                                    .try_clip(
+                                        Shape::try_ellipse(
+                                            Point::new(4.0, 4.0),
+                                            Size::new(3.25, 3.0),
+                                        )
+                                        .unwrap(),
+                                    )
+                                    .unwrap()
+                                    .try_transform(transforms[3])
+                                    .unwrap(),
+                                |scene| {
+                                    scene.layer(
+                                        Layer::new()
+                                            .try_clip_input(path_clip)
+                                            .unwrap()
+                                            .try_transform(transforms[4])
+                                            .unwrap()
+                                            .with_resolved_alpha_mask(opaque_planning_mask(
+                                                PhysicalSize::new(8, 8),
+                                            )),
+                                        |scene| {
+                                            scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
+                                        },
+                                    );
+                                },
+                            );
+                        },
+                    );
+                },
+            );
+        },
+    );
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
+fn c09_signed_path_clip_coverage_commands_for_test() -> (command::RenderCommands, CoordinateSpaceTag)
+{
+    let mut path = Path::new();
+    path.move_to(Point::new(-2.0, -1.0))
+        .line_to(Point::new(1.0, -1.0))
+        .line_to(Point::new(1.0, 1.0))
+        .line_to(Point::new(-2.0, 1.0))
+        .close()
+        .move_to(Point::new(-1.25, -0.5))
+        .line_to(Point::new(0.25, -0.5))
+        .line_to(Point::new(0.25, 0.5))
+        .line_to(Point::new(-1.25, 0.5))
+        .close();
+    let coordinate_space =
+        CoordinateSpaceTag::surface(Transform::translation(0.25, -0.25).unwrap()).unwrap();
+    let clip = ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::EvenOdd).unwrap())
+        .unwrap()
+        .with_coordinate_space(coordinate_space);
+
+    let mut scene = Scene::new();
+    scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
+        scene.layer(
+            Layer::new()
+                .try_clip_input(clip)
+                .unwrap()
+                .with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(5, 3))),
+            |scene| {
+                scene.fill(Rect::new(-3.0, -2.0, 6.0, 4.0), Color::BLACK);
+            },
+        );
+    });
+    (
+        scene.normalize(Capabilities::CURRENT).unwrap(),
+        coordinate_space,
+    )
+}
+
+#[test]
+fn graph_clip_coverage_is_one_vello_capture_of_ordered_render_clips() {
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::TRANSPARENT,
+    )
+    .unwrap();
+    let observed = super::pass::graph_clip_coverage_observation_for_test(
+        c09_ordered_clip_coverage_commands_for_test(),
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+    let authored_transforms = [
+        Transform::translation(0.25, 0.5).unwrap(),
+        Transform::translation(0.5, 0.25).unwrap(),
+        Transform::translation(0.125, 0.25).unwrap(),
+        Transform::translation(0.25, 0.125).unwrap(),
+        Transform::translation(0.125, 0.125).unwrap(),
+    ];
+    let mut accumulated = Transform::identity();
+    let expected_transforms = authored_transforms.map(|transform| {
+        accumulated = transform.then(accumulated).unwrap();
+        accumulated
+    });
+    let ordered_capture = observed.captures.as_slice().first().is_some_and(|capture| {
+        capture.elements.len() == 5
+            && matches!(
+                capture.elements[0].clip.geometry(),
+                command::RenderClipGeometry::Rect(_)
+            )
+            && matches!(
+                capture.elements[1].clip.geometry(),
+                command::RenderClipGeometry::RoundedRect { .. }
+            )
+            && matches!(
+                capture.elements[2].clip.geometry(),
+                command::RenderClipGeometry::Circle { .. }
+            )
+            && matches!(
+                capture.elements[3].clip.geometry(),
+                command::RenderClipGeometry::Ellipse { .. }
+            )
+            && matches!(
+                capture.elements[4].clip.geometry(),
+                command::RenderClipGeometry::Path {
+                    fill_rule: FillRule::EvenOdd,
+                    ..
+                }
+            )
+            && capture
+                .elements
+                .iter()
+                .map(|element| element.transform)
+                .eq(expected_transforms)
+            && capture.uses_coverage_resource_role
+            && capture.uses_rgba8_target
+            && capture.uses_transparent_base
+            && capture.paints_opaque_white
+    });
+
+    assert!(
+        observed.captures.len() == 1
+            && observed.all_vello_capture_count == 2
+            && observed.composite_coverage_read_count == 1
+            && ordered_capture,
+        "graph clips have no bounded Vello coverage capture"
+    );
+}
+
+#[test]
+fn clip_coverage_preserves_fill_rule_antialiasing_and_signed_mapping() {
+    let antialiasing = Antialiasing::Msaa16;
+    let (commands, coordinate_space) = c09_signed_path_clip_coverage_commands_for_test();
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.25,
+        antialiasing,
+        Color::TRANSPARENT,
+    )
+    .unwrap();
+    let observed = super::pass::graph_clip_coverage_observation_for_test(
+        commands,
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+    let expected_texel_origin = Point::new(-2.4, -1.6);
+    let expected_initial_transform = Transform::translation(2.4, 1.6)
+        .unwrap()
+        .then(Transform::scale(1.25, 1.25).unwrap())
+        .unwrap();
+    let expected_effective_transform = coordinate_space
+        .transform()
+        .then(expected_initial_transform)
+        .unwrap();
+    let preserves_geometry_and_grid = observed.captures.as_slice().first().is_some_and(|capture| {
+        capture.elements.as_slice().first().is_some_and(|element| {
+            matches!(
+                element.clip.geometry(),
+                command::RenderClipGeometry::Path {
+                    fill_rule: FillRule::EvenOdd,
+                    ..
+                }
+            ) && element.clip.coordinate_space() == Some(coordinate_space)
+                && element.transform == Transform::identity()
+                && element.effective_transform == expected_effective_transform
+        }) && capture.elements.len() == 1
+            && capture.antialiasing == antialiasing
+            && capture.device_origin == (-3, -2)
+            && capture.target_extent == PhysicalSize::new(5, 3)
+            && capture.texel_origin == expected_texel_origin
+            && capture.raster_scale == 1.25
+            && capture.first_texel_center == Point::new(-2.0, -1.2)
+            && capture.initial_transform == expected_initial_transform
+            && capture.uses_transparent_base
+            && capture.paints_opaque_white
+    });
+
+    assert!(
+        observed.captures.len() == 1 && preserves_geometry_and_grid,
+        "clip coverage differs from authored Vello geometry or grid"
+    );
+}
+
+#[test]
+fn clip_coverage_is_bound_before_mask_and_opacity() {
+    use super::pass::{
+        CompositionOuterOperationObservationForTest as Operation,
+        CompositionReadObservationForTest as Read,
+    };
+
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::TRANSPARENT,
+    )
+    .unwrap();
+    let observed = super::pass::composition_graph_observation_for_test(
+        c09_composition_commands_for_test(),
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+    let expected_reads = [
+        Read::Parent,
+        Read::Source,
+        Read::ClipCoverage,
+        Read::AlphaMask,
+    ];
+    let expected_operations = [
+        Operation::SourceMapping,
+        Operation::ClipCoverage,
+        Operation::AlphaMask,
+        Operation::Opacity,
+        Operation::Blend,
+    ];
+
+    assert!(
+        observed.layers_inner_to_outer.len() == 2
+            && observed.layers_inner_to_outer.iter().all(|layer| {
+                layer.reads == expected_reads && layer.outer_operations == expected_operations
+            }),
+        "clip coverage lost its ordered composite role"
+    );
+}
+
 #[test]
 fn c09_executor_accepts_only_spine_and_ordered_layer_composition() {
     let mut c08_scene = Scene::new();
@@ -11236,7 +11527,12 @@ fn composition_graph_orders_clip_mask_opacity_blend_and_nested_layers() {
             && observed.layers_inner_to_outer[0].has_own_clip
             && observed.layers_inner_to_outer[0].inherited_outer_clip_count == 0
             && observed.layers_inner_to_outer[0].reads
-                == [Read::Parent, Read::Source, Read::AlphaMask]
+                == [
+                    Read::Parent,
+                    Read::Source,
+                    Read::ClipCoverage,
+                    Read::AlphaMask
+                ]
             && observed.layers_inner_to_outer[0].outer_operations == expected_operations
             && observed.layers_inner_to_outer[0].source_captured_before_outer_semantics
             && observed.layers_inner_to_outer[1].transform == expected_outer_transform
@@ -11247,7 +11543,12 @@ fn composition_graph_orders_clip_mask_opacity_blend_and_nested_layers() {
             && observed.layers_inner_to_outer[1].inherited_outer_clip_transforms
                 == [outer_clip_transform, inherited_inner_clip_transform]
             && observed.layers_inner_to_outer[1].reads
-                == [Read::Parent, Read::Source, Read::AlphaMask]
+                == [
+                    Read::Parent,
+                    Read::Source,
+                    Read::ClipCoverage,
+                    Read::AlphaMask
+                ]
             && observed.layers_inner_to_outer[1].outer_operations == expected_operations
             && observed.layers_inner_to_outer[1].source_captured_before_outer_semantics
             && observed.mask_identity_is_preserved,

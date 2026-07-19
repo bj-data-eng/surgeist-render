@@ -1304,6 +1304,7 @@ impl SemanticPassId {
 enum SemanticResourceRole {
     RootWorkingImage,
     CaptureWorkingImage,
+    ClipCoverage,
     IsolationWorkingImage,
     ImportedImage,
     BackdropCopy,
@@ -1509,6 +1510,13 @@ struct SemanticVelloSpan {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+struct SemanticClipCoverage {
+    capture_pass: SemanticPassId,
+    elements: Vec<SemanticOuterClip>,
+    antialiasing: Antialiasing,
+}
+
+#[derive(Clone, Debug, PartialEq)]
 enum SemanticCompositeKind {
     SpanSourceOver,
     Layer {
@@ -1564,6 +1572,7 @@ pub(crate) struct GpuRenderGraph {
     final_present: SemanticPassId,
     selection_requirements: Vec<GraphSelectionRequirement>,
     vello_spans: Vec<SemanticVelloSpan>,
+    clip_coverages: Vec<SemanticClipCoverage>,
     composites: Vec<SemanticCompositePlan>,
     filter_steps: Vec<SemanticFilterStepPlan>,
     backdrop_reads: Vec<SemanticBackdropRead>,
@@ -1613,6 +1622,7 @@ impl GraphLoweringPassId {
 pub(crate) enum GraphLoweringResourceRole {
     RootWorkingImage,
     CaptureWorkingImage,
+    ClipCoverage,
     IsolationWorkingImage,
     ImportedImage,
     BackdropCopy,
@@ -1626,6 +1636,7 @@ impl GraphLoweringResourceRole {
         match role {
             SemanticResourceRole::RootWorkingImage => Self::RootWorkingImage,
             SemanticResourceRole::CaptureWorkingImage => Self::CaptureWorkingImage,
+            SemanticResourceRole::ClipCoverage => Self::ClipCoverage,
             SemanticResourceRole::IsolationWorkingImage => Self::IsolationWorkingImage,
             SemanticResourceRole::ImportedImage => Self::ImportedImage,
             SemanticResourceRole::BackdropCopy => Self::BackdropCopy,
@@ -1804,6 +1815,48 @@ impl GraphLoweringVelloSpan {
     pub(crate) const fn captured_before_outer_semantics(&self) -> bool {
         self.captured_before_outer_semantics
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GraphLoweringClipCoverageElement {
+    clip: RenderClip,
+    transform: Transform,
+}
+
+impl GraphLoweringClipCoverageElement {
+    #[must_use]
+    pub(crate) const fn clip(&self) -> &RenderClip {
+        &self.clip
+    }
+
+    #[must_use]
+    pub(crate) const fn transform(&self) -> Transform {
+        self.transform
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct GraphLoweringClipCoverage {
+    elements: Vec<GraphLoweringClipCoverageElement>,
+    antialiasing: Antialiasing,
+}
+
+impl GraphLoweringClipCoverage {
+    #[must_use]
+    pub(crate) fn elements(&self) -> &[GraphLoweringClipCoverageElement] {
+        &self.elements
+    }
+
+    #[must_use]
+    pub(crate) const fn antialiasing(&self) -> Antialiasing {
+        self.antialiasing
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum GraphLoweringVelloCapture {
+    Span(GraphLoweringVelloSpan),
+    ClipCoverage(GraphLoweringClipCoverage),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2032,7 +2085,7 @@ pub(crate) enum GraphLoweringPassKind {
         initialization: GraphLoweringInitialization,
         color: Color,
     },
-    VelloCapture(Option<GraphLoweringVelloSpan>),
+    VelloCapture(Option<GraphLoweringVelloCapture>),
     CanonicalizeCapture,
     CopyBackdrop,
     ColorFilter(Option<GraphLoweringColorFilter>),
@@ -2051,6 +2104,7 @@ pub(crate) enum GraphLoweringReadRole {
     BlurredSourceAlpha,
     CompositeParent,
     CompositeSource,
+    ClipCoverage,
     AlphaMask,
     Shadow,
     FinalWorkingImage,
@@ -2525,6 +2579,7 @@ impl SemanticGraphBuilder {
                         !matches!(
                             resource.descriptor.role,
                             SemanticResourceRole::CaptureWorkingImage
+                                | SemanticResourceRole::ClipCoverage
                                 | SemanticResourceRole::IsolationWorkingImage
                         )
                     }) {
@@ -2822,6 +2877,7 @@ impl SemanticGraphBuilder {
             final_present,
             selection_requirements: Vec::new(),
             vello_spans: Vec::new(),
+            clip_coverages: Vec::new(),
             composites: Vec::new(),
             filter_steps: Vec::new(),
             backdrop_reads: Vec::new(),
@@ -2958,6 +3014,7 @@ struct SemanticFrameGraphPlanner {
     builder: SemanticGraphBuilder,
     selection_requirements: Vec<GraphSelectionRequirement>,
     vello_spans: Vec<SemanticVelloSpan>,
+    clip_coverages: Vec<SemanticClipCoverage>,
     composites: Vec<SemanticCompositePlan>,
     filter_steps: Vec<SemanticFilterStepPlan>,
     backdrop_reads: Vec<SemanticBackdropRead>,
@@ -2997,6 +3054,7 @@ impl SemanticFrameGraphPlanner {
             builder: graph_build(SemanticGraphBuilder::for_frame_plan())?,
             selection_requirements,
             vello_spans: Vec::new(),
+            clip_coverages: Vec::new(),
             composites: Vec::new(),
             filter_steps: Vec::new(),
             backdrop_reads: Vec::new(),
@@ -3065,6 +3123,7 @@ impl SemanticFrameGraphPlanner {
         let mut graph = graph_build(planner.builder.finish())?;
         graph.selection_requirements = planner.selection_requirements;
         graph.vello_spans = planner.vello_spans;
+        graph.clip_coverages = planner.clip_coverages;
         graph.composites = planner.composites;
         graph.filter_steps = planner.filter_steps;
         graph.backdrop_reads = planner.backdrop_reads;
@@ -3627,17 +3686,93 @@ impl SemanticFrameGraphPlanner {
         })
     }
 
+    fn declare_clip_coverage(
+        &mut self,
+        spatial: NonEmptyFrameSpatialPlan,
+        elements: Vec<SemanticOuterClip>,
+    ) -> Result<PlannedGraphResource> {
+        if elements.is_empty() {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "clip coverage requires at least one ordered RenderClip",
+            ));
+        }
+        let resource = graph_build(self.builder.declare_resource(
+            SemanticResourceDescriptor::new(SemanticResourceRole::ClipCoverage, spatial, 0),
+        ))?;
+        let capture_pass = graph_build(self.builder.declare_pass(
+            SemanticPassIntent::VelloCapture {
+                initialization: WorkingImageInitialization::Transparent,
+            },
+            Vec::new(),
+            Vec::new(),
+            SemanticPassResult::Resource(resource),
+        ))?;
+        self.clip_coverages.push(SemanticClipCoverage {
+            capture_pass,
+            elements,
+            antialiasing: self.context.antialiasing,
+        });
+        Ok(PlannedGraphResource {
+            id: resource,
+            producer: Some(capture_pass),
+            logical_bounds: spatial.logical_bounds,
+            spatial,
+        })
+    }
+
     fn composite_into_parent(
         &mut self,
         parent: PlannedGraphParent,
         source: PlannedGraphResource,
         additional_sources: &[PlannedGraphResource],
-        kind: SemanticCompositeKind,
+        mut kind: SemanticCompositeKind,
         source_captured_before_outer_semantics: bool,
     ) -> Result<PlannedGraphParent> {
-        let mut sources = Vec::with_capacity(additional_sources.len() + 2);
+        let clip_elements = match &kind {
+            SemanticCompositeKind::Layer {
+                transform,
+                clip,
+                outer_clips,
+                clip_coverage,
+                ..
+            } => {
+                if clip_coverage.is_some() {
+                    return Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "clip coverage must be owned by graph composition planning",
+                    ));
+                }
+                let mut elements = outer_clips.clone();
+                if let Some(clip) = clip {
+                    elements.push(SemanticOuterClip {
+                        clip: (**clip).clone(),
+                        transform: *transform,
+                    });
+                }
+                elements
+            }
+            SemanticCompositeKind::SpanSourceOver | SemanticCompositeKind::DropShadow => Vec::new(),
+        };
+        let clip_coverage = if clip_elements.is_empty() {
+            None
+        } else {
+            Some(self.declare_clip_coverage(parent.spatial, clip_elements)?)
+        };
+        if let SemanticCompositeKind::Layer {
+            clip_coverage: coverage,
+            ..
+        } = &mut kind
+        {
+            *coverage = clip_coverage.map(|resource| resource.id);
+        }
+
+        let mut sources = Vec::with_capacity(additional_sources.len() + 3);
         sources.push(parent.current);
         sources.push(source);
+        if let Some(coverage) = clip_coverage {
+            sources.push(coverage);
+        }
         sources.extend_from_slice(additional_sources);
         let resource = graph_build(self.builder.declare_resource(
             SemanticResourceDescriptor::new(
@@ -3753,6 +3888,52 @@ fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()>
             })
             .count();
         if canonical_consumers != 1 {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        }
+    }
+    for coverage in &graph.clip_coverages {
+        let pass = graph
+            .passes
+            .iter()
+            .find(|pass| pass.id == coverage.capture_pass)
+            .ok_or(GraphValidationError::UnknownPass(coverage.capture_pass))?;
+        let SemanticPassResult::Resource(capture) = pass.result else {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        };
+        let resource = graph
+            .resources
+            .iter()
+            .find(|resource| resource.id == capture)
+            .ok_or(GraphValidationError::UnknownResource(capture))?;
+        if !matches!(
+            pass.intent,
+            SemanticPassIntent::VelloCapture {
+                initialization: WorkingImageInitialization::Transparent
+            }
+        ) || !pass.reads.is_empty()
+            || resource.descriptor.role != SemanticResourceRole::ClipCoverage
+            || coverage.elements.is_empty()
+        {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        }
+        let composite_consumers = graph
+            .composites
+            .iter()
+            .filter(|composite| {
+                matches!(
+                    &composite.kind,
+                    SemanticCompositeKind::Layer {
+                        clip_coverage: Some(resource),
+                        ..
+                    } if *resource == capture
+                ) && graph
+                    .passes
+                    .iter()
+                    .find(|candidate| candidate.id == composite.pass)
+                    .is_some_and(|candidate| candidate.reads.contains(&capture))
+            })
+            .count();
+        if composite_consumers != 1 {
             return Err(GraphValidationError::InvalidCaptureResult);
         }
     }
@@ -4036,16 +4217,28 @@ fn graph_lowering_pass_kind(
                 .iter()
                 .filter(|span| span.capture_pass == pass.id)
                 .collect::<Vec<_>>();
-            let span = match pass.result {
-                SemanticPassResult::Empty if spans.is_empty() => None,
-                SemanticPassResult::Resource(_) if spans.len() == 1 => {
-                    Some(graph_lowering_vello_span(spans[0]))
+            let coverages = graph
+                .clip_coverages
+                .iter()
+                .filter(|coverage| coverage.capture_pass == pass.id)
+                .collect::<Vec<_>>();
+            let work = match pass.result {
+                SemanticPassResult::Empty if spans.is_empty() && coverages.is_empty() => None,
+                SemanticPassResult::Resource(_) if spans.len() == 1 && coverages.is_empty() => {
+                    Some(GraphLoweringVelloCapture::Span(graph_lowering_vello_span(
+                        spans[0],
+                    )))
+                }
+                SemanticPassResult::Resource(_) if spans.is_empty() && coverages.len() == 1 => {
+                    Some(GraphLoweringVelloCapture::ClipCoverage(
+                        graph_lowering_clip_coverage(coverages[0]),
+                    ))
                 }
                 SemanticPassResult::Empty | SemanticPassResult::Resource(_) => {
                     return Err(GraphValidationError::InvalidCaptureResult);
                 }
             };
-            Ok(GraphLoweringPassKind::VelloCapture(span))
+            Ok(GraphLoweringPassKind::VelloCapture(work))
         }
         SemanticPassIntent::CanonicalizeCapture => {
             reject_unexpected_filter_metadata(graph, pass.id)?;
@@ -4171,6 +4364,20 @@ fn graph_lowering_vello_span(span: &SemanticVelloSpan) -> GraphLoweringVelloSpan
         parent_to_surface: span.parent_to_surface,
         antialiasing: span.antialiasing,
         captured_before_outer_semantics: span.captured_before_outer_semantics,
+    }
+}
+
+fn graph_lowering_clip_coverage(coverage: &SemanticClipCoverage) -> GraphLoweringClipCoverage {
+    GraphLoweringClipCoverage {
+        elements: coverage
+            .elements
+            .iter()
+            .map(|element| GraphLoweringClipCoverageElement {
+                clip: element.clip.clone(),
+                transform: element.transform,
+            })
+            .collect(),
+        antialiasing: coverage.antialiasing,
     }
 }
 
@@ -4440,12 +4647,23 @@ fn graph_lowering_read_bindings(
                         GraphLoweringSamplingEdge::TransparentBlack,
                     )?,
                 ];
-                if clip_coverage.is_some() {
-                    return Err(GraphValidationError::InvalidPassArity);
+                let mut next_read = 2;
+                if let Some(clip_coverage) = clip_coverage {
+                    let binding = make(
+                        next_read,
+                        GraphLoweringReadRole::ClipCoverage,
+                        GraphLoweringSamplingFilter::Linear,
+                        GraphLoweringSamplingEdge::TransparentBlack,
+                    )?;
+                    if binding.resource != *clip_coverage {
+                        return Err(GraphValidationError::InvalidPassArity);
+                    }
+                    bindings.push(binding);
+                    next_read += 1;
                 }
                 if let Some(alpha_mask) = alpha_mask {
                     let binding = make(
-                        2,
+                        next_read,
                         GraphLoweringReadRole::AlphaMask,
                         GraphLoweringSamplingFilter::ImportedMask,
                         GraphLoweringSamplingEdge::ClampToExtent,

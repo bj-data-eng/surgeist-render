@@ -1,8 +1,8 @@
 use super::{
     command::{
-        LayerIsolation, NormalizedLayer, RenderClipGeometry, RenderCommand, RenderCommands,
-        RenderPaint, RenderShadow, RenderShape, RenderStroke, RenderStrokeShape, ShadowShape,
-        kurbo_rounded_rect,
+        LayerIsolation, NormalizedLayer, RenderClip, RenderClipGeometry, RenderCommand,
+        RenderCommands, RenderPaint, RenderShadow, RenderShape, RenderStroke, RenderStrokeShape,
+        ShadowShape, kurbo_rounded_rect,
     },
     geometry::{expand_rect, offset_radii},
     paint::PaintKind,
@@ -25,6 +25,106 @@ pub(crate) fn encode_vello_scene_with_initial_transform(
         kurbo::Affine::from(initial_transform),
     )?;
     Ok(encoded)
+}
+
+pub(crate) fn encode_vello_clip_coverage_scene(
+    elements: &[(RenderClip, Transform)],
+    initial_transform: Transform,
+    target_extent: PhysicalSize,
+) -> Result<VelloScene> {
+    if elements.is_empty() {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "Vello clip coverage requires at least one ordered RenderClip",
+        ));
+    }
+    if target_extent.width() == 0 || target_extent.height() == 0 {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "Vello clip coverage requires a positive bounded extent",
+        ));
+    }
+
+    let mut scene = VelloScene::default();
+    for (clip, transform) in elements {
+        push_vello_clip(
+            &mut scene,
+            clip,
+            clip_coverage_transform(clip, *transform, initial_transform)?,
+        );
+    }
+    scene.fill(
+        peniko::Fill::NonZero,
+        kurbo::Affine::IDENTITY,
+        peniko::Color::WHITE,
+        None,
+        &kurbo::Rect::new(
+            0.0,
+            0.0,
+            f64::from(target_extent.width()),
+            f64::from(target_extent.height()),
+        ),
+    );
+    for _ in elements {
+        scene.pop_layer();
+    }
+    Ok(scene)
+}
+
+fn clip_coverage_transform(
+    clip: &RenderClip,
+    transform: Transform,
+    initial_transform: Transform,
+) -> Result<Transform> {
+    clip.coordinate_space()
+        .map(|coordinate_space| coordinate_space.transform())
+        .unwrap_or_else(Transform::identity)
+        .then(transform)?
+        .then(initial_transform)
+}
+
+fn push_vello_clip(scene: &mut VelloScene, clip: &RenderClip, transform: Transform) {
+    let transform = kurbo::Affine::from(transform);
+    match clip.geometry() {
+        RenderClipGeometry::Rect(rect) => {
+            scene.push_clip_layer(peniko::Fill::NonZero, transform, &kurbo::Rect::from(*rect))
+        }
+        RenderClipGeometry::RoundedRect { rect, radii } => scene.push_clip_layer(
+            peniko::Fill::NonZero,
+            transform,
+            &kurbo_rounded_rect(*rect, *radii),
+        ),
+        RenderClipGeometry::Circle { center, radius } => scene.push_clip_layer(
+            peniko::Fill::NonZero,
+            transform,
+            &kurbo::Circle::new((center.x(), center.y()), *radius),
+        ),
+        RenderClipGeometry::Ellipse { center, radii } => scene.push_clip_layer(
+            peniko::Fill::NonZero,
+            transform,
+            &kurbo::Ellipse::new(
+                (center.x(), center.y()),
+                (radii.width(), radii.height()),
+                0.0,
+            ),
+        ),
+        RenderClipGeometry::Path { path, fill_rule } => {
+            scene.push_clip_layer(vello_fill_rule(*fill_rule), transform, &path.to_kurbo())
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn clip_coverage_effective_transforms_for_test(
+    elements: &[(RenderClip, Transform)],
+    initial_transform: Transform,
+    target_extent: PhysicalSize,
+) -> Result<Vec<Transform>> {
+    let _scene = encode_vello_clip_coverage_scene(elements, initial_transform, target_extent)?;
+    elements
+        .iter()
+        .map(|(clip, transform)| clip_coverage_transform(clip, *transform, initial_transform))
+        .collect()
 }
 
 fn encode_vello_commands(
