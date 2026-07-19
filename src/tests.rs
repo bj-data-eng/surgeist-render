@@ -12504,12 +12504,17 @@ fn c09_selected_backend_and_requests_for_test() -> (
 #[test]
 fn c09_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
     let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
-    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
-        identity,
-        c09_composition_commands_for_test(),
-        c09_composition_frame_context_for_test(),
-    ))
-    .expect("the C09 graph must reach its checked one-shot encoding observation");
+    let observed =
+        match pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+            identity,
+            c09_composition_commands_for_test(),
+            c09_composition_frame_context_for_test(),
+        )) {
+            Ok(observed) => observed,
+            Err(error) => panic!(
+                "the C09 graph must reach its checked one-shot encoding observation: {error:?}"
+            ),
+        };
 
     assert!(
         observed.encodes_clip_mask_opacity_and_blend_in_authored_order,
@@ -12520,12 +12525,17 @@ fn c09_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
 #[test]
 fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
     let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
-    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
-        identity,
-        c09_shader_composite_commands_for_test(BlendMode::Normal, true, true),
-        c09_composition_frame_context_for_test(),
-    ))
-    .expect("normal composition must reach its checked one-shot encoding observation");
+    let observed =
+        match pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+            identity,
+            c09_shader_composite_commands_for_test(BlendMode::Normal, true, true),
+            c09_composition_frame_context_for_test(),
+        )) {
+            Ok(observed) => observed,
+            Err(error) => panic!(
+                "normal composition must reach its checked one-shot encoding observation: {error:?}"
+            ),
+        };
 
     assert!(
         observed.normal_uses_fixed_premultiplied_blend && observed.normal_omits_parent_sample,
@@ -12536,12 +12546,18 @@ fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
 #[test]
 fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
     let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
-    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
-        identity,
-        c09_shader_composite_commands_for_test(BlendMode::Multiply, true, true),
-        c09_composition_frame_context_for_test(),
-    ))
-    .expect("destination sampling must reach its checked one-shot encoding observation");
+    let observed = match pollster::block_on(
+        backend.c09_ordered_graph_encoding_observation_for_test(
+            identity,
+            c09_shader_composite_commands_for_test(BlendMode::Multiply, true, true),
+            c09_composition_frame_context_for_test(),
+        ),
+    ) {
+        Ok(observed) => observed,
+        Err(error) => panic!(
+            "destination sampling must reach its checked one-shot encoding observation: {error:?}"
+        ),
+    };
 
     assert!(
         observed.destination_copies_full_parent && observed.destination_avoids_read_write_alias,
@@ -12553,12 +12569,18 @@ fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
 fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
     let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
-        identity,
-        c09_composition_commands_for_test(),
-        c09_composition_frame_context_for_test(),
-    ))
-    .expect("multiple composites must reach their checked one-shot encoding observation");
+    let observed = match pollster::block_on(
+        backend.c09_ordered_graph_encoding_observation_for_test(
+            identity,
+            c09_composition_commands_for_test(),
+            c09_composition_frame_context_for_test(),
+        ),
+    ) {
+        Ok(observed) => observed,
+        Err(error) => panic!(
+            "multiple composites must reach their checked one-shot encoding observation: {error:?}"
+        ),
+    };
     let submission = submission_scope.observation_for_test();
 
     assert!(
