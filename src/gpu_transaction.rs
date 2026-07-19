@@ -631,6 +631,7 @@ struct C08GraphSubmissionObservationStateForTest {
     transaction_generation: Option<u64>,
     active_generation: Option<u64>,
     capture_lease_count: usize,
+    prepared_frame_resource_identities: Vec<super::resource::ResourceIdentity>,
     scopes_resolved: bool,
     #[cfg(any(
         feature = "render-window",
@@ -668,6 +669,7 @@ impl C08GraphSubmissionObservationForTest {
         transaction_generation: u64,
         active_generation: Option<u64>,
         capture_lease_count: usize,
+        prepared_frame_resource_identities: Vec<super::resource::ResourceIdentity>,
     ) {
         let mut state = self
             .state
@@ -677,6 +679,7 @@ impl C08GraphSubmissionObservationForTest {
         state.transaction_generation = Some(transaction_generation);
         state.active_generation = active_generation;
         state.capture_lease_count = capture_lease_count;
+        state.prepared_frame_resource_identities = prepared_frame_resource_identities;
     }
 
     fn record_scope_resolution(&self) {
@@ -744,6 +747,16 @@ impl C08GraphSubmissionObservationForTest {
             .lock()
             .expect("C08 graph submission observation must remain available")
             .capture_lease_count
+    }
+
+    pub(crate) fn prepared_frame_resource_identities_for_test(
+        &self,
+    ) -> Vec<super::resource::ResourceIdentity> {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .prepared_frame_resource_identities
+            .clone()
     }
 
     pub(crate) fn scopes_resolved_for_test(&self) -> bool {
@@ -837,6 +850,7 @@ fn record_active_c08_graph_submission_for_test(
     transaction_generation: u64,
     active_generation: Option<u64>,
     capture_lease_count: usize,
+    prepared_frame_resource_identities: Vec<super::resource::ResourceIdentity>,
 ) -> Option<C08GraphSubmissionObservationForTest> {
     ACTIVE_C08_GRAPH_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
         active.borrow().as_ref().map(|observation| {
@@ -844,6 +858,7 @@ fn record_active_c08_graph_submission_for_test(
                 transaction_generation,
                 active_generation,
                 capture_lease_count,
+                prepared_frame_resource_identities,
             );
             observation.clone()
         })
@@ -1580,6 +1595,8 @@ impl GpuOperationTransaction {
         } = payload;
         #[cfg(test)]
         let capture_lease_count = capture_resources.lease_count_for_test();
+        #[cfg(test)]
+        let prepared_frame_resource_identities = prepared_frame.resource_identities_for_test();
         queue.submit([command_buffer]);
         #[cfg(test)]
         let generic_submission_observation = record_active_gpu_operation_submission_for_test(
@@ -1592,6 +1609,7 @@ impl GpuOperationTransaction {
             self.lease.generation(),
             self.lease.active_generation_for_test(),
             capture_lease_count,
+            prepared_frame_resource_identities,
         );
         #[cfg(test)]
         let control =

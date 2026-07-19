@@ -2996,6 +2996,11 @@ impl PendingC08PreparedFrameCommit {
         self.pass_cache_update.commit(pass_cache)?;
         Ok(self.frame_scope.finish())
     }
+
+    #[cfg(test)]
+    pub(crate) fn resource_identities_for_test(&self) -> Vec<ResourceIdentity> {
+        self.frame_scope.leased_resource_identities_for_test()
+    }
 }
 
 #[must_use = "C08 graph submission state must remain owned by one transaction payload"]
@@ -3368,6 +3373,9 @@ impl<'device> PreparedGraph<'device> {
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
 
         let mut frame_scope = resources.begin_frame()?;
+        if c08_execution.is_some() {
+            frame_scope.discard_on_drop();
+        }
         let mut resource_bindings = BTreeMap::new();
         for request in &plan.resources {
             let lease =

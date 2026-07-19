@@ -1,10 +1,10 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::gpu_transaction::GpuOperationSubmissionObservationForTest;
 use super::gpu_transaction::{
-    GpuOperationLease, GpuOperationStage, ScopedC08GraphPostSubmitControlForTest,
-    ScopedC08GraphSubmissionObservationForTest, ScopedGpuOperationPostSubmitCheckpointForTest,
-    ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
-    ScopedInternalVelloSubmissionObservationForTest,
+    C08GraphResourceRetentionForTest, GpuOperationLease, GpuOperationStage,
+    ScopedC08GraphPostSubmitControlForTest, ScopedC08GraphSubmissionObservationForTest,
+    ScopedGpuOperationPostSubmitCheckpointForTest, ScopedGpuOperationSubmissionObservationForTest,
+    ScopedInternalVelloPostSubmitControlForTest, ScopedInternalVelloSubmissionObservationForTest,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use super::readback::{
@@ -24920,6 +24920,432 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         error,
         RuntimeOperation::SurfaceReadback,
         RenderSurfaceAvailability::Uninitialized,
+    );
+}
+
+#[test]
+fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("post-submit C08 abort coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
+        .expect("post-submit C08 abort coverage requires a headless surface");
+    let mut baseline_scene = Scene::new();
+    baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
+        .expect("the direct baseline frame must publish before C08 abort coverage");
+    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the direct baseline publication must be readable");
+    let baseline_stats = renderer.stats();
+    let baseline_parameters = surface.last_parameters;
+    let baseline_uploaded_images = renderer.uploaded_images_for_test();
+    let baseline_publication_count = surface.headless_publication_count_for_test();
+    let baseline_cache = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the direct baseline must retain a ready device")
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the direct baseline must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+
+    let mut replacement = Scene::new();
+    replacement.fill(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    let replacement_parameters = Parameters {
+        base_color: Color::TRANSPARENT,
+        debug: true,
+    };
+    let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let generic_submission = generic_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &replacement,
+        replacement_parameters,
+        working_format,
+    ))
+    .expect_err("the injected post-submit scope failure must abort the C08 frame");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    drop(failure);
+
+    let aborted_prepared_identities =
+        graph_submission.prepared_frame_resource_identities_for_test();
+    assert!(
+        !aborted_prepared_identities.is_empty(),
+        "the real C08 submission must identify every prepared-frame resource"
+    );
+    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(
+        generic_submission.readback_queue_submission_count_for_test(),
+        0
+    );
+    assert!(generic_submission.scopes_resolved_for_test());
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.headless_draft_released_for_test());
+    assert_eq!(renderer.stats(), baseline_stats);
+    assert_eq!(surface.last_parameters, baseline_parameters);
+    assert_eq!(
+        renderer.uploaded_images_for_test(),
+        baseline_uploaded_images
+    );
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count
+    );
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the scoped failure must retain the ready device")
+            .device_pass_cache_counts_for_test(),
+        baseline_cache
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+    let resources_after_failure = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the scoped failure must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_failure.active_frame_count, 0);
+    assert_eq!(resources_after_failure.resolved_lease_count, 0);
+    assert_eq!(resources_after_failure.leased_count, 0);
+    assert_eq!(
+        resources_after_failure.retained_bytes,
+        resources_after_failure.accounted_entry_bytes
+    );
+    let retained_aborted_identities = aborted_prepared_identities
+        .iter()
+        .filter(|identity| {
+            resources_after_failure
+                .entry_identities_for_test()
+                .contains(identity)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        retained_aborted_identities.is_empty(),
+        "submitted-but-uncertain C08 prepared resources remained reusable after post-submit scope failure: {retained_aborted_identities:?}"
+    );
+    assert!(
+        resources_after_failure
+            .lifecycle_stats_for_test()
+            .evictions
+            .saturating_sub(resources_before.lifecycle_stats_for_test().evictions)
+            >= aborted_prepared_identities.len() as u64,
+        "prepared-frame abort must record every discarded resource as an eviction"
+    );
+    drop(graph_scope);
+    drop(generic_scope);
+    assert_eq!(
+        pollster::block_on(renderer.read_headless(&surface))
+            .expect("the failed graph must preserve the direct baseline publication")
+            .rgba(),
+        baseline_pixels.rgba()
+    );
+
+    let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let retry_generic_submission = retry_generic_scope.observation_for_test();
+    let retry_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let retry_graph_submission = retry_graph_scope.observation_for_test();
+    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &replacement,
+        replacement_parameters,
+        working_format,
+    ))
+    .expect("a clean C08 retry must succeed after prepared-frame abort");
+    let retry_prepared_identities =
+        retry_graph_submission.prepared_frame_resource_identities_for_test();
+    assert_eq!(
+        retry_generic_submission.queue_submission_count_for_test(),
+        1
+    );
+    assert_eq!(
+        retry_generic_submission.readback_queue_submission_count_for_test(),
+        0
+    );
+    assert_eq!(retry_graph_submission.queue_submission_count_for_test(), 1);
+    assert!(retry_graph_submission.scopes_resolved_for_test());
+    assert!(retry_graph_submission.prepared_frame_committed_for_test());
+    assert!(retry_graph_submission.capture_resources_committed_for_test());
+    assert!(retry_graph_submission.headless_draft_released_for_test());
+    assert_eq!(
+        retry_graph_submission.resource_retention_for_test(),
+        Some(C08GraphResourceRetentionForTest::RetainedReusable)
+    );
+    assert!(
+        retry_prepared_identities
+            .iter()
+            .all(|identity| !aborted_prepared_identities.contains(identity)),
+        "a clean retry must allocate fresh prepared-frame identities after uncertainty"
+    );
+    let resources_after_retry = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the clean retry must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_retry.active_frame_count, 0);
+    assert_eq!(resources_after_retry.resolved_lease_count, 0);
+    assert_eq!(resources_after_retry.leased_count, 0);
+    assert_eq!(
+        resources_after_retry.retained_bytes,
+        resources_after_retry.accounted_entry_bytes
+    );
+    assert!(retry_prepared_identities.iter().all(|identity| {
+        resources_after_retry
+            .entry_identities_for_test()
+            .contains(identity)
+    }));
+    assert_ne!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the clean retry must retain its committed pass cache")
+            .device_pass_cache_counts_for_test(),
+        baseline_cache
+    );
+    assert_eq!(renderer.stats(), retry.stats);
+    assert_eq!(surface.last_parameters, Some(replacement_parameters));
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count + 1
+    );
+    drop(retry_graph_scope);
+    drop(retry_generic_scope);
+    assert_ne!(
+        pollster::block_on(renderer.read_headless(&surface))
+            .expect("the clean C08 retry publication must be readable")
+            .rgba(),
+        baseline_pixels.rgba()
+    );
+}
+
+#[test]
+fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_fresh() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("submitted C08 cancellation coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
+        .expect("submitted C08 cancellation coverage requires a headless surface");
+    let mut baseline_scene = Scene::new();
+    baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
+        .expect("the direct baseline frame must publish before cancellation coverage");
+    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the cancellation baseline publication must be readable");
+    let baseline_stats = renderer.stats();
+    let baseline_parameters = surface.last_parameters;
+    let baseline_uploaded_images = renderer.uploaded_images_for_test();
+    let baseline_publication_count = surface.headless_publication_count_for_test();
+    let baseline_cache = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the cancellation baseline must retain a ready device")
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the cancellation baseline must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+
+    let mut replacement = Scene::new();
+    replacement.fill(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    let replacement_parameters = Parameters {
+        base_color: Color::TRANSPARENT,
+        debug: true,
+    };
+    let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let generic_submission = generic_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    {
+        let future = renderer.render_forced_c08_graph_for_test(
+            &mut surface,
+            &replacement,
+            replacement_parameters,
+            working_format,
+        );
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        pause.wait_for_submission_for_test(Duration::from_secs(2));
+        assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
+        assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    }
+    drop(pause);
+
+    let canceled_prepared_identities =
+        graph_submission.prepared_frame_resource_identities_for_test();
+    assert!(
+        !canceled_prepared_identities.is_empty(),
+        "the real submitted C08 frame must identify every prepared-frame resource"
+    );
+    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(
+        generic_submission.readback_queue_submission_count_for_test(),
+        0
+    );
+    assert!(!generic_submission.scopes_resolved_for_test());
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(!graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.headless_draft_released_for_test());
+    assert_eq!(renderer.stats(), baseline_stats);
+    assert_eq!(surface.last_parameters, baseline_parameters);
+    assert_eq!(
+        renderer.uploaded_images_for_test(),
+        baseline_uploaded_images
+    );
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count
+    );
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the canceled frame must retain the ready device")
+            .device_pass_cache_counts_for_test(),
+        baseline_cache
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+    let resources_after_cancellation = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the canceled frame must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_cancellation.active_frame_count, 0);
+    assert_eq!(resources_after_cancellation.resolved_lease_count, 0);
+    assert_eq!(resources_after_cancellation.leased_count, 0);
+    assert_eq!(
+        resources_after_cancellation.retained_bytes,
+        resources_after_cancellation.accounted_entry_bytes
+    );
+    let retained_canceled_identities = canceled_prepared_identities
+        .iter()
+        .filter(|identity| {
+            resources_after_cancellation
+                .entry_identities_for_test()
+                .contains(identity)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        retained_canceled_identities.is_empty(),
+        "canceled submitted C08 prepared resources remained reusable: {retained_canceled_identities:?}"
+    );
+    assert!(
+        resources_after_cancellation
+            .lifecycle_stats_for_test()
+            .evictions
+            .saturating_sub(resources_before.lifecycle_stats_for_test().evictions)
+            >= canceled_prepared_identities.len() as u64,
+        "cancellation abort must record every discarded resource as an eviction"
+    );
+    drop(graph_scope);
+    drop(generic_scope);
+    assert_eq!(
+        pollster::block_on(renderer.read_headless(&surface))
+            .expect("the canceled graph must preserve the baseline publication")
+            .rgba(),
+        baseline_pixels.rgba()
+    );
+
+    let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let retry_generic_submission = retry_generic_scope.observation_for_test();
+    let retry_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let retry_graph_submission = retry_graph_scope.observation_for_test();
+    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &replacement,
+        replacement_parameters,
+        working_format,
+    ))
+    .expect("a clean C08 retry must succeed after submitted cancellation");
+    let retry_prepared_identities =
+        retry_graph_submission.prepared_frame_resource_identities_for_test();
+    assert_eq!(
+        retry_generic_submission.queue_submission_count_for_test(),
+        1
+    );
+    assert_eq!(
+        retry_generic_submission.readback_queue_submission_count_for_test(),
+        0
+    );
+    assert_eq!(retry_graph_submission.queue_submission_count_for_test(), 1);
+    assert!(retry_graph_submission.scopes_resolved_for_test());
+    assert!(retry_graph_submission.prepared_frame_committed_for_test());
+    assert!(retry_graph_submission.capture_resources_committed_for_test());
+    assert!(retry_graph_submission.headless_draft_released_for_test());
+    assert_eq!(
+        retry_graph_submission.resource_retention_for_test(),
+        Some(C08GraphResourceRetentionForTest::RetainedReusable)
+    );
+    assert!(
+        retry_prepared_identities
+            .iter()
+            .all(|identity| !canceled_prepared_identities.contains(identity)),
+        "the frame after submitted cancellation must receive fresh prepared-resource identities"
+    );
+    let resources_after_retry = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the clean retry must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_retry.active_frame_count, 0);
+    assert_eq!(resources_after_retry.resolved_lease_count, 0);
+    assert_eq!(resources_after_retry.leased_count, 0);
+    assert_eq!(
+        resources_after_retry.retained_bytes,
+        resources_after_retry.accounted_entry_bytes
+    );
+    assert!(retry_prepared_identities.iter().all(|identity| {
+        resources_after_retry
+            .entry_identities_for_test()
+            .contains(identity)
+    }));
+    assert_ne!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the clean retry must retain its committed pass cache")
+            .device_pass_cache_counts_for_test(),
+        baseline_cache
+    );
+    assert_eq!(renderer.stats(), retry.stats);
+    assert_eq!(surface.last_parameters, Some(replacement_parameters));
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count + 1
+    );
+    drop(retry_graph_scope);
+    drop(retry_generic_scope);
+    assert_ne!(
+        pollster::block_on(renderer.read_headless(&surface))
+            .expect("the clean retry publication must be readable")
+            .rgba(),
+        baseline_pixels.rgba()
     );
 }
 

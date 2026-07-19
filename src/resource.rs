@@ -1002,6 +1002,54 @@ impl ResourceManagerState {
         self.trim_idle()
     }
 
+    fn discard_frame(
+        &mut self,
+        manager_identity: &ManagerIdentity,
+        frame: FrameIdentity,
+    ) -> FrameCleanup {
+        if self.identity != *manager_identity || !self.active_frames.remove(&frame) {
+            return FrameCleanup::default();
+        }
+
+        let discarded = self
+            .entries
+            .iter()
+            .filter_map(|(identity, entry)| {
+                (entry.state == (ResourceEntryState::Leased { frame })).then_some(*identity)
+            })
+            .collect::<Vec<_>>();
+        let mut cleanup = FrameCleanup::default();
+        for identity in discarded {
+            if let Some(entry) = self.entries.remove(&identity) {
+                self.retained_bytes = self.retained_bytes.saturating_sub(entry.byte_len);
+                self.stats.evictions = self.stats.evictions.saturating_add(1);
+                cleanup.evicted_resources.push(identity);
+            }
+        }
+        self.resolved_leases
+            .retain(|(resolved_frame, _)| *resolved_frame != frame);
+
+        let (retained_count, retained_byte_len) = self
+            .entries
+            .values()
+            .filter_map(|entry| match entry.state {
+                ResourceEntryState::Idle { .. } => Some(entry.byte_len),
+                ResourceEntryState::Leased { .. } => None,
+            })
+            .fold((0_usize, 0_u64), |(count, bytes), byte_len| {
+                (count.saturating_add(1), bytes.saturating_add(byte_len))
+            });
+        cleanup.retention = if retained_count == 0 {
+            ResourceRetentionOutcome::NoIdleResources
+        } else {
+            ResourceRetentionOutcome::RetainedReusable {
+                resource_count: retained_count,
+                byte_len: retained_byte_len,
+            }
+        };
+        cleanup
+    }
+
     fn trim_idle(&mut self) -> FrameCleanup {
         let mut idle = self
             .entries
@@ -1109,7 +1157,7 @@ impl ResourceManager {
             state: Arc::clone(&self.state),
             manager_identity: state.identity.clone(),
             frame,
-            cleaned: false,
+            pending_drop_disposition: Some(FrameResourceDisposition::ReleaseReusable),
         })
     }
 
@@ -1199,6 +1247,14 @@ impl ResourceManager {
             idle_count,
             leased_count: state.entries.len().saturating_sub(idle_count),
             retained_bytes: state.retained_bytes,
+            accounted_entry_bytes: state
+                .entries
+                .values()
+                .fold(0_u64, |bytes, entry| bytes.saturating_add(entry.byte_len)),
+            active_frame_count: state.active_frames.len(),
+            resolved_lease_count: state.resolved_leases.len(),
+            entry_identities: state.entries.keys().copied().collect(),
+            lifecycle_stats: state.stats,
             next_resource: state.next_resource,
             entry_count: state.entries.len(),
             payload_creation_attempts: state.payload_creation_attempts,
@@ -1292,7 +1348,13 @@ pub(crate) struct FrameResourceScope {
     state: Arc<Mutex<ResourceManagerState>>,
     manager_identity: ManagerIdentity,
     frame: FrameIdentity,
-    cleaned: bool,
+    pending_drop_disposition: Option<FrameResourceDisposition>,
+}
+
+#[derive(Clone, Copy)]
+enum FrameResourceDisposition {
+    ReleaseReusable,
+    Discard,
 }
 
 impl FrameResourceScope {
@@ -1741,16 +1803,29 @@ impl FrameResourceScope {
         lock_state(&self.state).discard(&self.manager_identity, self.frame, lease.token)
     }
 
-    pub(crate) fn finish(mut self) -> FrameCleanup {
-        self.cleanup()
+    pub(crate) fn discard_on_drop(&mut self) {
+        if self.pending_drop_disposition.is_some() {
+            self.pending_drop_disposition = Some(FrameResourceDisposition::Discard);
+        }
     }
 
-    fn cleanup(&mut self) -> FrameCleanup {
-        if self.cleaned {
+    pub(crate) fn finish(mut self) -> FrameCleanup {
+        self.resolve(FrameResourceDisposition::ReleaseReusable)
+    }
+
+    fn resolve(&mut self, disposition: FrameResourceDisposition) -> FrameCleanup {
+        if self.pending_drop_disposition.take().is_none() {
             return FrameCleanup::default();
         }
-        self.cleaned = true;
-        lock_state(&self.state).cleanup_frame(&self.manager_identity, self.frame)
+        let mut state = lock_state(&self.state);
+        match disposition {
+            FrameResourceDisposition::ReleaseReusable => {
+                state.cleanup_frame(&self.manager_identity, self.frame)
+            }
+            FrameResourceDisposition::Discard => {
+                state.discard_frame(&self.manager_identity, self.frame)
+            }
+        }
     }
 
     #[cfg(test)]
@@ -1775,11 +1850,25 @@ impl FrameResourceScope {
     pub(crate) fn trim_idle_for_test(&mut self) -> FrameCleanup {
         lock_state(&self.state).trim_idle()
     }
+
+    #[cfg(test)]
+    pub(crate) fn leased_resource_identities_for_test(&self) -> Vec<ResourceIdentity> {
+        lock_state(&self.state)
+            .entries
+            .iter()
+            .filter_map(|(identity, entry)| {
+                (entry.state == (ResourceEntryState::Leased { frame: self.frame }))
+                    .then_some(*identity)
+            })
+            .collect()
+    }
 }
 
 impl Drop for FrameResourceScope {
     fn drop(&mut self) {
-        let _ = self.cleanup();
+        if let Some(disposition) = self.pending_drop_disposition {
+            let _ = self.resolve(disposition);
+        }
     }
 }
 
@@ -1871,11 +1960,16 @@ impl ResourceLeaseTokenForTest {
 }
 
 #[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceManagerObservationForTest {
     pub(crate) idle_count: usize,
     pub(crate) leased_count: usize,
     pub(crate) retained_bytes: u64,
+    pub(crate) accounted_entry_bytes: u64,
+    pub(crate) active_frame_count: usize,
+    pub(crate) resolved_lease_count: usize,
+    entry_identities: Vec<ResourceIdentity>,
+    lifecycle_stats: ResourceLifecycleStats,
     pub(crate) next_resource: u64,
     pub(crate) entry_count: usize,
     pub(crate) payload_creation_attempts: u64,
@@ -1890,6 +1984,14 @@ pub(crate) struct ResourceManagerObservationForTest {
 
 #[cfg(test)]
 impl ResourceManagerObservationForTest {
+    pub(crate) fn entry_identities_for_test(&self) -> &[ResourceIdentity] {
+        &self.entry_identities
+    }
+
+    pub(crate) const fn lifecycle_stats_for_test(&self) -> ResourceLifecycleStats {
+        self.lifecycle_stats
+    }
+
     pub(crate) const fn retained_count_for_test(&self) -> usize {
         self.entry_count
     }
