@@ -1517,6 +1517,7 @@ enum SemanticCompositeKind {
         blend: super::layer::BlendMode,
         clip: Option<Box<RenderClip>>,
         outer_clips: Vec<SemanticOuterClip>,
+        clip_coverage: Option<SemanticResourceId>,
         alpha_mask: Option<SemanticResourceId>,
     },
     DropShadow,
@@ -2001,6 +2002,7 @@ pub(crate) enum GraphLoweringCompositeKind {
         blend: super::layer::BlendMode,
         clip: Option<Box<RenderClip>>,
         outer_clips: Vec<GraphLoweringOuterClip>,
+        clip_coverage: Option<GraphLoweringResourceId>,
         alpha_mask: Option<GraphLoweringResourceId>,
     },
     DropShadow,
@@ -3186,6 +3188,7 @@ impl SemanticFrameGraphPlanner {
                 blend: super::layer::BlendMode::Normal,
                 clip: None,
                 outer_clips: state.outer_clips.clone(),
+                clip_coverage: None,
                 alpha_mask: None,
             }
         };
@@ -3256,6 +3259,7 @@ impl SemanticFrameGraphPlanner {
                 blend: layer.blend,
                 clip: layer.clip.map(Box::new),
                 outer_clips: state.outer_clips.clone(),
+                clip_coverage: None,
                 alpha_mask: alpha_mask.map(|mask| mask.id),
             },
             true,
@@ -3389,6 +3393,7 @@ impl SemanticFrameGraphPlanner {
                 blend: super::layer::BlendMode::Normal,
                 clip: backdrop.clip().cloned().map(Box::new),
                 outer_clips: Vec::new(),
+                clip_coverage: None,
                 alpha_mask: None,
             },
             true,
@@ -4302,6 +4307,7 @@ fn graph_lowering_composite(composite: &SemanticCompositePlan) -> GraphLoweringC
                 blend,
                 clip,
                 outer_clips,
+                clip_coverage,
                 alpha_mask,
             } => GraphLoweringCompositeKind::Layer {
                 transform: *transform,
@@ -4315,6 +4321,7 @@ fn graph_lowering_composite(composite: &SemanticCompositePlan) -> GraphLoweringC
                         transform: clip.transform,
                     })
                     .collect(),
+                clip_coverage: clip_coverage.map(GraphLoweringResourceId::from_semantic),
                 alpha_mask: alpha_mask.map(GraphLoweringResourceId::from_semantic),
             },
             SemanticCompositeKind::DropShadow => GraphLoweringCompositeKind::DropShadow,
@@ -4414,7 +4421,11 @@ fn graph_lowering_read_bindings(
                     GraphLoweringSamplingEdge::TransparentBlack,
                 )?,
             ],
-            GraphLoweringCompositeKind::Layer { alpha_mask, .. } => {
+            GraphLoweringCompositeKind::Layer {
+                clip_coverage,
+                alpha_mask,
+                ..
+            } => {
                 let mut bindings = vec![
                     make(
                         0,
@@ -4429,6 +4440,9 @@ fn graph_lowering_read_bindings(
                         GraphLoweringSamplingEdge::TransparentBlack,
                     )?,
                 ];
+                if clip_coverage.is_some() {
+                    return Err(GraphValidationError::InvalidPassArity);
+                }
                 if let Some(alpha_mask) = alpha_mask {
                     let binding = make(
                         2,

@@ -2820,7 +2820,7 @@ impl Backend {
         let failed_pass = first
             .c08_execution_facts()
             .and_then(|facts| facts.captures().first())
-            .map(super::pass::C08VelloCaptureExecutionFacts::pass);
+            .map(super::pass::ExecutableVelloCaptureFacts::pass);
         first.fail_capture_encoding_for_test();
         let capture_failure_is_reported = first
             .encode_c08_custom_spine(

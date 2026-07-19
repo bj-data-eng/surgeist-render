@@ -11104,6 +11104,182 @@ fn c08_executor_accepts_only_clear_capture_canonicalize_span_source_over_and_pre
     );
 }
 
+fn c09_composition_commands_for_test() -> command::RenderCommands {
+    let outer_mask = opaque_planning_mask(PhysicalSize::new(4, 4));
+    let inner_mask = opaque_planning_mask(PhysicalSize::new(4, 4));
+    let outer_clip_transform = Transform::translation(0.5, 0.25).unwrap();
+    let inner_clip_transform = Transform::translation(0.25, 0.5).unwrap();
+    let outer_transform = Transform::translation(1.0, 0.5).unwrap();
+    let inner_transform = Transform::scale(0.75, 0.5).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_clip(Shape::rect(Rect::new(0.0, 0.0, 4.0, 4.0)))
+            .unwrap()
+            .try_transform(outer_clip_transform)
+            .unwrap(),
+        |scene| {
+            scene.layer(
+                Layer::new()
+                    .try_clip(Shape::rect(Rect::new(0.125, 0.125, 3.75, 3.75)))
+                    .unwrap()
+                    .try_transform(inner_clip_transform)
+                    .unwrap(),
+                |scene| {
+                    scene.layer(
+                        Layer::new()
+                            .try_clip(Shape::rect(Rect::new(0.25, 0.25, 3.5, 3.5)))
+                            .unwrap()
+                            .try_transform(outer_transform)
+                            .unwrap()
+                            .try_opacity(1.5)
+                            .unwrap()
+                            .blend(BlendMode::Screen)
+                            .with_resolved_alpha_mask(outer_mask),
+                        |scene| {
+                            scene.layer(
+                                Layer::new()
+                                    .try_clip(Shape::rect(Rect::new(0.5, 0.5, 2.5, 2.5)))
+                                    .unwrap()
+                                    .try_transform(inner_transform)
+                                    .unwrap()
+                                    .try_opacity(0.25)
+                                    .unwrap()
+                                    .blend(BlendMode::Multiply)
+                                    .with_resolved_alpha_mask(inner_mask),
+                                |scene| {
+                                    scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+                                },
+                            );
+                        },
+                    );
+                },
+            );
+        },
+    );
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
+#[test]
+fn c09_executor_accepts_only_spine_and_ordered_layer_composition() {
+    let mut c08_scene = Scene::new();
+    c08_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    let c08_commands = c08_scene.normalize(Capabilities::CURRENT).unwrap();
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+    )
+    .unwrap();
+    let observed = super::pass::c09_executable_graph_observation_for_test(
+        c08_commands,
+        c09_composition_commands_for_test(),
+        runtime_lowering_commands_for_test(),
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.accepts_spine_and_layer_composition_for_all_formats
+            && observed.layer_composition_reads_are_exact
+            && observed.rejects_c10_plus_passes_and_payloads
+            && observed.rejects_missing_payloads
+            && observed.rejects_malformed_graph_facts
+            && observed.rejects_unsupported_output_binding
+            && observed.preserves_transitional_c09_dispatch,
+        "C09 has no closed pre-allocation subset"
+    );
+}
+
+#[test]
+fn composition_graph_orders_clip_mask_opacity_blend_and_nested_layers() {
+    use super::pass::{
+        CompositionOuterOperationObservationForTest as Operation,
+        CompositionReadObservationForTest as Read,
+    };
+
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+    )
+    .unwrap();
+    let observed = super::pass::composition_graph_observation_for_test(
+        c09_composition_commands_for_test(),
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+    let expected_operations = [
+        Operation::SourceMapping,
+        Operation::ClipCoverage,
+        Operation::AlphaMask,
+        Operation::Opacity,
+        Operation::Blend,
+    ];
+    let outer_clip_transform = Transform::translation(0.5, 0.25).unwrap();
+    let inherited_inner_clip_transform = Transform::translation(0.25, 0.5)
+        .unwrap()
+        .then(outer_clip_transform)
+        .unwrap();
+    let expected_outer_transform = Transform::translation(1.0, 0.5)
+        .unwrap()
+        .then(inherited_inner_clip_transform)
+        .unwrap();
+
+    assert!(
+        observed.layers_inner_to_outer.len() == 2
+            && observed.layers_inner_to_outer[0].transform == Transform::scale(0.75, 0.5).unwrap()
+            && observed.layers_inner_to_outer[0].opacity == 0.25
+            && observed.layers_inner_to_outer[0].blend == BlendMode::Multiply
+            && observed.layers_inner_to_outer[0].has_own_clip
+            && observed.layers_inner_to_outer[0].inherited_outer_clip_count == 0
+            && observed.layers_inner_to_outer[0].reads
+                == [Read::Parent, Read::Source, Read::AlphaMask]
+            && observed.layers_inner_to_outer[0].outer_operations == expected_operations
+            && observed.layers_inner_to_outer[0].source_captured_before_outer_semantics
+            && observed.layers_inner_to_outer[1].transform == expected_outer_transform
+            && observed.layers_inner_to_outer[1].opacity == 1.0
+            && observed.layers_inner_to_outer[1].blend == BlendMode::Screen
+            && observed.layers_inner_to_outer[1].has_own_clip
+            && observed.layers_inner_to_outer[1].inherited_outer_clip_count == 2
+            && observed.layers_inner_to_outer[1].inherited_outer_clip_transforms
+                == [outer_clip_transform, inherited_inner_clip_transform]
+            && observed.layers_inner_to_outer[1].reads
+                == [Read::Parent, Read::Source, Read::AlphaMask]
+            && observed.layers_inner_to_outer[1].outer_operations == expected_operations
+            && observed.layers_inner_to_outer[1].source_captured_before_outer_semantics
+            && observed.mask_identity_is_preserved,
+        "composition graph changed authored outer-operation order"
+    );
+}
+
+#[test]
+fn composition_isolation_starts_from_transparent_black() {
+    let base_color = Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap();
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        base_color,
+    )
+    .unwrap();
+    let observed = super::pass::composition_graph_observation_for_test(
+        c09_composition_commands_for_test(),
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.root_surface_base_clears == 1
+            && observed.root_surface_base_color == Some(base_color)
+            && observed.transparent_isolation_clears == 2
+            && observed.nontransparent_isolation_clears == 0,
+        "isolated composition inherited root base color"
+    );
+}
+
 #[test]
 fn c08_preparation_rejects_later_cycle_plan_without_resource_or_cache_mutation() {
     let policy = EffectQualityPolicy::AllowReducedPrecision;

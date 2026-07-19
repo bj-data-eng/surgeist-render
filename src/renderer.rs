@@ -12,7 +12,9 @@ use super::{
     frame::{FrameContext, FramePlan},
     geometry::physical_size,
     gpu_transaction::{GpuOperationDraft, GpuOperationStage},
-    pass::{C08GraphDispatchEligibility, C08GraphWorkingFormatRequest, C08PreparableGraph},
+    pass::{
+        C08PreparableGraph, ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest,
+    },
     readback::read_texture_rgba,
     stats::collect_render_stats,
     surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
@@ -649,7 +651,7 @@ impl Renderer {
         &mut self,
         plan: FramePlan,
         output_format: Format,
-        working_format: C08GraphWorkingFormatRequest,
+        working_format: ExecutableGraphWorkingFormatRequest,
         capabilities: &DeviceCapabilities,
     ) -> Result<RendererFrameDispatch> {
         #[cfg(test)]
@@ -670,13 +672,13 @@ impl Renderer {
                 }
                 Ok(RendererFrameDispatch::DirectVello(plan.into_commands()))
             }
-            FramePlan::GpuGraph(graph) => match C08GraphDispatchEligibility::try_classify(
+            FramePlan::GpuGraph(graph) => match ExecutableGraphDispatchEligibility::try_classify(
                 &graph,
                 output_format,
                 working_format,
                 capabilities,
             )? {
-                C08GraphDispatchEligibility::Exact(preparable) => {
+                ExecutableGraphDispatchEligibility::Exact(preparable) => {
                     #[cfg(test)]
                     {
                         self.dispatch_observation.exact_c08_graph_routes = self
@@ -686,7 +688,7 @@ impl Renderer {
                     }
                     Ok(RendererFrameDispatch::ExactC08Graph(preparable))
                 }
-                C08GraphDispatchEligibility::LaterCycleTransitional => {
+                ExecutableGraphDispatchEligibility::LaterCycleTransitional => {
                     #[cfg(test)]
                     {
                         self.dispatch_observation.transitional_graph_routes = self
@@ -772,7 +774,9 @@ impl Renderer {
         let dispatch = self.classify_frame_dispatch(
             frame_plan,
             runtime_surface_format(surface),
-            C08GraphWorkingFormatRequest::ConfiguredPolicy(self.options.effect_quality_policy()),
+            ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
+                self.options.effect_quality_policy(),
+            ),
             &capabilities,
         )?;
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
@@ -1032,7 +1036,7 @@ impl Renderer {
         let preparable = match self.classify_frame_dispatch(
             FramePlan::GpuGraph(graph),
             output_format,
-            C08GraphWorkingFormatRequest::Exact(working_format),
+            ExecutableGraphWorkingFormatRequest::Exact(working_format),
             &capabilities,
         )? {
             RendererFrameDispatch::ExactC08Graph(preparable) => preparable,
