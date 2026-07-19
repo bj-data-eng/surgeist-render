@@ -946,6 +946,44 @@ impl C08PreparableGraph {
     fn into_parts(self) -> (LoweredGraphPlan, C08ExecutionFacts) {
         (self.lowered, self.execution)
     }
+
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.execution.working_format()
+    }
+
+    pub(crate) const fn output_format(&self) -> Format {
+        self.execution.output_format()
+    }
+
+    pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
+        self.lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == self.lowered.root_working_image)
+            .map(|resource| resource.spatial.device_extent)
+            .ok_or_else(|| preparation_error("the C08 root output resource is missing"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn capture_grids_for_test(&self) -> Vec<C08CaptureGridForTest> {
+        self.execution
+            .captures()
+            .iter()
+            .map(|capture| C08CaptureGridForTest {
+                texel_origin: capture.texel_origin(),
+                extent: capture.target_extent(),
+                raster_scale: capture.raster_scale(),
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct C08CaptureGridForTest {
+    pub(crate) texel_origin: Point,
+    pub(crate) extent: PhysicalSize,
+    pub(crate) raster_scale: f64,
 }
 
 #[derive(Clone)]
@@ -2066,12 +2104,12 @@ struct RuntimeGraphPreparationPlan {
 impl RuntimeGraphPreparationPlan {
     fn try_derive(
         lowered: LoweredGraphPlan,
-        policy: EffectQualityPolicy,
+        selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
         device: &wgpu::Device,
     ) -> Result<Self> {
-        let selected = capabilities.resolve_effect_working_format(policy)?;
-        if selected != lowered.working_format {
+        capabilities.validate_supported_working_format(selected_working_format)?;
+        if selected_working_format != lowered.working_format {
             return Err(preparation_error(
                 "the lowered graph working format does not match immutable device policy",
             ));
@@ -2824,6 +2862,23 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
 }
 
+impl C08CustomSpineEncodingSummary {
+    fn proves_complete_submission(&self) -> bool {
+        self.encodes_custom_passes_in_order
+            && self.clears_full_root_once
+            && self.uses_exact_prepared_spatial_mapping
+            && self.presents_to_exact_external_output
+            && self.exposes_bounded_capture_handoff
+            && self.validates_checked_capture_completion
+            && self.completes_custom_passes_after_encoding
+            && self.parent_and_result_are_distinct
+            && self.copies_full_parent_before_bounded_source_render
+            && self.samples_only_source_with_fixed_premultiplied_blend
+            && self.preserves_signed_source_origin
+            && self.keeps_cache_update_provisional
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct C08EncodedCaptureObservationForTest {
@@ -2856,8 +2911,9 @@ struct C08VelloCaptureEncodingContext<'encoding, 'device> {
 /// submission payload. Dropping this value aborts every capture lease.
 #[must_use = "encoded C08 graph captures must remain pending until transaction resolution"]
 pub(crate) struct C08PendingGraphEncoding {
-    _summary: C08CustomSpineEncodingSummary,
-    _resources: PendingVelloResourceCommit,
+    summary: C08CustomSpineEncodingSummary,
+    resources: PendingVelloResourceCommit,
+    session: Arc<()>,
 }
 
 #[cfg(test)]
@@ -2865,7 +2921,32 @@ impl C08PendingGraphEncoding {
     pub(crate) fn into_summary_and_resources(
         self,
     ) -> (C08CustomSpineEncodingSummary, PendingVelloResourceCommit) {
-        (self._summary, self._resources)
+        (self.summary, self.resources)
+    }
+}
+
+#[must_use = "prepared C08 frame state must commit only after graph transaction success"]
+pub(crate) struct PendingC08PreparedFrameCommit {
+    frame_scope: FrameResourceScope,
+    pass_cache_update: ProvisionalDevicePassCacheUpdate,
+}
+
+impl PendingC08PreparedFrameCommit {
+    pub(crate) fn commit(self, pass_cache: &mut DevicePassCache) -> Result<FrameCleanup> {
+        self.pass_cache_update.commit(pass_cache)?;
+        Ok(self.frame_scope.finish())
+    }
+}
+
+#[must_use = "C08 graph submission state must remain owned by one transaction payload"]
+pub(crate) struct C08PreparedGraphSubmission {
+    capture_resources: PendingVelloResourceCommit,
+    prepared_frame: PendingC08PreparedFrameCommit,
+}
+
+impl C08PreparedGraphSubmission {
+    pub(crate) fn into_parts(self) -> (PendingVelloResourceCommit, PendingC08PreparedFrameCommit) {
+        (self.capture_resources, self.prepared_frame)
     }
 }
 
@@ -3089,6 +3170,7 @@ pub(crate) struct PreparedGraph<'device> {
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
     c08_encoding_state: Option<C08CustomSpineEncodingState>,
+    c08_completed_session: Option<Arc<()>>,
     #[cfg(test)]
     fail_capture_encoding_after_for_test: Option<usize>,
     #[cfg(test)]
@@ -3113,14 +3195,35 @@ impl<'device> PreparedGraph<'device> {
         resources: &'device ResourceManager,
         pass_cache: &'device DevicePassCache,
     ) -> Result<Self> {
-        let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C08(preparable),
-            policy,
+        let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
+        Self::try_prepare_c08_with_working_format(
+            preparable,
+            selected_working_format,
             capabilities,
             device,
             queue,
             resources,
             (pass_cache, false),
+        )
+    }
+
+    pub(crate) fn try_prepare_c08_with_working_format(
+        preparable: C08PreparableGraph,
+        selected_working_format: WorkingFormat,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_phase: (&'device DevicePassCache, bool),
+    ) -> Result<Self> {
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C08(preparable),
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache_phase,
         )?;
         if prepared.c08_execution_facts().is_none() {
             return Err(preparation_error(
@@ -3141,9 +3244,10 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         match PrePreparationGraphClassification::classify(lowered) {
             PrePreparationGraphClassification::ExactC08(preparable) if pass_cache_phase.1 => {
+                let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 let prepared = Self::try_prepare_inner(
                     GraphPreparationSource::C08(preparable),
-                    policy,
+                    selected_working_format,
                     capabilities,
                     device,
                     queue,
@@ -3167,9 +3271,10 @@ impl<'device> PreparedGraph<'device> {
                 pass_cache_phase.0,
             ),
             PrePreparationGraphClassification::LaterCycleTransitional(lowered) => {
+                let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 Self::try_prepare_inner(
                     GraphPreparationSource::Transitional(lowered),
-                    policy,
+                    selected_working_format,
                     capabilities,
                     device,
                     queue,
@@ -3185,7 +3290,7 @@ impl<'device> PreparedGraph<'device> {
 
     fn try_prepare_inner(
         source: GraphPreparationSource,
-        policy: EffectQualityPolicy,
+        selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
@@ -3194,7 +3299,12 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         let (pass_cache, realize_checked_passes) = pass_cache_phase;
         let (lowered, c08_execution) = source.into_parts();
-        let plan = RuntimeGraphPreparationPlan::try_derive(lowered, policy, capabilities, device)?;
+        let plan = RuntimeGraphPreparationPlan::try_derive(
+            lowered,
+            selected_working_format,
+            capabilities,
+            device,
+        )?;
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
 
         let mut frame_scope = resources.begin_frame()?;
@@ -3267,6 +3377,7 @@ impl<'device> PreparedGraph<'device> {
             frame_scope: Some(frame_scope),
             next_pass: 0,
             c08_encoding_state,
+            c08_completed_session: None,
             #[cfg(test)]
             fail_capture_encoding_after_for_test: None,
             #[cfg(test)]
@@ -3466,9 +3577,11 @@ impl<'device> PreparedGraph<'device> {
             }
         };
         self.c08_encoding_state = Some(C08CustomSpineEncodingState::Complete);
+        self.c08_completed_session = Some(Arc::clone(&session));
         Ok(C08PendingGraphEncoding {
-            _summary: summary,
-            _resources: PendingVelloResourceCommit::from_aggregate(leases),
+            summary,
+            resources: PendingVelloResourceCommit::from_aggregate(leases),
+            session,
         })
     }
 
@@ -4403,6 +4516,50 @@ impl<'device> PreparedGraph<'device> {
         }
         self.next_pass = self.next_pass.saturating_add(1);
         Ok(())
+    }
+
+    pub(crate) fn finish_c08_submission(
+        mut self,
+        pending: C08PendingGraphEncoding,
+    ) -> Result<C08PreparedGraphSubmission> {
+        let completed_session = self.c08_completed_session.take().ok_or_else(|| {
+            preparation_error("the prepared C08 graph has no completed encoding session")
+        })?;
+        if self.c08_encoding_state != Some(C08CustomSpineEncodingState::Complete)
+            || !Arc::ptr_eq(&completed_session, &pending.session)
+            || !pending.summary.proves_complete_submission()
+            || self.next_pass != self.plan.passes.len()
+            || self
+                .resource_bindings
+                .values()
+                .any(|binding| binding.lease.is_some())
+            || self
+                .kernel_bindings
+                .values()
+                .any(|binding| binding.lease.is_some())
+        {
+            return Err(preparation_error(
+                "the C08 graph submission does not own one exact completed prepared frame",
+            ));
+        }
+        let pass_cache_update = self.pass_cache_update.take().ok_or_else(|| {
+            preparation_error("the completed C08 graph lost its provisional pass-cache update")
+        })?;
+        let frame_scope = self.frame_scope.take().ok_or_else(|| {
+            preparation_error("the completed C08 graph lost its prepared frame scope")
+        })?;
+        let C08PendingGraphEncoding {
+            summary: _,
+            resources: capture_resources,
+            session: _,
+        } = pending;
+        Ok(C08PreparedGraphSubmission {
+            capture_resources,
+            prepared_frame: PendingC08PreparedFrameCommit {
+                frame_scope,
+                pass_cache_update,
+            },
+        })
     }
 
     #[cfg_attr(

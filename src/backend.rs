@@ -3,10 +3,11 @@ use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
 #[cfg(test)]
-use super::pass::{C08ExternalOutputView, C08PassCacheRequestsForTest};
-use super::pass::{LoweredGraphPlan, PreparedGraph};
+use super::pass::C08PassCacheRequestsForTest;
+use super::pass::{C08ExternalOutputView, C08PreparableGraph, LoweredGraphPlan, PreparedGraph};
 use super::resource::{
-    FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
+    FrameCleanup, FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager,
+    WorkingFormat,
 };
 #[cfg(test)]
 use super::resource::{ManagerIdentity, ResourceManagerObservationForTest};
@@ -33,7 +34,9 @@ use super::*;
 use super::{
     command::OffscreenBounds,
     geometry::physical_size,
-    gpu_transaction::{GpuOperationStage, GpuOperationTransaction, InternalVelloPayload},
+    gpu_transaction::{
+        C08GraphSubmissionPayload, GpuOperationStage, GpuOperationTransaction, InternalVelloPayload,
+    },
     shader::{DevicePassCache, ProvisionalDevicePassCacheUpdate},
     texture::{
         TextureDescriptor, TextureUsageIntent, TransitionalTextureRole, headless_texture_descriptor,
@@ -630,6 +633,18 @@ impl DeviceCapabilities {
             RuntimeCapabilityUnavailableReason::EffectFormatUnavailable { policy },
             "the selected GPU has no effect working format permitted by the configured quality policy",
         ))
+    }
+
+    pub(crate) fn validate_supported_working_format(
+        &self,
+        working_format: WorkingFormat,
+    ) -> Result<()> {
+        self.validate_effect_texture_allocation(
+            PhysicalSize::new(1, 1),
+            Some(working_format),
+            working_format.texture_format(),
+            working_format.required_usages(),
+        )
     }
 
     pub(crate) fn validate_effect_texture_extent(&self, requested: PhysicalSize) -> Result<()> {
@@ -1841,6 +1856,52 @@ impl Backend {
             &ready.queue,
             &ready.resources,
             (&ready.pass_cache, realize_checked_passes),
+        )
+        .map(|prepared| prepared.with_vello_engine(&ready.engine))
+    }
+
+    fn prepare_c08_graph_resources(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        preparable: C08PreparableGraph,
+        selected_working_format: WorkingFormat,
+    ) -> Result<PreparedGraph<'_>> {
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot is unavailable for C08 graph preparation",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before C08 graph preparation",
+            ));
+        }
+        if let Some(terminal) = state.terminal() {
+            return Err(terminal.error(RuntimeOperation::SurfaceRendering));
+        }
+        if !state.signal.has_active_operation() {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "C08 graph preparation requires one active GPU transaction",
+            ));
+        }
+        let capabilities = state.capabilities;
+        let ready = state.ready().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "ready GPU device resources disappeared before C08 graph preparation",
+            )
+        })?;
+        PreparedGraph::try_prepare_c08_with_working_format(
+            preparable,
+            selected_working_format,
+            &capabilities,
+            &ready.device,
+            &ready.queue,
+            &ready.resources,
+            (&ready.pass_cache, true),
         )
         .map(|prepared| prepared.with_vello_engine(&ready.engine))
     }
@@ -3180,6 +3241,7 @@ pub(crate) struct RenderTimings {
 pub(crate) struct SurfaceFrameCommit {
     timings: RenderTimings,
     headless_publication: Option<HeadlessPublication>,
+    _frame_cleanup: Option<FrameCleanup>,
 }
 
 impl SurfaceFrameCommit {
@@ -3187,6 +3249,7 @@ impl SurfaceFrameCommit {
         Self {
             timings,
             headless_publication: None,
+            _frame_cleanup: None,
         }
     }
 
@@ -3194,6 +3257,19 @@ impl SurfaceFrameCommit {
         Self {
             timings,
             headless_publication: Some(publication),
+            _frame_cleanup: None,
+        }
+    }
+
+    fn headless_graph(
+        publication: HeadlessPublication,
+        frame_cleanup: FrameCleanup,
+        timings: RenderTimings,
+    ) -> Self {
+        Self {
+            timings,
+            headless_publication: Some(publication),
+            _frame_cleanup: Some(frame_cleanup),
         }
     }
 
@@ -3206,6 +3282,139 @@ impl SurfaceFrameCommit {
             surface.commit_headless_publication(publication);
         }
     }
+}
+
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T8 dispatches eligible production graph plans through the T5 executor"
+    )
+)]
+pub(crate) async fn render_c08_headless_graph_surface(
+    backend: &mut Backend,
+    surface: &Surface,
+    preparable: C08PreparableGraph,
+    selected_working_format: WorkingFormat,
+) -> Result<SurfaceFrameCommit> {
+    let (device_identity, physical_size) = match &surface.backend {
+        SurfaceBackend::Headless {
+            device_identity,
+            physical_size,
+            ..
+        } => (*device_identity, *physical_size),
+        SurfaceBackend::ContractOnly { .. } => {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the C08 graph executor requires a device-backed headless surface",
+            ));
+        }
+        #[cfg(any(
+            feature = "render-window",
+            all(feature = "render-web", target_arch = "wasm32")
+        ))]
+        SurfaceBackend::Presented { .. } => {
+            return Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "presented C08 graph execution belongs to its later delivery task",
+            ));
+        }
+    };
+    if physical_size.width() == 0
+        || physical_size.height() == 0
+        || surface.options.format != Format::Rgba8
+        || preparable.output_format() != surface.options.format
+        || preparable.working_format() != selected_working_format
+        || preparable.output_extent()? != physical_size
+    {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "the C08 headless draft differs from the exact eligible graph output",
+        ));
+    }
+    let capabilities = backend
+        .device_capabilities(device_identity)
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "the C08 graph executor lost immutable device capabilities",
+            )
+        })?;
+    capabilities.validate_supported_working_format(selected_working_format)?;
+
+    let transaction = backend.begin_gpu_operation(
+        device_identity,
+        GpuOperationStage::Render,
+        RuntimeOperation::SurfaceRendering,
+    )?;
+    let (device, queue) = {
+        let ready = backend.ready_state_mut(
+            device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "the C08 graph executor lost its ready device before draft allocation",
+        )?;
+        (ready.device.clone(), ready.queue.clone())
+    };
+    let render_start = Instant::now();
+    let (draft_texture, draft_view) =
+        create_headless_texture(&device, physical_size, surface.options.format)?;
+    let mut prepared = backend.prepare_c08_graph_resources(
+        device_identity,
+        preparable,
+        selected_working_format,
+    )?;
+    if prepared.output_extent()? != physical_size
+        || prepared.output_format() != surface.options.format
+        || prepared.working_format() != selected_working_format
+    {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "prepared C08 graph output changed after eligibility validation",
+        ));
+    }
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist C08 headless graph encoder"),
+    });
+    let pending_encoding = prepared
+        .encode_c08_custom_spine(
+            &mut encoder,
+            C08ExternalOutputView::try_new(&draft_view, surface.options.format, physical_size)?,
+        )
+        .await?;
+    let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
+    let payload = C08GraphSubmissionPayload::new(
+        encoder.finish(),
+        prepared_submission,
+        HeadlessPublication::new(draft_texture),
+    );
+    let clean = {
+        let ready = backend.ready_state_mut(
+            device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "the C08 graph executor lost its ready device before submission",
+        )?;
+        transaction
+            .submit_c08_graph(
+                &device,
+                &queue,
+                &mut ready.pass_cache,
+                payload,
+                RuntimeOperation::SurfaceRendering,
+            )
+            .await?
+    };
+    let (publication, frame_cleanup) = clean.into_parts();
+    Ok(SurfaceFrameCommit::headless_graph(
+        publication,
+        frame_cleanup,
+        RenderTimings {
+            render_time: render_start.elapsed(),
+            present_time: Duration::ZERO,
+        },
+    ))
 }
 
 pub(crate) async fn render_internal_vello_surface(

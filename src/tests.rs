@@ -1,7 +1,8 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::gpu_transaction::GpuOperationSubmissionObservationForTest;
 use super::gpu_transaction::{
-    GpuOperationLease, GpuOperationStage, ScopedGpuOperationPostSubmitCheckpointForTest,
+    GpuOperationLease, GpuOperationStage, ScopedC08GraphPostSubmitControlForTest,
+    ScopedC08GraphSubmissionObservationForTest, ScopedGpuOperationPostSubmitCheckpointForTest,
     ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
     ScopedInternalVelloSubmissionObservationForTest,
 };
@@ -24319,6 +24320,185 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         RuntimeOperation::SurfaceReadback,
         RenderSurfaceAvailability::Uninitialized,
     );
+
+    let mut graph_renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("graph publication atomicity requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut graph_renderer);
+    let mut graph_surface =
+        pollster::block_on(graph_renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+            .expect("graph publication atomicity requires a headless surface");
+    pollster::block_on(graph_renderer.render(&mut graph_surface, &first, Parameters::default()))
+        .expect("the direct route must establish the graph failure publication baseline");
+    let graph_published = pollster::block_on(graph_renderer.read_headless(&graph_surface))
+        .expect("the graph failure baseline must be readable");
+    let graph_stats = graph_renderer.stats();
+    let graph_parameters = graph_surface.last_parameters;
+    let graph_uploaded_images = graph_renderer.uploaded_images_for_test();
+    let graph_publication_count = graph_surface.headless_publication_count_for_test();
+    let graph_cache_before = graph_renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the graph failure baseline must retain a ready device")
+        .device_pass_cache_counts_for_test();
+    let graph_resources_before = graph_renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the graph failure baseline must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+
+    let failure_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let failure_submission = failure_submission_scope.observation_for_test();
+    let graph_failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    let error = pollster::block_on(graph_renderer.render_forced_c08_graph_for_test(
+        &mut graph_surface,
+        &replacement,
+        Parameters {
+            base_color: Color::TRANSPARENT,
+            debug: true,
+        },
+        working_format,
+    ))
+    .expect_err("the scoped C08 graph validation failure must abort publication");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(
+        graph_failure.scope_resolution_observed_for_test(),
+        "the C08 graph failure must resolve transaction scopes before returning"
+    );
+    drop(graph_failure);
+    assert_eq!(failure_submission.queue_submission_count_for_test(), 1);
+    assert!(failure_submission.scopes_resolved_for_test());
+    assert!(!failure_submission.prepared_frame_committed_for_test());
+    assert!(!failure_submission.capture_resources_committed_for_test());
+    assert!(!failure_submission.headless_draft_released_for_test());
+    drop(failure_submission_scope);
+    assert_eq!(graph_renderer.stats(), graph_stats);
+    assert_eq!(graph_surface.last_parameters, graph_parameters);
+    assert_eq!(
+        graph_renderer.uploaded_images_for_test(),
+        graph_uploaded_images
+    );
+    assert_eq!(
+        graph_surface.headless_publication_count_for_test(),
+        graph_publication_count
+    );
+    assert_eq!(
+        pollster::block_on(graph_renderer.read_headless(&graph_surface))
+            .expect("a failed C08 graph must retain the prior publication")
+            .rgba(),
+        graph_published.rgba()
+    );
+    assert_eq!(
+        graph_renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the failed C08 graph must retain its ready device")
+            .device_pass_cache_counts_for_test(),
+        graph_cache_before
+    );
+    let resources_after_failure = graph_renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the failed C08 graph must return its resource leases")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_failure.leased_count, 0);
+    assert_eq!(
+        resources_after_failure.retained_count_for_test(),
+        graph_resources_before.retained_count_for_test()
+    );
+    assert_eq!(
+        resources_after_failure.retained_atlas_byte_len_for_test(),
+        graph_resources_before.retained_atlas_byte_len_for_test()
+    );
+
+    let cancellation_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let cancellation_submission = cancellation_submission_scope.observation_for_test();
+    let graph_pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    {
+        let future = graph_renderer.render_forced_c08_graph_for_test(
+            &mut graph_surface,
+            &replacement,
+            Parameters {
+                base_color: Color::TRANSPARENT,
+                debug: true,
+            },
+            working_format,
+        );
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        graph_pause.wait_for_submission_for_test(Duration::from_secs(2));
+    }
+    drop(graph_pause);
+    assert_eq!(cancellation_submission.queue_submission_count_for_test(), 1);
+    assert!(!cancellation_submission.scopes_resolved_for_test());
+    assert!(!cancellation_submission.prepared_frame_committed_for_test());
+    assert!(!cancellation_submission.capture_resources_committed_for_test());
+    assert!(!cancellation_submission.headless_draft_released_for_test());
+    drop(cancellation_submission_scope);
+    assert_eq!(graph_renderer.stats(), graph_stats);
+    assert_eq!(graph_surface.last_parameters, graph_parameters);
+    assert_eq!(
+        graph_renderer.uploaded_images_for_test(),
+        graph_uploaded_images
+    );
+    assert_eq!(
+        graph_surface.headless_publication_count_for_test(),
+        graph_publication_count
+    );
+    assert_eq!(
+        pollster::block_on(graph_renderer.read_headless(&graph_surface))
+            .expect("a canceled C08 graph must retain the prior publication")
+            .rgba(),
+        graph_published.rgba()
+    );
+    assert_eq!(
+        graph_renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the canceled C08 graph must retain its ready device")
+            .device_pass_cache_counts_for_test(),
+        graph_cache_before
+    );
+    let resources_after_cancellation = graph_renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the canceled C08 graph must return its resource leases")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_cancellation.leased_count, 0);
+    assert_eq!(
+        resources_after_cancellation.retained_count_for_test(),
+        graph_resources_before.retained_count_for_test()
+    );
+    assert_eq!(
+        resources_after_cancellation.retained_atlas_byte_len_for_test(),
+        graph_resources_before.retained_atlas_byte_len_for_test()
+    );
+
+    let mut graph_uninitialized =
+        pollster::block_on(graph_renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+            .expect("first-frame graph failure coverage requires another headless surface");
+    let graph_failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    pollster::block_on(graph_renderer.render_forced_c08_graph_for_test(
+        &mut graph_uninitialized,
+        &replacement,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("a failed first C08 graph frame must not create a publication");
+    drop(graph_failure);
+    assert_eq!(
+        graph_uninitialized.resource_state(),
+        SurfaceResourceState::PendingAllocation
+    );
+    assert_eq!(graph_uninitialized.headless_publication_count_for_test(), 0);
+    let error = pollster::block_on(graph_renderer.read_headless(&graph_uninitialized))
+        .expect_err("a failed first C08 graph frame must remain unreadable");
+    assert_surface_unavailable(
+        error,
+        RuntimeOperation::SurfaceReadback,
+        RenderSurfaceAvailability::Uninitialized,
+    );
 }
 
 #[test]
@@ -24905,6 +25085,332 @@ fn render_path_submits_without_map_or_cpu_wait() {
     assert!(
         !renderer_source.contains("render_vello_surface"),
         "Renderer::render must route production raster work through the transaction-owned internal pass"
+    );
+}
+
+fn c08_alpha_extreme_pixels_for_test() -> Vec<[u8; 4]> {
+    let mut pixels = vec![[128, 0, 0, 1]];
+    for alpha in [0, 1, 2, 15, 16, 127, 254, 255] {
+        for rgb in [
+            [0, 0, 0],
+            [255, 0, 0],
+            [0, 255, 0],
+            [0, 0, 255],
+            [255, 255, 255],
+        ] {
+            pixels.push([rgb[0], rgb[1], rgb[2], alpha]);
+        }
+    }
+    pixels
+}
+
+fn c08_alpha_extreme_scene_for_test(pixels: &[[u8; 4]]) -> Scene {
+    let bytes = pixels
+        .iter()
+        .flat_map(|pixel| pixel.iter().copied())
+        .collect::<Vec<_>>();
+    let width = u32::try_from(pixels.len()).expect("the C08 pixel vector must fit in u32");
+    let image = Image::from_rgba(Size::new(f64::from(width), 1.0), Arc::<[u8]>::from(bytes))
+        .expect("the source-readable C08 alpha vector must form one valid image");
+    let mut scene = Scene::new();
+    scene.image(
+        image,
+        Rect::new(0.0, 0.0, f64::from(width), 1.0),
+        ImageFit::Stretch,
+    );
+    scene
+}
+
+fn c08_canonical_pixel_for_test(pixel: [u8; 4]) -> [u8; 4] {
+    if pixel[3] == 0 { [0, 0, 0, 0] } else { pixel }
+}
+
+fn c08_premul8_for_test(color: u8, alpha: u8) -> u8 {
+    ((u16::from(color) * u16::from(alpha) + 127) / 255) as u8
+}
+
+fn c08_channel_error_for_test(actual: u8, expected: u8) -> u8 {
+    actual.abs_diff(expected)
+}
+
+struct C08AlphaVectorOutputForTest {
+    output: ImageBuffer,
+    graph: super::renderer::C08ForcedGraphRenderResultForTest,
+    used_graph_transaction: bool,
+    publication_count: usize,
+}
+
+fn default_c08_working_format_for_test(renderer: &mut Renderer) -> WorkingFormat {
+    let precisions = renderer
+        .default_device_capabilities_for_test()
+        .effect_precisions();
+    if precisions.supports_high_precision() {
+        WorkingFormat::HighPrecision
+    } else {
+        assert!(
+            precisions.supports_reduced_precision(),
+            "C08 graph tests require one real supported working format"
+        );
+        WorkingFormat::ReducedPrecision
+    }
+}
+
+fn render_c08_alpha_vector_for_test(
+    expected: &[[u8; 4]],
+    requested_working_format: Option<WorkingFormat>,
+) -> C08AlphaVectorOutputForTest {
+    let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let graph_submission = graph_submission_scope.observation_for_test();
+    let c08_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let c08_submission = c08_submission_scope.observation_for_test();
+    let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_submission_scope.observation_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("C08 alpha-vector execution requires a renderer");
+    let working_format = requested_working_format
+        .unwrap_or_else(|| default_c08_working_format_for_test(&mut renderer));
+    let width = u32::try_from(expected.len()).expect("the C08 pixel vector must fit in u32");
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .expect("C08 alpha-vector execution requires a headless surface");
+    let publication_before = surface.headless_publication_count_for_test();
+    let scene = c08_alpha_extreme_scene_for_test(expected);
+    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the forced C08 entry must execute the production headless graph");
+    let publication_count = surface
+        .headless_publication_count_for_test()
+        .saturating_sub(publication_before);
+    let output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the already-published C08 graph frame must be explicitly readable");
+    let used_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.transaction_generation_for_test()
+            == graph_submission.active_generation_for_test()
+        && c08_submission.queue_submission_count_for_test() == 1
+        && c08_submission.transaction_generation_for_test()
+            == c08_submission.active_generation_for_test()
+        && c08_submission.capture_lease_count_for_test() == 1
+        && c08_submission.scopes_resolved_for_test()
+        && c08_submission.prepared_frame_committed_for_test()
+        && c08_submission.capture_resources_committed_for_test()
+        && c08_submission.headless_draft_released_for_test()
+        && direct_submission.queue_submission_count_for_test() == 0
+        && graph.working_format == working_format;
+    C08AlphaVectorOutputForTest {
+        output,
+        graph,
+        used_graph_transaction,
+        publication_count,
+    }
+}
+
+fn c08_alpha_vector_has_exact_grid_for_test(
+    graph: &super::renderer::C08ForcedGraphRenderResultForTest,
+    width: u32,
+) -> bool {
+    graph.output_extent == PhysicalSize::new(width, 1)
+        && matches!(
+            graph.capture_grids.as_slice(),
+            [capture]
+                if capture.texel_origin == Point::new(0.0, 0.0)
+                    && capture.extent == PhysicalSize::new(width, 1)
+                    && capture.raster_scale == 1.0
+        )
+}
+
+#[test]
+fn capture_canonicalize_present_round_trips_transparent_partial_and_opaque_pixels() {
+    let expected = c08_alpha_extreme_pixels_for_test();
+    let rendered = render_c08_alpha_vector_for_test(&expected, None);
+    let width = u32::try_from(expected.len()).expect("the C08 pixel vector must fit in u32");
+    let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
+        && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
+    let canonical_pixels =
+        rendered
+            .output
+            .rgba()
+            .chunks_exact(4)
+            .zip(&expected)
+            .all(|(actual, expected)| {
+                let expected = c08_canonical_pixel_for_test(*expected);
+                if rendered.graph.working_format == WorkingFormat::HighPrecision {
+                    actual
+                        .iter()
+                        .copied()
+                        .zip(expected)
+                        .all(|(actual, expected)| c08_channel_error_for_test(actual, expected) <= 2)
+                } else {
+                    c08_channel_error_for_test(actual[3], expected[3]) <= 1
+                        && (0..3).all(|channel| {
+                            c08_channel_error_for_test(
+                                c08_premul8_for_test(actual[channel], actual[3]),
+                                c08_premul8_for_test(expected[channel], expected[3]),
+                            ) <= 1
+                        })
+                }
+            });
+
+    assert!(
+        rendered.used_graph_transaction
+            && rendered.publication_count == 1
+            && exact_extent_and_origin
+            && canonical_pixels,
+        "headless C08 graph pixels do not satisfy canonical output"
+    );
+}
+
+#[test]
+fn reduced_precision_low_alpha_pixels_use_alpha_and_premul8_tolerances() {
+    let expected = c08_alpha_extreme_pixels_for_test();
+    let rendered =
+        render_c08_alpha_vector_for_test(&expected, Some(WorkingFormat::ReducedPrecision));
+    let width = u32::try_from(expected.len()).expect("the C08 pixel vector must fit in u32");
+    let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
+        && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
+    let reduced_pixels =
+        rendered
+            .output
+            .rgba()
+            .chunks_exact(4)
+            .zip(&expected)
+            .all(|(actual, expected)| {
+                let expected = c08_canonical_pixel_for_test(*expected);
+                c08_channel_error_for_test(actual[3], expected[3]) <= 1
+                    && (0..3).all(|channel| {
+                        c08_channel_error_for_test(
+                            c08_premul8_for_test(actual[channel], actual[3]),
+                            c08_premul8_for_test(expected[channel], expected[3]),
+                        ) <= 1
+                    })
+            });
+
+    assert!(
+        rendered.used_graph_transaction
+            && rendered.publication_count == 1
+            && rendered.graph.working_format == WorkingFormat::ReducedPrecision
+            && exact_extent_and_origin
+            && reduced_pixels,
+        "reduced C08 output violates alpha or premul8 tolerance"
+    );
+}
+
+#[test]
+fn high_precision_low_alpha_pixels_preserve_straight_rgb() {
+    let expected = c08_alpha_extreme_pixels_for_test();
+    let rendered = render_c08_alpha_vector_for_test(&expected, Some(WorkingFormat::HighPrecision));
+    let width = u32::try_from(expected.len()).expect("the C08 pixel vector must fit in u32");
+    let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
+        && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
+    let stable_straight_rgb = rendered
+        .output
+        .rgba()
+        .chunks_exact(4)
+        .zip(&expected)
+        .filter(|(_, expected)| expected[3] > 0 && expected[3] <= 16)
+        .all(|(actual, expected)| {
+            c08_channel_error_for_test(actual[3], expected[3]) <= 2
+                && (0..3).all(|channel| {
+                    c08_channel_error_for_test(actual[channel], expected[channel]) <= 2
+                })
+        });
+
+    assert!(
+        rendered.used_graph_transaction
+            && rendered.publication_count == 1
+            && rendered.graph.working_format == WorkingFormat::HighPrecision
+            && exact_extent_and_origin
+            && stable_straight_rgb,
+        "high precision C08 output lost stable straight RGB"
+    );
+}
+
+#[test]
+fn graph_render_path_submits_without_map_or_cpu_wait() {
+    let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let graph_submission = graph_submission_scope.observation_for_test();
+    let c08_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let c08_submission = c08_submission_scope.observation_for_test();
+    let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_submission_scope.observation_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("C08 graph submission coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("C08 graph submission coverage requires a headless surface");
+    let publication_before = surface.headless_publication_count_for_test();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the private forced route must invoke the production C08 graph executor");
+
+    let production_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.transaction_generation_for_test()
+            == graph_submission.active_generation_for_test()
+        && c08_submission.queue_submission_count_for_test() == 1
+        && c08_submission.transaction_generation_for_test()
+            == c08_submission.active_generation_for_test()
+        && c08_submission.capture_lease_count_for_test() == 1
+        && c08_submission.scopes_resolved_for_test()
+        && c08_submission.prepared_frame_committed_for_test()
+        && c08_submission.capture_resources_committed_for_test()
+        && c08_submission.headless_draft_released_for_test()
+        && direct_submission.queue_submission_count_for_test() == 0
+        && surface
+            .headless_publication_count_for_test()
+            .saturating_sub(publication_before)
+            == 1
+        && graph.output_extent == PhysicalSize::new(2, 2)
+        && graph.stats == renderer.stats();
+    let graph_sources = [
+        include_str!("backend.rs"),
+        include_str!("gpu_transaction.rs"),
+        include_str!("pass.rs"),
+        include_str!("renderer.rs"),
+        include_str!("shader.rs"),
+        include_str!("vello_engine/encoder.rs"),
+        include_str!("vello_engine/mod.rs"),
+        include_str!("vello_engine/raster.rs"),
+        include_str!("vello_engine/resources.rs"),
+    ];
+    let has_no_cpu_visible_synchronization =
+        graph_sources.iter().all(|source| {
+            [
+                "map_async",
+                "MAP_READ",
+                "PollType::Wait",
+                "get_mapped_range",
+                "wait_indefinitely",
+                "pollster::block_on",
+            ]
+            .iter()
+            .all(|forbidden| !source.contains(forbidden))
+        }) && headless_texture_descriptor(PhysicalSize::new(2, 2), Format::Rgba8).is_ok_and(
+            |descriptor| {
+                descriptor.wgpu_usage()
+                    == wgpu::TextureUsages::RENDER_ATTACHMENT
+                        .union(wgpu::TextureUsages::STORAGE_BINDING)
+                        .union(wgpu::TextureUsages::TEXTURE_BINDING)
+                        .union(wgpu::TextureUsages::COPY_SRC)
+                        .union(wgpu::TextureUsages::COPY_DST)
+            },
+        );
+
+    assert!(
+        production_graph_transaction && has_no_cpu_visible_synchronization,
+        "production C08 graph reached CPU-visible synchronization"
     );
 }
 

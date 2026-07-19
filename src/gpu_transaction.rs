@@ -1,6 +1,10 @@
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
+    pass::{C08PreparedGraphSubmission, PendingC08PreparedFrameCommit},
+    resource::FrameCleanup,
+    shader::DevicePassCache,
+    surface::HeadlessPublication,
     vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit},
 };
 use std::sync::Arc;
@@ -24,6 +28,8 @@ thread_local! {
     static ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST: RefCell<Option<GpuOperationPostSubmitControlForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
+    static ACTIVE_C08_GRAPH_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<C08GraphSubmissionObservationForTest>> = const { RefCell::new(None) };
+    static ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<C08GraphPostSubmitControlForTest>> = const { RefCell::new(None) };
 }
 
 /// Private ownership stage for a render-owned GPU operation.
@@ -439,6 +445,305 @@ pub(crate) struct InternalVelloPayload {
     submission_observation: Option<InternalVelloSubmissionObservationForTest>,
     #[cfg(test)]
     after_submit_checkpoint: Option<AfterInternalVelloSubmitCheckpointForTest>,
+}
+
+/// One complete C08 headless graph draft whose effects remain private until
+/// the owning transaction resolves cleanly.
+#[must_use = "C08 graph payloads must be submitted or dropped atomically"]
+pub(crate) struct C08GraphSubmissionPayload {
+    command_buffer: wgpu::CommandBuffer,
+    capture_resources: PendingVelloResourceCommit,
+    prepared_frame: PendingC08PreparedFrameCommit,
+    headless_draft: HeadlessPublication,
+}
+
+/// A clean C08 graph result that the renderer may publish with frame stats.
+#[must_use = "clean C08 headless drafts must reach the renderer publication gate"]
+pub(crate) struct C08GraphSubmissionCommit {
+    headless_publication: HeadlessPublication,
+    frame_cleanup: FrameCleanup,
+}
+
+impl C08GraphSubmissionPayload {
+    pub(crate) fn new(
+        command_buffer: wgpu::CommandBuffer,
+        prepared: C08PreparedGraphSubmission,
+        headless_draft: HeadlessPublication,
+    ) -> Self {
+        let (capture_resources, prepared_frame) = prepared.into_parts();
+        Self {
+            command_buffer,
+            capture_resources,
+            prepared_frame,
+            headless_draft,
+        }
+    }
+}
+
+impl C08GraphSubmissionCommit {
+    pub(crate) fn into_parts(self) -> (HeadlessPublication, FrameCleanup) {
+        (self.headless_publication, self.frame_cleanup)
+    }
+}
+
+/// Test-only evidence emitted by the real C08 graph transaction payload.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct C08GraphSubmissionObservationForTest {
+    state: Arc<Mutex<C08GraphSubmissionObservationStateForTest>>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct C08GraphSubmissionObservationStateForTest {
+    queue_submission_count: usize,
+    transaction_generation: Option<u64>,
+    active_generation: Option<u64>,
+    capture_lease_count: usize,
+    scopes_resolved: bool,
+    prepared_frame_committed: bool,
+    capture_resources_committed: bool,
+    headless_draft_released: bool,
+}
+
+#[cfg(test)]
+impl C08GraphSubmissionObservationForTest {
+    fn record_submission(
+        &self,
+        transaction_generation: u64,
+        active_generation: Option<u64>,
+        capture_lease_count: usize,
+    ) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("C08 graph submission observation must remain available");
+        state.queue_submission_count = state.queue_submission_count.saturating_add(1);
+        state.transaction_generation = Some(transaction_generation);
+        state.active_generation = active_generation;
+        state.capture_lease_count = capture_lease_count;
+    }
+
+    fn record_scope_resolution(&self) {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .scopes_resolved = true;
+    }
+
+    fn record_commit(&self) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("C08 graph submission observation must remain available");
+        state.prepared_frame_committed = true;
+        state.capture_resources_committed = true;
+        state.headless_draft_released = true;
+    }
+
+    pub(crate) fn queue_submission_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .queue_submission_count
+    }
+
+    pub(crate) fn transaction_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .transaction_generation
+    }
+
+    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .active_generation
+    }
+
+    pub(crate) fn capture_lease_count_for_test(&self) -> usize {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .capture_lease_count
+    }
+
+    pub(crate) fn scopes_resolved_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .scopes_resolved
+    }
+
+    pub(crate) fn prepared_frame_committed_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .prepared_frame_committed
+    }
+
+    pub(crate) fn capture_resources_committed_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .capture_resources_committed
+    }
+
+    pub(crate) fn headless_draft_released_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .headless_draft_released
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct ScopedC08GraphSubmissionObservationForTest {
+    observation: C08GraphSubmissionObservationForTest,
+    previous: Option<C08GraphSubmissionObservationForTest>,
+}
+
+#[cfg(test)]
+impl ScopedC08GraphSubmissionObservationForTest {
+    pub(crate) fn begin() -> Self {
+        let observation = C08GraphSubmissionObservationForTest::default();
+        let previous = ACTIVE_C08_GRAPH_SUBMISSION_OBSERVATION_FOR_TEST
+            .with(|active| active.replace(Some(observation.clone())));
+        Self {
+            observation,
+            previous,
+        }
+    }
+
+    pub(crate) fn observation_for_test(&self) -> C08GraphSubmissionObservationForTest {
+        self.observation.clone()
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedC08GraphSubmissionObservationForTest {
+    fn drop(&mut self) {
+        ACTIVE_C08_GRAPH_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+fn record_active_c08_graph_submission_for_test(
+    transaction_generation: u64,
+    active_generation: Option<u64>,
+    capture_lease_count: usize,
+) -> Option<C08GraphSubmissionObservationForTest> {
+    ACTIVE_C08_GRAPH_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
+        active.borrow().as_ref().map(|observation| {
+            observation.record_submission(
+                transaction_generation,
+                active_generation,
+                capture_lease_count,
+            );
+            observation.clone()
+        })
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+enum C08GraphPostSubmitControlForTest {
+    Fail {
+        scope_resolution_observed: SyncSender<()>,
+    },
+    Pause(SyncSender<()>),
+}
+
+/// Private deterministic failure/cancellation control for the production C08 graph executor.
+#[cfg(test)]
+pub(crate) struct ScopedC08GraphPostSubmitControlForTest {
+    reached: Option<Receiver<()>>,
+    scope_resolution_observed: Option<Receiver<()>>,
+    previous: Option<C08GraphPostSubmitControlForTest>,
+}
+
+#[cfg(test)]
+impl ScopedC08GraphPostSubmitControlForTest {
+    pub(crate) fn failing() -> Self {
+        let (scope_resolution_observed, observed) = sync_channel(1);
+        let previous = ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(C08GraphPostSubmitControlForTest::Fail {
+                scope_resolution_observed,
+            }))
+        });
+        Self {
+            reached: None,
+            scope_resolution_observed: Some(observed),
+            previous,
+        }
+    }
+
+    pub(crate) fn paused() -> Self {
+        let (reached, observed) = sync_channel(1);
+        let previous = ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST
+            .with(|active| active.replace(Some(C08GraphPostSubmitControlForTest::Pause(reached))));
+        Self {
+            reached: Some(observed),
+            scope_resolution_observed: None,
+            previous,
+        }
+    }
+
+    pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
+        self.reached
+            .as_ref()
+            .expect("only a paused C08 graph control has a submission receiver")
+            .recv_timeout(deadline)
+            .expect("the production C08 graph did not reach its post-submit checkpoint");
+    }
+
+    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
+        self.scope_resolution_observed
+            .as_ref()
+            .is_some_and(|observed| observed.try_recv().is_ok())
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedC08GraphPostSubmitControlForTest {
+    fn drop(&mut self) {
+        ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            *active.borrow_mut() = self.previous.take();
+        });
+    }
+}
+
+#[cfg(test)]
+impl C08GraphPostSubmitControlForTest {
+    async fn apply(self, device: &wgpu::Device) {
+        match self {
+            Self::Fail { .. } => {
+                let _ = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("Surgeist test-injected C08 graph validation failure"),
+                    size: wgpu::Extent3d {
+                        width: 0,
+                        height: 1,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                    view_formats: &[],
+                });
+            }
+            Self::Pause(reached) => {
+                reached
+                    .send(())
+                    .expect("the C08 graph test must observe the post-submit checkpoint");
+                std::future::pending::<()>().await;
+            }
+        }
+    }
 }
 
 /// Test-only evidence carried by the real single-buffer internal raster payload.
@@ -916,6 +1221,79 @@ impl GpuOperationTransaction {
             observation.record_scope_resolution(false);
         }
         result
+    }
+
+    /// Submits one complete C08 graph and commits every private graph-owned
+    /// resource only after the transaction scopes and device signal are clean.
+    pub(crate) async fn submit_c08_graph(
+        self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass_cache: &mut DevicePassCache,
+        payload: C08GraphSubmissionPayload,
+        operation: RuntimeOperation,
+    ) -> Result<C08GraphSubmissionCommit> {
+        #[cfg(not(test))]
+        let _ = device;
+        let C08GraphSubmissionPayload {
+            command_buffer,
+            capture_resources,
+            prepared_frame,
+            headless_draft,
+        } = payload;
+        #[cfg(test)]
+        let capture_lease_count = capture_resources.lease_count_for_test();
+        queue.submit([command_buffer]);
+        #[cfg(test)]
+        let generic_submission_observation = record_active_gpu_operation_submission_for_test(
+            self.lease.generation(),
+            self.lease.active_generation_for_test(),
+            None,
+        );
+        #[cfg(test)]
+        let graph_submission_observation = record_active_c08_graph_submission_for_test(
+            self.lease.generation(),
+            self.lease.active_generation_for_test(),
+            capture_lease_count,
+        );
+        #[cfg(test)]
+        let control =
+            ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
+        #[cfg(test)]
+        if let Some(control) = control.clone() {
+            control.apply(device).await;
+        }
+        #[cfg(test)]
+        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
+
+        let result = self.finish(operation).await;
+        #[cfg(test)]
+        if let Some(observation) = &generic_submission_observation {
+            observation.record_scope_resolution(false);
+        }
+        #[cfg(test)]
+        if let Some(observation) = &graph_submission_observation {
+            observation.record_scope_resolution();
+        }
+        #[cfg(test)]
+        if let Some(C08GraphPostSubmitControlForTest::Fail {
+            scope_resolution_observed,
+        }) = control
+        {
+            let _ = scope_resolution_observed.send(());
+        }
+        result?;
+
+        let frame_cleanup = prepared_frame.commit(pass_cache)?;
+        capture_resources.commit(VelloResourceCommitProof { _private: () });
+        #[cfg(test)]
+        if let Some(observation) = graph_submission_observation {
+            observation.record_commit();
+        }
+        Ok(C08GraphSubmissionCommit {
+            headless_publication: headless_draft,
+            frame_cleanup,
+        })
     }
 
     /// Submits one texture-copy command and returns its exact queue submission index.

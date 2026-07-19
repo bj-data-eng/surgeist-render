@@ -18,6 +18,11 @@ use super::{
     *,
 };
 #[cfg(test)]
+use super::{
+    pass::{C08CaptureGridForTest, C08PreparableGraph, LoweredGraphPlan},
+    resource::WorkingFormat,
+};
+#[cfg(test)]
 use std::{cell::RefCell, sync::Arc};
 use std::{
     collections::HashSet,
@@ -65,6 +70,15 @@ pub(crate) struct ResourcePreparationObservationForTest {
     pub(crate) failure_and_drop_cleanup: bool,
     pub(crate) repeated_reuse_is_exact_and_bounded: bool,
     pub(crate) populated_pass_cache_is_preserved: bool,
+}
+
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct C08ForcedGraphRenderResultForTest {
+    pub(crate) stats: Stats,
+    pub(crate) working_format: WorkingFormat,
+    pub(crate) output_extent: PhysicalSize,
+    pub(crate) capture_grids: Vec<C08CaptureGridForTest>,
 }
 
 struct RenderPublication {
@@ -728,26 +742,37 @@ impl Renderer {
             Err(error) => return Err(error),
             Ok(frame) => frame,
         };
-        let publication_signal = self
-            .backend
-            .as_mut()
-            .expect("surface preflight confirmed the renderer backend is available")
-            .publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
-        let timings = frame.timings();
-        stats.render_time = timings.render_time;
-        stats.present_time = timings.present_time;
-        stats.frame_time = frame_start.elapsed();
-        let mut published = None;
-        GpuOperationDraft::new(
-            &mut published,
+        self.publish_clean_render_frame(
+            surface,
+            device_identity,
             RenderPublication {
                 frame,
                 stats,
                 uploaded_images,
                 parameters,
             },
+            frame_start,
         )
-        .commit();
+    }
+
+    fn publish_clean_render_frame(
+        &mut self,
+        surface: &mut Surface,
+        device_identity: DeviceSlotIdentity,
+        mut publication: RenderPublication,
+        frame_start: Instant,
+    ) -> Result<Stats> {
+        let publication_signal = self
+            .backend
+            .as_mut()
+            .expect("surface preflight confirmed the renderer backend is available")
+            .publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
+        let timings = publication.frame.timings();
+        publication.stats.render_time = timings.render_time;
+        publication.stats.present_time = timings.present_time;
+        publication.stats.frame_time = frame_start.elapsed();
+        let mut published = None;
+        GpuOperationDraft::new(&mut published, publication).commit();
         let publication =
             published.expect("a clean GPU transaction must commit its staged public state");
         #[cfg(test)]
@@ -763,6 +788,118 @@ impl Renderer {
                 Err(error)
             }
         }
+    }
+
+    /// Private T5 entry for forcing ordinary commands through the exact
+    /// production C08 graph executor without adding a public route or option.
+    #[cfg(test)]
+    pub(crate) async fn render_forced_c08_graph_for_test(
+        &mut self,
+        surface: &mut Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C08ForcedGraphRenderResultForTest> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_renderable()?;
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
+        if !matches!(surface.backend, SurfaceBackend::Headless { .. }) {
+            return Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "the private C08 forced route requires a headless surface",
+            ));
+        }
+        let device_identity = surface.device_identity().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the private C08 forced route requires a device-backed surface",
+            )
+        })?;
+        let frame_start = Instant::now();
+        let encode_start = Instant::now();
+        let normalized = scene.normalize(self.capabilities())?;
+        let context = FrameContext::try_new(
+            surface.size(),
+            surface.scale(),
+            self.options.antialiasing(),
+            parameters.base_color,
+        )?;
+        let graph = super::frame::forced_c08_graph_for_test(normalized.clone(), context)?;
+        let capabilities = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| {
+                Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                    "the private C08 forced route requires a renderer backend",
+                )
+            })?
+            .device_capabilities(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C08 forced route lost immutable device capabilities",
+                )
+            })?;
+        capabilities.validate_supported_working_format(working_format)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            surface.options.format,
+            &capabilities,
+        )?;
+        let preparable = C08PreparableGraph::try_from_lowered(lowered).map_err(|_| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "the private forced graph is outside the exact executable C08 subset",
+            )
+        })?;
+        let output_extent = preparable.output_extent()?;
+        let capture_grids = preparable.capture_grids_for_test();
+        let mut stats = Stats {
+            encode_time: encode_start.elapsed(),
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
+        if parameters.debug || self.options.debug() {
+            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
+        }
+        let frame = {
+            let backend = self
+                .backend
+                .as_mut()
+                .expect("forced C08 preflight confirmed the renderer backend is available");
+            let frame =
+                render_c08_headless_graph_surface(backend, surface, preparable, working_format)
+                    .await;
+            backend.observe_device_terminal(device_identity);
+            frame
+        }?;
+        let stats = self.publish_clean_render_frame(
+            surface,
+            device_identity,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+            frame_start,
+        )?;
+        Ok(C08ForcedGraphRenderResultForTest {
+            stats,
+            working_format,
+            output_extent,
+            capture_grids,
+        })
     }
 
     /// Resumes a compatible surface, awaiting recreation when it is presented.

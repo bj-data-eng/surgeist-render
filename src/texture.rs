@@ -311,9 +311,11 @@ impl TextureDescriptor {
                 .union(wgpu::TextureUsages::TEXTURE_BINDING)
                 .union(wgpu::TextureUsages::COPY_SRC)
                 .union(wgpu::TextureUsages::COPY_DST),
-            (TextureUsageIntent::ReadbackReference, _) => {
-                wgpu::TextureUsages::STORAGE_BINDING.union(wgpu::TextureUsages::COPY_SRC)
-            }
+            (TextureUsageIntent::ReadbackReference, _) => wgpu::TextureUsages::RENDER_ATTACHMENT
+                .union(wgpu::TextureUsages::STORAGE_BINDING)
+                .union(wgpu::TextureUsages::TEXTURE_BINDING)
+                .union(wgpu::TextureUsages::COPY_SRC)
+                .union(wgpu::TextureUsages::COPY_DST),
         }
     }
 }

@@ -29,6 +29,8 @@ pub struct Surface {
     pub(crate) last_parameters: Option<Parameters>,
     pub(crate) backend: SurfaceBackend,
     pub(crate) renderer_identity: RendererIdentity,
+    #[cfg(test)]
+    headless_publication_count: usize,
 }
 
 impl Surface {
@@ -45,6 +47,8 @@ impl Surface {
             last_parameters: None,
             backend,
             renderer_identity,
+            #[cfg(test)]
+            headless_publication_count: 0,
         }
     }
 
@@ -254,6 +258,15 @@ impl Surface {
         *resources = HeadlessResources::Ready {
             texture: publication.texture,
         };
+        #[cfg(test)]
+        {
+            self.headless_publication_count = self.headless_publication_count.saturating_add(1);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn headless_publication_count_for_test(&self) -> usize {
+        self.headless_publication_count
     }
 }
 
