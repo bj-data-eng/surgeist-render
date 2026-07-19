@@ -11,25 +11,20 @@ use super::{
 const CANONICALIZE_CAPTURE_WGSL: &str = include_str!("shaders/canonicalize_capture.wgsl");
 const SPAN_SOURCE_OVER_WGSL: &str = include_str!("shaders/span_source_over.wgsl");
 const PRESENT_WGSL: &str = include_str!("shaders/present.wgsl");
+const LAYER_COMPOSITE_WGSL: &str = include_str!("shaders/layer_composite.wgsl");
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum ShaderBlendKey {
+pub(crate) enum ShaderCompositePathKey {
     Normal,
-    Multiply,
-    Screen,
-    Overlay,
-    Darken,
-    Lighten,
-    Plus,
+    DestinationSampling,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ShaderCompositeKey {
     SpanSourceOver,
     Layer {
-        blend: ShaderBlendKey,
-        has_clip: bool,
-        has_outer_clips: bool,
+        path: ShaderCompositePathKey,
+        has_clip_coverage: bool,
         has_alpha_mask: bool,
     },
     DropShadow,
@@ -50,6 +45,7 @@ pub(crate) enum ShaderProgramKey {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ShaderTextureFormatKey {
     VelloCaptureRgba8Unorm,
+    ClipCoverageRgba8Unorm,
     WorkingHighPrecisionRgba16Float,
     WorkingReducedPrecisionRgba8Unorm,
     ResolvedMaskRgba8Unorm,
@@ -83,6 +79,7 @@ pub(crate) enum ShaderBindingRoleKey {
     BlurredSourceAlpha,
     CompositeParent,
     CompositeSource,
+    ClipCoverage,
     AlphaMask,
     Shadow,
     FinalWorkingImage,
@@ -334,6 +331,22 @@ struct C08PassKeyRefs<'a> {
     pipeline: &'a RenderPipelineKey,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CompositePassDescription {
+    path: ShaderCompositePathKey,
+    has_clip_coverage: bool,
+    has_alpha_mask: bool,
+    target_format: ShaderTextureFormatKey,
+}
+
+#[derive(Clone, Copy)]
+struct CompositePassKeyRefs<'a> {
+    samplers: &'a [SamplerKey],
+    layout: &'a BindGroupLayoutKey,
+    shader: &'a ShaderModuleKey,
+    pipeline: &'a RenderPipelineKey,
+}
+
 /// Non-clone handles created inside one checked GPU-operation scope. New entries
 /// remain private to this phase until the caller explicitly commits after the
 /// owning transaction resolves cleanly.
@@ -351,6 +364,16 @@ pub(crate) struct ProvisionalDevicePassCacheUpdate {
 pub(crate) struct ProvisionalC08PassObjects<'a> {
     program: C08Program,
     samplers: Vec<&'a wgpu::Sampler>,
+    layout: &'a wgpu::BindGroupLayout,
+    shader: &'a wgpu::ShaderModule,
+    pipeline: &'a wgpu::RenderPipeline,
+}
+
+/// Borrowed layer-compositor objects that remain provisional until the owning
+/// checked transaction resolves successfully.
+pub(crate) struct ProvisionalCompositePassObjects<'a> {
+    description: CompositePassDescription,
+    source_sampler: &'a wgpu::Sampler,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
     pipeline: &'a wgpu::RenderPipeline,
@@ -488,6 +511,27 @@ impl DevicePassCache {
         pipeline: &RenderPipelineKey,
     ) -> bool {
         samplers.iter().all(|key| self.samplers.contains_key(key))
+            && self.layouts.contains_key(layout)
+            && self.shaders.contains_key(shader)
+            && self.pipelines.contains_key(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_composite_pass_for_test(
+        &self,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> bool {
+        validate_composite_pass_keys(CompositePassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        })
+        .is_ok()
+            && samplers.iter().all(|key| self.samplers.contains_key(key))
             && self.layouts.contains_key(layout)
             && self.shaders.contains_key(shader)
             && self.pipelines.contains_key(pipeline)
@@ -685,10 +729,211 @@ impl ProvisionalDevicePassCacheUpdate {
         )
     }
 
+    pub(crate) fn realize_composite_pass<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalCompositePassObjects<'a>> {
+        self.realize_composite_pass_with_fragment_entry(
+            device,
+            cache,
+            CompositePassKeyRefs {
+                samplers,
+                layout,
+                shader,
+                pipeline,
+            },
+            None,
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn realize_composite_pass_with_invalid_fragment_for_test<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalCompositePassObjects<'a>> {
+        self.realize_composite_pass_with_fragment_entry(
+            device,
+            cache,
+            CompositePassKeyRefs {
+                samplers,
+                layout,
+                shader,
+                pipeline,
+            },
+            Some("missing_c09_composite_fragment"),
+        )
+    }
+
+    fn realize_composite_pass_with_fragment_entry<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        keys: CompositePassKeyRefs<'_>,
+        fragment_entry_override: Option<&'static str>,
+    ) -> Result<ProvisionalCompositePassObjects<'a>> {
+        if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
+            return Err(c08_cache_error(
+                "provisional composite pass objects belong to another device cache",
+            ));
+        }
+        let description = validate_composite_pass_keys(keys)?;
+        for sampler_key in keys.samplers {
+            if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
+            {
+                self.samplers.insert(
+                    *sampler_key,
+                    device.create_sampler(&sampler_descriptor(*sampler_key)),
+                );
+            }
+        }
+        if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
+            self.layouts.insert(
+                keys.layout.clone(),
+                create_composite_bind_group_layout(device, description),
+            );
+        }
+        if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
+            self.shaders.insert(
+                keys.shader.clone(),
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Surgeist C09 layer-composite shader"),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(LAYER_COMPOSITE_WGSL)),
+                }),
+            );
+        }
+        if !cache.pipelines.contains_key(keys.pipeline)
+            && !self.pipelines.contains_key(keys.pipeline)
+        {
+            let layout_handle = self
+                .layouts
+                .get(keys.layout)
+                .or_else(|| cache.layouts.get(keys.layout))
+                .ok_or_else(|| {
+                    c08_cache_error("composite bind-group layout realization was lost")
+                })?;
+            let shader_handle = self
+                .shaders
+                .get(keys.shader)
+                .or_else(|| cache.shaders.get(keys.shader))
+                .ok_or_else(|| c08_cache_error("composite shader-module realization was lost"))?;
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Surgeist C09 layer-composite pipeline layout"),
+                bind_group_layouts: &[Some(layout_handle)],
+                immediate_size: 0,
+            });
+            let target = wgpu::ColorTargetState {
+                format: texture_format(description.target_format)?,
+                blend: match description.path {
+                    ShaderCompositePathKey::Normal => Some(span_source_over_blend()),
+                    ShaderCompositePathKey::DestinationSampling => None,
+                },
+                write_mask: wgpu::ColorWrites::ALL,
+            };
+            let fragment_entry =
+                fragment_entry_override.unwrap_or_else(|| composite_fragment_entry(description));
+            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Surgeist C09 layer-composite pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader_handle,
+                    entry_point: Some("vertex_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: shader_handle,
+                    entry_point: Some(fragment_entry),
+                    targets: &[Some(target)],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.pipelines.insert(keys.pipeline.clone(), created);
+        }
+        self.composite_pass_objects(cache, keys)
+    }
+
+    fn composite_pass_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        keys: CompositePassKeyRefs<'_>,
+    ) -> Result<ProvisionalCompositePassObjects<'a>> {
+        let [source_sampler_key] = keys.samplers else {
+            return Err(c08_cache_error(
+                "composite pass realization requires one source sampler",
+            ));
+        };
+        let source_sampler = self
+            .samplers
+            .get(source_sampler_key)
+            .or_else(|| cache.samplers.get(source_sampler_key))
+            .ok_or_else(|| c08_cache_error("composite source sampler realization was lost"))?;
+        let layout = self
+            .layouts
+            .get(keys.layout)
+            .or_else(|| cache.layouts.get(keys.layout))
+            .ok_or_else(|| c08_cache_error("composite bind-group layout realization was lost"))?;
+        let shader = self
+            .shaders
+            .get(keys.shader)
+            .or_else(|| cache.shaders.get(keys.shader))
+            .ok_or_else(|| c08_cache_error("composite shader-module realization was lost"))?;
+        let pipeline = self
+            .pipelines
+            .get(keys.pipeline)
+            .or_else(|| cache.pipelines.get(keys.pipeline))
+            .ok_or_else(|| c08_cache_error("composite render-pipeline realization was lost"))?;
+        Ok(ProvisionalCompositePassObjects {
+            description: validate_composite_pass_keys(keys)?,
+            source_sampler,
+            layout,
+            shader,
+            pipeline,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_composite_pass_for_test(
+        &self,
+        cache: &DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> bool {
+        self.composite_pass_objects(
+            cache,
+            CompositePassKeyRefs {
+                samplers,
+                layout,
+                shader,
+                pipeline,
+            },
+        )
+        .is_ok_and(|objects| objects.require_encoding_ready().is_ok())
+    }
+
     pub(crate) fn ensure_commit_ready(&self, cache: &DevicePassCache) -> Result<()> {
         if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
             return Err(c08_cache_error(
-                "provisional C08 pass objects cannot enter another device cache",
+                "provisional pass objects cannot enter another device cache",
             ));
         }
         if self
@@ -709,7 +954,7 @@ impl ProvisionalDevicePassCacheUpdate {
                 .any(|key| cache.pipelines.contains_key(key))
         {
             return Err(c08_cache_error(
-                "persistent C08 pass cache changed during provisional realization",
+                "persistent pass cache changed during provisional realization",
             ));
         }
         Ok(())
@@ -789,6 +1034,65 @@ impl ProvisionalC08PassObjects<'_> {
     #[cfg(test)]
     fn is_encoding_ready_for_test(&self) -> bool {
         self.require_encoding_ready().is_ok()
+    }
+}
+
+impl ProvisionalCompositePassObjects<'_> {
+    pub(crate) fn require_encoding_ready(&self) -> Result<()> {
+        let _ = (
+            self.description,
+            self.layout,
+            self.shader,
+            self.pipeline,
+            self.source_sampler,
+        );
+        Ok(())
+    }
+
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn source_sampler(&self) -> &wgpu::Sampler {
+        self.source_sampler
+    }
+
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        self.layout
+    }
+
+    #[cfg(test)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn path(&self) -> ShaderCompositePathKey {
+        self.description.path
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn has_clip_coverage(&self) -> bool {
+        self.description.has_clip_coverage
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn has_alpha_mask(&self) -> bool {
+        self.description.has_alpha_mask
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn uses_fixed_source_over_blend(&self) -> bool {
+        matches!(self.description.path, ShaderCompositePathKey::Normal)
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn uses_replace_blend(&self) -> bool {
+        matches!(
+            self.description.path,
+            ShaderCompositePathKey::DestinationSampling
+        )
     }
 }
 
@@ -920,6 +1224,97 @@ fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription
     })
 }
 
+fn validate_composite_pass_keys(
+    keys: CompositePassKeyRefs<'_>,
+) -> Result<CompositePassDescription> {
+    let ShaderProgramKey::Composite(ShaderCompositeKey::Layer {
+        path,
+        has_clip_coverage,
+        has_alpha_mask,
+    }) = keys.layout.program
+    else {
+        return Err(c08_cache_error(
+            "a non-layer program reached C09 composite realization",
+        ));
+    };
+    let Some(working_format) = keys.shader.working_format else {
+        return Err(c08_cache_error(
+            "C09 composite shader key has no selected working format",
+        ));
+    };
+    if !is_working_format(working_format)
+        || keys.layout.data_bindings.as_slice()
+            != [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::CompositeParameters,
+            ]
+        || keys.shader.program != keys.layout.program
+        || &keys.shader.layout != keys.layout
+        || keys.shader.samplers.as_slice() != keys.samplers
+        || keys.shader.output_format.is_some()
+        || &keys.pipeline.shader != keys.shader
+        || &keys.pipeline.layout != keys.layout
+        || keys.pipeline.samplers.as_slice() != keys.samplers
+        || keys.pipeline.target_format != working_format
+    {
+        return Err(c08_cache_error(
+            "C09 composite keys disagree across layout, shader, format, or pipeline phases",
+        ));
+    }
+
+    let [source_sampler] = keys.samplers else {
+        return Err(c08_cache_error(
+            "C09 composite pass must bind exactly one source sampler",
+        ));
+    };
+    if source_sampler.binding_role != ShaderBindingRoleKey::CompositeSource
+        || source_sampler.source_format != working_format
+        || source_sampler.filter != ShaderSamplingFilterKey::Linear
+        || source_sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
+        || source_sampler.resolved_mask_sampling.is_some()
+    {
+        return Err(c08_cache_error(
+            "C09 composite source sampler semantics are not exact",
+        ));
+    }
+
+    let mut expected_textures = Vec::with_capacity(4);
+    if path == ShaderCompositePathKey::DestinationSampling {
+        expected_textures.push(SampledTextureLayoutKey {
+            binding_role: ShaderBindingRoleKey::CompositeParent,
+            source_format: working_format,
+        });
+    }
+    expected_textures.push(SampledTextureLayoutKey {
+        binding_role: ShaderBindingRoleKey::CompositeSource,
+        source_format: working_format,
+    });
+    if has_clip_coverage {
+        expected_textures.push(SampledTextureLayoutKey {
+            binding_role: ShaderBindingRoleKey::ClipCoverage,
+            source_format: ShaderTextureFormatKey::ClipCoverageRgba8Unorm,
+        });
+    }
+    if has_alpha_mask {
+        expected_textures.push(SampledTextureLayoutKey {
+            binding_role: ShaderBindingRoleKey::AlphaMask,
+            source_format: ShaderTextureFormatKey::ResolvedMaskRgba8Unorm,
+        });
+    }
+    if keys.layout.sampled_textures != expected_textures {
+        return Err(c08_cache_error(
+            "C09 composite layout contains an absent or missing semantic texture",
+        ));
+    }
+
+    Ok(CompositePassDescription {
+        path,
+        has_clip_coverage,
+        has_alpha_mask,
+        target_format: working_format,
+    })
+}
+
 const fn is_working_format(format: ShaderTextureFormatKey) -> bool {
     matches!(
         format,
@@ -949,7 +1344,7 @@ fn sampler_descriptor(key: SamplerKey) -> wgpu::SamplerDescriptor<'static> {
         Some(ShaderMaskExtendKey::Reflect) => wgpu::AddressMode::MirrorRepeat,
     };
     wgpu::SamplerDescriptor {
-        label: Some("Surgeist C08 sampled-image sampler"),
+        label: Some("Surgeist sampled-image sampler"),
         address_mode_u: address_mode,
         address_mode_v: address_mode,
         address_mode_w: address_mode,
@@ -996,6 +1391,82 @@ fn create_c08_bind_group_layout(
         label: Some(c08_bind_group_layout_label(program)),
         entries: &entries,
     })
+}
+
+fn create_composite_bind_group_layout(
+    device: &wgpu::Device,
+    description: CompositePassDescription,
+) -> wgpu::BindGroupLayout {
+    let texture_entry = |binding, filterable| wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: wgpu::TextureViewDimension::D2,
+            multisampled: false,
+        },
+        count: None,
+    };
+    let mut entries = Vec::with_capacity(7);
+    entries.push(texture_entry(0, true));
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 1,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+        count: None,
+    });
+    if description.path == ShaderCompositePathKey::DestinationSampling {
+        entries.push(texture_entry(2, false));
+    }
+    if description.has_clip_coverage {
+        entries.push(texture_entry(3, false));
+    }
+    if description.has_alpha_mask {
+        entries.push(texture_entry(4, false));
+    }
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 5,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(48),
+        },
+        count: None,
+    });
+    entries.push(wgpu::BindGroupLayoutEntry {
+        binding: 6,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: wgpu::BufferSize::new(112),
+        },
+        count: None,
+    });
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Surgeist C09 layer-composite bindings"),
+        entries: &entries,
+    })
+}
+
+const fn composite_fragment_entry(description: CompositePassDescription) -> &'static str {
+    match (
+        description.path,
+        description.has_clip_coverage,
+        description.has_alpha_mask,
+    ) {
+        (ShaderCompositePathKey::Normal, false, false) => "fragment_normal",
+        (ShaderCompositePathKey::Normal, true, false) => "fragment_normal_clip",
+        (ShaderCompositePathKey::Normal, false, true) => "fragment_normal_mask",
+        (ShaderCompositePathKey::Normal, true, true) => "fragment_normal_clip_mask",
+        (ShaderCompositePathKey::DestinationSampling, false, false) => "fragment_destination",
+        (ShaderCompositePathKey::DestinationSampling, true, false) => "fragment_destination_clip",
+        (ShaderCompositePathKey::DestinationSampling, false, true) => "fragment_destination_mask",
+        (ShaderCompositePathKey::DestinationSampling, true, true) => {
+            "fragment_destination_clip_mask"
+        }
+    }
 }
 
 const fn c08_shader_source(program: C08Program) -> &'static str {
@@ -1053,6 +1524,7 @@ const fn span_source_over_blend() -> wgpu::BlendState {
 const fn texture_format(format: ShaderTextureFormatKey) -> Result<wgpu::TextureFormat> {
     match format {
         ShaderTextureFormatKey::VelloCaptureRgba8Unorm
+        | ShaderTextureFormatKey::ClipCoverageRgba8Unorm
         | ShaderTextureFormatKey::WorkingReducedPrecisionRgba8Unorm
         | ShaderTextureFormatKey::ResolvedMaskRgba8Unorm
         | ShaderTextureFormatKey::OutputRgba8Unorm => Ok(wgpu::TextureFormat::Rgba8Unorm),
@@ -1132,6 +1604,66 @@ pub(crate) fn c08_pass_key_facts_for_test(
                         operation: wgpu::BlendOperation::Add,
                     },
                 },
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct C09CompositePassKeyFactsForTest {
+    pub(crate) path: ShaderCompositePathKey,
+    pub(crate) has_clip_coverage: bool,
+    pub(crate) has_alpha_mask: bool,
+    pub(crate) sampled_roles: Vec<ShaderBindingRoleKey>,
+    pub(crate) has_only_source_sampler: bool,
+    pub(crate) has_exact_uniforms: bool,
+    pub(crate) working_format: ShaderTextureFormatKey,
+    pub(crate) target_format: ShaderTextureFormatKey,
+    pub(crate) uses_fixed_source_over_blend: bool,
+    pub(crate) uses_replace_blend: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c09_composite_pass_key_facts_for_test(
+    samplers: &[SamplerKey],
+    layout: &BindGroupLayoutKey,
+    shader: &ShaderModuleKey,
+    pipeline: &RenderPipelineKey,
+) -> Option<C09CompositePassKeyFactsForTest> {
+    let description = validate_composite_pass_keys(CompositePassKeyRefs {
+        samplers,
+        layout,
+        shader,
+        pipeline,
+    })
+    .ok()?;
+    Some(C09CompositePassKeyFactsForTest {
+        path: description.path,
+        has_clip_coverage: description.has_clip_coverage,
+        has_alpha_mask: description.has_alpha_mask,
+        sampled_roles: layout
+            .sampled_textures
+            .iter()
+            .map(|texture| texture.binding_role)
+            .collect(),
+        has_only_source_sampler: matches!(
+            samplers,
+            [SamplerKey {
+                binding_role: ShaderBindingRoleKey::CompositeSource,
+                filter: ShaderSamplingFilterKey::Linear,
+                edge: ShaderSamplingEdgeKey::TransparentBlack,
+                resolved_mask_sampling: None,
+                ..
+            }]
+        ),
+        has_exact_uniforms: layout.data_bindings.as_slice()
+            == [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::CompositeParameters,
+            ],
+        working_format: shader.working_format?,
+        target_format: pipeline.target_format,
+        uses_fixed_source_over_blend: description.path == ShaderCompositePathKey::Normal,
+        uses_replace_blend: description.path == ShaderCompositePathKey::DestinationSampling,
     })
 }
 
@@ -1222,11 +1754,48 @@ impl PassSpatialUniformBytes {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct CompositeParameterBytes([u8; 112]);
 
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct CompositeMaskParameterFacts {
+    bounds: [f64; 4],
+    dimensions: [u32; 2],
+    texel_center_facts: [f64; 4],
+    sampling: ShaderMaskSamplingKey,
+}
+
 impl CompositeParameterBytes {
     pub(crate) fn try_from_runtime_layer(
         parameters: &RuntimeLayerCompositeParameters,
     ) -> Result<Self> {
-        let [a, b, c, d, e, f] = parameters.destination_to_layer_local().affine().as_array();
+        let mask = parameters.alpha_mask().map(|mask| {
+            let bounds = mask.bounds();
+            let dimensions = mask.image_dimensions();
+            let texel_centers = mask.texel_center_facts();
+            let [half_x, half_y] = texel_centers.half_texel_normalized();
+            let [texel_x, texel_y] = texel_centers.texel_size_normalized();
+            CompositeMaskParameterFacts {
+                bounds: [bounds.x(), bounds.y(), bounds.width(), bounds.height()],
+                dimensions: [dimensions.width(), dimensions.height()],
+                texel_center_facts: [half_x, half_y, texel_x, texel_y],
+                sampling: mask.sampling(),
+            }
+        });
+        Self::try_from_facts(
+            parameters.destination_to_layer_local().affine().as_array(),
+            parameters.opacity(),
+            parameters.blend(),
+            parameters.has_clip(),
+            mask,
+        )
+    }
+
+    fn try_from_facts(
+        affine: [f64; 6],
+        opacity: f32,
+        blend: BlendMode,
+        has_clip: bool,
+        mask: Option<CompositeMaskParameterFacts>,
+    ) -> Result<Self> {
+        let [a, b, c, d, e, f] = affine;
         let affine = [
             narrow_composite_scalar("composite affine coefficient a", a)?,
             narrow_composite_scalar("composite affine coefficient b", b)?,
@@ -1237,7 +1806,6 @@ impl CompositeParameterBytes {
         ];
         validate_narrowed_composite_affine(affine)?;
 
-        let opacity = parameters.opacity();
         if !opacity.is_finite() || !(0.0..=1.0).contains(&opacity) {
             return Err(Error::invalid_value(
                 "composite opacity",
@@ -1254,33 +1822,29 @@ impl CompositeParameterBytes {
         write_f32(&mut bytes, 16, affine[4]);
         write_f32(&mut bytes, 20, affine[5]);
 
-        if let Some(mask) = parameters.alpha_mask() {
-            let bounds = mask.bounds();
+        if let Some(mask) = mask {
             let bounds = [
-                narrow_composite_scalar("composite mask bounds x", bounds.x())?,
-                narrow_composite_scalar("composite mask bounds y", bounds.y())?,
-                narrow_positive_composite_scalar("composite mask bounds width", bounds.width())?,
-                narrow_positive_composite_scalar("composite mask bounds height", bounds.height())?,
+                narrow_composite_scalar("composite mask bounds x", mask.bounds[0])?,
+                narrow_composite_scalar("composite mask bounds y", mask.bounds[1])?,
+                narrow_positive_composite_scalar("composite mask bounds width", mask.bounds[2])?,
+                narrow_positive_composite_scalar("composite mask bounds height", mask.bounds[3])?,
             ];
             for (index, value) in bounds.into_iter().enumerate() {
                 write_f32(&mut bytes, 32 + index * 4, value);
             }
 
-            let dimensions = mask.image_dimensions();
-            if dimensions.width() == 0 || dimensions.height() == 0 {
+            let [width, height] = mask.dimensions;
+            if width == 0 || height == 0 {
                 return Err(Error::invalid_value(
                     "composite mask image dimensions",
-                    format!("{}x{}", dimensions.width(), dimensions.height()),
+                    format!("{width}x{height}"),
                     "must be positive before parameter serialization",
                 ));
             }
-            write_u32(&mut bytes, 48, dimensions.width());
-            write_u32(&mut bytes, 52, dimensions.height());
+            write_u32(&mut bytes, 48, width);
+            write_u32(&mut bytes, 52, height);
 
-            let texel_centers = mask.texel_center_facts();
-            let [half_x, half_y] = texel_centers.half_texel_normalized();
-            let [texel_x, texel_y] = texel_centers.texel_size_normalized();
-            for (index, value) in [half_x, half_y, texel_x, texel_y].into_iter().enumerate() {
+            for (index, value) in mask.texel_center_facts.into_iter().enumerate() {
                 write_f32(
                     &mut bytes,
                     64 + index * 4,
@@ -1288,15 +1852,15 @@ impl CompositeParameterBytes {
                 );
             }
 
-            let sampling = mask.sampling();
+            let sampling = mask.sampling;
             write_u32(&mut bytes, 88, sampling.quality().parameter_code());
             write_u32(&mut bytes, 92, sampling.extend().parameter_code());
             write_u32(&mut bytes, 100, 1);
         }
 
         write_f32(&mut bytes, 80, opacity);
-        write_u32(&mut bytes, 84, blend_parameter_code(parameters.blend()));
-        write_u32(&mut bytes, 96, u32::from(parameters.has_clip()));
+        write_u32(&mut bytes, 84, blend_parameter_code(blend));
+        write_u32(&mut bytes, 96, u32::from(has_clip));
         Ok(Self(bytes))
     }
 
@@ -1310,6 +1874,58 @@ impl CompositeParameterBytes {
     pub(crate) const fn into_bytes_for_test(self) -> [u8; 112] {
         self.0
     }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) struct CompositeParameterGpuVectorFactsForTest {
+    pub(crate) layer_point: [f64; 2],
+    pub(crate) mask_bounds: [f64; 4],
+    pub(crate) mask_dimensions: [u32; 2],
+    pub(crate) quality: ImageQuality,
+    pub(crate) extend: Extend,
+    pub(crate) opacity: f32,
+    pub(crate) blend: BlendMode,
+    pub(crate) has_clip: bool,
+    pub(crate) has_mask: bool,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) fn composite_parameter_bytes_for_gpu_vector_for_test(
+    facts: CompositeParameterGpuVectorFactsForTest,
+) -> Result<[u8; 112]> {
+    if !facts.opacity.is_finite() {
+        return Err(Error::invalid_value(
+            "composite opacity",
+            facts.opacity,
+            "must be finite before clamping",
+        ));
+    }
+    let mask = facts.has_mask.then(|| {
+        let [width, height] = facts.mask_dimensions;
+        let texel_x = 1.0 / f64::from(width);
+        let texel_y = 1.0 / f64::from(height);
+        CompositeMaskParameterFacts {
+            bounds: facts.mask_bounds,
+            dimensions: facts.mask_dimensions,
+            texel_center_facts: [texel_x * 0.5, texel_y * 0.5, texel_x, texel_y],
+            sampling: ShaderMaskSamplingKey::new(facts.quality, facts.extend),
+        }
+    });
+    CompositeParameterBytes::try_from_facts(
+        [
+            1.0,
+            0.0,
+            0.0,
+            1.0,
+            facts.layer_point[0] - 0.5,
+            facts.layer_point[1] - 0.5,
+        ],
+        facts.opacity.clamp(0.0, 1.0),
+        facts.blend,
+        facts.has_clip,
+        mask,
+    )
+    .map(CompositeParameterBytes::into_bytes_for_test)
 }
 
 fn validate_narrowed_composite_affine(affine: [f32; 6]) -> Result<()> {

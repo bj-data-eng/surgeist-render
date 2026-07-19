@@ -2,9 +2,9 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
-#[cfg(test)]
-use super::pass::C08PassCacheRequestsForTest;
 use super::pass::{C08ExternalOutputView, C08PreparableGraph, LoweredGraphPlan, PreparedGraph};
+#[cfg(test)]
+use super::pass::{C08PassCacheRequestsForTest, C09CompositeCacheRequestsForTest};
 use super::resource::{
     FrameCleanup, FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager,
     WorkingFormat,
@@ -220,6 +220,56 @@ pub(crate) struct C08ShaderCacheRealizationObservationForTest {
     pub(crate) cancellation_publishes_none: bool,
     pub(crate) device_transition_publishes_none: bool,
     pub(crate) specializes_rgba_and_bgra_outputs: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C09CompositeCacheRealizationObservationForTest {
+    pub(crate) realizes_normal_and_destination_programs: bool,
+    pub(crate) realizes_all_optional_binding_combinations: bool,
+    pub(crate) normal_uses_fixed_premultiplied_source_over: bool,
+    pub(crate) destination_uses_replace_blending: bool,
+    pub(crate) commits_only_after_clean_transaction: bool,
+    pub(crate) reuses_exact_committed_entries: bool,
+    pub(crate) failed_validation_publishes_none: bool,
+    pub(crate) cancellation_publishes_none: bool,
+    pub(crate) device_transition_publishes_none: bool,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct C09MaskSamplingVectorForTest {
+    pub(crate) quality: ImageQuality,
+    pub(crate) extend: Extend,
+    pub(crate) layer_point: Point,
+    pub(crate) clip_alpha: Option<f32>,
+    pub(crate) opacity: f32,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct C09MaskSamplingInputForTest {
+    pub(crate) mask_size: PhysicalSize,
+    pub(crate) mask_rgba: Vec<u8>,
+    pub(crate) mask_bounds: Rect,
+    pub(crate) source: [f32; 4],
+    pub(crate) vectors: Vec<C09MaskSamplingVectorForTest>,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct C09BlendVectorForTest {
+    pub(crate) blend: BlendMode,
+    pub(crate) source: [f32; 4],
+    pub(crate) parent: [f32; 4],
+    pub(crate) opacity: f32,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct C09GpuVectorResultsForTest {
+    pub(crate) working_format: WorkingFormat,
+    pub(crate) rgba: Vec<[f32; 4]>,
 }
 
 #[cfg(test)]
@@ -486,6 +536,504 @@ fn c08_requests_are_cached_for_test(
                 keys.pipeline(),
             )
         })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct C09CompositeProvisionObservationForTest {
+    encoding_ready: bool,
+    has_normal: bool,
+    has_destination: bool,
+    all_optional_combinations: bool,
+    normal_uses_fixed_blend: bool,
+    destination_uses_replace_blend: bool,
+}
+
+#[cfg(test)]
+fn provision_c09_composite_requests_for_test(
+    ready: &ReadyDeviceState,
+    requests: &C09CompositeCacheRequestsForTest,
+    invalidate_last_pipeline: bool,
+) -> Result<(
+    ProvisionalDevicePassCacheUpdate,
+    C09CompositeProvisionObservationForTest,
+)> {
+    let mut update = ready.pass_cache.provisional_update();
+    let last = requests.passes().len().saturating_sub(1);
+    let mut encoding_ready = !requests.passes().is_empty();
+    let mut has_normal = false;
+    let mut has_destination = false;
+    let mut normal_uses_fixed_blend = true;
+    let mut destination_uses_replace_blend = true;
+    let mut combinations = [[false; 4]; 2];
+    for (index, keys) in requests.passes().iter().enumerate() {
+        let objects = if invalidate_last_pipeline && index == last {
+            update.realize_composite_pass_with_invalid_fragment_for_test(
+                &ready.device,
+                &ready.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+        } else {
+            update.realize_composite_pass(
+                &ready.device,
+                &ready.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+        };
+        encoding_ready &= objects.require_encoding_ready().is_ok();
+        let path_index = match objects.path() {
+            super::shader::ShaderCompositePathKey::Normal => {
+                has_normal = true;
+                normal_uses_fixed_blend &= objects.uses_fixed_source_over_blend();
+                0
+            }
+            super::shader::ShaderCompositePathKey::DestinationSampling => {
+                has_destination = true;
+                destination_uses_replace_blend &= objects.uses_replace_blend();
+                1
+            }
+        };
+        let combination_index =
+            usize::from(objects.has_clip_coverage()) + 2 * usize::from(objects.has_alpha_mask());
+        combinations[path_index][combination_index] = true;
+        encoding_ready &= update.contains_composite_pass_for_test(
+            &ready.pass_cache,
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        );
+    }
+    Ok((
+        update,
+        C09CompositeProvisionObservationForTest {
+            encoding_ready,
+            has_normal,
+            has_destination,
+            all_optional_combinations: combinations.into_iter().flatten().all(|present| present),
+            normal_uses_fixed_blend,
+            destination_uses_replace_blend,
+        },
+    ))
+}
+
+#[cfg(test)]
+fn c09_composite_requests_are_cached_for_test(
+    cache: &DevicePassCache,
+    requests: &C09CompositeCacheRequestsForTest,
+) -> bool {
+    !requests.passes().is_empty()
+        && requests.passes().iter().all(|keys| {
+            cache.contains_composite_pass_for_test(
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+        })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct C09GpuVectorDrawForTest {
+    path: super::shader::ShaderCompositePathKey,
+    has_clip_coverage: bool,
+    has_alpha_mask: bool,
+    source: [f32; 4],
+    parent: [f32; 4],
+    layer_point: Point,
+    clip_alpha: f32,
+    opacity: f32,
+    blend: BlendMode,
+    quality: ImageQuality,
+    extend: Extend,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct C09GpuMaskTextureForTest<'a> {
+    size: PhysicalSize,
+    rgba: &'a [u8],
+    bounds: Rect,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(crate) struct C09PreparedGpuVectorsForTest {
+    pub(crate) device: wgpu::Device,
+    pub(crate) queue: wgpu::Queue,
+    pub(crate) working_format: WorkingFormat,
+    pub(crate) encoder: wgpu::CommandEncoder,
+    pub(crate) outputs: Vec<wgpu::Texture>,
+    pub(crate) pass_cache_update: ProvisionalDevicePassCacheUpdate,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_vector_texture(
+    device: &wgpu::Device,
+    size: PhysicalSize,
+    format: wgpu::TextureFormat,
+    usage: wgpu::TextureUsages,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: size.width(),
+            height: size.height(),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    })
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_clear_vector_texture(
+    encoder: &mut wgpu::CommandEncoder,
+    view: &wgpu::TextureView,
+    color: [f32; 4],
+    label: &'static str,
+) {
+    let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: f64::from(color[0]),
+                    g: f64::from(color[1]),
+                    b: f64::from(color[2]),
+                    a: f64::from(color[3]),
+                }),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        occlusion_query_set: None,
+        timestamp_writes: None,
+        multiview_mask: None,
+    });
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_vector_uniform_buffer(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    bytes: &[u8],
+    label: &'static str,
+) -> wgpu::Buffer {
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some(label),
+        size: u64::try_from(bytes.len()).unwrap(),
+        usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
+        mapped_at_creation: false,
+    });
+    queue.write_buffer(&buffer, 0, bytes);
+    buffer
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn encode_c09_gpu_vectors_for_test(
+    ready: &ReadyDeviceState,
+    requests: &C09CompositeCacheRequestsForTest,
+    working_format: WorkingFormat,
+    mask: Option<C09GpuMaskTextureForTest<'_>>,
+    draws: &[C09GpuVectorDrawForTest],
+) -> Result<C09PreparedGpuVectorsForTest> {
+    if draws.is_empty() {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "C09 GPU vector execution requires at least one draw",
+        ));
+    }
+    let mask_texture = if let Some(mask) = &mask {
+        let expected_len = usize::try_from(mask.size.width())
+            .ok()
+            .and_then(|width| {
+                usize::try_from(mask.size.height())
+                    .ok()
+                    .and_then(|height| width.checked_mul(height))
+            })
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "C09 GPU mask vector byte length overflowed",
+                )
+            })?;
+        if mask.rgba.len() != expected_len || mask.size.width() == 0 || mask.size.height() == 0 {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "C09 GPU mask vector bytes do not match a positive RGBA8 extent",
+            ));
+        }
+        let texture = c09_vector_texture(
+            &ready.device,
+            mask.size,
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST),
+            "Surgeist C09 GPU vector mask",
+        );
+        ready.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            mask.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(mask.size.width() * 4),
+                rows_per_image: None,
+            },
+            wgpu::Extent3d {
+                width: mask.size.width(),
+                height: mask.size.height(),
+                depth_or_array_layers: 1,
+            },
+        );
+        Some(texture)
+    } else {
+        None
+    };
+    let mask_view = mask_texture
+        .as_ref()
+        .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    let spatial_bytes = super::pass::pass_spatial_uniform_bytes_for_test(
+        Point::new(0.0, 0.0),
+        1.0,
+        PhysicalSize::new(1, 1),
+        Point::new(0.0, 0.0),
+        1.0,
+        PhysicalSize::new(1, 1),
+    )?;
+    let mut encoder = ready
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C09 GPU vector encoder"),
+        });
+    let mut outputs = Vec::with_capacity(draws.len());
+    let mut pass_cache_update = ready.pass_cache.provisional_update();
+    for draw in draws.iter().copied() {
+        let keys = requests
+            .composite_pass(draw.path, draw.has_clip_coverage, draw.has_alpha_mask)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "C09 GPU vector draw has no exact composite pipeline keys",
+                )
+            })?;
+        let source = c09_vector_texture(
+            &ready.device,
+            PhysicalSize::new(1, 1),
+            working_format.texture_format(),
+            wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
+            "Surgeist C09 GPU vector source",
+        );
+        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
+        c09_clear_vector_texture(
+            &mut encoder,
+            &source_view,
+            draw.source,
+            "Surgeist C09 GPU vector source clear",
+        );
+        let parent = (draw.path == super::shader::ShaderCompositePathKey::DestinationSampling)
+            .then(|| {
+                c09_vector_texture(
+                    &ready.device,
+                    PhysicalSize::new(1, 1),
+                    working_format.texture_format(),
+                    wgpu::TextureUsages::RENDER_ATTACHMENT
+                        .union(wgpu::TextureUsages::TEXTURE_BINDING),
+                    "Surgeist C09 GPU vector parent",
+                )
+            });
+        let parent_view = parent
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        if let Some(parent_view) = &parent_view {
+            c09_clear_vector_texture(
+                &mut encoder,
+                parent_view,
+                draw.parent,
+                "Surgeist C09 GPU vector parent clear",
+            );
+        }
+        let clip = draw.has_clip_coverage.then(|| {
+            c09_vector_texture(
+                &ready.device,
+                PhysicalSize::new(1, 1),
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
+                "Surgeist C09 GPU vector clip coverage",
+            )
+        });
+        let clip_view = clip
+            .as_ref()
+            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+        if let Some(clip_view) = &clip_view {
+            c09_clear_vector_texture(
+                &mut encoder,
+                clip_view,
+                [1.0, 0.25, 0.75, draw.clip_alpha],
+                "Surgeist C09 GPU vector clip clear",
+            );
+        }
+        let output = c09_vector_texture(
+            &ready.device,
+            PhysicalSize::new(1, 1),
+            working_format.texture_format(),
+            wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::COPY_SRC),
+            "Surgeist C09 GPU vector output",
+        );
+        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+        let output_base = if draw.path == super::shader::ShaderCompositePathKey::Normal {
+            draw.parent
+        } else {
+            [0.125, 0.25, 0.375, 0.5]
+        };
+        c09_clear_vector_texture(
+            &mut encoder,
+            &output_view,
+            output_base,
+            "Surgeist C09 GPU vector output clear",
+        );
+        let mask_bounds = mask.as_ref().map_or([0.0, 0.0, 1.0, 1.0], |mask| {
+            [
+                mask.bounds.x(),
+                mask.bounds.y(),
+                mask.bounds.width(),
+                mask.bounds.height(),
+            ]
+        });
+        let mask_dimensions = mask
+            .as_ref()
+            .map_or([1, 1], |mask| [mask.size.width(), mask.size.height()]);
+        let parameters = super::shader::composite_parameter_bytes_for_gpu_vector_for_test(
+            super::shader::CompositeParameterGpuVectorFactsForTest {
+                layer_point: [draw.layer_point.x(), draw.layer_point.y()],
+                mask_bounds,
+                mask_dimensions,
+                quality: draw.quality,
+                extend: draw.extend,
+                opacity: draw.opacity,
+                blend: draw.blend,
+                has_clip: draw.has_clip_coverage,
+                has_mask: draw.has_alpha_mask,
+            },
+        )?;
+        let spatial_buffer = c09_vector_uniform_buffer(
+            &ready.device,
+            &ready.queue,
+            &spatial_bytes,
+            "Surgeist C09 GPU vector spatial uniform",
+        );
+        let parameter_buffer = c09_vector_uniform_buffer(
+            &ready.device,
+            &ready.queue,
+            &parameters,
+            "Surgeist C09 GPU vector composite parameters",
+        );
+        let objects = pass_cache_update.realize_composite_pass(
+            &ready.device,
+            &ready.pass_cache,
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        )?;
+        objects.require_encoding_ready()?;
+        let mut entries = vec![
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&source_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
+            },
+        ];
+        if let Some(parent_view) = &parent_view {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(parent_view),
+            });
+        }
+        if let Some(clip_view) = &clip_view {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(clip_view),
+            });
+        }
+        if draw.has_alpha_mask {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(mask_view.as_ref().ok_or_else(
+                    || {
+                        Error::new(
+                            BackendErrorCode::RenderFailed,
+                            "C09 GPU mask draw has no uploaded mask texture",
+                        )
+                    },
+                )?),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: spatial_buffer.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 6,
+            resource: parameter_buffer.as_entire_binding(),
+        });
+        let bind_group = ready.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C09 GPU vector bindings"),
+            layout: objects.bind_group_layout(),
+            entries: &entries,
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Surgeist C09 GPU vector composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &output_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(objects.render_pipeline());
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        outputs.push(output);
+    }
+    Ok(C09PreparedGpuVectorsForTest {
+        device: ready.device.clone(),
+        queue: ready.queue.clone(),
+        working_format,
+        encoder,
+        outputs,
+        pass_cache_update,
+    })
 }
 
 impl DeviceState {
@@ -1423,6 +1971,19 @@ impl Backend {
         update.commit(&mut ready.pass_cache)
     }
 
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn commit_checked_pass_cache_update_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        update: ProvisionalDevicePassCacheUpdate,
+    ) -> Result<()> {
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(update),
+            RuntimeOperation::EffectRendering,
+        )
+    }
+
     #[cfg(any(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
@@ -2001,6 +2562,314 @@ impl Backend {
         state
             .ready_mut()
             .map(ReadyDeviceState::seed_pass_cache_sampler_for_test)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c09_composite_cache_realization_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        requests: &C09CompositeCacheRequestsForTest,
+    ) -> Result<C09CompositeCacheRealizationObservationForTest> {
+        let initial_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 composite realization requires a ready device",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, provision) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 composite realization lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        let counts_before_commit = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 composite realization lost its persistent cache",
+            )?
+            .pass_cache
+            .counts_for_test();
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let committed_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 committed compositor cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let realizes_normal_and_destination_programs = initial_counts.is_empty()
+            && counts_before_commit == initial_counts
+            && committed_counts != initial_counts
+            && provision.encoding_ready
+            && provision.has_normal
+            && provision.has_destination
+            && c09_composite_requests_are_cached_for_test(
+                &self
+                    .ready_state_mut(
+                        identity,
+                        RuntimeOperation::EffectRendering,
+                        BackendErrorCode::RenderFailed,
+                        "C09 committed compositor programs disappeared",
+                    )?
+                    .pass_cache,
+                requests,
+            );
+
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (reused_update, reused_provision) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 compositor cache reuse lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        let reused_existing_entries = reused_update.is_empty_for_test();
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(reused_update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let reused_counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 reused compositor cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let reuses_exact_committed_entries = reused_existing_entries
+            && reused_provision.encoding_ready
+            && reused_counts == committed_counts;
+
+        let validation_identity = self.add_device_slot_for_test().await?;
+        let validation_transaction = self.begin_gpu_operation(
+            validation_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let validation_update = {
+            let ready = self.ready_state_mut(
+                validation_identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 validation probe lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, true)?.0
+        };
+        let validation_error = validation_transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await;
+        drop(validation_update);
+        let failed_validation_publishes_none = validation_error
+            .as_ref()
+            .is_err_and(|error| error.code() == ErrorCode::RenderFailed)
+            && self
+                .device_states
+                .get(validation_identity.slot())
+                .and_then(DeviceState::ready)
+                .map(|ready| ready.pass_cache.counts_for_test())
+                .is_some_and(DevicePassCacheCountsForTest::is_empty);
+
+        let cancellation_identity = self.add_device_slot_for_test().await?;
+        let cancellation_transaction = self.begin_gpu_operation(
+            cancellation_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (canceled_update, canceled_provision) = {
+            let ready = self.ready_state_mut(
+                cancellation_identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 cancellation probe lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        let cancellation_cache_before_drop = self
+            .device_states
+            .get(cancellation_identity.slot())
+            .and_then(DeviceState::ready)
+            .map(|ready| ready.pass_cache.counts_for_test())
+            .is_some_and(DevicePassCacheCountsForTest::is_empty);
+        drop(canceled_update);
+        drop(cancellation_transaction);
+        let cancellation_publishes_none = canceled_provision.encoding_ready
+            && cancellation_cache_before_drop
+            && self
+                .device_states
+                .get(cancellation_identity.slot())
+                .and_then(DeviceState::ready)
+                .map(|ready| ready.pass_cache.counts_for_test())
+                .is_some_and(DevicePassCacheCountsForTest::is_empty)
+            && self
+                .device_states
+                .get(cancellation_identity.slot())
+                .is_some_and(|state| state.signal.active_generation_for_test().is_none());
+
+        let transition_transaction = self.begin_gpu_operation(
+            cancellation_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (transition_update, transition_provision) = {
+            let ready = self.ready_state_mut(
+                cancellation_identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 transition probe lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        self.signal_loss_for_test(cancellation_identity, DeviceLossReason::Destroyed);
+        let transition_error = transition_transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await;
+        drop(transition_update);
+        let device_transition_publishes_none = transition_provision.encoding_ready
+            && transition_error.is_err()
+            && self.renderer_released_for_test(cancellation_identity);
+
+        Ok(C09CompositeCacheRealizationObservationForTest {
+            realizes_normal_and_destination_programs,
+            realizes_all_optional_binding_combinations: provision.all_optional_combinations,
+            normal_uses_fixed_premultiplied_source_over: provision.normal_uses_fixed_blend,
+            destination_uses_replace_blending: provision.destination_uses_replace_blend,
+            commits_only_after_clean_transaction: counts_before_commit == initial_counts
+                && committed_counts != counts_before_commit,
+            reuses_exact_committed_entries,
+            failed_validation_publishes_none,
+            cancellation_publishes_none,
+            device_transition_publishes_none,
+        })
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn c09_shader_mask_sampling_preparation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        requests: &C09CompositeCacheRequestsForTest,
+        input: &C09MaskSamplingInputForTest,
+    ) -> Result<C09PreparedGpuVectorsForTest> {
+        let working_format = self
+            .device_capabilities(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "C09 mask vectors require immutable device capabilities",
+                )
+            })?
+            .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)?;
+        let draws = input
+            .vectors
+            .iter()
+            .map(|vector| C09GpuVectorDrawForTest {
+                path: super::shader::ShaderCompositePathKey::Normal,
+                has_clip_coverage: vector.clip_alpha.is_some(),
+                has_alpha_mask: true,
+                source: input.source,
+                parent: [0.0; 4],
+                layer_point: vector.layer_point,
+                clip_alpha: vector.clip_alpha.unwrap_or(1.0),
+                opacity: vector.opacity,
+                blend: BlendMode::Normal,
+                quality: vector.quality,
+                extend: vector.extend,
+            })
+            .collect::<Vec<_>>();
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::EffectRendering,
+            BackendErrorCode::RenderFailed,
+            "C09 mask vectors lost their ready device",
+        )?;
+        encode_c09_gpu_vectors_for_test(
+            ready,
+            requests,
+            working_format,
+            Some(C09GpuMaskTextureForTest {
+                size: input.mask_size,
+                rgba: &input.mask_rgba,
+                bounds: input.mask_bounds,
+            }),
+            &draws,
+        )
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    pub(crate) fn c09_shader_blend_preparation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        requests: &C09CompositeCacheRequestsForTest,
+        vectors: &[C09BlendVectorForTest],
+    ) -> Result<C09PreparedGpuVectorsForTest> {
+        let working_format = self
+            .device_capabilities(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "C09 blend vectors require immutable device capabilities",
+                )
+            })?
+            .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)?;
+        let draws = vectors
+            .iter()
+            .map(|vector| C09GpuVectorDrawForTest {
+                path: if vector.blend == BlendMode::Normal {
+                    super::shader::ShaderCompositePathKey::Normal
+                } else {
+                    super::shader::ShaderCompositePathKey::DestinationSampling
+                },
+                has_clip_coverage: false,
+                has_alpha_mask: false,
+                source: vector.source,
+                parent: vector.parent,
+                layer_point: Point::new(0.5, 0.5),
+                clip_alpha: 1.0,
+                opacity: vector.opacity,
+                blend: vector.blend,
+                quality: ImageQuality::Low,
+                extend: Extend::Pad,
+            })
+            .collect::<Vec<_>>();
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::EffectRendering,
+            BackendErrorCode::RenderFailed,
+            "C09 blend vectors lost their ready device",
+        )?;
+        encode_c09_gpu_vectors_for_test(ready, requests, working_format, None, &draws)
     }
 
     #[cfg(test)]

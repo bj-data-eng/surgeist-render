@@ -32,7 +32,7 @@ use super::{
     shader::{
         BindGroupLayoutKey, CompositeParameterBytes, DevicePassCache, PassSpatialUniformBytes,
         ProvisionalC08PassObjects, ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey,
-        ShaderBindingRoleKey, ShaderBlendKey, ShaderCompositeKey, ShaderDataBindingKey,
+        ShaderBindingRoleKey, ShaderCompositeKey, ShaderCompositePathKey, ShaderDataBindingKey,
         ShaderMaskQualityKey, ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey,
         ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
@@ -217,6 +217,249 @@ pub(crate) struct C08PassCacheRequestsForTest {
 impl C08PassCacheRequestsForTest {
     pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
         &self.passes
+    }
+}
+
+#[cfg(test)]
+pub(crate) struct C09CompositeCacheRequestsForTest {
+    passes: Vec<RuntimePassCacheKeys>,
+}
+
+#[cfg(test)]
+impl C09CompositeCacheRequestsForTest {
+    pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
+        &self.passes
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn composite_pass(
+        &self,
+        path: ShaderCompositePathKey,
+        has_clip_coverage: bool,
+        has_alpha_mask: bool,
+    ) -> Option<&RuntimePassCacheKeys> {
+        self.passes.iter().find(|keys| {
+            super::shader::c09_composite_pass_key_facts_for_test(
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+            .is_some_and(|facts| {
+                facts.path == path
+                    && facts.has_clip_coverage == has_clip_coverage
+                    && facts.has_alpha_mask == has_alpha_mask
+            })
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn c09_composite_cache_requests_for_test(
+    command_sets: &[RenderCommands],
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> Result<C09CompositeCacheRequestsForTest> {
+    let mut passes = Vec::with_capacity(command_sets.len());
+    for commands in command_sets {
+        let FramePlan::GpuGraph(graph) = commands.clone().plan_for(context)? else {
+            return Err(lowering_error(
+                "the C09 composite cache fixture did not produce a GPU graph",
+            ));
+        };
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let resource_formats = lowered
+            .resources
+            .iter()
+            .map(|resource| (resource.id, resource.format))
+            .collect::<BTreeMap<_, _>>();
+        let layer_passes = lowered.passes.iter().filter_map(|pass| {
+            matches!(
+                &pass.kind,
+                RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::Layer { .. },
+                    ..
+                }))
+            )
+            .then_some(pass.cache_keys.as_ref())
+            .flatten()
+        });
+        let mut found_layer = false;
+        for keys in layer_passes {
+            found_layer = true;
+            if !passes.contains(keys) {
+                passes.push(keys.clone());
+            }
+        }
+        if !found_layer {
+            return Err(lowering_error(
+                "the C09 composite cache fixture has no layer-composite keys",
+            ));
+        }
+        for pass in &lowered.passes {
+            let RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::Layer { parameters, .. },
+                ..
+            })) = &pass.kind
+            else {
+                continue;
+            };
+            if parameters.blend() == BlendMode::Normal {
+                continue;
+            }
+            let mut normal_kind = pass.kind.clone();
+            let RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::Layer { parameters, .. },
+                ..
+            })) = &mut normal_kind
+            else {
+                unreachable!("the cloned C09 layer-composite kind must remain a layer")
+            };
+            parameters.blend = BlendMode::Normal;
+            let Some(keys) = runtime_pass_cache_keys(
+                &normal_kind,
+                &pass.reads,
+                pass.result,
+                working_format,
+                Format::Rgba8,
+                &resource_formats,
+            )?
+            else {
+                return Err(lowering_error(
+                    "the C09 normal-path cache fixture lost its exact keys",
+                ));
+            };
+            if !passes.contains(&keys) {
+                passes.push(keys);
+            }
+        }
+    }
+    if passes.is_empty() {
+        return Err(lowering_error(
+            "the C09 composite cache fixture contains no composite variants",
+        ));
+    }
+    Ok(C09CompositeCacheRequestsForTest { passes })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C09CompositeLayoutObservationForTest {
+    pub(crate) realizes_all_eight_entry_interfaces: bool,
+    pub(crate) normal_omits_parent: bool,
+    pub(crate) destination_binds_parent: bool,
+    pub(crate) optional_clip_is_exact: bool,
+    pub(crate) optional_mask_is_exact: bool,
+    pub(crate) binds_only_one_source_sampler: bool,
+    pub(crate) binds_only_exact_uniforms: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c09_composite_layout_observation_for_test(
+    requests: &C09CompositeCacheRequestsForTest,
+) -> C09CompositeLayoutObservationForTest {
+    use super::shader::c09_composite_pass_key_facts_for_test;
+
+    let facts = requests
+        .passes()
+        .iter()
+        .filter_map(|keys| {
+            c09_composite_pass_key_facts_for_test(
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+        })
+        .collect::<Vec<_>>();
+    let realizes_all_eight_entry_interfaces = facts.len() == requests.passes().len()
+        && facts.len() == 8
+        && [
+            ShaderCompositePathKey::Normal,
+            ShaderCompositePathKey::DestinationSampling,
+        ]
+        .into_iter()
+        .all(|path| {
+            [(false, false), (true, false), (false, true), (true, true)]
+                .into_iter()
+                .all(|(has_clip, has_mask)| {
+                    facts
+                        .iter()
+                        .filter(|facts| {
+                            facts.path == path
+                                && facts.has_clip_coverage == has_clip
+                                && facts.has_alpha_mask == has_mask
+                        })
+                        .count()
+                        == 1
+                })
+        });
+    let normal_omits_parent = facts.iter().all(|facts| {
+        facts.path != ShaderCompositePathKey::Normal
+            || (!facts
+                .sampled_roles
+                .contains(&ShaderBindingRoleKey::CompositeParent)
+                && facts.uses_fixed_source_over_blend
+                && !facts.uses_replace_blend)
+    });
+    let destination_binds_parent = facts.iter().all(|facts| {
+        facts.path != ShaderCompositePathKey::DestinationSampling
+            || (facts
+                .sampled_roles
+                .iter()
+                .filter(|role| **role == ShaderBindingRoleKey::CompositeParent)
+                .count()
+                == 1
+                && facts.uses_replace_blend
+                && !facts.uses_fixed_source_over_blend)
+    });
+    let optional_clip_is_exact = facts.iter().all(|facts| {
+        facts
+            .sampled_roles
+            .iter()
+            .filter(|role| **role == ShaderBindingRoleKey::ClipCoverage)
+            .count()
+            == usize::from(facts.has_clip_coverage)
+    });
+    let optional_mask_is_exact = facts.iter().all(|facts| {
+        facts
+            .sampled_roles
+            .iter()
+            .filter(|role| **role == ShaderBindingRoleKey::AlphaMask)
+            .count()
+            == usize::from(facts.has_alpha_mask)
+    });
+    let binds_only_one_source_sampler = facts.iter().all(|facts| {
+        facts.has_only_source_sampler
+            && facts
+                .sampled_roles
+                .iter()
+                .filter(|role| **role == ShaderBindingRoleKey::CompositeSource)
+                .count()
+                == 1
+    });
+    let binds_only_exact_uniforms = facts.iter().all(|facts| {
+        facts.has_exact_uniforms
+            && facts.working_format == facts.target_format
+            && facts.sampled_roles.len()
+                == 1 + usize::from(facts.path == ShaderCompositePathKey::DestinationSampling)
+                    + usize::from(facts.has_clip_coverage)
+                    + usize::from(facts.has_alpha_mask)
+    });
+    C09CompositeLayoutObservationForTest {
+        realizes_all_eight_entry_interfaces,
+        normal_omits_parent,
+        destination_binds_parent,
+        optional_clip_is_exact,
+        optional_mask_is_exact,
+        binds_only_one_source_sampler,
+        binds_only_exact_uniforms,
     }
 }
 
@@ -781,9 +1024,8 @@ pub(crate) enum RuntimeResourceFormat {
 impl RuntimeResourceFormat {
     const fn shader_key(self) -> ShaderTextureFormatKey {
         match self {
-            Self::VelloCaptureRgba8Unorm | Self::ClipCoverageRgba8Unorm => {
-                ShaderTextureFormatKey::VelloCaptureRgba8Unorm
-            }
+            Self::VelloCaptureRgba8Unorm => ShaderTextureFormatKey::VelloCaptureRgba8Unorm,
+            Self::ClipCoverageRgba8Unorm => ShaderTextureFormatKey::ClipCoverageRgba8Unorm,
             Self::Working(format) => ShaderTextureFormatKey::working(format),
             Self::ResolvedMaskRgba8Unorm => ShaderTextureFormatKey::ResolvedMaskRgba8Unorm,
         }
@@ -5398,6 +5640,33 @@ impl<'device> PreparedGraph<'device> {
                     .require_encoding_ready()?;
             }
             Some(update)
+        } else if realize_checked_passes {
+            let mut update = pass_cache.provisional_update();
+            let mut realized_composite = false;
+            for request in &plan.passes {
+                let RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::Layer { .. },
+                    ..
+                })) = &request.runtime.kind
+                else {
+                    continue;
+                };
+                let keys = request.cache_keys.as_ref().ok_or_else(|| {
+                    preparation_error("C09 composite preparation lost its exact cache keys")
+                })?;
+                update
+                    .realize_composite_pass(
+                        device,
+                        pass_cache,
+                        keys.samplers(),
+                        keys.layout(),
+                        keys.shader(),
+                        keys.pipeline(),
+                    )?
+                    .require_encoding_ready()?;
+                realized_composite = true;
+            }
+            realized_composite.then_some(update)
         } else {
             None
         };
@@ -7388,7 +7657,7 @@ const fn shader_binding_role(role: RuntimeReadRole) -> ShaderBindingRoleKey {
         RuntimeReadRole::BlurredSourceAlpha => ShaderBindingRoleKey::BlurredSourceAlpha,
         RuntimeReadRole::CompositeParent => ShaderBindingRoleKey::CompositeParent,
         RuntimeReadRole::CompositeSource => ShaderBindingRoleKey::CompositeSource,
-        RuntimeReadRole::ClipCoverage => ShaderBindingRoleKey::AlphaMask,
+        RuntimeReadRole::ClipCoverage => ShaderBindingRoleKey::ClipCoverage,
         RuntimeReadRole::AlphaMask => ShaderBindingRoleKey::AlphaMask,
         RuntimeReadRole::Shadow => ShaderBindingRoleKey::Shadow,
         RuntimeReadRole::FinalWorkingImage => ShaderBindingRoleKey::FinalWorkingImage,
@@ -7400,6 +7669,16 @@ const fn shader_sampling_edge(edge: RuntimeSamplingEdge) -> ShaderSamplingEdgeKe
         RuntimeSamplingEdge::ClampToExtent => ShaderSamplingEdgeKey::ClampToExtent,
         RuntimeSamplingEdge::TransparentBlack => ShaderSamplingEdgeKey::TransparentBlack,
         RuntimeSamplingEdge::SemanticBorderMirror(_) => ShaderSamplingEdgeKey::SemanticBorderMirror,
+    }
+}
+
+const fn runtime_read_uses_shader_sampler(kind: &RuntimePassKind, role: RuntimeReadRole) -> bool {
+    match kind {
+        RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::Layer { .. },
+            ..
+        })) => matches!(role, RuntimeReadRole::CompositeSource),
+        _ => true,
     }
 }
 
@@ -7419,16 +7698,24 @@ fn runtime_pass_cache_keys(
         return Ok(None);
     }
     let program = shader_program(kind)?;
+    let composite_samples_parent = matches!(
+        kind,
+        RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::Layer { parameters, .. },
+            ..
+        })) if parameters.blend() != BlendMode::Normal
+    );
     let sampled_reads = reads
         .iter()
         .filter(|read| {
-            !matches!(
-                kind,
-                RuntimePassKind::Composite(Some(RuntimeComposite {
-                    kind: RuntimeCompositeKind::SpanSourceOver,
-                    ..
-                }))
-            ) || read.role != RuntimeReadRole::CompositeParent
+            read.role != RuntimeReadRole::CompositeParent
+                || (!matches!(
+                    kind,
+                    RuntimePassKind::Composite(Some(RuntimeComposite {
+                        kind: RuntimeCompositeKind::SpanSourceOver,
+                        ..
+                    }))
+                ) && composite_samples_parent)
         })
         .collect::<Vec<_>>();
     let sampled_textures = sampled_reads
@@ -7443,6 +7730,7 @@ fn runtime_pass_cache_keys(
         .collect::<Result<Vec<_>>>()?;
     let samplers = sampled_reads
         .iter()
+        .filter(|read| runtime_read_uses_shader_sampler(kind, read.role))
         .map(|read| read.sampler_key)
         .collect::<Vec<_>>();
     let layout = BindGroupLayoutKey::new(program, &sampled_textures, shader_data_bindings(kind));
@@ -7513,28 +7801,18 @@ fn shader_composite_key(kind: &RuntimeCompositeKind) -> ShaderCompositeKey {
         RuntimeCompositeKind::SpanSourceOver => ShaderCompositeKey::SpanSourceOver,
         RuntimeCompositeKind::Layer {
             parameters,
-            clip,
-            outer_clips,
+            clip_coverage,
             ..
         } => ShaderCompositeKey::Layer {
-            blend: shader_blend_key(parameters.blend()),
-            has_clip: clip.is_some(),
-            has_outer_clips: !outer_clips.is_empty(),
+            path: if parameters.blend() == BlendMode::Normal {
+                ShaderCompositePathKey::Normal
+            } else {
+                ShaderCompositePathKey::DestinationSampling
+            },
+            has_clip_coverage: clip_coverage.is_some(),
             has_alpha_mask: parameters.alpha_mask().is_some(),
         },
         RuntimeCompositeKind::DropShadow => ShaderCompositeKey::DropShadow,
-    }
-}
-
-const fn shader_blend_key(blend: BlendMode) -> ShaderBlendKey {
-    match blend {
-        BlendMode::Normal => ShaderBlendKey::Normal,
-        BlendMode::Multiply => ShaderBlendKey::Multiply,
-        BlendMode::Screen => ShaderBlendKey::Screen,
-        BlendMode::Overlay => ShaderBlendKey::Overlay,
-        BlendMode::Darken => ShaderBlendKey::Darken,
-        BlendMode::Lighten => ShaderBlendKey::Lighten,
-        BlendMode::Plus => ShaderBlendKey::Plus,
     }
 }
 

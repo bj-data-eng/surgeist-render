@@ -12404,6 +12404,103 @@ fn c08_shader_frame_context_for_test() -> super::frame::FrameContext {
     .unwrap()
 }
 
+fn c09_shader_composite_commands_for_test(
+    blend: BlendMode,
+    has_clip: bool,
+    has_mask: bool,
+) -> command::RenderCommands {
+    let mut layer = Layer::new().try_opacity(0.75).unwrap().blend(blend);
+    if has_clip {
+        layer = layer
+            .try_clip(Shape::rect(Rect::new(0.0, 0.0, 12.0, 10.0)))
+            .unwrap();
+    }
+    if has_mask {
+        let mask = c09_mask_image_for_composition_test(
+            PhysicalSize::new(4, 1),
+            53,
+            ImageQuality::High,
+            Extend::Reflect,
+        );
+        layer = layer.with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(mask, Rect::new(0.0, 0.0, 4.0, 1.0)).unwrap(),
+        );
+    }
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 4.0, 1.0),
+            Color::try_rgba(0.8, 0.4, 0.2, 1.0).unwrap(),
+        );
+    });
+    if !has_mask {
+        let graph_trigger = ResolvedLayerAlphaMask::try_new(
+            c09_mask_image_for_composition_test(
+                PhysicalSize::new(1, 1),
+                97,
+                ImageQuality::Low,
+                Extend::Pad,
+            ),
+            Rect::new(7.0, 7.0, 1.0, 1.0),
+        )
+        .unwrap();
+        scene.layer(
+            Layer::new().with_resolved_alpha_mask(graph_trigger),
+            |scene| {
+                scene.fill(Rect::new(7.0, 7.0, 1.0, 1.0), Color::BLACK);
+            },
+        );
+    }
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
+fn c09_shader_composite_command_variants_for_test() -> Vec<command::RenderCommands> {
+    let mut variants = Vec::with_capacity(8);
+    for blend in [BlendMode::Normal, BlendMode::Multiply] {
+        for (has_clip, has_mask) in [(false, false), (true, false), (false, true), (true, true)] {
+            variants.push(c09_shader_composite_commands_for_test(
+                blend, has_clip, has_mask,
+            ));
+        }
+    }
+    variants
+}
+
+fn c09_composite_requests_for_test(
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> super::pass::C09CompositeCacheRequestsForTest {
+    super::pass::c09_composite_cache_requests_for_test(
+        &c09_shader_composite_command_variants_for_test(),
+        c09_composition_frame_context_for_test(),
+        capabilities,
+        working_format,
+    )
+    .unwrap()
+}
+
+fn c09_selected_backend_and_requests_for_test() -> (
+    Backend,
+    DeviceSlotIdentity,
+    super::pass::C09CompositeCacheRequestsForTest,
+) {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap()
+        .unwrap();
+    let capabilities = {
+        let ready = backend
+            .ready_device_state_borrow_for_test(identity)
+            .unwrap();
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test())
+    };
+    let working_format = capabilities
+        .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)
+        .unwrap();
+    let requests = c09_composite_requests_for_test(capabilities, working_format);
+    (backend, identity, requests)
+}
+
 #[test]
 fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
@@ -12454,6 +12551,471 @@ fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries(
             && observed.device_transition_publishes_none
             && observed.specializes_rgba_and_bgra_outputs,
         "C08 pass objects are not transactionally cached"
+    );
+}
+
+#[test]
+fn c09_composite_cache_realizes_exact_normal_and_destination_sampling_programs() {
+    let (mut backend, identity, requests) = c09_selected_backend_and_requests_for_test();
+    let observed = pollster::block_on(
+        backend.c09_composite_cache_realization_observation_for_test(identity, &requests),
+    )
+    .unwrap();
+
+    assert!(
+        observed.realizes_normal_and_destination_programs
+            && observed.realizes_all_optional_binding_combinations
+            && observed.normal_uses_fixed_premultiplied_source_over
+            && observed.destination_uses_replace_blending
+            && observed.commits_only_after_clean_transaction
+            && observed.reuses_exact_committed_entries
+            && observed.failed_validation_publishes_none
+            && observed.cancellation_publishes_none
+            && observed.device_transition_publishes_none,
+        "C09 compositor has no checked pipeline realization"
+    );
+}
+
+#[test]
+fn c09_composite_layouts_bind_no_dummy_parent_clip_or_mask() {
+    let requests = c09_composite_requests_for_test(
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+        WorkingFormat::HighPrecision,
+    );
+    let observed = super::pass::c09_composite_layout_observation_for_test(&requests);
+
+    assert!(
+        observed.realizes_all_eight_entry_interfaces
+            && observed.normal_omits_parent
+            && observed.destination_binds_parent
+            && observed.optional_clip_is_exact
+            && observed.optional_mask_is_exact
+            && observed.binds_only_one_source_sampler
+            && observed.binds_only_exact_uniforms,
+        "composite layout contains an absent semantic binding"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn c09_f16_to_f32_for_test(bits: u16) -> f32 {
+    let sign = u32::from(bits & 0x8000) << 16;
+    let exponent = u32::from((bits >> 10) & 0x1f);
+    let mantissa = u32::from(bits & 0x03ff);
+    let value = match exponent {
+        0 if mantissa == 0 => sign,
+        0 => {
+            let mut normalized = mantissa;
+            let mut unbiased = -14_i32;
+            while normalized & 0x0400 == 0 {
+                normalized <<= 1;
+                unbiased -= 1;
+            }
+            normalized &= 0x03ff;
+            sign | (u32::try_from(unbiased + 127).unwrap() << 23) | (normalized << 13)
+        }
+        0x1f => sign | 0x7f80_0000 | (mantissa << 13),
+        _ => sign | ((exponent + 112) << 23) | (mantissa << 13),
+    };
+    f32::from_bits(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn c09_read_gpu_vectors_for_test(
+    device: &wgpu::Device,
+    staging: &wgpu::Buffer,
+    working_format: WorkingFormat,
+    count: usize,
+) -> Result<Vec<[f32; 4]>> {
+    let slice = staging.slice(..);
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    slice.map_async(wgpu::MapMode::Read, move |result| {
+        let _ = sender.send(result);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(Duration::from_secs(5)),
+        })
+        .map_err(|source| {
+            Error::new(
+                BackendErrorCode::ReadbackFailed,
+                "C09 GPU vector readback did not make bounded device progress",
+            )
+            .with_source(source)
+        })?;
+    receiver
+        .recv_timeout(Duration::from_secs(5))
+        .map_err(|source| {
+            Error::new(
+                BackendErrorCode::ReadbackFailed,
+                "C09 GPU vector map callback missed its diagnostic deadline",
+            )
+            .with_source(source)
+        })?
+        .map_err(|source| {
+            Error::new(
+                BackendErrorCode::ReadbackFailed,
+                "C09 GPU vector staging buffer could not be mapped",
+            )
+            .with_source(source)
+        })?;
+    let mapped = slice.get_mapped_range();
+    let stride = usize::try_from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT).unwrap();
+    let mut rgba = Vec::with_capacity(count);
+    for index in 0..count {
+        let offset = index.checked_mul(stride).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::ReadbackFailed,
+                "C09 vector offset overflowed",
+            )
+        })?;
+        let pixel = match working_format {
+            WorkingFormat::HighPrecision => {
+                let bytes = mapped.get(offset..offset + 8).ok_or_else(|| {
+                    Error::new(
+                        BackendErrorCode::ReadbackFailed,
+                        "C09 high-precision vector readback is truncated",
+                    )
+                })?;
+                let mut pixel = [0.0; 4];
+                for (channel, pair) in bytes.chunks_exact(2).enumerate() {
+                    pixel[channel] =
+                        c09_f16_to_f32_for_test(u16::from_le_bytes([pair[0], pair[1]]));
+                }
+                pixel
+            }
+            WorkingFormat::ReducedPrecision => {
+                let bytes = mapped.get(offset..offset + 4).ok_or_else(|| {
+                    Error::new(
+                        BackendErrorCode::ReadbackFailed,
+                        "C09 reduced-precision vector readback is truncated",
+                    )
+                })?;
+                [
+                    f32::from(bytes[0]) / 255.0,
+                    f32::from(bytes[1]) / 255.0,
+                    f32::from(bytes[2]) / 255.0,
+                    f32::from(bytes[3]) / 255.0,
+                ]
+            }
+        };
+        rgba.push(pixel);
+    }
+    drop(mapped);
+    staging.unmap();
+    Ok(rgba)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+async fn c09_submit_and_read_gpu_vectors_for_test(
+    backend: &mut Backend,
+    identity: DeviceSlotIdentity,
+    transaction: super::gpu_transaction::GpuOperationTransaction,
+    prepared: C09PreparedGpuVectorsForTest,
+) -> Result<C09GpuVectorResultsForTest> {
+    let C09PreparedGpuVectorsForTest {
+        device,
+        queue,
+        working_format,
+        mut encoder,
+        outputs,
+        pass_cache_update,
+    } = prepared;
+    let output_stride = wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
+    let staging_size = u64::from(output_stride)
+        .checked_mul(u64::try_from(outputs.len()).map_err(|_| {
+            Error::new(
+                BackendErrorCode::ReadbackFailed,
+                "C09 GPU vector count does not fit the staging address space",
+            )
+        })?)
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::ReadbackFailed,
+                "C09 GPU vector staging size overflowed",
+            )
+        })?;
+    let staging = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Surgeist C09 GPU vector readback"),
+        size: staging_size,
+        usage: wgpu::BufferUsages::MAP_READ.union(wgpu::BufferUsages::COPY_DST),
+        mapped_at_creation: false,
+    });
+    for (index, output) in outputs.iter().enumerate() {
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: output,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &staging,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: u64::from(output_stride) * u64::try_from(index).unwrap(),
+                    bytes_per_row: Some(output_stride),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+        );
+    }
+    transaction
+        .submit_command_buffer(&queue, encoder.finish(), RuntimeOperation::EffectRendering)
+        .await?;
+    backend.commit_checked_pass_cache_update_for_test(identity, pass_cache_update)?;
+    let rgba = c09_read_gpu_vectors_for_test(&device, &staging, working_format, outputs.len())?;
+    Ok(C09GpuVectorResultsForTest {
+        working_format,
+        rgba,
+    })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn c09_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorForTest>, Vec<[f32; 4]>) {
+    let mut vectors = Vec::new();
+    let mut expected = Vec::new();
+    let rows = [
+        (
+            ImageQuality::Low,
+            [
+                (Extend::Pad, 0.0, 1.0),
+                (Extend::Repeat, 0.0, 0.0),
+                (Extend::Reflect, 0.0, 1.0),
+            ],
+            0.666_666_7,
+        ),
+        (
+            ImageQuality::Medium,
+            [
+                (Extend::Pad, 0.0, 1.0),
+                (Extend::Repeat, 0.5, 0.5),
+                (Extend::Reflect, 0.0, 1.0),
+            ],
+            0.5,
+        ),
+        (
+            ImageQuality::High,
+            [
+                (Extend::Pad, 0.0, 1.0),
+                (Extend::Repeat, 0.5, 0.5),
+                (Extend::Reflect, 0.0, 1.0),
+            ],
+            0.5,
+        ),
+    ];
+    for (quality, extend_rows, vertical_boundary) in rows {
+        for (extend, left_boundary, right_boundary) in extend_rows {
+            for (point, alpha) in [
+                (Point::new(0.0, 0.5), left_boundary),
+                (Point::new(4.0, 0.5), right_boundary),
+                (Point::new(2.0, 0.0), vertical_boundary),
+                (Point::new(2.0, 1.0), vertical_boundary),
+                (Point::new(-0.000_1, 0.5), 0.0),
+                (Point::new(4.000_1, 0.5), 0.0),
+                (Point::new(2.0, -0.000_1), 0.0),
+                (Point::new(2.0, 1.000_1), 0.0),
+            ] {
+                vectors.push(C09MaskSamplingVectorForTest {
+                    quality,
+                    extend,
+                    layer_point: point,
+                    clip_alpha: None,
+                    opacity: 1.0,
+                });
+                expected.push([alpha; 4]);
+            }
+        }
+    }
+    vectors.push(C09MaskSamplingVectorForTest {
+        quality: ImageQuality::Medium,
+        extend: Extend::Repeat,
+        layer_point: Point::new(0.0, 0.5),
+        clip_alpha: Some(0.5),
+        opacity: 0.5,
+    });
+    expected.push([0.125; 4]);
+    (vectors, expected)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn c09_gpu_vectors_match(
+    observed: &C09GpuVectorResultsForTest,
+    expected: &[[f32; 4]],
+    tolerance: f32,
+) -> bool {
+    observed.rgba.len() == expected.len()
+        && observed
+            .rgba
+            .iter()
+            .zip(expected)
+            .all(|(actual, expected)| {
+                actual.iter().all(|channel| channel.is_finite())
+                    && actual[3] >= -tolerance
+                    && actual[3] <= 1.0 + tolerance
+                    && actual[..3]
+                        .iter()
+                        .all(|channel| *channel >= -tolerance && *channel <= actual[3] + tolerance)
+                    && actual
+                        .iter()
+                        .zip(expected)
+                        .all(|(actual, expected)| (actual - expected).abs() <= tolerance)
+            })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn c09_shader_mask_sampling_matches_independent_boundary_vectors() {
+    let (mut backend, identity, requests) = c09_selected_backend_and_requests_for_test();
+    let (vectors, expected) = c09_mask_boundary_vectors_for_test();
+    let observed = pollster::block_on(async {
+        let transaction = backend.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let prepared = backend.c09_shader_mask_sampling_preparation_for_test(
+            identity,
+            &requests,
+            &C09MaskSamplingInputForTest {
+                mask_size: PhysicalSize::new(4, 1),
+                mask_rgba: vec![255, 0, 0, 0, 0, 255, 0, 85, 0, 0, 255, 170, 17, 33, 65, 255],
+                mask_bounds: Rect::new(0.0, 0.0, 4.0, 1.0),
+                source: [1.0; 4],
+                vectors,
+            },
+        )?;
+        c09_submit_and_read_gpu_vectors_for_test(&mut backend, identity, transaction, prepared)
+            .await
+    })
+    .unwrap();
+    let tolerance = match observed.working_format {
+        WorkingFormat::HighPrecision | WorkingFormat::ReducedPrecision => 2.0 / 255.0,
+    };
+
+    assert!(
+        c09_gpu_vectors_match(&observed, &expected, tolerance),
+        "GPU mask sampling differs from independent constants"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn c09_shader_blend_functions_match_independent_known_vectors() {
+    let (mut backend, identity, requests) = c09_selected_backend_and_requests_for_test();
+    let source = [0.4, 0.1, 0.3, 0.5];
+    let parent = [0.2, 0.6, 0.32, 0.8];
+    let vectors = [
+        C09BlendVectorForTest {
+            blend: BlendMode::Normal,
+            source,
+            parent,
+            opacity: 1.25,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Multiply,
+            source,
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Screen,
+            source,
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Overlay,
+            source,
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Darken,
+            source,
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Lighten,
+            source,
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Plus,
+            source,
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Plus,
+            source: [0.8, 0.2, 0.7, 0.8],
+            parent: [0.6, 0.9, 0.4, 0.9],
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Multiply,
+            source: [0.0; 4],
+            parent,
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Screen,
+            source,
+            parent: [0.0; 4],
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Overlay,
+            source: [0.0; 4],
+            parent: [0.0; 4],
+            opacity: 1.0,
+        },
+        C09BlendVectorForTest {
+            blend: BlendMode::Normal,
+            source,
+            parent,
+            opacity: -0.25,
+        },
+    ];
+    let expected = [
+        [0.5, 0.4, 0.46, 0.9],
+        [0.26, 0.38, 0.316, 0.9],
+        [0.52, 0.64, 0.524, 0.9],
+        [0.34, 0.56, 0.412, 0.9],
+        [0.28, 0.4, 0.38, 0.9],
+        [0.5, 0.62, 0.46, 0.9],
+        [0.6, 0.7, 0.62, 1.0],
+        [1.0, 1.0, 1.0, 1.0],
+        parent,
+        source,
+        [0.0; 4],
+        parent,
+    ];
+    let observed = pollster::block_on(async {
+        let transaction = backend.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let prepared =
+            backend.c09_shader_blend_preparation_for_test(identity, &requests, &vectors)?;
+        c09_submit_and_read_gpu_vectors_for_test(&mut backend, identity, transaction, prepared)
+            .await
+    })
+    .unwrap();
+    let tolerance = match observed.working_format {
+        WorkingFormat::HighPrecision | WorkingFormat::ReducedPrecision => 3.0 / 255.0,
+    };
+
+    assert!(
+        c09_gpu_vectors_match(&observed, &expected, tolerance),
+        "GPU blend math differs from independent constants"
     );
 }
 
@@ -12807,6 +13369,7 @@ fn c07_contains_no_placeholder_custom_shader_program() {
     shader_files.sort();
     let expected_shader_files = [
         "canonicalize_capture.wgsl".to_owned(),
+        "layer_composite.wgsl".to_owned(),
         "present.wgsl".to_owned(),
         "span_source_over.wgsl".to_owned(),
     ];
