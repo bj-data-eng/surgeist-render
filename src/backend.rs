@@ -3102,8 +3102,7 @@ impl OffscreenRenderedTextureLease {
             return;
         };
         if let Some(resource) = self.resource.take() {
-            let result = frame_scope.discard(resource);
-            debug_assert!(result.is_ok());
+            let _ = frame_scope.discard(resource);
         }
         let _ = frame_scope.finish();
     }

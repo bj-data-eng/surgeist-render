@@ -759,9 +759,9 @@ impl PendingVelloResources {
 
         for (_, managed) in self.buffers.drain() {
             match self.clean_retention {
-                CleanVelloResourceRetention::DirectAtlasOnly => frame_scope
-                    .discard(managed.lease)
-                    .expect("a Vello buffer must remain leased by its resource frame"),
+                CleanVelloResourceRetention::DirectAtlasOnly => {
+                    let _ = frame_scope.discard(managed.lease);
+                }
                 CleanVelloResourceRetention::ReusableGraphFrame => frame_scope
                     .release(managed.lease)
                     .expect("a reusable graph Vello buffer must remain leased by its frame"),
@@ -774,9 +774,9 @@ impl PendingVelloResources {
                 retained_atlas = Some(managed.lease);
             } else {
                 match self.clean_retention {
-                    CleanVelloResourceRetention::DirectAtlasOnly => frame_scope
-                        .discard(managed.lease)
-                        .expect("a transient Vello image must remain leased by its resource frame"),
+                    CleanVelloResourceRetention::DirectAtlasOnly => {
+                        let _ = frame_scope.discard(managed.lease);
+                    }
                     CleanVelloResourceRetention::ReusableGraphFrame => frame_scope
                         .release(managed.lease)
                         .expect("a reusable graph Vello image must remain leased by its frame"),
@@ -806,12 +806,10 @@ impl PendingVelloResources {
         let atlas_outcome = self.persistent_image_atlas.abort_outcome();
         if let Some(mut frame_scope) = self.frame_scope.take() {
             for (_, managed) in self.buffers.drain() {
-                let result = frame_scope.discard(managed.lease);
-                debug_assert!(result.is_ok());
+                let _ = frame_scope.discard(managed.lease);
             }
             for (_, managed) in self.images.drain() {
-                let result = frame_scope.discard(managed.lease);
-                debug_assert!(result.is_ok());
+                let _ = frame_scope.discard(managed.lease);
             }
             frame_scope.record_vello_atlas_recovery(atlas_outcome);
             let _ = frame_scope.finish();

@@ -1001,11 +1001,36 @@ impl ResourceManagerState {
             .entries
             .remove(&token.resource_identity)
             .expect("a validated resource lease must remain registered");
-        self.retained_bytes = self
-            .retained_bytes
-            .checked_sub(entry.byte_len)
-            .expect("registered resource bytes must not exceed retained accounting");
         self.stats.evictions = self.stats.evictions.saturating_add(1);
+
+        if self.accounting_fault.is_some() {
+            return Ok(());
+        }
+
+        let Some(retained_bytes) = self.retained_bytes.checked_sub(entry.byte_len) else {
+            self.record_accounting_fault(ResourceAccountingFault::RetainedByteUnderflow {
+                retained_bytes: self.retained_bytes,
+                discarded_entry_bytes: entry.byte_len,
+            });
+            return Err(Self::accounting_fault_error());
+        };
+        self.retained_bytes = retained_bytes;
+
+        let detected_fault = match self.checked_registered_entry_bytes() {
+            None => Some(ResourceAccountingFault::SurvivingEntryByteTotalOverflow),
+            Some(registered_entry_bytes) if retained_bytes != registered_entry_bytes => {
+                Some(ResourceAccountingFault::RetainedByteMismatch {
+                    retained_bytes,
+                    registered_entry_bytes,
+                })
+            }
+            Some(_) => None,
+        };
+        if let Some(fault) = detected_fault {
+            self.record_accounting_fault(fault);
+            return Err(Self::accounting_fault_error());
+        }
+
         Ok(())
     }
 
@@ -1965,6 +1990,9 @@ impl FrameResourceScope {
         )
     }
 
+    /// Removes the exact validated lease even when accounting becomes faulted.
+    /// A newly detected fault returns a bounded error after removal; cleanup
+    /// under an existing fault succeeds without replacing its first diagnostic.
     pub(crate) fn discard(&mut self, lease: ResourceLease) -> Result<()> {
         lock_state(&self.state).discard(&self.manager_identity, self.frame, lease.token)
     }

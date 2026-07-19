@@ -7170,6 +7170,339 @@ fn c08_discard_records_underflow_and_surviving_total_overflow_without_panicking(
 }
 
 #[test]
+fn per_lease_discard_after_accounting_fault_removes_exact_lease_without_panicking() {
+    let manager = ResourceManager::default();
+    let mut unrelated_frame = manager.begin_frame().unwrap();
+    let unrelated_lease = unrelated_frame
+        .acquire(modeled_resource_key_for_test(50), 8)
+        .unwrap();
+    let unrelated_identity = unrelated_lease.resource_identity();
+    let mut faulting_frame = manager.begin_frame().unwrap();
+    let _faulting_lease = faulting_frame
+        .acquire(modeled_resource_key_for_test(51), 16)
+        .unwrap();
+    faulting_frame.discard_on_drop();
+    manager.inject_retained_byte_mismatch_before_discard_for_test();
+    drop(faulting_frame);
+
+    let expected_fault = ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes: 7,
+        registered_entry_bytes: 8,
+    };
+    assert_eq!(
+        manager.observation_for_test().accounting_fault_for_test(),
+        Some(expected_fault)
+    );
+
+    let discard_result = catch_unwind(AssertUnwindSafe(|| {
+        unrelated_frame.discard(unrelated_lease)
+    }));
+    assert!(
+        discard_result.is_ok(),
+        "per-lease cleanup after an accounting fault must not panic"
+    );
+    assert!(
+        discard_result.unwrap().is_ok(),
+        "an already-recorded accounting fault must allow exact lease cleanup"
+    );
+
+    let after_discard = manager.observation_for_test();
+    assert_eq!(after_discard.retained_bytes, 7);
+    assert_eq!(after_discard.accounted_entry_bytes, Some(0));
+    assert_eq!(
+        after_discard.accounting_fault_for_test(),
+        Some(expected_fault),
+        "per-lease cleanup replaced the first accounting diagnostic"
+    );
+    assert_eq!(after_discard.active_frame_count, 1);
+    assert_eq!(after_discard.leased_count, 0);
+    assert!(
+        !after_discard
+            .entry_identities_for_test()
+            .contains(&unrelated_identity),
+        "per-lease cleanup retained its exact uncertain lease"
+    );
+
+    let begin_error = match manager.begin_frame() {
+        Ok(_) => panic!("faulted per-lease cleanup reenabled frame acquisition"),
+        Err(error) => error,
+    };
+    let preflight_error = manager
+        .preflight_graph_acquisitions(&[])
+        .expect_err("faulted per-lease cleanup reenabled graph preflight");
+    let acquire_error = unrelated_frame
+        .acquire(modeled_resource_key_for_test(52), 4)
+        .expect_err("faulted per-lease cleanup reenabled resource acquisition");
+    for error in [&begin_error, &preflight_error, &acquire_error] {
+        assert_eq!(error.code(), ErrorCode::RenderFailed);
+        assert_eq!(
+            error.message(),
+            "resource manager is unavailable after a retained-byte accounting invariant failure"
+        );
+    }
+
+    let finish_result = catch_unwind(AssertUnwindSafe(|| unrelated_frame.finish()));
+    assert!(
+        finish_result.is_ok(),
+        "the active frame must remain resolvable after fault-aware per-lease cleanup"
+    );
+    assert_eq!(
+        finish_result.unwrap().retention(),
+        ResourceRetentionOutcome::AccountingFault {
+            fault: expected_fault,
+        }
+    );
+    let after_finish = manager.observation_for_test();
+    assert_eq!(after_finish.active_frame_count, 0);
+    assert_eq!(after_finish.resolved_lease_count, 0);
+    assert_eq!(
+        after_finish.accounting_fault_for_test(),
+        Some(expected_fault)
+    );
+    assert!(manager.begin_frame().is_err());
+}
+
+#[test]
+fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
+    let assert_bounded_fault = |error: &Error| {
+        assert_eq!(error.code(), ErrorCode::RenderFailed);
+        assert_eq!(
+            error.message(),
+            "resource manager is unavailable after a retained-byte accounting invariant failure"
+        );
+    };
+
+    let mismatch_manager = ResourceManager::default();
+    let mut mismatch_frame = mismatch_manager.begin_frame().unwrap();
+    let mismatch_survivor = mismatch_frame
+        .acquire(modeled_resource_key_for_test(53), 8)
+        .unwrap();
+    let mismatch_survivor_identity = mismatch_survivor.resource_identity();
+    let mismatch_discarded = mismatch_frame
+        .acquire(modeled_resource_key_for_test(54), 16)
+        .unwrap();
+    let mismatch_discarded_identity = mismatch_discarded.resource_identity();
+    mismatch_manager.inject_retained_byte_mismatch_before_discard_for_test();
+
+    let mismatch_error = mismatch_frame
+        .discard(mismatch_discarded)
+        .expect_err("per-lease discard silently accepted a retained-byte mismatch");
+    assert_bounded_fault(&mismatch_error);
+    let mismatch_fault = ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes: 7,
+        registered_entry_bytes: 8,
+    };
+    let mismatch_observation = mismatch_manager.observation_for_test();
+    assert_eq!(mismatch_observation.retained_bytes, 7);
+    assert_eq!(mismatch_observation.accounted_entry_bytes, Some(8));
+    assert_eq!(
+        mismatch_observation.accounting_fault_for_test(),
+        Some(mismatch_fault)
+    );
+    assert!(
+        !mismatch_observation
+            .entry_identities_for_test()
+            .contains(&mismatch_discarded_identity)
+    );
+    assert!(
+        mismatch_observation
+            .entry_identities_for_test()
+            .contains(&mismatch_survivor_identity),
+        "per-lease mismatch handling removed a surviving lease"
+    );
+    assert!(mismatch_manager.begin_frame().is_err());
+    assert!(mismatch_manager.preflight_graph_acquisitions(&[]).is_err());
+    assert!(
+        mismatch_frame
+            .acquire(modeled_resource_key_for_test(55), 4)
+            .is_err()
+    );
+    mismatch_frame.release(mismatch_survivor).unwrap();
+    let mismatch_finish = catch_unwind(AssertUnwindSafe(|| mismatch_frame.finish()));
+    assert!(mismatch_finish.is_ok());
+    assert_eq!(
+        mismatch_finish.unwrap().retention(),
+        ResourceRetentionOutcome::AccountingFault {
+            fault: mismatch_fault,
+        }
+    );
+
+    let underflow_manager = ResourceManager::default();
+    let mut underflow_frame = underflow_manager.begin_frame().unwrap();
+    let underflow_discarded = underflow_frame
+        .acquire(modeled_resource_key_for_test(56), 8)
+        .unwrap();
+    let underflow_discarded_identity = underflow_discarded.resource_identity();
+    underflow_manager.inject_retained_byte_underflow_before_discard_for_test();
+
+    let underflow_result = catch_unwind(AssertUnwindSafe(|| {
+        underflow_frame.discard(underflow_discarded)
+    }));
+    assert!(
+        underflow_result.is_ok(),
+        "per-lease retained-byte underflow must return an error instead of panicking"
+    );
+    let underflow_error = underflow_result
+        .unwrap()
+        .expect_err("per-lease discard silently accepted retained-byte underflow");
+    assert_bounded_fault(&underflow_error);
+    let underflow_fault = ResourceAccountingFault::RetainedByteUnderflow {
+        retained_bytes: 0,
+        discarded_entry_bytes: 8,
+    };
+    let underflow_observation = underflow_manager.observation_for_test();
+    assert_eq!(underflow_observation.retained_bytes, 0);
+    assert_eq!(underflow_observation.accounted_entry_bytes, Some(0));
+    assert_eq!(
+        underflow_observation.accounting_fault_for_test(),
+        Some(underflow_fault)
+    );
+    assert!(
+        !underflow_observation
+            .entry_identities_for_test()
+            .contains(&underflow_discarded_identity)
+    );
+    assert!(underflow_manager.begin_frame().is_err());
+    assert!(underflow_manager.preflight_graph_acquisitions(&[]).is_err());
+    assert!(
+        underflow_frame
+            .acquire(modeled_resource_key_for_test(57), 4)
+            .is_err()
+    );
+    let underflow_finish = catch_unwind(AssertUnwindSafe(|| underflow_frame.finish()));
+    assert!(underflow_finish.is_ok());
+    assert_eq!(
+        underflow_finish.unwrap().retention(),
+        ResourceRetentionOutcome::AccountingFault {
+            fault: underflow_fault,
+        }
+    );
+
+    let overflow_manager = ResourceManager::default();
+    let mut overflow_frame = overflow_manager.begin_frame().unwrap();
+    let first_overflow_survivor = overflow_frame
+        .acquire(modeled_resource_key_for_test(58), 1)
+        .unwrap();
+    let second_overflow_survivor = overflow_frame
+        .acquire(modeled_resource_key_for_test(59), 1)
+        .unwrap();
+    let overflow_discarded = overflow_frame
+        .acquire(modeled_resource_key_for_test(60), 1)
+        .unwrap();
+    let overflow_discarded_identity = overflow_discarded.resource_identity();
+    let _originals = overflow_manager.inject_registered_entry_total_overflow_for_test(
+        first_overflow_survivor.resource_identity(),
+        second_overflow_survivor.resource_identity(),
+    );
+
+    let overflow_error = overflow_frame
+        .discard(overflow_discarded)
+        .expect_err("per-lease discard silently accepted a surviving-entry total overflow");
+    assert_bounded_fault(&overflow_error);
+    let overflow_fault = ResourceAccountingFault::SurvivingEntryByteTotalOverflow;
+    let overflow_observation = overflow_manager.observation_for_test();
+    assert_eq!(overflow_observation.retained_bytes, 2);
+    assert_eq!(overflow_observation.accounted_entry_bytes, None);
+    assert_eq!(
+        overflow_observation.accounting_fault_for_test(),
+        Some(overflow_fault)
+    );
+    assert!(
+        !overflow_observation
+            .entry_identities_for_test()
+            .contains(&overflow_discarded_identity)
+    );
+    assert!(
+        overflow_observation
+            .entry_identities_for_test()
+            .contains(&first_overflow_survivor.resource_identity())
+    );
+    assert!(
+        overflow_observation
+            .entry_identities_for_test()
+            .contains(&second_overflow_survivor.resource_identity())
+    );
+    assert!(overflow_manager.begin_frame().is_err());
+    assert!(overflow_manager.preflight_graph_acquisitions(&[]).is_err());
+    assert!(
+        overflow_frame
+            .acquire(modeled_resource_key_for_test(61), 4)
+            .is_err()
+    );
+    overflow_frame.release(first_overflow_survivor).unwrap();
+    overflow_frame.release(second_overflow_survivor).unwrap();
+    let overflow_finish = catch_unwind(AssertUnwindSafe(|| overflow_frame.finish()));
+    assert!(overflow_finish.is_ok());
+    assert_eq!(
+        overflow_finish.unwrap().retention(),
+        ResourceRetentionOutcome::AccountingFault {
+            fault: overflow_fault,
+        }
+    );
+}
+
+#[test]
+fn healthy_per_lease_discard_subtracts_exact_bytes_without_false_fault() {
+    let manager = ResourceManager::default();
+    let mut discarded_frame = manager.begin_frame().unwrap();
+    let discarded = discarded_frame
+        .acquire(modeled_resource_key_for_test(62), 16)
+        .unwrap();
+    let discarded_identity = discarded.resource_identity();
+    let survivor = discarded_frame
+        .acquire(modeled_resource_key_for_test(63), 8)
+        .unwrap();
+    let survivor_identity = survivor.resource_identity();
+    let mut unrelated_frame = manager.begin_frame().unwrap();
+    let unrelated = unrelated_frame
+        .acquire(modeled_resource_key_for_test(64), 4)
+        .unwrap();
+    let unrelated_identity = unrelated.resource_identity();
+
+    discarded_frame.discard(discarded).unwrap();
+
+    let after_discard = manager.observation_for_test();
+    assert_eq!(after_discard.retained_bytes, 12);
+    assert_eq!(after_discard.accounted_entry_bytes, Some(12));
+    assert_eq!(after_discard.accounting_fault_for_test(), None);
+    assert_eq!(after_discard.active_frame_count, 2);
+    assert_eq!(after_discard.leased_count, 2);
+    assert!(
+        !after_discard
+            .entry_identities_for_test()
+            .contains(&discarded_identity)
+    );
+    assert!(
+        after_discard
+            .entry_identities_for_test()
+            .contains(&survivor_identity)
+    );
+    assert!(
+        after_discard
+            .entry_identities_for_test()
+            .contains(&unrelated_identity),
+        "healthy per-lease discard removed an unrelated frame's lease"
+    );
+
+    discarded_frame.release(survivor).unwrap();
+    let _ = discarded_frame.finish();
+    unrelated_frame.release(unrelated).unwrap();
+    let _ = unrelated_frame.finish();
+
+    let mut reuse_frame = manager.begin_frame().unwrap();
+    let reused = reuse_frame
+        .acquire(modeled_resource_key_for_test(63), 8)
+        .unwrap();
+    assert_eq!(reused.resource_identity(), survivor_identity);
+    reuse_frame.release(reused).unwrap();
+    let _ = reuse_frame.finish();
+    let final_observation = manager.observation_for_test();
+    assert_eq!(final_observation.retained_bytes, 12);
+    assert_eq!(final_observation.accounted_entry_bytes, Some(12));
+    assert_eq!(final_observation.accounting_fault_for_test(), None);
+}
+
+#[test]
 fn extreme_effect_extent_reports_device_dimension_before_descriptor_byte_overflow() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("extreme effect extent coverage requires a selected host adapter");
