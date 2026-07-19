@@ -35,7 +35,8 @@ use super::{
     command::OffscreenBounds,
     geometry::physical_size,
     gpu_transaction::{
-        C08GraphSubmissionPayload, GpuOperationStage, GpuOperationTransaction, InternalVelloPayload,
+        C08GraphOutputCommit, C08GraphSubmissionPayload, GpuOperationStage,
+        GpuOperationTransaction, InternalVelloPayload,
     },
     shader::{DevicePassCache, ProvisionalDevicePassCacheUpdate},
     texture::{
@@ -1232,6 +1233,7 @@ impl Backend {
         &mut self,
         preferred: Option<DeviceSlotIdentity>,
         operation: RuntimeOperation,
+        format: Format,
     ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
         let incompatible_preferred = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
             .with(|active| {
@@ -1261,7 +1263,7 @@ impl Backend {
             BackendErrorCode::SurfaceCreateFailed,
             "the selected presentation device is unavailable",
         )?;
-        Ok((PresentedSurface::display_free_for_test(), identity))
+        Ok((PresentedSurface::display_free_for_test(format), identity))
     }
 
     fn ready_state_mut(
@@ -3273,6 +3275,18 @@ impl SurfaceFrameCommit {
         }
     }
 
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn presented_graph(frame_cleanup: FrameCleanup, timings: RenderTimings) -> Self {
+        Self {
+            timings,
+            headless_publication: None,
+            _frame_cleanup: Some(frame_cleanup),
+        }
+    }
+
     pub(crate) const fn timings(&self) -> RenderTimings {
         self.timings
     }
@@ -3406,13 +3420,303 @@ pub(crate) async fn render_c08_headless_graph_surface(
             )
             .await?
     };
-    let (publication, frame_cleanup) = clean.into_parts();
+    let (output, frame_cleanup) = clean.into_parts();
+    #[cfg(not(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )))]
+    let C08GraphOutputCommit::Headless(publication) = output;
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    let publication = match output {
+        C08GraphOutputCommit::Headless(publication) => publication,
+        C08GraphOutputCommit::Presented => {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "the headless C08 graph transaction returned a presented host effect",
+            ));
+        }
+    };
     Ok(SurfaceFrameCommit::headless_graph(
         publication,
         frame_cleanup,
         RenderTimings {
             render_time: render_start.elapsed(),
             present_time: Duration::ZERO,
+        },
+    ))
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "T8 dispatches eligible production graph plans through the T7 presented executor"
+    )
+)]
+pub(crate) async fn render_c08_presented_graph_surface(
+    backend: &mut Backend,
+    surface: &mut Surface,
+    preparable: C08PreparableGraph,
+    selected_working_format: WorkingFormat,
+) -> Result<SurfaceFrameCommit> {
+    let (device_identity, physical_size, output_format) = match &surface.backend {
+        SurfaceBackend::Presented {
+            surface: native,
+            device_identity,
+            state,
+        } => {
+            match state.lifecycle() {
+                PresentedLifecycle::Ready { .. } => {}
+                PresentedLifecycle::ResizePending { .. } => {
+                    return Err(Error::new(
+                        BackendErrorCode::SurfaceConfigureFailed,
+                        "presented C08 graph execution started before configuration committed",
+                    ));
+                }
+                PresentedLifecycle::NonRenderable { .. } => {
+                    return Err(Error::runtime_unavailable(
+                        RuntimeOperation::SurfaceRendering,
+                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                            state: RenderSurfaceAvailability::NonRenderable,
+                        },
+                        "presented C08 graph output is not renderable",
+                    ));
+                }
+                PresentedLifecycle::Occluded { .. } => {
+                    return Err(Error::runtime_unavailable(
+                        RuntimeOperation::SurfaceRendering,
+                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                            state: RenderSurfaceAvailability::Occluded,
+                        },
+                        "presented C08 graph output is occluded",
+                    ));
+                }
+                PresentedLifecycle::Lost => {
+                    return Err(Error::runtime_unavailable(
+                        RuntimeOperation::SurfaceRendering,
+                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                            state: RenderSurfaceAvailability::Lost,
+                        },
+                        "presented C08 graph output is lost",
+                    ));
+                }
+            }
+            let resources = native.committed().ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::SurfaceConfigureFailed,
+                    "ready presented C08 graph output has no committed configuration",
+                )
+            })?;
+            let physical_size = PhysicalSize::new(resources.config.width, resources.config.height);
+            if resources.config.format != native.format
+                || state.requested_physical_size() != physical_size
+            {
+                return Err(Error::new(
+                    BackendErrorCode::SurfaceConfigureFailed,
+                    "presented C08 graph output differs from its committed configuration",
+                ));
+            }
+            let output_format = match native.format {
+                wgpu::TextureFormat::Rgba8Unorm => Format::Rgba8,
+                wgpu::TextureFormat::Bgra8Unorm => Format::Bgra8,
+                _ => {
+                    return Err(Error::new(
+                        BackendErrorCode::PresentFailed,
+                        "presented C08 graph output is not an advertised RGBA8 or BGRA8 format",
+                    ));
+                }
+            };
+            (*device_identity, physical_size, output_format)
+        }
+        SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
+            return Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "presented C08 graph execution requires a presented surface",
+            ));
+        }
+    };
+    if physical_size.width() == 0
+        || physical_size.height() == 0
+        || preparable.output_format() != output_format
+        || preparable.working_format() != selected_working_format
+        || preparable.output_extent()? != physical_size
+    {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "the presented C08 graph differs from the exact eligible output",
+        ));
+    }
+    let capabilities = backend
+        .device_capabilities(device_identity)
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "the presented C08 graph executor lost immutable device capabilities",
+            )
+        })?;
+    capabilities.validate_supported_working_format(selected_working_format)?;
+
+    let transaction = backend.begin_gpu_operation(
+        device_identity,
+        GpuOperationStage::Render,
+        RuntimeOperation::SurfaceRendering,
+    )?;
+    let (device, queue) = {
+        let ready = backend.ready_state_mut(
+            device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "the presented C08 graph lost its ready device before preparation",
+        )?;
+        (ready.device.clone(), ready.queue.clone())
+    };
+    let render_start = Instant::now();
+    let mut prepared = backend.prepare_c08_graph_resources(
+        device_identity,
+        preparable,
+        selected_working_format,
+    )?;
+    if prepared.output_extent()? != physical_size
+        || prepared.output_format() != output_format
+        || prepared.working_format() != selected_working_format
+    {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "prepared presented C08 graph output changed after eligibility validation",
+        ));
+    }
+
+    let present_start = Instant::now();
+    let acquired = match &mut surface.backend {
+        SurfaceBackend::Presented {
+            surface: native,
+            state,
+            ..
+        } => match native.acquire_texture(&device) {
+            PresentedSurfaceAcquire::Success(acquired) => acquired,
+            PresentedSurfaceAcquire::Suboptimal(acquired) => {
+                drop(acquired);
+                drop(prepared);
+                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+                state.mark_configuration_pending();
+                scope_result?;
+                return Err(Error::new(
+                    BackendErrorCode::SurfaceOutdated,
+                    "surface is suboptimal and requires reconfiguration",
+                ));
+            }
+            PresentedSurfaceAcquire::Outdated => {
+                drop(prepared);
+                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+                state.mark_configuration_pending();
+                scope_result?;
+                return Err(Error::new(
+                    BackendErrorCode::SurfaceOutdated,
+                    "surface is outdated and requires reconfiguration",
+                ));
+            }
+            PresentedSurfaceAcquire::Occluded => {
+                drop(prepared);
+                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+                state.mark_occluded();
+                scope_result?;
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                        state: RenderSurfaceAvailability::Occluded,
+                    },
+                    "surface is occluded",
+                ));
+            }
+            PresentedSurfaceAcquire::Timeout => {
+                drop(prepared);
+                transaction
+                    .finish(RuntimeOperation::SurfaceRendering)
+                    .await?;
+                return Err(Error::new(
+                    BackendErrorCode::SurfaceTimeout,
+                    "timed out acquiring surface texture",
+                ));
+            }
+            PresentedSurfaceAcquire::Lost => {
+                drop(prepared);
+                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+                state.mark_lost();
+                scope_result?;
+                return Err(Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                        state: RenderSurfaceAvailability::Lost,
+                    },
+                    "surface was lost",
+                ));
+            }
+            PresentedSurfaceAcquire::Validation => {
+                drop(prepared);
+                transaction
+                    .finish(RuntimeOperation::SurfaceRendering)
+                    .await?;
+                return Err(Error::new(
+                    BackendErrorCode::PresentFailed,
+                    "surface texture validation failed",
+                ));
+            }
+        },
+        SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
+            unreachable!("presented C08 graph output changed after eligibility validation")
+        }
+    };
+
+    let output_view = acquired.create_view();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist C08 presented graph encoder"),
+    });
+    let pending_encoding = prepared
+        .encode_c08_custom_spine(
+            &mut encoder,
+            C08ExternalOutputView::try_new(&output_view, output_format, physical_size)?,
+        )
+        .await?;
+    let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
+    drop(output_view);
+    let payload =
+        C08GraphSubmissionPayload::presented(encoder.finish(), prepared_submission, acquired);
+    let clean = {
+        let ready = backend.ready_state_mut(
+            device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "the presented C08 graph lost its ready device before submission",
+        )?;
+        transaction
+            .submit_c08_graph(
+                &device,
+                &queue,
+                &mut ready.pass_cache,
+                payload,
+                RuntimeOperation::SurfaceRendering,
+            )
+            .await?
+    };
+    let (output, frame_cleanup) = clean.into_parts();
+    if !matches!(output, C08GraphOutputCommit::Presented) {
+        return Err(Error::new(
+            BackendErrorCode::PresentFailed,
+            "the presented C08 graph transaction returned a headless publication",
+        ));
+    }
+    Ok(SurfaceFrameCommit::presented_graph(
+        frame_cleanup,
+        RenderTimings {
+            render_time: present_start.duration_since(render_start),
+            present_time: present_start.elapsed(),
         },
     ))
 }

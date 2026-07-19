@@ -20283,6 +20283,420 @@ fn presented_blit_and_present_remain_scoped_until_frame_commit() {
 
 #[cfg(feature = "render-window")]
 #[test]
+fn render_window_smoke_executes_direct_and_graph_presented_frames() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("presented C08 smoke coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let observation = presented_observation_handle_for_test(&surface);
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let direct = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()));
+    let after_direct = observation.snapshot_for_test();
+    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ));
+    let after_graph = observation.snapshot_for_test();
+
+    let direct_presented = direct.is_ok()
+        && after_direct.acquire_count_for_test() == 1
+        && after_direct.present_count_for_test() == 1
+        && after_direct.discarded_count_for_test() == 0;
+    let graph_presented = graph.is_ok()
+        && after_graph.acquire_count_for_test() == 2
+        && after_graph.present_count_for_test() == 2
+        && after_graph.discarded_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.transaction_generation_for_test()
+            == graph_submission.active_generation_for_test()
+        && graph_submission.scopes_resolved_for_test()
+        && graph_submission.presentation_scopes_resolved_for_test()
+        && graph_submission.prepared_frame_committed_for_test()
+        && graph_submission.capture_resources_committed_for_test()
+        && graph_submission.presented_host_effect_applied_for_test()
+        && surface.headless_publication_count_for_test() == 0;
+
+    assert!(
+        direct_presented && graph_presented,
+        "presented C08 graph did not acquire submit and present through one transaction"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
+    let expected = [191_u8, 64, 16, 255];
+    let mut preserves_rgba_semantics = true;
+
+    for format in [Format::Rgba8, Format::Bgra8] {
+        let mut renderer = pollster::block_on(Renderer::new(
+            Options::default()
+                .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+        ))
+        .expect("presented C08 format coverage requires a compatible device");
+        let working_format = default_c08_working_format_for_test(&mut renderer);
+        let mut surface = display_free_presented_surface_for_test(
+            &mut renderer,
+            SurfaceOptions {
+                size: Size::new(4.0, 4.0),
+                format,
+                ..SurfaceOptions::default()
+            },
+        );
+        pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+            .expect("presented C08 format coverage requires a configured output");
+        let advertised_format_is_exact = matches!(
+            &surface.backend,
+            SurfaceBackend::Presented { surface, .. }
+                if surface.format == wgpu::TextureFormat::from(format)
+        );
+        let mut scene = Scene::new();
+        scene.fill(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            Color::try_rgba(0.75, 0.25, 0.0625, 1.0)
+                .expect("the asymmetric test color must be valid"),
+        );
+
+        let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+            &mut surface,
+            &scene,
+            Parameters::default(),
+            working_format,
+        ));
+        let presented_texture = take_last_presented_texture_for_test(&mut surface);
+        let semantic_pixel = presented_texture.as_ref().and_then(|texture| {
+            pollster::block_on(
+                renderer.read_render_texture_for_test(texture, PhysicalSize::new(4, 4)),
+            )
+            .ok()
+            .and_then(|image| {
+                let offset = (4 + 1) * 4;
+                let raw: [u8; 4] = image.rgba().get(offset..offset + 4)?.try_into().ok()?;
+                Some(match format {
+                    Format::Rgba8 => raw,
+                    Format::Bgra8 => [raw[2], raw[1], raw[0], raw[3]],
+                })
+            })
+        });
+        preserves_rgba_semantics &= graph.is_ok()
+            && advertised_format_is_exact
+            && surface.headless_publication_count_for_test() == 0
+            && semantic_pixel.is_some_and(|actual| {
+                actual
+                    .into_iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.abs_diff(expected) <= 4)
+            });
+    }
+
+    assert!(
+        preserves_rgba_semantics,
+        "presented output format conversion changed RGBA semantics"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("presented C08 acquire-failure coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let stats_before = renderer.stats();
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the configured surface must retain a ready device")
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the configured surface must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+    set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Timeout);
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("the injected acquire timeout must abort the prepared C08 graph");
+
+    assert_eq!(error.code(), ErrorCode::SurfaceTimeout);
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 0);
+    assert_eq!(presented.present_count_for_test(), 0);
+    assert_eq!(presented.discarded_count_for_test(), 0);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 0);
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, None);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("an acquire timeout must retain the ready device")
+            .device_pass_cache_counts_for_test(),
+        cache_before
+    );
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("an acquire timeout must return every prepared lease")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after.leased_count, 0);
+    assert_eq!(
+        resources_after.retained_count_for_test(),
+        resources_before.retained_count_for_test()
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("presented C08 scope-failure coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let stats_before = renderer.stats();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("the injected post-submit validation error must abort presentation");
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.present_count_for_test(), 0);
+    assert_eq!(presented.discarded_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.presentation_scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, None);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_graph_present_scope_failure_maps_present_error_without_public_commit() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let failure = ScopedC08GraphPostSubmitControlForTest::present_failing();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("presented C08 present-failure coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let stats_before = renderer.stats();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("the injected present-scope validation error must abort public commit");
+
+    assert_eq!(error.code(), ErrorCode::PresentFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.present_count_for_test(), 1);
+    assert_eq!(presented.discarded_count_for_test(), 0);
+    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(graph_submission.presentation_scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, None);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_graph_cancellation_after_submit_discards_without_presentation() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("presented C08 cancellation coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let stats_before = renderer.stats();
+    let observation = presented_observation_handle_for_test(&surface);
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    {
+        let future = renderer.render_forced_c08_graph_for_test(
+            &mut surface,
+            &scene,
+            Parameters::default(),
+            working_format,
+        );
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        pause.wait_for_submission_for_test(Duration::from_secs(2));
+        let pending = observation.snapshot_for_test();
+        assert_eq!(pending.acquire_attempt_count_for_test(), 1);
+        assert_eq!(pending.acquire_count_for_test(), 1);
+        assert_eq!(pending.present_count_for_test(), 0);
+        assert_eq!(pending.discarded_count_for_test(), 0);
+    }
+
+    let canceled = observation.snapshot_for_test();
+    assert_eq!(canceled.present_count_for_test(), 0);
+    assert_eq!(canceled.discarded_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(!graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.presentation_scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, None);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let terminal = ScopedC08GraphPostSubmitControlForTest::terminal_loss();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("presented C08 terminal-loss coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("terminal device loss before graph commit must suppress presentation");
+
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Destroyed,
+    );
+    assert!(terminal.scope_resolution_observed_for_test());
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.present_count_for_test(), 0);
+    assert_eq!(presented.discarded_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.presentation_scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(surface.last_parameters, None);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert!(matches!(
+        renderer.runtime_capabilities(&surface),
+        RuntimeCapabilities::Unavailable(RuntimeCapabilityUnavailableReason::DeviceLost {
+            reason: DeviceLossReason::Destroyed
+        })
+    ));
+    let repeated = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("the terminal device generation must reject every later frame");
+    assert_runtime_device_lost(
+        repeated,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Destroyed,
+    );
+    assert_eq!(
+        presented_observation_for_test(&surface),
+        presented,
+        "a terminal device generation must not reacquire or present"
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
 fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("presented configuration coverage requires a compatible device");
@@ -21521,6 +21935,14 @@ fn set_presented_acquire_outcome_for_test(
 ) {
     match &mut surface.backend {
         SurfaceBackend::Presented { surface, .. } => surface.set_acquire_outcome_for_test(outcome),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+fn take_last_presented_texture_for_test(surface: &mut Surface) -> Option<wgpu::Texture> {
+    match &mut surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.take_last_presented_texture_for_test(),
         _ => panic!("the fixture must retain a presented surface backend"),
     }
 }

@@ -7,6 +7,12 @@ use super::{
     surface::HeadlessPublication,
     vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit},
 };
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::AcquiredPresentedSurfaceTexture;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -21,6 +27,9 @@ use std::cell::RefCell;
 
 #[cfg(test)]
 use super::vello_engine::VelloResourceAllocationSummaryForTest;
+
+#[cfg(all(test, feature = "render-window"))]
+use super::DeviceLossReason;
 
 #[cfg(test)]
 thread_local! {
@@ -447,21 +456,76 @@ pub(crate) struct InternalVelloPayload {
     after_submit_checkpoint: Option<AfterInternalVelloSubmitCheckpointForTest>,
 }
 
-/// One complete C08 headless graph draft whose effects remain private until
-/// the owning transaction resolves cleanly.
+/// One complete C08 graph draft whose effects remain private until the owning
+/// transaction resolves cleanly.
 #[must_use = "C08 graph payloads must be submitted or dropped atomically"]
 pub(crate) struct C08GraphSubmissionPayload {
     command_buffer: wgpu::CommandBuffer,
     capture_resources: PendingVelloResourceCommit,
     prepared_frame: PendingC08PreparedFrameCommit,
-    headless_draft: HeadlessPublication,
+    output: PendingC08GraphHostEffect,
 }
 
 /// A clean C08 graph result that the renderer may publish with frame stats.
-#[must_use = "clean C08 headless drafts must reach the renderer publication gate"]
+#[must_use = "clean C08 graph results must reach the renderer publication gate"]
 pub(crate) struct C08GraphSubmissionCommit {
-    headless_publication: HeadlessPublication,
+    output: C08GraphOutputCommit,
     frame_cleanup: FrameCleanup,
+}
+
+/// The only output effects that one pending C08 graph transaction may own.
+#[must_use = "pending C08 graph host effects must resolve through their transaction"]
+enum PendingC08GraphHostEffect {
+    Headless(HeadlessPublication),
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    Presented(PendingC08PresentedHostEffect),
+}
+
+/// Non-clone ownership of one acquired presented output before clean submission.
+#[must_use = "an acquired C08 presented output must be authorized or discarded"]
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+struct PendingC08PresentedHostEffect {
+    acquired: AcquiredPresentedSurfaceTexture,
+}
+
+/// Sealed proof that submission scopes and the active terminal signal are clean.
+struct CleanC08GraphSubmissionReceipt {
+    _private: (),
+}
+
+/// A host effect that can exist only after clean graph submission.
+#[must_use = "clean C08 graph host effects must be applied exactly once"]
+enum CleanC08GraphHostEffect {
+    Headless(HeadlessPublication),
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    Presented(CleanC08PresentedHostEffect),
+}
+
+#[must_use = "clean acquired presented outputs must be presented exactly once"]
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+struct CleanC08PresentedHostEffect {
+    acquired: AcquiredPresentedSurfaceTexture,
+}
+
+pub(crate) enum C08GraphOutputCommit {
+    Headless(HeadlessPublication),
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    Presented,
 }
 
 impl C08GraphSubmissionPayload {
@@ -475,14 +539,81 @@ impl C08GraphSubmissionPayload {
             command_buffer,
             capture_resources,
             prepared_frame,
-            headless_draft,
+            output: PendingC08GraphHostEffect::Headless(headless_draft),
+        }
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    pub(crate) fn presented(
+        command_buffer: wgpu::CommandBuffer,
+        prepared: C08PreparedGraphSubmission,
+        acquired: AcquiredPresentedSurfaceTexture,
+    ) -> Self {
+        let (capture_resources, prepared_frame) = prepared.into_parts();
+        Self {
+            command_buffer,
+            capture_resources,
+            prepared_frame,
+            output: PendingC08GraphHostEffect::Presented(PendingC08PresentedHostEffect {
+                acquired,
+            }),
         }
     }
 }
 
 impl C08GraphSubmissionCommit {
-    pub(crate) fn into_parts(self) -> (HeadlessPublication, FrameCleanup) {
-        (self.headless_publication, self.frame_cleanup)
+    pub(crate) fn into_parts(self) -> (C08GraphOutputCommit, FrameCleanup) {
+        (self.output, self.frame_cleanup)
+    }
+}
+
+impl PendingC08GraphHostEffect {
+    fn authorize(self, _receipt: CleanC08GraphSubmissionReceipt) -> CleanC08GraphHostEffect {
+        match self {
+            Self::Headless(publication) => CleanC08GraphHostEffect::Headless(publication),
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::Presented(effect) => {
+                CleanC08GraphHostEffect::Presented(CleanC08PresentedHostEffect {
+                    acquired: effect.acquired,
+                })
+            }
+        }
+    }
+}
+
+impl CleanC08GraphHostEffect {
+    fn apply(self) -> C08GraphOutputCommit {
+        match self {
+            Self::Headless(publication) => C08GraphOutputCommit::Headless(publication),
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::Presented(effect) => {
+                effect.acquired.present();
+                C08GraphOutputCommit::Presented
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+impl C08GraphOutputCommit {
+    fn observation_kind_for_test(&self) -> C08GraphCommittedOutputForTest {
+        match self {
+            Self::Headless(_) => C08GraphCommittedOutputForTest::Headless,
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            Self::Presented => C08GraphCommittedOutputForTest::Presented,
+        }
     }
 }
 
@@ -501,9 +632,25 @@ struct C08GraphSubmissionObservationStateForTest {
     active_generation: Option<u64>,
     capture_lease_count: usize,
     scopes_resolved: bool,
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    presentation_scopes_resolved: bool,
     prepared_frame_committed: bool,
     capture_resources_committed: bool,
-    headless_draft_released: bool,
+    committed_output: Option<C08GraphCommittedOutputForTest>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum C08GraphCommittedOutputForTest {
+    Headless,
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    Presented,
 }
 
 #[cfg(test)]
@@ -531,14 +678,25 @@ impl C08GraphSubmissionObservationForTest {
             .scopes_resolved = true;
     }
 
-    fn record_commit(&self) {
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn record_presentation_scope_resolution(&self) {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .presentation_scopes_resolved = true;
+    }
+
+    fn record_commit(&self, output: C08GraphCommittedOutputForTest) {
         let mut state = self
             .state
             .lock()
             .expect("C08 graph submission observation must remain available");
         state.prepared_frame_committed = true;
         state.capture_resources_committed = true;
-        state.headless_draft_released = true;
+        state.committed_output = Some(output);
     }
 
     pub(crate) fn queue_submission_count_for_test(&self) -> usize {
@@ -576,6 +734,14 @@ impl C08GraphSubmissionObservationForTest {
             .scopes_resolved
     }
 
+    #[cfg(feature = "render-window")]
+    pub(crate) fn presentation_scopes_resolved_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .presentation_scopes_resolved
+    }
+
     pub(crate) fn prepared_frame_committed_for_test(&self) -> bool {
         self.state
             .lock()
@@ -594,7 +760,17 @@ impl C08GraphSubmissionObservationForTest {
         self.state
             .lock()
             .expect("C08 graph submission observation must remain available")
-            .headless_draft_released
+            .committed_output
+            == Some(C08GraphCommittedOutputForTest::Headless)
+    }
+
+    #[cfg(feature = "render-window")]
+    pub(crate) fn presented_host_effect_applied_for_test(&self) -> bool {
+        self.state
+            .lock()
+            .expect("C08 graph submission observation must remain available")
+            .committed_output
+            == Some(C08GraphCommittedOutputForTest::Presented)
     }
 }
 
@@ -654,6 +830,14 @@ enum C08GraphPostSubmitControlForTest {
     Fail {
         scope_resolution_observed: SyncSender<()>,
     },
+    #[cfg(feature = "render-window")]
+    TerminalLoss {
+        scope_resolution_observed: SyncSender<()>,
+    },
+    #[cfg(feature = "render-window")]
+    PresentFail {
+        scope_resolution_observed: SyncSender<()>,
+    },
     Pause(SyncSender<()>),
 }
 
@@ -692,6 +876,36 @@ impl ScopedC08GraphPostSubmitControlForTest {
         }
     }
 
+    #[cfg(feature = "render-window")]
+    pub(crate) fn terminal_loss() -> Self {
+        let (scope_resolution_observed, observed) = sync_channel(1);
+        let previous = ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(C08GraphPostSubmitControlForTest::TerminalLoss {
+                scope_resolution_observed,
+            }))
+        });
+        Self {
+            reached: None,
+            scope_resolution_observed: Some(observed),
+            previous,
+        }
+    }
+
+    #[cfg(feature = "render-window")]
+    pub(crate) fn present_failing() -> Self {
+        let (scope_resolution_observed, observed) = sync_channel(1);
+        let previous = ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(C08GraphPostSubmitControlForTest::PresentFail {
+                scope_resolution_observed,
+            }))
+        });
+        Self {
+            reached: None,
+            scope_resolution_observed: Some(observed),
+            previous,
+        }
+    }
+
     pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
         self.reached
             .as_ref()
@@ -718,7 +932,7 @@ impl Drop for ScopedC08GraphPostSubmitControlForTest {
 
 #[cfg(test)]
 impl C08GraphPostSubmitControlForTest {
-    async fn apply(self, device: &wgpu::Device) {
+    async fn apply(self, device: &wgpu::Device, _signal: &DeviceSignal) {
         match self {
             Self::Fail { .. } => {
                 let _ = device.create_texture(&wgpu::TextureDescriptor {
@@ -736,6 +950,12 @@ impl C08GraphPostSubmitControlForTest {
                     view_formats: &[],
                 });
             }
+            #[cfg(feature = "render-window")]
+            Self::TerminalLoss { .. } => {
+                _signal.record_loss_for_test(DeviceLossReason::Destroyed);
+            }
+            #[cfg(feature = "render-window")]
+            Self::PresentFail { .. } => {}
             Self::Pause(reached) => {
                 reached
                     .send(())
@@ -743,6 +963,48 @@ impl C08GraphPostSubmitControlForTest {
                 std::future::pending::<()>().await;
             }
         }
+    }
+
+    fn notify_submission_scope_resolution(&self) {
+        let observed = match self {
+            Self::Fail {
+                scope_resolution_observed,
+            } => Some(scope_resolution_observed),
+            #[cfg(feature = "render-window")]
+            Self::TerminalLoss {
+                scope_resolution_observed,
+            } => Some(scope_resolution_observed),
+            _ => None,
+        };
+        if let Some(observed) = observed {
+            let _ = observed.send(());
+        }
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn apply_present_failure(&self, device: &wgpu::Device) {
+        #[cfg(feature = "render-window")]
+        if matches!(self, Self::PresentFail { .. }) {
+            let _ = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Surgeist test-injected C08 graph present validation failure"),
+                size: wgpu::Extent3d {
+                    width: 0,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+        }
+        #[cfg(not(feature = "render-window"))]
+        let _ = device;
     }
 }
 
@@ -1108,8 +1370,7 @@ impl GpuOperationTransaction {
         }
     }
 
-    /// Resolves all error scopes before the caller may publish its draft state.
-    pub(crate) async fn finish(mut self, operation: RuntimeOperation) -> Result<()> {
+    async fn pop_active_scopes(&mut self) -> Option<wgpu::Error> {
         let validation = self
             .validation
             .take()
@@ -1129,6 +1390,73 @@ impl GpuOperationTransaction {
             .pop()
             .await;
 
+        [validation, out_of_memory, internal]
+            .into_iter()
+            .flatten()
+            .next()
+    }
+
+    fn terminal_result(
+        &self,
+        terminal: Option<Arc<DeviceTerminalSignal>>,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        let Some(terminal) = terminal else {
+            return Ok(());
+        };
+        match terminal.as_ref() {
+            DeviceTerminalSignal::Lost { .. } => Err(terminal.error(operation)),
+            DeviceTerminalSignal::Faulted {
+                kind,
+                message,
+                operation_generation: Some(generation),
+            } if *generation == self.lease.generation() => {
+                Err(self.stage.classify_fault(*kind, message))
+            }
+            DeviceTerminalSignal::Faulted { .. } => Err(terminal.error(operation)),
+        }
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    async fn resolve_submission_phase(&mut self, operation: RuntimeOperation) -> Result<()> {
+        let captured = self.pop_active_scopes().await;
+        self.terminal_result(self.lease.signal.first_terminal(), operation)?;
+        if let Some(error) = captured {
+            return Err(classify_captured_error(self.stage, error));
+        }
+        Ok(())
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    fn begin_present_phase(
+        &mut self,
+        device: &wgpu::Device,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        if self.validation.is_some() || self.out_of_memory.is_some() || self.internal.is_some() {
+            return Err(Error::new(
+                BackendErrorCode::PresentFailed,
+                "the C08 graph presentation phase started before submission scopes resolved",
+            ));
+        }
+        self.terminal_result(self.lease.signal.first_terminal(), operation)?;
+        self.stage = GpuOperationStage::Present;
+        self.internal = Some(device.push_error_scope(wgpu::ErrorFilter::Internal));
+        self.out_of_memory = Some(device.push_error_scope(wgpu::ErrorFilter::OutOfMemory));
+        self.validation = Some(device.push_error_scope(wgpu::ErrorFilter::Validation));
+        Ok(())
+    }
+
+    /// Resolves all error scopes before the caller may publish its draft state.
+    pub(crate) async fn finish(mut self, operation: RuntimeOperation) -> Result<()> {
+        let captured = self.pop_active_scopes().await;
+
         #[cfg(test)]
         ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
             if let Some(InternalVelloPostSubmitControlForTest::Fail {
@@ -1139,25 +1467,8 @@ impl GpuOperationTransaction {
             }
         });
 
-        if let Some(terminal) = self.lease.finish() {
-            return match terminal.as_ref() {
-                DeviceTerminalSignal::Lost { .. } => Err(terminal.error(operation)),
-                DeviceTerminalSignal::Faulted {
-                    kind,
-                    message,
-                    operation_generation: Some(generation),
-                } if *generation == self.lease.generation() => {
-                    Err(self.stage.classify_fault(*kind, message))
-                }
-                DeviceTerminalSignal::Faulted { .. } => Err(terminal.error(operation)),
-            };
-        }
-
-        if let Some(error) = [validation, out_of_memory, internal]
-            .into_iter()
-            .flatten()
-            .next()
-        {
+        self.terminal_result(self.lease.finish(), operation)?;
+        if let Some(error) = captured {
             return Err(classify_captured_error(self.stage, error));
         }
         Ok(())
@@ -1239,7 +1550,7 @@ impl GpuOperationTransaction {
             command_buffer,
             capture_resources,
             prepared_frame,
-            headless_draft,
+            output,
         } = payload;
         #[cfg(test)]
         let capture_lease_count = capture_resources.lease_count_for_test();
@@ -1261,37 +1572,85 @@ impl GpuOperationTransaction {
             ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
         #[cfg(test)]
         if let Some(control) = control.clone() {
-            control.apply(device).await;
+            control.apply(device, &self.lease.signal).await;
         }
         #[cfg(test)]
         wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
 
-        let result = self.finish(operation).await;
-        #[cfg(test)]
-        if let Some(observation) = &generic_submission_observation {
-            observation.record_scope_resolution(false);
-        }
-        #[cfg(test)]
-        if let Some(observation) = &graph_submission_observation {
-            observation.record_scope_resolution();
-        }
-        #[cfg(test)]
-        if let Some(C08GraphPostSubmitControlForTest::Fail {
-            scope_resolution_observed,
-        }) = control
-        {
-            let _ = scope_resolution_observed.send(());
-        }
-        result?;
+        let output = match output {
+            PendingC08GraphHostEffect::Headless(publication) => {
+                let result = self.finish(operation).await;
+                #[cfg(test)]
+                if let Some(observation) = &generic_submission_observation {
+                    observation.record_scope_resolution(false);
+                }
+                #[cfg(test)]
+                if let Some(observation) = &graph_submission_observation {
+                    observation.record_scope_resolution();
+                }
+                #[cfg(test)]
+                if let Some(control) = &control {
+                    control.notify_submission_scope_resolution();
+                }
+                result?;
+                PendingC08GraphHostEffect::Headless(publication)
+                    .authorize(CleanC08GraphSubmissionReceipt { _private: () })
+                    .apply()
+            }
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            PendingC08GraphHostEffect::Presented(effect) => {
+                let mut transaction = self;
+                let result = transaction.resolve_submission_phase(operation).await;
+                #[cfg(test)]
+                if let Some(observation) = &graph_submission_observation {
+                    observation.record_scope_resolution();
+                }
+                #[cfg(test)]
+                if let Some(control) = &control {
+                    control.notify_submission_scope_resolution();
+                }
+                result?;
+
+                let clean = PendingC08GraphHostEffect::Presented(effect)
+                    .authorize(CleanC08GraphSubmissionReceipt { _private: () });
+                transaction.begin_present_phase(device, operation)?;
+                let output = clean.apply();
+                #[cfg(test)]
+                if let Some(control) = &control {
+                    control.apply_present_failure(device);
+                }
+                let result = transaction.finish(operation).await;
+                #[cfg(test)]
+                if let Some(observation) = &generic_submission_observation {
+                    observation.record_scope_resolution(false);
+                }
+                #[cfg(test)]
+                if let Some(observation) = &graph_submission_observation {
+                    observation.record_presentation_scope_resolution();
+                }
+                #[cfg(all(test, feature = "render-window"))]
+                if let Some(C08GraphPostSubmitControlForTest::PresentFail {
+                    scope_resolution_observed,
+                }) = &control
+                {
+                    let _ = scope_resolution_observed.send(());
+                }
+                result?;
+                output
+            }
+        };
 
         let frame_cleanup = prepared_frame.commit(pass_cache)?;
         capture_resources.commit(VelloResourceCommitProof { _private: () });
         #[cfg(test)]
         if let Some(observation) = graph_submission_observation {
-            observation.record_commit();
+            observation.record_commit(output.observation_kind_for_test());
         }
         Ok(C08GraphSubmissionCommit {
-            headless_publication: headless_draft,
+            output,
             frame_cleanup,
         })
     }

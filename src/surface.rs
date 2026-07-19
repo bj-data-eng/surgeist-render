@@ -346,6 +346,7 @@ pub(crate) enum PresentedAcquireOutcomeForTest {
 #[cfg(all(test, feature = "render-window"))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct DisplayFreePresentedSurfaceObservationForTest {
+    acquire_attempt_count: usize,
     acquire_count: usize,
     present_count: usize,
     discarded_count: usize,
@@ -369,6 +370,10 @@ impl DisplayFreePresentedSurfaceObservationHandleForTest {
 
 #[cfg(all(test, feature = "render-window"))]
 impl DisplayFreePresentedSurfaceObservationForTest {
+    pub(crate) const fn acquire_attempt_count_for_test(self) -> usize {
+        self.acquire_attempt_count
+    }
+
     pub(crate) const fn acquire_count_for_test(self) -> usize {
         self.acquire_count
     }
@@ -388,6 +393,7 @@ pub(crate) struct DisplayFreePresentedSurfaceStateForTest {
     configuration_count: usize,
     next_outcome: PresentedAcquireOutcomeForTest,
     observation: DisplayFreePresentedSurfaceObservationForTest,
+    last_presented_texture: Option<wgpu::Texture>,
 }
 
 #[cfg(any(
@@ -422,9 +428,8 @@ pub(crate) enum AcquiredPresentedSurfaceTexture {
     Host(Option<wgpu::SurfaceTexture>),
     #[cfg(all(test, feature = "render-window"))]
     DisplayFree {
-        texture: wgpu::Texture,
+        texture: Option<wgpu::Texture>,
         state: Arc<Mutex<DisplayFreePresentedSurfaceStateForTest>>,
-        presented: bool,
     },
 }
 
@@ -472,7 +477,7 @@ impl PresentedSurface {
     }
 
     #[cfg(all(test, feature = "render-window"))]
-    pub(crate) fn display_free_for_test() -> Self {
+    pub(crate) fn display_free_for_test(format: Format) -> Self {
         Self {
             target: PresentedSurfaceTarget::DisplayFreeHostEffectForTest(Arc::new(Mutex::new(
                 DisplayFreePresentedSurfaceStateForTest {
@@ -481,9 +486,10 @@ impl PresentedSurface {
                     configuration_count: 0,
                     next_outcome: PresentedAcquireOutcomeForTest::Success,
                     observation: DisplayFreePresentedSurfaceObservationForTest::default(),
+                    last_presented_texture: None,
                 },
             ))),
-            format: wgpu::TextureFormat::Rgba8Unorm,
+            format: format.into(),
             committed: None,
         }
     }
@@ -545,6 +551,8 @@ impl PresentedSurface {
                     let mut state = state
                         .lock()
                         .expect("display-free presentation fixture state must remain available");
+                    state.observation.acquire_attempt_count =
+                        state.observation.acquire_attempt_count.saturating_add(1);
                     let outcome = state.next_outcome;
                     state.next_outcome = PresentedAcquireOutcomeForTest::Success;
                     outcome
@@ -564,7 +572,8 @@ impl PresentedSurface {
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
                         format: resources.config.format,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
                     })
                 };
@@ -576,9 +585,8 @@ impl PresentedSurface {
                         fixture.observation.acquire_count.saturating_add(1);
                     drop(fixture);
                     AcquiredPresentedSurfaceTexture::DisplayFree {
-                        texture: texture(),
+                        texture: Some(texture()),
                         state: Arc::clone(state),
-                        presented: false,
                     }
                 };
                 match outcome {
@@ -648,6 +656,18 @@ impl PresentedSurface {
             .target_identity
     }
 
+    #[cfg(all(test, feature = "render-window"))]
+    pub(crate) fn take_last_presented_texture_for_test(&mut self) -> Option<wgpu::Texture> {
+        let PresentedSurfaceTarget::DisplayFreeHostEffectForTest(state) = &self.target else {
+            panic!("only the display-free presented fixture retains presented textures");
+        };
+        state
+            .lock()
+            .expect("display-free presentation fixture state must remain available")
+            .last_presented_texture
+            .take()
+    }
+
     pub(crate) fn commit_configuration(&mut self, draft: PresentedConfigurationDraft) {
         self.committed = Some(draft.resources);
     }
@@ -674,9 +694,10 @@ impl AcquiredPresentedSurfaceTexture {
                 .texture
                 .create_view(&wgpu::TextureViewDescriptor::default()),
             #[cfg(all(test, feature = "render-window"))]
-            Self::DisplayFree { texture, .. } => {
-                texture.create_view(&wgpu::TextureViewDescriptor::default())
-            }
+            Self::DisplayFree { texture, .. } => texture
+                .as_ref()
+                .expect("an unpresented display-free texture must remain available")
+                .create_view(&wgpu::TextureViewDescriptor::default()),
         }
     }
 
@@ -687,13 +708,14 @@ impl AcquiredPresentedSurfaceTexture {
                 .expect("a host surface texture is presented at most once")
                 .present(),
             #[cfg(all(test, feature = "render-window"))]
-            Self::DisplayFree {
-                state, presented, ..
-            } => {
-                *presented = true;
+            Self::DisplayFree { texture, state } => {
+                let texture = texture
+                    .take()
+                    .expect("a display-free surface texture is presented at most once");
                 let mut state = state
                     .lock()
                     .expect("display-free presentation fixture state must remain available");
+                state.last_presented_texture = Some(texture);
                 state.observation.present_count = state.observation.present_count.saturating_add(1);
             }
         }
@@ -717,10 +739,8 @@ impl Surface {
 impl Drop for AcquiredPresentedSurfaceTexture {
     fn drop(&mut self) {
         #[cfg(all(test, feature = "render-window"))]
-        if let Self::DisplayFree {
-            state, presented, ..
-        } = self
-            && !*presented
+        if let Self::DisplayFree { texture, state } = self
+            && texture.is_some()
         {
             let mut state = state
                 .lock()

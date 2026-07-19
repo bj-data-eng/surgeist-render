@@ -561,7 +561,9 @@ impl Renderer {
             attachment,
             options,
             SurfaceBackend::Presented {
-                surface: Box::new(super::surface::PresentedSurface::display_free_for_test()),
+                surface: Box::new(super::surface::PresentedSurface::display_free_for_test(
+                    options.format,
+                )),
                 device_identity,
                 state: PresentedSurfaceState::new(physical_size, ResizeState::Idle),
             },
@@ -596,6 +598,7 @@ impl Renderer {
             .create_display_free_presented_surface_for_test(
                 preferred_device,
                 configuration_operation,
+                options.format,
             )
             .await?;
         ensure_presented_device_available_after_creation(
@@ -839,12 +842,6 @@ impl Renderer {
         surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
         surface.ensure_renderable()?;
         self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
-        if !matches!(surface.backend, SurfaceBackend::Headless { .. }) {
-            return Err(Error::new(
-                BackendErrorCode::UnsupportedBackend,
-                "the private C08 forced route requires a headless surface",
-            ));
-        }
         let device_identity = surface.device_identity().ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -884,11 +881,12 @@ impl Renderer {
                     "the private C08 forced route lost immutable device capabilities",
                 )
             })?;
+        let output_format = runtime_surface_format(surface);
         capabilities.validate_supported_working_format(working_format)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
-            surface.options.format,
+            output_format,
             &capabilities,
         )?;
         let preparable = C08PreparableGraph::try_from_lowered(lowered).map_err(|_| {
@@ -926,6 +924,8 @@ impl Renderer {
                 raster_scale: capture.raster_scale,
             })
             .collect();
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
         let mut stats = Stats {
             encode_time: encode_start.elapsed(),
             render_time: Duration::ZERO,
@@ -942,12 +942,39 @@ impl Renderer {
                 .backend
                 .as_mut()
                 .expect("forced C08 preflight confirmed the renderer backend is available");
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            let frame = if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                render_c08_presented_graph_surface(backend, surface, preparable, working_format)
+                    .await
+            } else {
+                render_c08_headless_graph_surface(backend, surface, preparable, working_format)
+                    .await
+            };
+            #[cfg(not(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            )))]
             let frame =
                 render_c08_headless_graph_surface(backend, surface, preparable, working_format)
                     .await;
             backend.observe_device_terminal(device_identity);
             frame
-        }?;
+        };
+        let frame = match frame {
+            Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
+                self.configure_presented_surface_if_needed(
+                    surface,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+            Ok(frame) => frame,
+        };
         let stats = self.publish_clean_render_frame(
             surface,
             device_identity,
