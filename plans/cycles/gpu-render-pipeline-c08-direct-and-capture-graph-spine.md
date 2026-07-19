@@ -1,7 +1,7 @@
 # GPU Render Pipeline C08 Direct And Capture Graph Spine
 
 ## Header
-- Cycle: `C08`; owner: `surgeist-render`; status: `in_progress`.
+- Cycle: `C08`; owner: `surgeist-render`; status: `complete`.
 - Cycle base and published prerequisite: `d57e49d728ccd3ba9d65d3793a89faac00721aef` (C07).
 - Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S15-S19, the root/normal-source-over/present subset of S23, S25-S26, S28, and C08-applicable S31-S35 evidence.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at `c1a203393b2549603c0a0d5698099f55018abe2e`, normalized SHA-256 `70b345be31ac5bf4fcae72e2d3c5901c8e04ad0b2c26080851bd2c50d7150cde`, entry `C08 Direct And Capture Graph Spine`.
