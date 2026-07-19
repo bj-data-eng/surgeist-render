@@ -604,7 +604,7 @@ impl ProvisionalDevicePassCacheUpdate {
         )
     }
 
-    pub(crate) fn commit(self, cache: &mut DevicePassCache) -> Result<()> {
+    pub(crate) fn ensure_commit_ready(&self, cache: &DevicePassCache) -> Result<()> {
         if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
             return Err(c08_cache_error(
                 "provisional C08 pass objects cannot enter another device cache",
@@ -631,6 +631,11 @@ impl ProvisionalDevicePassCacheUpdate {
                 "persistent C08 pass cache changed during provisional realization",
             ));
         }
+        Ok(())
+    }
+
+    pub(crate) fn commit(self, cache: &mut DevicePassCache) -> Result<()> {
+        self.ensure_commit_ready(cache)?;
         cache.samplers.extend(self.samplers);
         cache.layouts.extend(self.layouts);
         cache.shaders.extend(self.shaders);

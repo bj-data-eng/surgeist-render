@@ -1,11 +1,16 @@
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
-    pass::{C08PreparedGraphSubmission, PendingC08PreparedFrameCommit},
+    pass::{
+        AccountingReadyC08PreparedFrameCommit, C08PreparedGraphSubmission,
+        PendingC08PreparedFrameCommit,
+    },
     resource::FrameCleanup,
     shader::DevicePassCache,
     surface::HeadlessPublication,
-    vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit},
+    vello_engine::{
+        AccountingReadyVelloResourceCommit, DirectVelloLogicalPass, PendingVelloResourceCommit,
+    },
 };
 
 #[cfg(any(
@@ -496,7 +501,19 @@ struct PendingC08PresentedHostEffect {
 
 /// Sealed proof that submission scopes and the active terminal signal are clean.
 struct CleanC08GraphSubmissionReceipt {
+    _resource_readiness: C08GraphResourceReadinessReceipt,
+}
+
+/// Sealed one-shot evidence that both pending resource owners and the
+/// provisional cache passed exact readiness checks before host authorization.
+struct C08GraphResourceReadinessReceipt {
     _private: (),
+}
+
+#[must_use = "accounting-ready C08 graph resources must commit or abort on drop"]
+struct AccountingReadyC08GraphResources {
+    capture_resources: AccountingReadyVelloResourceCommit,
+    prepared_frame: AccountingReadyC08PreparedFrameCommit,
 }
 
 /// A host effect that can exist only after clean graph submission.
@@ -561,6 +578,40 @@ impl C08GraphSubmissionPayload {
                 acquired,
             }),
         }
+    }
+}
+
+impl AccountingReadyC08GraphResources {
+    fn try_new(
+        capture_resources: PendingVelloResourceCommit,
+        prepared_frame: PendingC08PreparedFrameCommit,
+        pass_cache: &DevicePassCache,
+    ) -> Result<Self> {
+        let capture_resources = capture_resources.into_accounting_ready()?;
+        let prepared_frame = prepared_frame.into_accounting_ready(pass_cache)?;
+        Ok(Self {
+            capture_resources,
+            prepared_frame,
+        })
+    }
+
+    fn authorization_receipt(
+        &self,
+        pass_cache: &DevicePassCache,
+    ) -> Result<C08GraphResourceReadinessReceipt> {
+        self.capture_resources.ensure_commit_ready()?;
+        self.prepared_frame.ensure_commit_ready(pass_cache)?;
+        Ok(C08GraphResourceReadinessReceipt { _private: () })
+    }
+
+    fn commit(self, pass_cache: &mut DevicePassCache) -> Result<FrameCleanup> {
+        self.capture_resources.ensure_commit_ready()?;
+        self.prepared_frame.ensure_commit_ready(pass_cache)?;
+        let capture_cleanup = self
+            .capture_resources
+            .commit(VelloResourceCommitProof { _private: () })?;
+        let prepared_cleanup = self.prepared_frame.commit(pass_cache)?;
+        Ok(prepared_cleanup.followed_by(capture_cleanup))
     }
 }
 
@@ -879,6 +930,7 @@ enum C08GraphPostSubmitControlForTest {
     PresentFail {
         scope_resolution_observed: SyncSender<()>,
     },
+    AccountingFault,
     Pause(SyncSender<()>),
 }
 
@@ -912,6 +964,16 @@ impl ScopedC08GraphPostSubmitControlForTest {
             .with(|active| active.replace(Some(C08GraphPostSubmitControlForTest::Pause(reached))));
         Self {
             reached: Some(observed),
+            scope_resolution_observed: None,
+            previous,
+        }
+    }
+
+    pub(crate) fn accounting_fault() -> Self {
+        let previous = ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST
+            .with(|active| active.replace(Some(C08GraphPostSubmitControlForTest::AccountingFault)));
+        Self {
+            reached: None,
             scope_resolution_observed: None,
             previous,
         }
@@ -973,7 +1035,12 @@ impl Drop for ScopedC08GraphPostSubmitControlForTest {
 
 #[cfg(test)]
 impl C08GraphPostSubmitControlForTest {
-    async fn apply(self, device: &wgpu::Device, _signal: &DeviceSignal) {
+    async fn apply(
+        self,
+        device: &wgpu::Device,
+        _signal: &DeviceSignal,
+        prepared_frame: &PendingC08PreparedFrameCommit,
+    ) {
         match self {
             Self::Fail { .. } => {
                 let _ = device.create_texture(&wgpu::TextureDescriptor {
@@ -997,6 +1064,9 @@ impl C08GraphPostSubmitControlForTest {
             }
             #[cfg(feature = "render-window")]
             Self::PresentFail { .. } => {}
+            Self::AccountingFault => {
+                let _ = prepared_frame.poison_retained_byte_accounting_for_test();
+            }
             Self::Pause(reached) => {
                 reached
                     .send(())
@@ -1190,6 +1260,7 @@ enum InternalVelloPostSubmitControlForTest {
     Fail {
         scope_resolution_observed: SyncSender<()>,
     },
+    AccountingFault,
     Pause(SyncSender<()>),
 }
 
@@ -1228,6 +1299,17 @@ impl ScopedInternalVelloPostSubmitControlForTest {
         }
     }
 
+    pub(crate) fn accounting_fault() -> Self {
+        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
+            active.replace(Some(InternalVelloPostSubmitControlForTest::AccountingFault))
+        });
+        Self {
+            reached: None,
+            scope_resolution_observed: None,
+            previous,
+        }
+    }
+
     pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
         self.reached
             .as_ref()
@@ -1256,7 +1338,7 @@ impl Drop for ScopedInternalVelloPostSubmitControlForTest {
 
 #[cfg(test)]
 impl InternalVelloPostSubmitControlForTest {
-    async fn apply(self, device: &wgpu::Device) {
+    async fn apply(self, device: &wgpu::Device, resources: &PendingVelloResourceCommit) {
         match self {
             Self::Fail { .. } => {
                 let _ = device.create_texture(&wgpu::TextureDescriptor {
@@ -1273,6 +1355,9 @@ impl InternalVelloPostSubmitControlForTest {
                     usage: wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 });
+            }
+            Self::AccountingFault => {
+                let _ = resources.poison_retained_byte_accounting_for_test();
             }
             Self::Pause(reached) => {
                 reached
@@ -1522,7 +1607,9 @@ impl GpuOperationTransaction {
         operation: RuntimeOperation,
     ) -> Result<()> {
         self.finish(operation).await?;
-        resources.commit(VelloResourceCommitProof { _private: () });
+        resources
+            .into_accounting_ready()?
+            .commit(VelloResourceCommitProof { _private: () })?;
         Ok(())
     }
 
@@ -1616,12 +1703,14 @@ impl GpuOperationTransaction {
             ACTIVE_C08_GRAPH_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
         #[cfg(test)]
         if let Some(control) = control.clone() {
-            control.apply(device, &self.lease.signal).await;
+            control
+                .apply(device, &self.lease.signal, &prepared_frame)
+                .await;
         }
         #[cfg(test)]
         wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
 
-        let output = match output {
+        let (output, frame_cleanup) = match output {
             PendingC08GraphHostEffect::Headless(publication) => {
                 let result = self.finish(operation).await;
                 #[cfg(test)]
@@ -1637,9 +1726,19 @@ impl GpuOperationTransaction {
                     control.notify_submission_scope_resolution();
                 }
                 result?;
-                PendingC08GraphHostEffect::Headless(publication)
-                    .authorize(CleanC08GraphSubmissionReceipt { _private: () })
-                    .apply()
+                let resources = AccountingReadyC08GraphResources::try_new(
+                    capture_resources,
+                    prepared_frame,
+                    pass_cache,
+                )?;
+                let receipt = resources.authorization_receipt(pass_cache)?;
+                let output = PendingC08GraphHostEffect::Headless(publication).authorize(
+                    CleanC08GraphSubmissionReceipt {
+                        _resource_readiness: receipt,
+                    },
+                );
+                let frame_cleanup = resources.commit(pass_cache)?;
+                (output.apply(), frame_cleanup)
             }
             #[cfg(any(
                 feature = "render-window",
@@ -1658,8 +1757,17 @@ impl GpuOperationTransaction {
                 }
                 result?;
 
-                let clean = PendingC08GraphHostEffect::Presented(effect)
-                    .authorize(CleanC08GraphSubmissionReceipt { _private: () });
+                let resources = AccountingReadyC08GraphResources::try_new(
+                    capture_resources,
+                    prepared_frame,
+                    pass_cache,
+                )?;
+                let receipt = resources.authorization_receipt(pass_cache)?;
+                let clean = PendingC08GraphHostEffect::Presented(effect).authorize(
+                    CleanC08GraphSubmissionReceipt {
+                        _resource_readiness: receipt,
+                    },
+                );
                 transaction.begin_present_phase(device, operation)?;
                 let output = clean.apply();
                 #[cfg(test)]
@@ -1683,13 +1791,10 @@ impl GpuOperationTransaction {
                     let _ = scope_resolution_observed.send(());
                 }
                 result?;
-                output
+                let frame_cleanup = resources.commit(pass_cache)?;
+                (output, frame_cleanup)
             }
         };
-
-        let frame_cleanup = prepared_frame
-            .commit(pass_cache)?
-            .followed_by(capture_resources.commit(VelloResourceCommitProof { _private: () }));
         #[cfg(test)]
         if let Some(observation) = graph_submission_observation {
             observation.record_commit(
@@ -1774,11 +1879,13 @@ impl GpuOperationTransaction {
         if let Some(control) = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST
             .with(|active| active.borrow().clone())
         {
-            control.apply(device).await;
+            control.apply(device, &resources).await;
         }
         match self.finish(operation).await {
             Ok(()) => {
-                resources.commit(VelloResourceCommitProof { _private: () });
+                resources
+                    .into_accounting_ready()?
+                    .commit(VelloResourceCommitProof { _private: () })?;
                 Ok(())
             }
             Err(error) => Err(error),

@@ -7503,6 +7503,165 @@ fn healthy_per_lease_discard_subtracts_exact_bytes_without_false_fault() {
 }
 
 #[test]
+fn replace_rejects_existing_accounting_fault_before_mutation() {
+    let manager = ResourceManager::default();
+    let mut frame = manager.begin_frame().unwrap();
+    let lease = frame.acquire(modeled_resource_key_for_test(65), 8).unwrap();
+    let resource_identity = lease.resource_identity();
+    let expected_fault = manager.poison_retained_byte_accounting_for_test();
+    let poisoned = manager.observation_for_test();
+
+    let replacement = catch_unwind(AssertUnwindSafe(|| {
+        frame.replace(lease, modeled_resource_key_for_test(66), 4)
+    }));
+
+    assert!(
+        replacement.is_ok(),
+        "replace after a recorded accounting fault must return a bounded error"
+    );
+    let error = replacement
+        .unwrap()
+        .expect_err("replace must reject an existing accounting fault");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        error.message(),
+        "resource manager is unavailable after a retained-byte accounting invariant failure"
+    );
+    assert_eq!(manager.observation_for_test(), poisoned);
+    assert_eq!(poisoned.accounting_fault_for_test(), Some(expected_fault));
+    assert!(
+        poisoned
+            .entry_identities_for_test()
+            .contains(&resource_identity),
+        "rejected replace mutated or removed the original resource"
+    );
+    assert_eq!(poisoned.accounted_entry_bytes, Some(8));
+
+    let cleanup = catch_unwind(AssertUnwindSafe(|| drop(frame)));
+    assert!(cleanup.is_ok(), "faulted replace cleanup must not panic");
+    assert_eq!(
+        manager.observation_for_test().accounting_fault_for_test(),
+        Some(expected_fault),
+        "faulted replace cleanup replaced the first accounting diagnostic"
+    );
+}
+
+#[test]
+fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
+    let assert_bounded_fault = |error: &Error| {
+        assert_eq!(error.code(), ErrorCode::RenderFailed);
+        assert_eq!(
+            error.message(),
+            "resource manager is unavailable after a retained-byte accounting invariant failure"
+        );
+    };
+
+    let mismatch_manager = ResourceManager::default();
+    let mut mismatch_frame = mismatch_manager.begin_frame().unwrap();
+    let mismatch_survivor = mismatch_frame
+        .acquire(modeled_resource_key_for_test(67), 8)
+        .unwrap();
+    let mismatch_replaced = mismatch_frame
+        .acquire(modeled_resource_key_for_test(68), 16)
+        .unwrap();
+    let mismatch_replaced_identity = mismatch_replaced.resource_identity();
+    mismatch_manager.inject_retained_byte_mismatch_before_discard_for_test();
+    let mismatch_result = catch_unwind(AssertUnwindSafe(|| {
+        mismatch_frame.replace(mismatch_replaced, modeled_resource_key_for_test(69), 4)
+    }));
+    assert!(mismatch_result.is_ok(), "replace mismatch must not panic");
+    let mismatch_error = mismatch_result
+        .unwrap()
+        .expect_err("replace silently accepted mismatched retained accounting");
+    assert_bounded_fault(&mismatch_error);
+    let mismatch_fault = ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes: 23,
+        registered_entry_bytes: 24,
+    };
+    let mismatch_observation = mismatch_manager.observation_for_test();
+    assert_eq!(
+        mismatch_observation.accounting_fault_for_test(),
+        Some(mismatch_fault)
+    );
+    assert_eq!(mismatch_observation.accounted_entry_bytes, Some(24));
+    assert!(
+        mismatch_observation
+            .entry_identities_for_test()
+            .contains(&mismatch_replaced_identity),
+        "mismatched replace removed or replaced the original entry"
+    );
+    mismatch_frame.release(mismatch_survivor).unwrap();
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(mismatch_frame))).is_ok());
+
+    let underflow_manager = ResourceManager::default();
+    let mut underflow_frame = underflow_manager.begin_frame().unwrap();
+    let underflow_replaced = underflow_frame
+        .acquire(modeled_resource_key_for_test(70), 8)
+        .unwrap();
+    let underflow_identity = underflow_replaced.resource_identity();
+    underflow_manager.inject_retained_byte_underflow_before_discard_for_test();
+    let underflow_result = catch_unwind(AssertUnwindSafe(|| {
+        underflow_frame.replace(underflow_replaced, modeled_resource_key_for_test(71), 4)
+    }));
+    assert!(underflow_result.is_ok(), "replace underflow must not panic");
+    let underflow_error = underflow_result
+        .unwrap()
+        .expect_err("replace silently accepted retained-byte underflow");
+    assert_bounded_fault(&underflow_error);
+    let underflow_fault = ResourceAccountingFault::RetainedByteUnderflow {
+        retained_bytes: 0,
+        discarded_entry_bytes: 8,
+    };
+    let underflow_observation = underflow_manager.observation_for_test();
+    assert_eq!(
+        underflow_observation.accounting_fault_for_test(),
+        Some(underflow_fault)
+    );
+    assert_eq!(underflow_observation.accounted_entry_bytes, Some(8));
+    assert!(
+        underflow_observation
+            .entry_identities_for_test()
+            .contains(&underflow_identity)
+    );
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(underflow_frame))).is_ok());
+
+    let overflow_manager = ResourceManager::default();
+    let mut overflow_frame = overflow_manager.begin_frame().unwrap();
+    let overflow_survivor = overflow_frame
+        .acquire(modeled_resource_key_for_test(72), 1)
+        .unwrap();
+    let overflow_replaced = overflow_frame
+        .acquire(modeled_resource_key_for_test(73), 1)
+        .unwrap();
+    let overflow_identity = overflow_replaced.resource_identity();
+    let overflow_result = catch_unwind(AssertUnwindSafe(|| {
+        overflow_frame.replace(
+            overflow_replaced,
+            modeled_resource_key_for_test(74),
+            u64::MAX,
+        )
+    }));
+    assert!(overflow_result.is_ok(), "replace overflow must not panic");
+    let overflow_error = overflow_result
+        .unwrap()
+        .expect_err("replace overflow must fault accounting instead of mutating");
+    assert_bounded_fault(&overflow_error);
+    let overflow_observation = overflow_manager.observation_for_test();
+    assert_eq!(
+        overflow_observation.accounting_fault_for_test(),
+        Some(ResourceAccountingFault::SurvivingEntryByteTotalOverflow)
+    );
+    assert_eq!(overflow_observation.accounted_entry_bytes, Some(2));
+    assert!(
+        overflow_observation
+            .entry_identities_for_test()
+            .contains(&overflow_identity)
+    );
+    overflow_frame.release(overflow_survivor).unwrap();
+    assert!(catch_unwind(AssertUnwindSafe(|| drop(overflow_frame))).is_ok());
+}
+
+#[test]
 fn extreme_effect_extent_reports_device_dimension_before_descriptor_byte_overflow() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("extreme effect extent coverage requires a selected host adapter");
@@ -8567,6 +8726,78 @@ fn offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available(
         .internal_resource_manager_observation_for_test();
     assert_eq!(resources.leased_count, 0);
     assert!(resources.idle_count >= 1);
+}
+
+#[test]
+fn explicit_offscreen_release_reports_accounting_fault_while_drop_remains_nonpanicking() {
+    let render_output = |renderer: &mut Renderer| {
+        let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
+        let mut scene = VelloScene::default();
+        scene.fill(
+            peniko::Fill::NonZero,
+            kurbo::Affine::IDENTITY,
+            peniko::Color::BLACK,
+            None,
+            &kurbo::Rect::new(0.0, 0.0, 2.0, 2.0),
+        );
+        let request = OffscreenLocalSceneRenderRequest::new(
+            bounds,
+            1.0,
+            Format::Rgba8,
+            Parameters::default(),
+        );
+        let options = renderer.options();
+        let context = renderer
+            .default_offscreen_render_context()
+            .expect("offscreen accounting coverage requires a host adapter");
+        pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
+            Some(context),
+            options,
+            &scene,
+            request,
+        ))
+        .expect("offscreen accounting coverage requires a rendered texture lease")
+    };
+
+    let mut explicit_renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("explicit offscreen release coverage requires a host adapter");
+    let explicit = render_output(&mut explicit_renderer);
+    let expected_fault = explicit.poison_retained_byte_accounting_for_test();
+    let error = explicit
+        .release()
+        .expect_err("explicit offscreen release silently ignored terminal accounting cleanup");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        error.message(),
+        "resource manager is unavailable after a retained-byte accounting invariant failure"
+    );
+    assert_eq!(
+        explicit_renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the accounting fault must retain the ready device for diagnosis")
+            .internal_resource_manager_observation_for_test()
+            .accounting_fault_for_test(),
+        Some(expected_fault)
+    );
+
+    let mut drop_renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("offscreen drop coverage requires a host adapter");
+    let dropped = render_output(&mut drop_renderer);
+    let drop_fault = dropped.poison_retained_byte_accounting_for_test();
+    let drop_result = catch_unwind(AssertUnwindSafe(|| drop(dropped)));
+    assert!(
+        drop_result.is_ok(),
+        "dropping a poisoned offscreen texture lease must remain best-effort and nonpanicking"
+    );
+    assert_eq!(
+        drop_renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("offscreen drop must retain the ready device for diagnosis")
+            .internal_resource_manager_observation_for_test()
+            .accounting_fault_for_test(),
+        Some(drop_fault),
+        "offscreen drop replaced the first accounting diagnostic"
+    );
 }
 
 #[test]
@@ -20194,7 +20425,8 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             let lease = pollster::block_on(scope.finish_with_lease(lease))
                 .expect("the caller must resolve a clean checked encoding scope");
             assert_eq!(
-                super::vello_engine::commit_scope_resolved_for_test(lease),
+                super::vello_engine::commit_scope_resolved_for_test(lease)
+                    .expect("the scope-resolved Vello commit must keep accounting clean"),
                 VelloAtlasOutcome::Retain
             );
         }
@@ -21052,6 +21284,97 @@ fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
         renderer.default_device_active_operation_generation_for_test(),
         None
     );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_c08_accounting_fault_before_authorization_suppresses_present_and_commits() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let _poison = ScopedC08GraphPostSubmitControlForTest::accounting_fault();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("presented C08 accounting coverage requires a compatible device");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let stats_before = renderer.stats();
+    let parameters_before = surface.last_parameters;
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the configured surface must retain a ready device")
+        .device_pass_cache_counts_for_test();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("pre-authorization accounting poison must abort presentation");
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        error.message(),
+        "resource manager is unavailable after a retained-byte accounting invariant failure"
+    );
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.present_count_for_test(), 0);
+    assert_eq!(presented.discarded_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.presentation_scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the accounting fault must retain the ready device")
+            .device_pass_cache_counts_for_test(),
+        cache_before
+    );
+    let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
+    assert!(!prepared_identities.is_empty());
+    let after_fault = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the accounting fault must retain the resource manager for diagnosis")
+        .internal_resource_manager_observation_for_test();
+    let Some(ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes,
+        registered_entry_bytes,
+    }) = after_fault.accounting_fault_for_test()
+    else {
+        panic!("the presented transaction must preserve the exact injected accounting fault");
+    };
+    assert_eq!(retained_bytes.checked_add(1), Some(registered_entry_bytes));
+    assert_eq!(after_fault.active_frame_count, 0);
+    assert_eq!(after_fault.leased_count, 0);
+    assert!(
+        prepared_identities
+            .iter()
+            .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
+    );
+
+    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("the poisoned presented resource manager must block later acquisition");
+    assert_eq!(retry.code(), ErrorCode::RenderFailed);
+    assert_eq!(presented_observation_for_test(&surface), presented);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
 }
 
 #[cfg(feature = "render-window")]
@@ -23052,6 +23375,61 @@ fn encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit(
             .internal_resources_empty_for_test(),
         "a checked Vello lease must be submitted and explicitly adopted by the per-device manager"
     );
+}
+
+#[test]
+fn direct_vello_submission_reports_accounting_fault_after_real_submit() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("direct Vello accounting coverage requires a real selected WGPU device");
+    let target_extent = PhysicalSize::new(64, 48);
+    let prepared = VelloScene::prepare_raster_scenario_for_test(
+        VelloRasterScenario::Base,
+        RasterParameters::try_new(target_extent, peniko::Color::BLACK, Antialiasing::Area)
+            .expect("a non-empty direct Vello target must prepare"),
+    )
+    .expect("the direct Vello accounting fixture must prepare without submission");
+    let submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let _poison = ScopedInternalVelloPostSubmitControlForTest::accounting_fault();
+
+    let error = match pollster::block_on(
+        renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent),
+    ) {
+        Ok(_) => {
+            panic!("direct Vello submission silently ignored terminal resource accounting cleanup")
+        }
+        Err(error) => error,
+    };
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        error.message(),
+        "resource manager is unavailable after a retained-byte accounting invariant failure"
+    );
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    let after_fault = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the accounting fault must retain the ready device for diagnosis")
+        .internal_resource_manager_observation_for_test();
+    assert!(matches!(
+        after_fault.accounting_fault_for_test(),
+        Some(ResourceAccountingFault::RetainedByteMismatch { .. })
+    ));
+    assert_eq!(after_fault.active_frame_count, 0);
+    assert_eq!(after_fault.leased_count, 0);
+    assert_eq!(
+        after_fault.entry_count, 0,
+        "the failed direct Vello commit retained submitted-but-uncertain identities"
+    );
+
+    let retry = match pollster::block_on(
+        renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent),
+    ) {
+        Ok(_) => panic!("a faulted direct Vello manager must block later acquisition"),
+        Err(error) => error,
+    };
+    assert_eq!(retry.code(), ErrorCode::RenderFailed);
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
 }
 
 #[test]
@@ -25454,6 +25832,133 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         error,
         RuntimeOperation::SurfaceReadback,
         RenderSurfaceAvailability::Uninitialized,
+    );
+}
+
+#[test]
+fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("headless C08 accounting coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
+        .expect("headless C08 accounting coverage requires a real surface");
+    let mut baseline_scene = Scene::new();
+    baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
+        .expect("the direct baseline must publish before accounting poison");
+    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the direct baseline publication must remain readable");
+    let baseline_stats = renderer.stats();
+    let baseline_parameters = surface.last_parameters;
+    let baseline_uploaded_images = renderer.uploaded_images_for_test();
+    let baseline_publication_count = surface.headless_publication_count_for_test();
+    let baseline_cache = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the baseline must retain a ready device")
+        .device_pass_cache_counts_for_test();
+
+    let mut replacement = Scene::new();
+    replacement.fill(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    let replacement_parameters = Parameters {
+        base_color: Color::TRANSPARENT,
+        debug: true,
+    };
+    let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let generic_submission = generic_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let _poison = ScopedC08GraphPostSubmitControlForTest::accounting_fault();
+
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &replacement,
+        replacement_parameters,
+        working_format,
+    ))
+    .expect_err("accounting poison after submit must abort the headless C08 publication");
+
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        error.message(),
+        "resource manager is unavailable after a retained-byte accounting invariant failure"
+    );
+    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(
+        generic_submission.readback_queue_submission_count_for_test(),
+        0
+    );
+    assert!(generic_submission.scopes_resolved_for_test());
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.headless_draft_released_for_test());
+    assert_eq!(renderer.stats(), baseline_stats);
+    assert_eq!(surface.last_parameters, baseline_parameters);
+    assert_eq!(
+        renderer.uploaded_images_for_test(),
+        baseline_uploaded_images
+    );
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count
+    );
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the accounting fault must retain the ready device")
+            .device_pass_cache_counts_for_test(),
+        baseline_cache
+    );
+    let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
+    assert!(!prepared_identities.is_empty());
+    let after_fault = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the accounting fault must retain the resource manager for diagnosis")
+        .internal_resource_manager_observation_for_test();
+    let Some(ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes,
+        registered_entry_bytes,
+    }) = after_fault.accounting_fault_for_test()
+    else {
+        panic!("the transaction must preserve the exact injected accounting fault");
+    };
+    assert_eq!(retained_bytes.checked_add(1), Some(registered_entry_bytes));
+    assert_eq!(after_fault.active_frame_count, 0);
+    assert_eq!(after_fault.leased_count, 0);
+    assert!(
+        prepared_identities
+            .iter()
+            .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
+    );
+    assert_eq!(
+        pollster::block_on(renderer.read_headless(&surface))
+            .expect("the failed C08 graph must preserve the baseline publication")
+            .rgba(),
+        baseline_pixels.rgba()
+    );
+
+    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &replacement,
+        replacement_parameters,
+        working_format,
+    ))
+    .expect_err("the poisoned resource manager must block a later C08 acquisition");
+    assert_eq!(retry.code(), ErrorCode::RenderFailed);
+    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(renderer.stats(), baseline_stats);
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count
     );
 }
 

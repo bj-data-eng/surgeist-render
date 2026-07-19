@@ -32,8 +32,8 @@ mod recording {
     pub(crate) use resources::VelloResourceAllocationSummaryForTest;
     pub(super) use resources::VelloResourceLease;
     pub(crate) use resources::{
-        PendingVelloResourceCommit, VelloAtlasOutcome, VelloBufferKey, VelloImageKey,
-        VelloResourceLeaseAggregate,
+        AccountingReadyVelloResourceCommit, PendingVelloResourceCommit, VelloAtlasOutcome,
+        VelloBufferKey, VelloImageKey, VelloResourceLeaseAggregate,
     };
     #[cfg(test)]
     pub(super) use resources::{
@@ -137,9 +137,9 @@ pub(crate) use raster::{
 };
 
 pub(crate) use recording::{
-    ActiveVelloEncodingScope, PendingVelloResourceCommit, TransactionEncodingState,
-    TransactionTargetIntent, VelloAtlasOutcome, VelloBufferKey, VelloEngineState, VelloImageKey,
-    VelloResourceLeaseAggregate,
+    AccountingReadyVelloResourceCommit, ActiveVelloEncodingScope, PendingVelloResourceCommit,
+    TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloBufferKey,
+    VelloEngineState, VelloImageKey, VelloResourceLeaseAggregate,
 };
 
 #[cfg(test)]
@@ -172,7 +172,7 @@ pub(crate) async fn no_atlas_commit_outcome_for_test(
 #[cfg(test)]
 pub(crate) fn commit_scope_resolved_for_test(
     lease: recording::ScopeResolvedVelloResourceLease,
-) -> VelloAtlasOutcome {
+) -> crate::Result<VelloAtlasOutcome> {
     recording::commit_scope_resolved_for_test(lease)
 }
 

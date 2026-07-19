@@ -18,6 +18,9 @@ use super::{
 #[cfg(test)]
 use super::RecordingBuilder;
 
+#[cfg(test)]
+use crate::resource::ResourceAccountingFault;
+
 struct ManagedBuffer {
     lease: ResourceLease,
     byte_len: u64,
@@ -285,6 +288,13 @@ pub(crate) struct PendingVelloResourceCommit {
     leases: Vec<ScopeResolvedVelloResourceLease>,
 }
 
+/// Sealed one-shot state proving that every pending Vello frame currently has
+/// exact accounting and owns its complete clean disposition.
+#[must_use = "accounting-ready Vello resources must be committed or aborted on drop"]
+pub(crate) struct AccountingReadyVelloResourceCommit {
+    pending: PendingVelloResourceCommit,
+}
+
 impl PendingVelloResourceCommit {
     pub(crate) fn new(mut lease: ScopeResolvedVelloResourceLease) -> Self {
         lease.consume_pending_atlas_recovery();
@@ -321,12 +331,48 @@ impl PendingVelloResourceCommit {
         self.leases.len()
     }
 
-    pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) -> FrameCleanup {
-        let mut cleanup = FrameCleanup::default();
-        for lease in self.leases.drain(..) {
-            cleanup = cleanup.followed_by(lease.commit().into_frame_cleanup());
+    #[cfg(test)]
+    pub(crate) fn poison_retained_byte_accounting_for_test(
+        &self,
+    ) -> ResourceAccountingFault {
+        self.leases
+            .first()
+            .expect("the accounting-poison fixture requires one pending Vello resource lease")
+            .lease
+            .pending
+            .frame_scope()
+            .expect("the accounting-poison fixture requires an unresolved Vello frame")
+            .poison_retained_byte_accounting_for_test()
+    }
+
+    fn ensure_commit_ready(&self) -> Result<()> {
+        for lease in &self.leases {
+            lease.ensure_commit_ready()?;
         }
-        cleanup
+        Ok(())
+    }
+
+    pub(crate) fn into_accounting_ready(self) -> Result<AccountingReadyVelloResourceCommit> {
+        self.ensure_commit_ready()?;
+        Ok(AccountingReadyVelloResourceCommit { pending: self })
+    }
+}
+
+impl AccountingReadyVelloResourceCommit {
+    pub(crate) fn ensure_commit_ready(&self) -> Result<()> {
+        self.pending.ensure_commit_ready()
+    }
+
+    pub(crate) fn commit(
+        mut self,
+        _proof: VelloResourceCommitProof,
+    ) -> Result<FrameCleanup> {
+        self.ensure_commit_ready()?;
+        let mut cleanup = FrameCleanup::default();
+        for lease in self.pending.leases.drain(..) {
+            cleanup = cleanup.followed_by(lease.commit()?.into_frame_cleanup());
+        }
+        cleanup.into_accounting_result()
     }
 }
 
@@ -496,7 +542,7 @@ impl VelloResourceLease {
         ScopeResolvedVelloResourceLease { lease: self }
     }
 
-    fn into_committed_resources(mut self) -> CommittedVelloResources {
+    fn into_committed_resources(mut self) -> Result<CommittedVelloResources> {
         self.pending.commit()
     }
 
@@ -580,7 +626,11 @@ impl ScopeResolvedVelloResourceLease {
     fn allocation_summary_for_test(&self) -> VelloResourceAllocationSummaryForTest {
         self.lease.allocation_summary.clone()
     }
-    fn commit(self) -> CommittedVelloResources {
+    fn ensure_commit_ready(&self) -> Result<()> {
+        self.lease.pending.ensure_commit_ready()
+    }
+
+    fn commit(self) -> Result<CommittedVelloResources> {
         self.lease.into_committed_resources()
     }
 
@@ -620,8 +670,8 @@ pub(crate) async fn over_limit_buffer_preflight_for_test(device: &wgpu::Device) 
 #[cfg(test)]
 pub(crate) fn commit_scope_resolved_for_test(
     lease: ScopeResolvedVelloResourceLease,
-) -> VelloAtlasOutcome {
-    lease.commit().atlas_outcome()
+) -> Result<VelloAtlasOutcome> {
+    lease.commit().map(|committed| committed.atlas_outcome())
 }
 
 #[cfg(test)]
@@ -635,7 +685,7 @@ pub(crate) async fn no_atlas_commit_outcome_for_test(
     match allocation {
         Ok(lease) => match scope.finish_with_lease(lease).await {
             Ok(lease) => {
-                let committed = lease.commit();
+                let committed = lease.commit()?;
                 Ok(committed.atlas_outcome())
             }
             Err(failure) => Err(failure.into_error_and_aborted_resources().0),
@@ -748,7 +798,19 @@ impl PendingVelloResources {
         }
     }
 
-    fn commit(&mut self) -> CommittedVelloResources {
+    fn ensure_commit_ready(&self) -> Result<()> {
+        let frame_scope = self.frame_scope()?;
+        let leases = self
+            .buffers
+            .values()
+            .map(|managed| &managed.lease)
+            .chain(self.images.values().map(|managed| &managed.lease))
+            .collect::<Vec<_>>();
+        frame_scope.ensure_commit_ready(&leases)
+    }
+
+    fn commit(&mut self) -> Result<CommittedVelloResources> {
+        self.ensure_commit_ready()?;
         let atlas_handle = self.persistent_image_atlas.resource();
         #[cfg(test)]
         let atlas_outcome = self.persistent_image_atlas.commit_outcome();
@@ -760,11 +822,11 @@ impl PendingVelloResources {
         for (_, managed) in self.buffers.drain() {
             match self.clean_retention {
                 CleanVelloResourceRetention::DirectAtlasOnly => {
-                    let _ = frame_scope.discard(managed.lease);
+                    frame_scope.discard(managed.lease)?;
                 }
-                CleanVelloResourceRetention::ReusableGraphFrame => frame_scope
-                    .release(managed.lease)
-                    .expect("a reusable graph Vello buffer must remain leased by its frame"),
+                CleanVelloResourceRetention::ReusableGraphFrame => {
+                    frame_scope.release(managed.lease)?;
+                }
             }
         }
 
@@ -775,29 +837,27 @@ impl PendingVelloResources {
             } else {
                 match self.clean_retention {
                     CleanVelloResourceRetention::DirectAtlasOnly => {
-                        let _ = frame_scope.discard(managed.lease);
+                        frame_scope.discard(managed.lease)?;
                     }
-                    CleanVelloResourceRetention::ReusableGraphFrame => frame_scope
-                        .release(managed.lease)
-                        .expect("a reusable graph Vello image must remain leased by its frame"),
+                    CleanVelloResourceRetention::ReusableGraphFrame => {
+                        frame_scope.release(managed.lease)?;
+                    }
                 }
             }
         }
         if let Some(atlas) = retained_atlas {
             if self.clean_retention == CleanVelloResourceRetention::DirectAtlasOnly {
-                frame_scope.retire_idle_vello_atlases();
+                frame_scope.retire_idle_vello_atlases()?;
             }
-            frame_scope
-                .release(atlas)
-                .expect("the persistent Vello atlas must remain leased by its resource frame");
+            frame_scope.release(atlas)?;
         }
-        let frame_cleanup = frame_scope.finish();
+        let frame_cleanup = frame_scope.finish_checked()?;
 
-        CommittedVelloResources {
+        Ok(CommittedVelloResources {
             frame_cleanup,
             #[cfg(test)]
             atlas_outcome,
-        }
+        })
     }
 
     fn abort(&mut self) -> AbortedVelloResources {

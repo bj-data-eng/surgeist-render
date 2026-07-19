@@ -47,6 +47,9 @@ use super::{
 use super::texture::EffectTextureRole;
 
 #[cfg(test)]
+use super::resource::ResourceAccountingFault;
+
+#[cfg(test)]
 use super::frame::{FrameContext, FramePlan};
 
 #[cfg(test)]
@@ -2991,15 +2994,49 @@ pub(crate) struct PendingC08PreparedFrameCommit {
     pass_cache_update: ProvisionalDevicePassCacheUpdate,
 }
 
+/// Sealed one-shot state proving that the prepared frame and provisional cache
+/// can still complete without an accounting or cache-identity fault.
+#[must_use = "accounting-ready C08 prepared state must be committed or aborted on drop"]
+pub(crate) struct AccountingReadyC08PreparedFrameCommit {
+    frame_scope: FrameResourceScope,
+    pass_cache_update: ProvisionalDevicePassCacheUpdate,
+}
+
 impl PendingC08PreparedFrameCommit {
-    pub(crate) fn commit(self, pass_cache: &mut DevicePassCache) -> Result<FrameCleanup> {
-        self.pass_cache_update.commit(pass_cache)?;
-        Ok(self.frame_scope.finish())
+    pub(crate) fn into_accounting_ready(
+        self,
+        pass_cache: &DevicePassCache,
+    ) -> Result<AccountingReadyC08PreparedFrameCommit> {
+        self.pass_cache_update.ensure_commit_ready(pass_cache)?;
+        self.frame_scope.ensure_commit_ready(&[])?;
+        Ok(AccountingReadyC08PreparedFrameCommit {
+            frame_scope: self.frame_scope,
+            pass_cache_update: self.pass_cache_update,
+        })
     }
 
     #[cfg(test)]
     pub(crate) fn resource_identities_for_test(&self) -> Vec<ResourceIdentity> {
         self.frame_scope.leased_resource_identities_for_test()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn poison_retained_byte_accounting_for_test(&self) -> ResourceAccountingFault {
+        self.frame_scope.poison_retained_byte_accounting_for_test()
+    }
+}
+
+impl AccountingReadyC08PreparedFrameCommit {
+    pub(crate) fn ensure_commit_ready(&self, pass_cache: &DevicePassCache) -> Result<()> {
+        self.pass_cache_update.ensure_commit_ready(pass_cache)?;
+        self.frame_scope.ensure_commit_ready(&[])
+    }
+
+    pub(crate) fn commit(self, pass_cache: &mut DevicePassCache) -> Result<FrameCleanup> {
+        self.ensure_commit_ready(pass_cache)?;
+        let frame_cleanup = self.frame_scope.finish_checked()?;
+        self.pass_cache_update.commit(pass_cache)?;
+        Ok(frame_cleanup)
     }
 }
 
@@ -4623,8 +4660,8 @@ impl<'device> PreparedGraph<'device> {
         let _ = self.pass_cache_update.take();
         self.frame_scope
             .take()
-            .ok_or_else(|| preparation_error("prepared frame resource scope is already closed"))
-            .map(FrameResourceScope::finish)
+            .ok_or_else(|| preparation_error("prepared frame resource scope is already closed"))?
+            .finish_checked()
     }
 
     #[cfg(test)]

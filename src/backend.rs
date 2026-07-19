@@ -3067,6 +3067,16 @@ impl OffscreenRenderedTextureLease {
         self.timings
     }
 
+    #[cfg(test)]
+    pub(crate) fn poison_retained_byte_accounting_for_test(
+        &self,
+    ) -> super::resource::ResourceAccountingFault {
+        self.frame_scope
+            .as_ref()
+            .expect("an unresolved offscreen lease must own its resource frame")
+            .poison_retained_byte_accounting_for_test()
+    }
+
     pub(crate) fn release(mut self) -> Result<()> {
         let mut frame_scope = self
             .frame_scope
@@ -3076,8 +3086,9 @@ impl OffscreenRenderedTextureLease {
             .resource
             .take()
             .expect("an unresolved offscreen lease must own its resource lease");
+        frame_scope.ensure_commit_ready(&[&resource])?;
         frame_scope.release(resource)?;
-        let _ = frame_scope.finish();
+        let _ = frame_scope.finish_checked()?;
         Ok(())
     }
 
