@@ -3,6 +3,7 @@ use super::gpu_transaction::GpuOperationSubmissionObservationForTest;
 use super::gpu_transaction::{
     GpuOperationLease, GpuOperationStage, ScopedGpuOperationPostSubmitCheckpointForTest,
     ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
+    ScopedInternalVelloSubmissionObservationForTest,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use super::readback::{
@@ -10525,6 +10526,22 @@ fn c08_shader_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
+fn c08_vello_capture_commands_for_test() -> command::RenderCommands {
+    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 1.5, 9.5, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        ahem_font("C08 Vello capture raster contract"),
+        8.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        TextRunBounds::try_ink(Rect::new(1.0, 1.0, 8.0, 10.0)).unwrap(),
+    )
+    .unwrap();
+    let mut scene = Scene::new();
+    scene.text_run(run);
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
 fn c08_shader_frame_context_for_test() -> super::frame::FrameContext {
     super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
@@ -10708,6 +10725,86 @@ fn span_source_over_copies_parent_then_uses_fixed_premultiplied_blend() {
 }
 
 #[test]
+fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let vello_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let vello_submission = vello_submission_scope.observation_for_test();
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("multiple C08 captures require backend selection")
+        .expect("multiple C08 captures require a host adapter");
+    let observed = pollster::block_on(
+        backend.c08_multiple_vello_capture_encoding_observation_for_test(
+            identity,
+            c08_shader_commands_for_test(),
+            runtime_lowering_commands_for_test(),
+            c08_shader_frame_context_for_test(),
+        ),
+    )
+    .expect("the validated two-capture fixture must reach graph encoding");
+    let no_queue_submit = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0
+        && vello_submission.queue_submission_count_for_test() == 0;
+
+    assert!(
+        observed.exact_capture_count
+            && observed.one_graph_command_encoder
+            && observed.one_gpu_transaction
+            && observed.one_active_vello_scope
+            && observed.aggregate_pending_commit
+            && observed.commits_every_capture_after_transaction_success
+            && observed.aborts_every_capture_on_drop
+            && no_queue_submit,
+        "bounded Vello captures cannot share one graph transaction"
+    );
+}
+
+#[test]
+fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .expect("C08 capture raster contracts require backend selection")
+        .expect("C08 capture raster contracts require a host adapter");
+    let commands = c08_vello_capture_commands_for_test();
+    let mut contract_is_exact = true;
+    for antialiasing in [
+        Antialiasing::Area,
+        Antialiasing::Msaa8,
+        Antialiasing::Msaa16,
+    ] {
+        let context = super::frame::FrameContext::try_new(
+            Size::new(16.0, 12.0),
+            1.25,
+            antialiasing,
+            Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+        )
+        .unwrap();
+        let observed = pollster::block_on(
+            backend.c08_vello_capture_raster_contract_observation_for_test(
+                identity,
+                commands.clone(),
+                context,
+                antialiasing,
+            ),
+        )
+        .expect("the bounded C08 capture must reach its raster contract observation");
+        contract_is_exact &= observed.lowers_with_exact_initial_transform
+            && observed.uses_transparent_base
+            && observed.uses_requested_antialiasing
+            && observed.uses_exact_positive_extent
+            && observed.uses_exact_rgba8_target_and_view
+            && observed.uses_exact_capture_usage
+            && observed.has_unforgeable_encoded_capture_proof;
+    }
+
+    assert!(
+        contract_is_exact,
+        "Vello capture changed its raster contract"
+    );
+}
+
+#[test]
 fn c08_capture_failure_is_abort_only_and_cannot_retry_on_new_encoder() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
@@ -10721,21 +10818,30 @@ fn c08_capture_failure_is_abort_only_and_cannot_retry_on_new_encoder() {
     ))
     .expect("C08 capture-failure coverage must reach its private observation");
     let pass_source = include_str!("pass.rs");
+    let raster_source = include_str!("vello_engine/raster.rs");
+    let vello_module_source = include_str!("vello_engine/mod.rs");
     let production_completion_is_sealed = pass_source
         .contains("pub(crate) struct C08VelloCaptureCompletionReceipt")
         && pass_source.contains("_seal: C08VelloCaptureCompletionSeal")
-        && pass_source.contains("T3 intentionally has no production constructor")
-        && pass_source.contains(") -> Result<C08VelloCaptureCompletionReceipt>,")
-        && !pass_source.contains(") -> Result<()>,");
-    let t3_success_proof_is_statically_test_only =
-        pass_source.contains("#[cfg(test)]\n    pub(crate) fn c08_capture_completion_for_t3_test");
+        && pass_source.contains("fn complete_after_encoded_capture(")
+        && pass_source.contains("proof.proves_capture_contract(")
+        && pass_source.contains("prepared.encode_capture_into(")
+        && pass_source.contains("capture_encoding.engine,")
+        && pass_source.contains("capture_encoding.resources,")
+        && !pass_source.contains("c08_capture_completion_for_t3_test")
+        && !pass_source.contains("encode_capture: F");
+    let successful_encoding_is_the_only_proof_source = raster_source
+        .contains("pub(crate) struct EncodedVelloCaptureProof {")
+        && !raster_source.contains("pub(crate) fn new(")
+        && vello_module_source.contains("pub(crate) fn encode_capture_into(")
+        && vello_module_source.contains(".map(|resources| EncodedVelloCapture {");
 
     assert!(
-        observed.callback_failure_is_reported
+        observed.capture_failure_is_reported
             && observed.complete_pass_is_rejected
             && observed.retry_on_new_encoder_is_rejected
             && production_completion_is_sealed
-            && t3_success_proof_is_statically_test_only,
+            && successful_encoding_is_the_only_proof_source,
         "failed C08 capture remained forgeable or retryable"
     );
 }

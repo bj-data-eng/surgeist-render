@@ -59,6 +59,8 @@ struct RasterTargetIntent {
     extent: PhysicalSize,
     format: RasterImageFormat,
     access: RasterTargetAccess,
+    base_color: Color,
+    antialiasing: Antialiasing,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -92,11 +94,86 @@ pub(crate) struct EncodedVelloPass {
     logical_pass: DirectVelloLogicalPass,
 }
 
+/// Proof produced only after one prepared capture has encoded successfully.
+#[must_use]
+pub(crate) struct EncodedVelloCaptureProof {
+    target_extent: PhysicalSize,
+    target_format: wgpu::TextureFormat,
+    target_usage: wgpu::TextureUsages,
+    antialiasing: Antialiasing,
+    transparent_base: bool,
+    #[cfg(test)]
+    target_view_identity: usize,
+}
+
+#[must_use]
+pub(crate) struct EncodedVelloCapture {
+    resources: super::recording::VelloResourceLease,
+    proof: EncodedVelloCaptureProof,
+}
+
 impl EncodedVelloPass {
     pub(crate) fn into_resources_and_logical_pass(
         self,
     ) -> (super::recording::VelloResourceLease, DirectVelloLogicalPass) {
         (self.resources, self.logical_pass)
+    }
+}
+
+impl EncodedVelloCapture {
+    pub(crate) fn into_resources_and_proof(
+        self,
+    ) -> (
+        super::recording::VelloResourceLease,
+        EncodedVelloCaptureProof,
+    ) {
+        (self.resources, self.proof)
+    }
+}
+
+impl EncodedVelloCaptureProof {
+    pub(crate) fn proves_capture_contract(
+        &self,
+        target_extent: PhysicalSize,
+        target_format: wgpu::TextureFormat,
+        target_usage: wgpu::TextureUsages,
+        antialiasing: Antialiasing,
+    ) -> bool {
+        self.target_extent == target_extent
+            && self.target_format == target_format
+            && self.target_usage == target_usage
+            && self.antialiasing == antialiasing
+            && self.transparent_base
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn transparent_base_for_test(&self) -> bool {
+        self.transparent_base
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn antialiasing_for_test(&self) -> Antialiasing {
+        self.antialiasing
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_extent_for_test(&self) -> PhysicalSize {
+        self.target_extent
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_format_for_test(&self) -> wgpu::TextureFormat {
+        self.target_format
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_usage_for_test(&self) -> wgpu::TextureUsages {
+        self.target_usage
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn target_view_identity_for_test(&self) -> usize {
+        self.target_view_identity
     }
 }
 
@@ -155,6 +232,8 @@ pub(super) fn prepare(
             extent: parameters.target_extent,
             format: RasterImageFormat::Rgba8Unorm,
             access: RasterTargetAccess::StorageWrite,
+            base_color: parameters.base_color,
+            antialiasing: parameters.antialiasing,
         },
         resource_intents,
     })

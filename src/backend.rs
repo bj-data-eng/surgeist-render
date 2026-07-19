@@ -23,12 +23,12 @@ use super::surface::{PresentedConfigurationDraft, PresentedLifecycle};
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::{PresentedSurface, PresentedSurfaceAcquire};
-#[cfg(test)]
-use super::vello_engine::PreparedVelloPass;
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
     TransactionTargetIntent, VelloEngineState, scene::VelloScene,
 };
+#[cfg(test)]
+use super::vello_engine::{PreparedVelloPass, VelloAtlasOutcome};
 use super::*;
 use super::{
     command::OffscreenBounds,
@@ -239,9 +239,33 @@ pub(crate) struct C08CustomSpineEncodingObservationForTest {
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct C08CaptureFailureObservationForTest {
-    pub(crate) callback_failure_is_reported: bool,
+    pub(crate) capture_failure_is_reported: bool,
     pub(crate) complete_pass_is_rejected: bool,
     pub(crate) retry_on_new_encoder_is_rejected: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C08MultipleVelloCaptureEncodingObservationForTest {
+    pub(crate) exact_capture_count: bool,
+    pub(crate) one_graph_command_encoder: bool,
+    pub(crate) one_gpu_transaction: bool,
+    pub(crate) one_active_vello_scope: bool,
+    pub(crate) aggregate_pending_commit: bool,
+    pub(crate) commits_every_capture_after_transaction_success: bool,
+    pub(crate) aborts_every_capture_on_drop: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C08VelloCaptureRasterContractObservationForTest {
+    pub(crate) lowers_with_exact_initial_transform: bool,
+    pub(crate) uses_transparent_base: bool,
+    pub(crate) uses_requested_antialiasing: bool,
+    pub(crate) uses_exact_positive_extent: bool,
+    pub(crate) uses_exact_rgba8_target_and_view: bool,
+    pub(crate) uses_exact_capture_usage: bool,
+    pub(crate) has_unforgeable_encoded_capture_proof: bool,
 }
 
 struct InternalVelloRenderRequest<'a> {
@@ -1797,6 +1821,7 @@ impl Backend {
             &ready.resources,
             (&ready.pass_cache, realize_checked_passes),
         )
+        .map(|prepared| prepared.with_vello_engine(&ready.engine))
     }
 
     pub(crate) fn device_capabilities(
@@ -2229,27 +2254,21 @@ impl Backend {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 caller-owned custom-spine observation encoder"),
         });
-        let mut capture_handoff_count = 0_usize;
-        let mut capture_handoffs_are_exact = true;
-        let summary =
-            prepared.encode_c08_custom_spine(&mut encoder, output, |handoff, encoder| {
-                capture_handoff_count = capture_handoff_count.saturating_add(1);
-                let _ = (handoff.pass(), handoff.target());
-                capture_handoffs_are_exact &= !handoff.commands().commands.is_empty()
-                    && handoff.target_extent().width() == handoff.texture().width()
-                    && handoff.target_extent().height() == handoff.texture().height()
-                    && handoff.texel_origin().x().is_finite()
-                    && handoff.texel_origin().y().is_finite()
-                    && handoff.raster_scale().is_finite()
-                    && handoff.raster_scale() > 0.0
-                    && handoff.allocation_resource().get() > 0
-                    && matches!(
-                        handoff.antialiasing(),
-                        Antialiasing::Area | Antialiasing::Msaa8 | Antialiasing::Msaa16
-                    );
-                let _ = handoff.view();
-                Ok(handoff.c08_capture_completion_for_t3_test(encoder))
-            })?;
+        let encoded = prepared
+            .encode_c08_custom_spine(&mut encoder, output)
+            .await?;
+        let (summary, capture_resources) = encoded.into_summary_and_resources();
+        let capture_handoff_count = summary.capture_count;
+        let capture_handoffs_are_exact = summary.capture_observations.iter().all(|capture| {
+            capture.target_extent.width() > 0
+                && capture.target_extent.height() > 0
+                && capture.target_and_view_are_exact
+                && matches!(
+                    capture.antialiasing,
+                    Antialiasing::Area | Antialiasing::Msaa8 | Antialiasing::Msaa16
+                )
+        });
+        drop(capture_resources);
         let command_buffer = encoder.finish();
         drop(command_buffer);
         drop(prepared);
@@ -2286,6 +2305,231 @@ impl Backend {
                 && pass_cache_after == pass_cache_before,
             encodes_without_submission_or_sync: true,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c08_multiple_vello_capture_encoding_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        donor_commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C08MultipleVelloCaptureEncodingObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "multiple C08 capture coverage requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let lowered = super::pass::c08_two_capture_spine_lowered_for_test(
+            commands,
+            donor_commands,
+            context,
+            capabilities,
+            policy,
+        )?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let transaction_generation = self.active_operation_generation_for_test(identity);
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "multiple C08 capture coverage lost its ready device",
+            )?
+            .device
+            .clone();
+        let mut prepared = self.prepare_graph_resources(identity, lowered.clone(), policy)?;
+        let output_extent = prepared.output_extent()?;
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surgeist C08 multiple-capture output"),
+            size: wgpu::Extent3d {
+                width: output_extent.width(),
+                height: output_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 multiple-capture graph encoder"),
+        });
+        let encoded = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await?;
+        let (summary, capture_resources) = encoded.into_summary_and_resources();
+        let committed_lease_count = capture_resources.lease_count_for_test();
+        drop(encoder.finish());
+        drop(prepared);
+        let same_transaction = transaction_generation.is_some()
+            && transaction_generation == self.active_operation_generation_for_test(identity);
+        transaction
+            .finish_vello_resources_without_submission_for_test(
+                capture_resources,
+                RuntimeOperation::EffectRendering,
+            )
+            .await?;
+        let after_commit = self
+            .ready_device_state_borrow_for_test(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "multiple C08 capture commit lost its resource manager",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+
+        let abort_transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let mut abort_prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let mut abort_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 multiple-capture aggregate-abort encoder"),
+        });
+        let abort_encoded = abort_prepared
+            .encode_c08_custom_spine(
+                &mut abort_encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await?;
+        let (_, abort_resources) = abort_encoded.into_summary_and_resources();
+        let aborted_lease_count = abort_resources.lease_count_for_test();
+        drop(abort_encoder.finish());
+        drop(abort_prepared);
+        drop(abort_resources);
+        abort_transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        let after_abort = self
+            .ready_device_state_borrow_for_test(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "multiple C08 capture abort lost its resource manager",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+
+        Ok(C08MultipleVelloCaptureEncodingObservationForTest {
+            exact_capture_count: summary.capture_count == 2
+                && summary.exposes_bounded_capture_handoff,
+            one_graph_command_encoder: summary.captures_share_one_command_encoder,
+            one_gpu_transaction: same_transaction,
+            one_active_vello_scope: summary.captures_share_one_active_vello_scope,
+            aggregate_pending_commit: committed_lease_count == 2 && aborted_lease_count == 2,
+            commits_every_capture_after_transaction_success: committed_lease_count == 2
+                && after_commit.leased_count == 0
+                && after_commit.recovery_outcome_for_test().is_none(),
+            aborts_every_capture_on_drop: aborted_lease_count == 2
+                && after_abort.leased_count == 0
+                && after_abort.recovery_outcome_for_test() == Some(VelloAtlasOutcome::Recreate),
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c08_vello_capture_raster_contract_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+        requested_antialiasing: Antialiasing,
+    ) -> Result<C08VelloCaptureRasterContractObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C08 capture raster coverage requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 capture raster coverage lost its ready device",
+            )?
+            .device
+            .clone();
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surgeist C08 raster-contract output"),
+            size: wgpu::Extent3d {
+                width: output_extent.width(),
+                height: output_extent.height(),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 raster-contract graph encoder"),
+        });
+        let encoded = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await?;
+        let (summary, capture_resources) = encoded.into_summary_and_resources();
+        let capture = summary.capture_observations.first().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C08 capture raster coverage produced no encoded capture proof",
+            )
+        })?;
+        let observed = C08VelloCaptureRasterContractObservationForTest {
+            lowers_with_exact_initial_transform: capture.lowers_with_exact_initial_transform,
+            uses_transparent_base: capture.uses_transparent_base,
+            uses_requested_antialiasing: capture.antialiasing == requested_antialiasing,
+            uses_exact_positive_extent: capture.target_extent.width() > 0
+                && capture.target_extent.height() > 0,
+            uses_exact_rgba8_target_and_view: capture.target_and_view_are_exact
+                && capture.target_format == wgpu::TextureFormat::Rgba8Unorm,
+            uses_exact_capture_usage: capture.target_usage
+                == super::pass::VELLO_CAPTURE_TEXTURE_USAGES,
+            has_unforgeable_encoded_capture_proof: summary.validates_checked_capture_completion,
+        };
+        drop(capture_resources);
+        drop(encoder.finish());
+        drop(prepared);
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        Ok(observed)
     }
 
     #[cfg(test)]
@@ -2346,20 +2590,18 @@ impl Backend {
         let mut first_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 failed-capture first encoder observation"),
         });
-        let mut failed_pass = None;
-        let callback_failure_is_reported = first
+        let failed_pass = first
+            .c08_execution_facts()
+            .and_then(|facts| facts.captures().first())
+            .map(super::pass::C08VelloCaptureExecutionFacts::pass);
+        first.fail_capture_encoding_for_test();
+        let capture_failure_is_reported = first
             .encode_c08_custom_spine(
                 &mut first_encoder,
                 C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
-                |handoff, _| {
-                    failed_pass = Some(handoff.pass());
-                    Err(Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "injected C08 Vello capture failure",
-                    ))
-                },
             )
-            .is_err()
+            .await
+            .is_err_and(|error| error.message() == "injected C08 Vello capture encoding failure")
             && failed_pass.is_some();
         let complete_pass_is_rejected =
             failed_pass.is_some_and(|pass| first.complete_pass(pass).is_err());
@@ -2370,38 +2612,26 @@ impl Backend {
         let mut failed_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 failed-capture retry source encoder observation"),
         });
-        let mut retry_failure_reached_capture = false;
+        retried.fail_capture_encoding_for_test();
         let initial_failure = retried
             .encode_c08_custom_spine(
                 &mut failed_encoder,
                 C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
-                |_, _| {
-                    retry_failure_reached_capture = true;
-                    Err(Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "injected C08 Vello capture failure before retry",
-                    ))
-                },
             )
-            .is_err();
+            .await
+            .is_err_and(|error| error.message() == "injected C08 Vello capture encoding failure");
         drop(failed_encoder.finish());
         let mut retry_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 forbidden new retry encoder observation"),
         });
-        let mut retry_callback_was_invoked = false;
         let retry_on_new_encoder_is_rejected = initial_failure
-            && retry_failure_reached_capture
             && retried
                 .encode_c08_custom_spine(
                     &mut retry_encoder,
                     C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
-                    |handoff, encoder| {
-                        retry_callback_was_invoked = true;
-                        Ok(handoff.c08_capture_completion_for_t3_test(encoder))
-                    },
                 )
-                .is_err()
-            && !retry_callback_was_invoked;
+                .await
+                .is_err();
         drop(retry_encoder.finish());
         drop(retried);
         transaction
@@ -2409,7 +2639,7 @@ impl Backend {
             .await?;
 
         Ok(C08CaptureFailureObservationForTest {
-            callback_failure_is_reported,
+            capture_failure_is_reported,
             complete_pass_is_rejected,
             retry_on_new_encoder_is_rejected,
         })

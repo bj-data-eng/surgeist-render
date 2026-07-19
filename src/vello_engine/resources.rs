@@ -200,6 +200,11 @@ impl VelloResourceAllocationSummaryForTest {
         self.allocated_roles.push(Self::role_for_intent(intent));
     }
 
+    fn extend(&mut self, other: Self) {
+        self.requested_roles.extend(other.requested_roles);
+        self.allocated_roles.extend(other.allocated_roles);
+    }
+
     fn role_count(
         roles: &[VelloResourceAllocationRoleForTest],
         role: VelloResourceAllocationRoleForTest,
@@ -249,6 +254,17 @@ pub(crate) struct ScopeResolvedVelloResourceLease {
     lease: VelloResourceLease,
 }
 
+/// Owns every non-clone lease encoded under one checked Vello scope.
+#[must_use = "active Vello resource aggregates must be scope-resolved or aborted"]
+pub(crate) struct VelloResourceLeaseAggregate {
+    leases: Vec<VelloResourceLease>,
+}
+
+#[must_use = "scope-clean Vello resource aggregates must be committed or aborted"]
+pub(crate) struct ScopeResolvedVelloResourceLeaseAggregate {
+    leases: Vec<ScopeResolvedVelloResourceLease>,
+}
+
 #[must_use]
 #[cfg(not(test))]
 pub(crate) struct CommittedVelloResources;
@@ -262,25 +278,47 @@ pub(crate) struct CommittedVelloResources {
 /// Keeps a scope-clean resource lease uncertain until the owning GPU transaction succeeds.
 #[must_use = "pending Vello resources must be committed by their transaction or aborted on drop"]
 pub(crate) struct PendingVelloResourceCommit {
-    lease: Option<ScopeResolvedVelloResourceLease>,
+    leases: Vec<ScopeResolvedVelloResourceLease>,
 }
 
 impl PendingVelloResourceCommit {
     pub(crate) fn new(mut lease: ScopeResolvedVelloResourceLease) -> Self {
         lease.consume_pending_atlas_recovery();
-        Self { lease: Some(lease) }
+        Self {
+            leases: vec![lease],
+        }
+    }
+
+    pub(crate) fn from_aggregate(
+        mut aggregate: ScopeResolvedVelloResourceLeaseAggregate,
+    ) -> Self {
+        aggregate
+            .leases
+            .iter_mut()
+            .for_each(ScopeResolvedVelloResourceLease::consume_pending_atlas_recovery);
+        Self {
+            leases: std::mem::take(&mut aggregate.leases),
+        }
     }
 
     #[cfg(test)]
     pub(crate) fn allocation_summary_for_test(&self) -> VelloResourceAllocationSummaryForTest {
-        self.lease
-            .as_ref()
-            .expect("pending Vello resource commits must own their scope-resolved lease")
-            .allocation_summary_for_test()
+        self.leases.iter().fold(
+            VelloResourceAllocationSummaryForTest::default(),
+            |mut summary, lease| {
+                summary.extend(lease.allocation_summary_for_test());
+                summary
+            },
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn lease_count_for_test(&self) -> usize {
+        self.leases.len()
     }
 
     pub(crate) fn commit(mut self, _proof: VelloResourceCommitProof) {
-        if let Some(lease) = self.lease.take() {
+        for lease in self.leases.drain(..) {
             let _ = lease.commit();
         }
     }
@@ -288,7 +326,7 @@ impl PendingVelloResourceCommit {
 
 impl Drop for PendingVelloResourceCommit {
     fn drop(&mut self) {
-        if let Some(lease) = self.lease.take() {
+        for lease in self.leases.drain(..) {
             let _ = lease.abort();
         }
     }
@@ -467,6 +505,54 @@ impl VelloResourceLease {
     }
 }
 
+impl VelloResourceLeaseAggregate {
+    pub(crate) const fn new() -> Self {
+        Self { leases: Vec::new() }
+    }
+
+    pub(crate) fn push(&mut self, lease: VelloResourceLease) {
+        self.leases.push(lease);
+    }
+
+    pub(crate) fn after_clean_scope(
+        mut self,
+    ) -> ScopeResolvedVelloResourceLeaseAggregate {
+        ScopeResolvedVelloResourceLeaseAggregate {
+            leases: std::mem::take(&mut self.leases)
+                .into_iter()
+                .map(VelloResourceLease::after_clean_scope)
+                .collect(),
+        }
+    }
+
+    pub(crate) fn abort(mut self) -> AbortedVelloResources {
+        abort_vello_leases(std::mem::take(&mut self.leases))
+    }
+}
+
+impl Drop for VelloResourceLeaseAggregate {
+    fn drop(&mut self) {
+        for lease in self.leases.drain(..) {
+            let _ = lease.abort();
+        }
+    }
+}
+
+impl Drop for ScopeResolvedVelloResourceLeaseAggregate {
+    fn drop(&mut self) {
+        for lease in self.leases.drain(..) {
+            let _ = lease.abort();
+        }
+    }
+}
+
+fn abort_vello_leases(leases: Vec<VelloResourceLease>) -> AbortedVelloResources {
+    leases.into_iter().fold(
+        AbortedVelloResources::without_resources(),
+        |aborted, lease| aborted.merge(lease.abort()),
+    )
+}
+
 impl ScopeResolvedVelloResourceLease {
     #[cfg(test)]
     fn allocation_summary_for_test(&self) -> VelloResourceAllocationSummaryForTest {
@@ -567,6 +653,31 @@ impl AbortedVelloResources {
             discarded_resource_count: 0,
             #[cfg(test)]
             atlas_outcome: VelloAtlasOutcome::NoAtlas,
+        }
+    }
+
+    fn merge(self, _other: Self) -> Self {
+        Self {
+            #[cfg(test)]
+            discarded_resource_count: self
+                .discarded_resource_count
+                .saturating_add(_other.discarded_resource_count),
+            #[cfg(test)]
+            atlas_outcome: match (self.atlas_outcome, _other.atlas_outcome) {
+                (VelloAtlasOutcome::Recreate, _) | (_, VelloAtlasOutcome::Recreate) => {
+                    VelloAtlasOutcome::Recreate
+                }
+                (VelloAtlasOutcome::MarkDirty, _) | (_, VelloAtlasOutcome::MarkDirty) => {
+                    VelloAtlasOutcome::MarkDirty
+                }
+                #[cfg(test)]
+                (VelloAtlasOutcome::Retain, _) | (_, VelloAtlasOutcome::Retain) => {
+                    VelloAtlasOutcome::Retain
+                }
+                (VelloAtlasOutcome::NoAtlas, VelloAtlasOutcome::NoAtlas) => {
+                    VelloAtlasOutcome::NoAtlas
+                }
+            },
         }
     }
 }

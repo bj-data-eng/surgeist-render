@@ -33,6 +33,7 @@ mod recording {
     pub(super) use resources::VelloResourceLease;
     pub(crate) use resources::{
         PendingVelloResourceCommit, VelloAtlasOutcome, VelloBufferKey, VelloImageKey,
+        VelloResourceLeaseAggregate,
     };
     #[cfg(test)]
     pub(super) use resources::{
@@ -45,12 +46,15 @@ mod raster {
     include!("raster.rs");
 
     impl PreparedVelloPass {
-        pub(crate) fn encode_into(
+        fn encode_resources_into(
             &self,
             engine: &super::recording::VelloEngineState,
             resources: &crate::resource::ResourceManager,
             state: &mut super::recording::TransactionEncodingState<'_, '_>,
-        ) -> std::result::Result<EncodedVelloPass, super::recording::VelloEncodingFailure> {
+        ) -> std::result::Result<
+            super::recording::VelloResourceLease,
+            super::recording::VelloEncodingFailure,
+        > {
             if self.target_intent.extent != state.target_extent()
                 || self.target_intent.format != RasterImageFormat::Rgba8Unorm
                 || self.target_intent.access != RasterTargetAccess::StorageWrite
@@ -74,10 +78,47 @@ mod raster {
                 resources,
                 state,
             )
-            .map(|resources| EncodedVelloPass {
-                resources,
-                logical_pass: DirectVelloLogicalPass { _prepared_pass: () },
-            })
+        }
+
+        pub(crate) fn encode_into(
+            &self,
+            engine: &super::recording::VelloEngineState,
+            resources: &crate::resource::ResourceManager,
+            state: &mut super::recording::TransactionEncodingState<'_, '_>,
+        ) -> std::result::Result<EncodedVelloPass, super::recording::VelloEncodingFailure> {
+            self.encode_resources_into(engine, resources, state)
+                .map(|resources| EncodedVelloPass {
+                    resources,
+                    logical_pass: DirectVelloLogicalPass { _prepared_pass: () },
+                })
+        }
+
+        pub(crate) fn encode_capture_into(
+            &self,
+            engine: &super::recording::VelloEngineState,
+            resources: &crate::resource::ResourceManager,
+            state: &mut super::recording::TransactionEncodingState<'_, '_>,
+        ) -> std::result::Result<EncodedVelloCapture, super::recording::VelloEncodingFailure>
+        {
+            let target_extent = state.target_extent();
+            let target_format = state.target_format();
+            let target_usage = state.target_usage();
+            #[cfg(test)]
+            let target_view_identity = state.target_view_identity_for_test();
+            self.encode_resources_into(engine, resources, state)
+                .map(|resources| EncodedVelloCapture {
+                    resources,
+                    proof: EncodedVelloCaptureProof {
+                        target_extent,
+                        target_format,
+                        target_usage,
+                        antialiasing: self.target_intent.antialiasing,
+                        transparent_base: self.target_intent.base_color
+                            == peniko::Color::TRANSPARENT,
+                        #[cfg(test)]
+                        target_view_identity,
+                    },
+                })
         }
     }
 }
@@ -91,12 +132,14 @@ pub(crate) mod scene;
     )
 )]
 pub(crate) use raster::{
-    DirectVelloLogicalPass, EncodedVelloPass, PreparedVelloPass, RasterParameters,
+    DirectVelloLogicalPass, EncodedVelloCaptureProof, EncodedVelloPass, PreparedVelloPass,
+    RasterParameters,
 };
 
 pub(crate) use recording::{
     ActiveVelloEncodingScope, PendingVelloResourceCommit, TransactionEncodingState,
     TransactionTargetIntent, VelloAtlasOutcome, VelloBufferKey, VelloEngineState, VelloImageKey,
+    VelloResourceLeaseAggregate,
 };
 
 #[cfg(test)]

@@ -6,7 +6,8 @@ use peniko::ImageFormat;
 use crate::{BackendErrorCode, Error, PhysicalSize, Result, resource::ResourceManager};
 
 use super::resources::{
-    AbortedVelloResources, ScopeResolvedVelloResourceLease, VelloResourceLease,
+    AbortedVelloResources, ScopeResolvedVelloResourceLease,
+    ScopeResolvedVelloResourceLeaseAggregate, VelloResourceLease, VelloResourceLeaseAggregate,
 };
 use super::{
     BufferRole, DispatchIntent, FineRasterVariant, RasterCommand, RasterKernel, RasterPhase,
@@ -46,6 +47,16 @@ impl<'a> ActiveVelloEncodingScope<'a> {
                 error,
                 lease.abort(),
             )),
+        }
+    }
+
+    pub(crate) async fn finish_with_leases(
+        self,
+        leases: VelloResourceLeaseAggregate,
+    ) -> std::result::Result<ScopeResolvedVelloResourceLeaseAggregate, VelloEncodingFailure> {
+        match self.finish().await {
+            Ok(()) => Ok(leases.after_clean_scope()),
+            Err(error) => Err(VelloEncodingFailure::after_encoding(error, leases.abort())),
         }
     }
 }
@@ -106,6 +117,11 @@ impl<'state, 'device> TransactionEncodingState<'state, 'device> {
 
     pub(crate) const fn target_usage(&self) -> wgpu::TextureUsages {
         self.target.usage
+    }
+
+    #[cfg(test)]
+    pub(crate) fn target_view_identity_for_test(&self) -> usize {
+        std::ptr::from_ref(self.target_view) as usize
     }
 
     pub(super) fn device(&self) -> &wgpu::Device {

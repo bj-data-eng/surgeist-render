@@ -858,6 +858,17 @@ impl GpuOperationTransaction {
         Ok(())
     }
 
+    #[cfg(test)]
+    pub(crate) async fn finish_vello_resources_without_submission_for_test(
+        self,
+        resources: PendingVelloResourceCommit,
+        operation: RuntimeOperation,
+    ) -> Result<()> {
+        self.finish(operation).await?;
+        resources.commit(VelloResourceCommitProof { _private: () });
+        Ok(())
+    }
+
     /// Submits one command buffer while this transaction owns its generation and scopes.
     #[cfg(test)]
     pub(crate) async fn submit_command_buffer(

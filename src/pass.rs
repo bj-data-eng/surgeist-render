@@ -8,6 +8,7 @@ use super::{
     BackendErrorCode, Color, Error, Format, PhysicalSize, Point, Rect, Result, Transform,
     backend::DeviceCapabilities,
     command::{RenderClip, RenderCommands},
+    encode::encode_vello_scene_with_initial_transform,
     filter::{CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS, ColorClampBoundary},
     frame::{
         GpuRenderGraph, GraphLoweringBlur, GraphLoweringBlurInput, GraphLoweringColorFilter,
@@ -35,6 +36,11 @@ use super::{
     },
     style::ColorFilterOp,
     texture::EffectTextureDescriptor,
+    vello_engine::{
+        ActiveVelloEncodingScope, EncodedVelloCaptureProof, PendingVelloResourceCommit,
+        RasterParameters, TransactionEncodingState, TransactionTargetIntent, VelloEngineState,
+        VelloResourceLeaseAggregate,
+    },
 };
 
 #[cfg(test)]
@@ -281,6 +287,178 @@ pub(crate) fn c08_zero_capture_spine_lowered_for_test(
     lowered.resources = vec![root];
     lowered.passes = vec![clear, present];
 
+    Ok(lowered)
+}
+
+#[cfg(test)]
+pub(crate) fn c08_two_capture_spine_lowered_for_test(
+    commands: RenderCommands,
+    donor_commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    policy: EffectQualityPolicy,
+) -> Result<LoweredGraphPlan> {
+    let working_format = capabilities.resolve_effect_working_format(policy)?;
+    let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+    let mut lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let FramePlan::GpuGraph(donor_graph) = donor_commands.plan_for(context)? else {
+        return Err(lowering_error(
+            "the two-capture C08 fixture requires a graph-shaped identity donor",
+        ));
+    };
+    let donor = LoweredGraphPlan::try_lower_validated_graph(
+        &donor_graph,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+
+    let existing_passes = lowered
+        .passes
+        .iter()
+        .map(|pass| pass.id)
+        .collect::<BTreeSet<_>>();
+    let mut donor_passes = donor
+        .passes
+        .iter()
+        .map(|pass| pass.id)
+        .filter(|pass| !existing_passes.contains(pass));
+    let second_capture_pass = donor_passes.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare capture pass identity")
+    })?;
+    let second_canonicalize_pass = donor_passes.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare canonical pass identity")
+    })?;
+    let second_composite_pass = donor_passes.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare composite pass identity")
+    })?;
+
+    let existing_resources = lowered
+        .resources
+        .iter()
+        .map(|resource| resource.id)
+        .collect::<BTreeSet<_>>();
+    let mut donor_resources = donor
+        .resources
+        .iter()
+        .map(|resource| resource.id)
+        .filter(|resource| !existing_resources.contains(resource));
+    let second_capture_target = donor_resources.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare capture resource identity")
+    })?;
+    let second_canonical_target = donor_resources.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare canonical resource identity")
+    })?;
+    let second_composite_target = donor_resources.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare composite resource identity")
+    })?;
+
+    if lowered.passes.len() != 5 || lowered.resources.len() != 4 {
+        return Err(lowering_error(
+            "the two-capture C08 fixture source is not the exact one-capture spine",
+        ));
+    }
+    let first_capture = lowered.passes[1].clone();
+    let first_canonicalize = lowered.passes[2].clone();
+    let first_composite = lowered.passes[3].clone();
+    let mut present = lowered
+        .passes
+        .pop()
+        .ok_or_else(|| lowering_error("the two-capture C08 fixture has no terminal present"))?;
+    let RuntimeResultBinding::Resource(first_capture_target) = first_capture.result else {
+        return Err(lowering_error(
+            "the two-capture C08 fixture source has no capture target",
+        ));
+    };
+    let RuntimeResultBinding::Resource(first_canonical_target) = first_canonicalize.result else {
+        return Err(lowering_error(
+            "the two-capture C08 fixture source has no canonical target",
+        ));
+    };
+    let RuntimeResultBinding::Resource(first_composite_target) = first_composite.result else {
+        return Err(lowering_error(
+            "the two-capture C08 fixture source has no composite target",
+        ));
+    };
+
+    let mut capture_resource = lowered
+        .resources
+        .iter()
+        .find(|resource| resource.id == first_capture_target)
+        .cloned()
+        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its capture resource"))?;
+    capture_resource.id = second_capture_target;
+    capture_resource.producer = RuntimeResourceProducer::Pass(second_capture_pass);
+    capture_resource.last_use = second_canonicalize_pass;
+
+    let mut canonical_resource = lowered
+        .resources
+        .iter()
+        .find(|resource| resource.id == first_canonical_target)
+        .cloned()
+        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its canonical resource"))?;
+    canonical_resource.id = second_canonical_target;
+    canonical_resource.producer = RuntimeResourceProducer::Pass(second_canonicalize_pass);
+    canonical_resource.last_use = second_composite_pass;
+
+    let mut composite_resource = lowered
+        .resources
+        .iter()
+        .find(|resource| resource.id == first_composite_target)
+        .cloned()
+        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its composite resource"))?;
+    composite_resource.id = second_composite_target;
+    composite_resource.producer = RuntimeResourceProducer::Pass(second_composite_pass);
+    composite_resource.last_use = present.id;
+    lowered
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id == first_composite_target)
+        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its first result"))?
+        .last_use = second_composite_pass;
+
+    let mut second_capture = first_capture;
+    second_capture.id = second_capture_pass;
+    second_capture.result = RuntimeResultBinding::Resource(second_capture_target);
+
+    let mut second_canonicalize = first_canonicalize;
+    second_canonicalize.id = second_canonicalize_pass;
+    second_canonicalize.dependencies = vec![second_capture_pass];
+    second_canonicalize.reads[0].resource = second_capture_target;
+    second_canonicalize.result = RuntimeResultBinding::Resource(second_canonical_target);
+    second_canonicalize.releases = vec![second_capture_target];
+
+    let mut second_composite = first_composite;
+    second_composite.id = second_composite_pass;
+    second_composite.dependencies = vec![lowered.passes[3].id, second_canonicalize_pass];
+    second_composite.reads[0].resource = first_composite_target;
+    second_composite.reads[1].resource = second_canonical_target;
+    second_composite.result = RuntimeResultBinding::Resource(second_composite_target);
+    second_composite.releases = vec![first_composite_target, second_canonical_target];
+
+    present.dependencies = vec![second_composite_pass];
+    present.reads[0].resource = second_composite_target;
+    present.releases = vec![second_composite_target];
+    lowered
+        .resources
+        .extend([capture_resource, canonical_resource, composite_resource]);
+    lowered.passes.extend([
+        second_capture,
+        second_canonicalize,
+        second_composite,
+        present,
+    ]);
+
+    if lowered.c08_execution_facts().is_none() {
+        return Err(lowering_error(
+            "the two-capture C08 fixture did not preserve the validated executable subset",
+        ));
+    }
     Ok(lowered)
 }
 
@@ -1806,10 +1984,11 @@ fn inverse_transform_point(transform: Transform, point: Point) -> Option<Point> 
     ))
 }
 
-const VELLO_CAPTURE_TEXTURE_USAGES: wgpu::TextureUsages = wgpu::TextureUsages::STORAGE_BINDING
-    .union(wgpu::TextureUsages::TEXTURE_BINDING)
-    .union(wgpu::TextureUsages::COPY_SRC)
-    .union(wgpu::TextureUsages::COPY_DST);
+pub(crate) const VELLO_CAPTURE_TEXTURE_USAGES: wgpu::TextureUsages =
+    wgpu::TextureUsages::STORAGE_BINDING
+        .union(wgpu::TextureUsages::TEXTURE_BINDING)
+        .union(wgpu::TextureUsages::COPY_SRC)
+        .union(wgpu::TextureUsages::COPY_DST);
 const RESOLVED_MASK_TEXTURE_USAGES: wgpu::TextureUsages =
     wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST);
 
@@ -2478,9 +2657,7 @@ pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
     initial_transform: Transform,
     antialiasing: Antialiasing,
     target_extent: PhysicalSize,
-    texel_origin: Point,
     raster_scale: f64,
-    allocation_resource: ResourceIdentity,
     texture: &'prepared wgpu::Texture,
     view: &'prepared wgpu::TextureView,
     session: Arc<()>,
@@ -2489,8 +2666,7 @@ pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
 struct C08VelloCaptureCompletionSeal;
 
 /// Opaque proof that one exact capture finished inside the active C08 encoding
-/// session. T3 intentionally has no production constructor; T4's checked Vello
-/// encoding phase owns adding the production sealing path.
+/// session. Only a successfully encoded internal Vello capture can seal it.
 #[must_use = "a capture completion receipt must return to the owning C08 scheduler"]
 pub(crate) struct C08VelloCaptureCompletionReceipt {
     pass: RuntimePassId,
@@ -2507,10 +2683,6 @@ pub(crate) struct C08VelloCaptureCompletionReceipt {
     )
 )]
 impl C08VelloCaptureEncodingHandoff<'_> {
-    pub(crate) const fn pass(&self) -> RuntimePassId {
-        self.pass
-    }
-
     pub(crate) const fn target(&self) -> RuntimeResourceId {
         self.target
     }
@@ -2531,16 +2703,8 @@ impl C08VelloCaptureEncodingHandoff<'_> {
         self.target_extent
     }
 
-    pub(crate) const fn texel_origin(&self) -> Point {
-        self.texel_origin
-    }
-
     pub(crate) const fn raster_scale(&self) -> f64 {
         self.raster_scale
-    }
-
-    pub(crate) const fn allocation_resource(&self) -> ResourceIdentity {
-        self.allocation_resource
     }
 
     pub(crate) const fn texture(&self) -> &wgpu::Texture {
@@ -2551,20 +2715,26 @@ impl C08VelloCaptureEncodingHandoff<'_> {
         self.view
     }
 
-    #[cfg(test)]
-    pub(crate) fn c08_capture_completion_for_t3_test(
+    fn complete_after_encoded_capture(
         self,
-        encoder: &mut wgpu::CommandEncoder,
-    ) -> C08VelloCaptureCompletionReceipt {
-        encoder.insert_debug_marker(
-            "Surgeist T3 cfg(test)-only capture completion proof; not Vello encoding",
-        );
-        C08VelloCaptureCompletionReceipt {
+        proof: EncodedVelloCaptureProof,
+    ) -> Result<C08VelloCaptureCompletionReceipt> {
+        if !proof.proves_capture_contract(
+            self.target_extent,
+            wgpu::TextureFormat::Rgba8Unorm,
+            VELLO_CAPTURE_TEXTURE_USAGES,
+            self.antialiasing,
+        ) {
+            return Err(preparation_error(
+                "encoded C08 Vello capture proof changed its exact raster target contract",
+            ));
+        }
+        Ok(C08VelloCaptureCompletionReceipt {
             pass: self.pass,
             target: self.target,
             session: self.session,
             _seal: C08VelloCaptureCompletionSeal,
-        }
+        })
     }
 }
 
@@ -2644,6 +2814,59 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) samples_only_source_with_fixed_premultiplied_blend: bool,
     pub(crate) preserves_signed_source_origin: bool,
     pub(crate) keeps_cache_update_provisional: bool,
+    #[cfg(test)]
+    pub(crate) capture_count: usize,
+    #[cfg(test)]
+    pub(crate) captures_share_one_command_encoder: bool,
+    #[cfg(test)]
+    pub(crate) captures_share_one_active_vello_scope: bool,
+    #[cfg(test)]
+    pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C08EncodedCaptureObservationForTest {
+    pub(crate) lowers_with_exact_initial_transform: bool,
+    pub(crate) uses_transparent_base: bool,
+    pub(crate) antialiasing: Antialiasing,
+    pub(crate) target_extent: PhysicalSize,
+    pub(crate) target_format: wgpu::TextureFormat,
+    pub(crate) target_usage: wgpu::TextureUsages,
+    pub(crate) target_and_view_are_exact: bool,
+    encoder_identity: usize,
+    scope_identity: usize,
+}
+
+struct C08EncodedCaptureResult {
+    receipt: C08VelloCaptureCompletionReceipt,
+    #[cfg(test)]
+    observation: C08EncodedCaptureObservationForTest,
+}
+
+struct C08VelloCaptureEncodingContext<'encoding, 'device> {
+    engine: &'device VelloEngineState,
+    resources: &'device ResourceManager,
+    queue: &'device wgpu::Queue,
+    scope: &'encoding mut ActiveVelloEncodingScope<'device>,
+    leases: &'encoding mut VelloResourceLeaseAggregate,
+}
+
+/// Owns the scope-clean capture leases until T5 gives them to the transaction
+/// submission payload. Dropping this value aborts every capture lease.
+#[must_use = "encoded C08 graph captures must remain pending until transaction resolution"]
+pub(crate) struct C08PendingGraphEncoding {
+    _summary: C08CustomSpineEncodingSummary,
+    _resources: PendingVelloResourceCommit,
+}
+
+#[cfg(test)]
+impl C08PendingGraphEncoding {
+    pub(crate) fn into_summary_and_resources(
+        self,
+    ) -> (C08CustomSpineEncodingSummary, PendingVelloResourceCommit) {
+        (self._summary, self._resources)
+    }
 }
 
 #[derive(Clone)]
@@ -2866,8 +3089,12 @@ pub(crate) struct PreparedGraph<'device> {
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
     c08_encoding_state: Option<C08CustomSpineEncodingState>,
+    #[cfg(test)]
+    fail_capture_encoding_for_test: bool,
     device: &'device wgpu::Device,
     queue: &'device wgpu::Queue,
+    vello_engine: Option<&'device VelloEngineState>,
+    resources: &'device ResourceManager,
     pass_cache: &'device DevicePassCache,
     _ready_device: PhantomData<&'device ResourceManager>,
 }
@@ -3036,11 +3263,25 @@ impl<'device> PreparedGraph<'device> {
             frame_scope: Some(frame_scope),
             next_pass: 0,
             c08_encoding_state,
+            #[cfg(test)]
+            fail_capture_encoding_for_test: false,
             device,
             queue,
+            vello_engine: None,
+            resources,
             pass_cache,
             _ready_device: PhantomData,
         })
+    }
+
+    pub(crate) fn with_vello_engine(mut self, engine: &'device VelloEngineState) -> Self {
+        self.vello_engine = Some(engine);
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fail_capture_encoding_for_test(&mut self) {
+        self.fail_capture_encoding_for_test = true;
     }
 
     pub(crate) const fn c08_execution_facts(&self) -> Option<&C08ExecutionFacts> {
@@ -3107,18 +3348,11 @@ impl<'device> PreparedGraph<'device> {
             reason = "T4 supplies bounded Vello capture encoding while this C08 scheduler owns custom passes"
         )
     )]
-    pub(crate) fn encode_c08_custom_spine<F>(
+    pub(crate) async fn encode_c08_custom_spine(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         output: C08ExternalOutputView<'_>,
-        encode_capture: F,
-    ) -> Result<C08CustomSpineEncodingSummary>
-    where
-        F: for<'capture> FnMut(
-            C08VelloCaptureEncodingHandoff<'capture>,
-            &mut wgpu::CommandEncoder,
-        ) -> Result<C08VelloCaptureCompletionReceipt>,
-    {
+    ) -> Result<C08PendingGraphEncoding> {
         match self.c08_encoding_state {
             Some(C08CustomSpineEncodingState::Ready) => {}
             Some(
@@ -3159,38 +3393,66 @@ impl<'device> PreparedGraph<'device> {
                 "the C08 custom scheduler requires one unstarted capture spine",
             ));
         }
+        let engine = self.vello_engine.ok_or_else(|| {
+            preparation_error("the C08 capture scheduler has no ready internal Vello engine")
+        })?;
+        let resources = self.resources;
+        let queue = self.queue;
 
         let session = Arc::new(());
+        let mut scope = ActiveVelloEncodingScope::begin(self.device);
+        let mut leases = VelloResourceLeaseAggregate::new();
         self.c08_encoding_state = Some(C08CustomSpineEncodingState::Encoding);
-        let result = self.encode_c08_custom_spine_once(
-            encoder,
-            &output,
-            expected_capture_count,
-            &session,
-            encode_capture,
-        );
-        self.c08_encoding_state = Some(if result.is_ok() {
-            C08CustomSpineEncodingState::Complete
-        } else {
-            C08CustomSpineEncodingState::AbortOnly
-        });
-        result
+        let result = {
+            let mut capture_encoding = C08VelloCaptureEncodingContext {
+                engine,
+                resources,
+                queue,
+                scope: &mut scope,
+                leases: &mut leases,
+            };
+            self.encode_c08_custom_spine_once(
+                encoder,
+                &output,
+                expected_capture_count,
+                &session,
+                &mut capture_encoding,
+            )
+        };
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(encoding_error) => {
+                let _ = leases.abort();
+                let scope_result = scope.finish().await;
+                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
+                return match scope_result {
+                    Ok(()) => Err(encoding_error),
+                    Err(scope_error) => Err(scope_error),
+                };
+            }
+        };
+        let leases = match scope.finish_with_leases(leases).await {
+            Ok(leases) => leases,
+            Err(failure) => {
+                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
+                return Err(failure.into_error_and_aborted_resources().0);
+            }
+        };
+        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Complete);
+        Ok(C08PendingGraphEncoding {
+            _summary: summary,
+            _resources: PendingVelloResourceCommit::from_aggregate(leases),
+        })
     }
 
-    fn encode_c08_custom_spine_once<F>(
+    fn encode_c08_custom_spine_once(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         output: &C08ExternalOutputView<'_>,
         expected_capture_count: usize,
         session: &Arc<()>,
-        mut encode_capture: F,
-    ) -> Result<C08CustomSpineEncodingSummary>
-    where
-        F: for<'capture> FnMut(
-            C08VelloCaptureEncodingHandoff<'capture>,
-            &mut wgpu::CommandEncoder,
-        ) -> Result<C08VelloCaptureCompletionReceipt>,
-    {
+        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
+    ) -> Result<C08CustomSpineEncodingSummary> {
         let mut scheduled = Vec::with_capacity(self.plan.passes.len());
         let mut capture_count = 0_usize;
         let mut validated_capture_receipts = 0_usize;
@@ -3206,6 +3468,8 @@ impl<'device> PreparedGraph<'device> {
         let mut full_copy_before_bounded_render = true;
         let mut samples_source_with_fixed_blend = true;
         let mut preserves_signed_origin = true;
+        #[cfg(test)]
+        let mut capture_observations = Vec::with_capacity(expected_capture_count);
 
         while let Some(request) = self
             .plan
@@ -3225,6 +3489,12 @@ impl<'device> PreparedGraph<'device> {
                     custom_completed = custom_completed.saturating_add(1);
                 }
                 RuntimePassKind::VelloCapture(Some(_)) => {
+                    #[cfg(test)]
+                    if self.fail_capture_encoding_for_test {
+                        return Err(preparation_error(
+                            "injected C08 Vello capture encoding failure",
+                        ));
+                    }
                     let handoff = self.c08_vello_capture_handoff(&request, session)?;
                     let target = handoff.target();
                     bounded_capture_handoffs &= !handoff.commands().commands.is_empty()
@@ -3243,8 +3513,11 @@ impl<'device> PreparedGraph<'device> {
                             .iter()
                             .all(|value| value.is_finite());
                     scheduled.push(C08ScheduledEncodingKind::VelloCapture);
-                    let receipt = encode_capture(handoff, encoder)?;
-                    self.complete_c08_capture(pass, target, session, receipt)?;
+                    let encoded =
+                        Self::encode_c08_vello_capture(handoff, encoder, capture_encoding)?;
+                    #[cfg(test)]
+                    capture_observations.push(encoded.observation);
+                    self.complete_c08_capture(pass, target, session, encoded.receipt)?;
                     capture_count = capture_count.saturating_add(1);
                     validated_capture_receipts = validated_capture_receipts.saturating_add(1);
                 }
@@ -3297,6 +3570,22 @@ impl<'device> PreparedGraph<'device> {
 
         let encodes_custom_passes_in_order =
             c08_scheduled_encoding_order_is_exact(&scheduled, expected_capture_count);
+        #[cfg(test)]
+        let captures_share_one_command_encoder =
+            capture_observations.first().is_some_and(|first| {
+                capture_observations.len() == expected_capture_count
+                    && capture_observations
+                        .iter()
+                        .all(|capture| capture.encoder_identity == first.encoder_identity)
+            });
+        #[cfg(test)]
+        let captures_share_one_active_vello_scope =
+            capture_observations.first().is_some_and(|first| {
+                capture_observations.len() == expected_capture_count
+                    && capture_observations
+                        .iter()
+                        .all(|capture| capture.scope_identity == first.scope_identity)
+            });
         Ok(C08CustomSpineEncodingSummary {
             encodes_custom_passes_in_order,
             clears_full_root_once: clear_count == 1 && clears_full_root,
@@ -3316,6 +3605,113 @@ impl<'device> PreparedGraph<'device> {
                 && samples_source_with_fixed_blend,
             preserves_signed_source_origin: source_over_count > 0 && preserves_signed_origin,
             keeps_cache_update_provisional: self.pass_cache_update.is_some(),
+            #[cfg(test)]
+            capture_count,
+            #[cfg(test)]
+            captures_share_one_command_encoder,
+            #[cfg(test)]
+            captures_share_one_active_vello_scope,
+            #[cfg(test)]
+            capture_observations,
+        })
+    }
+
+    fn encode_c08_vello_capture(
+        handoff: C08VelloCaptureEncodingHandoff<'_>,
+        encoder: &mut wgpu::CommandEncoder,
+        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
+    ) -> Result<C08EncodedCaptureResult> {
+        let target_extent = handoff.target_extent();
+        let antialiasing = handoff.antialiasing();
+        if target_extent.width() == 0
+            || target_extent.height() == 0
+            || handoff.texture().width() != target_extent.width()
+            || handoff.texture().height() != target_extent.height()
+            || handoff.texture().depth_or_array_layers() != 1
+            || handoff.texture().mip_level_count() != 1
+            || handoff.texture().sample_count() != 1
+            || handoff.texture().dimension() != wgpu::TextureDimension::D2
+            || handoff.texture().format() != wgpu::TextureFormat::Rgba8Unorm
+            || handoff.texture().usage() != VELLO_CAPTURE_TEXTURE_USAGES
+        {
+            return Err(preparation_error(
+                "the C08 Vello capture target changed its exact RGBA8 storage contract",
+            ));
+        }
+        let initial_transform = handoff.initial_transform();
+        let scene =
+            encode_vello_scene_with_initial_transform(handoff.commands(), initial_transform)?;
+        #[cfg(test)]
+        let lowers_with_exact_initial_transform = scene
+            .observation_for_test()
+            .first_glyph_run_for_test()
+            .is_some_and(|run| {
+                run.transform_components_for_test()
+                    .iter()
+                    .zip(initial_transform.as_array())
+                    .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5)
+            });
+        let prepared = scene.prepare_raster(RasterParameters::try_new(
+            target_extent,
+            peniko::Color::TRANSPARENT,
+            antialiasing,
+        )?)?;
+        #[cfg(test)]
+        let encoder_identity = std::ptr::from_mut(&mut *encoder) as usize;
+        #[cfg(test)]
+        let scope_identity = std::ptr::from_ref(&*capture_encoding.scope) as usize;
+        #[cfg(test)]
+        let target_view_identity = std::ptr::from_ref(handoff.view()) as usize;
+        let encoded = {
+            let mut encoding = TransactionEncodingState::new(
+                capture_encoding.scope,
+                capture_encoding.queue,
+                encoder,
+                handoff.view(),
+                TransactionTargetIntent::new(
+                    target_extent,
+                    wgpu::TextureFormat::Rgba8Unorm,
+                    VELLO_CAPTURE_TEXTURE_USAGES,
+                ),
+            );
+            prepared.encode_capture_into(
+                capture_encoding.engine,
+                capture_encoding.resources,
+                &mut encoding,
+            )
+        };
+        let encoded = match encoded {
+            Ok(encoded) => encoded,
+            Err(failure) => return Err(failure.into_error_and_aborted_resources().0),
+        };
+        let (lease, proof) = encoded.into_resources_and_proof();
+        #[cfg(test)]
+        let observation = C08EncodedCaptureObservationForTest {
+            lowers_with_exact_initial_transform,
+            uses_transparent_base: proof.transparent_base_for_test(),
+            antialiasing: proof.antialiasing_for_test(),
+            target_extent: proof.target_extent_for_test(),
+            target_format: proof.target_format_for_test(),
+            target_usage: proof.target_usage_for_test(),
+            target_and_view_are_exact: handoff.texture().format() == proof.target_format_for_test()
+                && handoff.texture().width() == proof.target_extent_for_test().width()
+                && handoff.texture().height() == proof.target_extent_for_test().height()
+                && proof.target_view_identity_for_test() == target_view_identity,
+            encoder_identity,
+            scope_identity,
+        };
+        let receipt = match handoff.complete_after_encoded_capture(proof) {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                let _ = lease.abort();
+                return Err(error);
+            }
+        };
+        capture_encoding.leases.push(lease);
+        Ok(C08EncodedCaptureResult {
+            receipt,
+            #[cfg(test)]
+            observation,
         })
     }
 
@@ -3420,9 +3816,7 @@ impl<'device> PreparedGraph<'device> {
             initial_transform: capture.initial_transform(),
             antialiasing: capture.antialiasing(),
             target_extent: capture.target_extent(),
-            texel_origin: capture.texel_origin(),
             raster_scale: capture.raster_scale(),
-            allocation_resource: binding.allocation_resource(),
             texture: binding.texture(),
             view: binding.view(),
             session: Arc::clone(session),
