@@ -659,6 +659,8 @@ impl PreparedVelloPass {
             .schedule_observations_for_test(&self.resource_intents);
         PreparedVelloPassObservation {
             target_extent: self.target_intent.extent,
+            transparent_base: self.target_intent.base_color == Color::TRANSPARENT,
+            antialiasing: self.target_intent.antialiasing,
             is_rgba8_storage: self.target_intent.is_rgba8_storage_for_test(),
             final_dispatch_targets_output: self.recording.final_dispatch_targets_output_for_test(),
             is_self_consistent: self

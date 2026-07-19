@@ -31,7 +31,11 @@ use super::vello_engine::{
     VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
     prepared_vello_pass_observation_for_test,
-    scene::{VelloRasterScenario, VelloScene},
+    scene::{
+        VelloDrawObservationForTest, VelloFillRuleObservationForTest,
+        VelloPathDrawObservationForTest, VelloPathElementObservationForTest, VelloRasterScenario,
+        VelloScene,
+    },
 };
 use super::{
     backend::*,
@@ -11160,14 +11164,7 @@ fn c09_composition_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
-    let transforms = [
-        Transform::translation(0.25, 0.5).unwrap(),
-        Transform::translation(0.5, 0.25).unwrap(),
-        Transform::translation(0.125, 0.25).unwrap(),
-        Transform::translation(0.25, 0.125).unwrap(),
-        Transform::translation(0.125, 0.125).unwrap(),
-    ];
+fn c09_ordered_nonzero_clip_path_for_test() -> Path {
     let mut path = Path::new();
     path.move_to(Point::new(1.0, 1.0))
         .line_to(Point::new(7.0, 1.0))
@@ -11179,8 +11176,114 @@ fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
         .line_to(Point::new(5.0, 5.0))
         .line_to(Point::new(3.0, 5.0))
         .close();
+    path
+}
+
+fn c09_signed_even_odd_clip_path_for_test() -> Path {
+    let mut path = Path::new();
+    path.move_to(Point::new(-2.0, -1.0))
+        .line_to(Point::new(1.0, -1.0))
+        .line_to(Point::new(1.0, 1.0))
+        .line_to(Point::new(-2.0, 1.0))
+        .close()
+        .move_to(Point::new(-1.25, -0.5))
+        .line_to(Point::new(0.25, -0.5))
+        .line_to(Point::new(0.25, 0.5))
+        .line_to(Point::new(-1.25, 0.5))
+        .close();
+    path
+}
+
+fn emitted_vello_fill_geometry_for_test(
+    shape: &impl kurbo::Shape,
+) -> Vec<VelloPathElementObservationForTest> {
+    let mut geometry = shape
+        .path_elements(0.1)
+        .map(|element| match element {
+            kurbo::PathEl::MoveTo(point) => {
+                VelloPathElementObservationForTest::MoveTo([point.x as f32, point.y as f32])
+            }
+            kurbo::PathEl::LineTo(point) => {
+                VelloPathElementObservationForTest::LineTo([point.x as f32, point.y as f32])
+            }
+            kurbo::PathEl::QuadTo(control, point) => VelloPathElementObservationForTest::QuadTo(
+                [control.x as f32, control.y as f32],
+                [point.x as f32, point.y as f32],
+            ),
+            kurbo::PathEl::CurveTo(first, second, point) => {
+                VelloPathElementObservationForTest::CubicTo(
+                    [first.x as f32, first.y as f32],
+                    [second.x as f32, second.y as f32],
+                    [point.x as f32, point.y as f32],
+                )
+            }
+            kurbo::PathEl::ClosePath => VelloPathElementObservationForTest::Close,
+        })
+        .collect::<Vec<_>>();
+    if !matches!(
+        geometry.last(),
+        Some(VelloPathElementObservationForTest::Close)
+    ) {
+        geometry.push(VelloPathElementObservationForTest::Close);
+    }
+    geometry
+}
+
+fn emitted_vello_transform_for_test(transform: Transform) -> [f32; 6] {
+    transform.as_array().map(|component| component as f32)
+}
+
+fn emitted_vello_clip_is_exact_for_test(
+    observed: &VelloPathDrawObservationForTest,
+    expected_geometry: &[VelloPathElementObservationForTest],
+    expected_transform: [f32; 6],
+    expected_fill_rule: VelloFillRuleObservationForTest,
+) -> bool {
+    observed.geometry == expected_geometry
+        && observed.transform == expected_transform
+        && observed.fill_rule == expected_fill_rule
+        && matches!(
+            observed.draw,
+            VelloDrawObservationForTest::BeginClip { blend_mode, alpha }
+                if blend_mode == vello_encoding::DrawBeginClip::CLIP_BLEND_MODE
+                    && alpha == 1.0
+        )
+}
+
+fn emitted_vello_coverage_fill_is_exact_for_test(
+    observed: &VelloPathDrawObservationForTest,
+    target_extent: PhysicalSize,
+) -> bool {
+    let expected_geometry = emitted_vello_fill_geometry_for_test(&kurbo::Rect::new(
+        0.0,
+        0.0,
+        f64::from(target_extent.width()),
+        f64::from(target_extent.height()),
+    ));
+    observed.geometry == expected_geometry
+        && observed.transform == emitted_vello_transform_for_test(Transform::identity())
+        && observed.fill_rule == VelloFillRuleObservationForTest::NonZero
+        && matches!(
+            observed.draw,
+            VelloDrawObservationForTest::SolidColor { rgba } if rgba == u32::MAX
+        )
+}
+
+fn emitted_vello_end_clip_is_exact_for_test(observed: &VelloPathDrawObservationForTest) -> bool {
+    observed.geometry.is_empty() && observed.draw == VelloDrawObservationForTest::EndClip
+}
+
+fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
+    let transforms = [
+        Transform::translation(0.25, 0.5).unwrap(),
+        Transform::translation(0.5, 0.25).unwrap(),
+        Transform::translation(0.125, 0.25).unwrap(),
+        Transform::translation(0.25, 0.125).unwrap(),
+        Transform::translation(0.125, 0.125).unwrap(),
+    ];
+    let path = c09_ordered_nonzero_clip_path_for_test();
     let path_clip =
-        ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::EvenOdd).unwrap()).unwrap();
+        ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::NonZero).unwrap()).unwrap();
 
     let mut scene = Scene::new();
     scene.layer(
@@ -11249,17 +11352,7 @@ fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
 
 fn c09_signed_path_clip_coverage_commands_for_test() -> (command::RenderCommands, CoordinateSpaceTag)
 {
-    let mut path = Path::new();
-    path.move_to(Point::new(-2.0, -1.0))
-        .line_to(Point::new(1.0, -1.0))
-        .line_to(Point::new(1.0, 1.0))
-        .line_to(Point::new(-2.0, 1.0))
-        .close()
-        .move_to(Point::new(-1.25, -0.5))
-        .line_to(Point::new(0.25, -0.5))
-        .line_to(Point::new(0.25, 0.5))
-        .line_to(Point::new(-1.25, 0.5))
-        .close();
+    let path = c09_signed_even_odd_clip_path_for_test();
     let coordinate_space =
         CoordinateSpaceTag::surface(Transform::translation(0.25, -0.25).unwrap()).unwrap();
     let clip = ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::EvenOdd).unwrap())
@@ -11310,8 +11403,46 @@ fn graph_clip_coverage_is_one_vello_capture_of_ordered_render_clips() {
         accumulated = transform.then(accumulated).unwrap();
         accumulated
     });
+    let expected_geometries = [
+        emitted_vello_fill_geometry_for_test(&kurbo::Rect::new(0.0, 0.0, 8.0, 8.0)),
+        emitted_vello_fill_geometry_for_test(&command::kurbo_rounded_rect(
+            Rect::new(0.25, 0.25, 7.5, 7.5),
+            Radii::new(0.5, 0.75, 1.0, 1.25),
+        )),
+        emitted_vello_fill_geometry_for_test(&kurbo::Circle::new((4.0, 4.0), 3.5)),
+        emitted_vello_fill_geometry_for_test(&kurbo::Ellipse::new((4.0, 4.0), (3.25, 3.0), 0.0)),
+        emitted_vello_fill_geometry_for_test(&c09_ordered_nonzero_clip_path_for_test().to_kurbo()),
+    ];
+    let expected_fill_rules = [
+        VelloFillRuleObservationForTest::NonZero,
+        VelloFillRuleObservationForTest::NonZero,
+        VelloFillRuleObservationForTest::NonZero,
+        VelloFillRuleObservationForTest::NonZero,
+        VelloFillRuleObservationForTest::NonZero,
+    ];
     let ordered_capture = observed.captures.as_slice().first().is_some_and(|capture| {
+        let expected_emitted_transforms = expected_transforms.map(|transform| {
+            emitted_vello_transform_for_test(transform.then(capture.initial_transform).unwrap())
+        });
+        let emitted_clips_are_exact = capture.emitted_draws.get(..5).is_some_and(|draws| {
+            draws
+                .iter()
+                .zip(&expected_geometries)
+                .zip(expected_emitted_transforms)
+                .zip(expected_fill_rules)
+                .all(|(((draw, geometry), transform), fill_rule)| {
+                    emitted_vello_clip_is_exact_for_test(draw, geometry, transform, fill_rule)
+                })
+        });
+        let emitted_fill_is_exact = capture.emitted_draws.get(5).is_some_and(|draw| {
+            emitted_vello_coverage_fill_is_exact_for_test(draw, capture.target_extent)
+        });
+        let emitted_end_clips_are_exact = capture
+            .emitted_draws
+            .get(6..11)
+            .is_some_and(|draws| draws.iter().all(emitted_vello_end_clip_is_exact_for_test));
         capture.elements.len() == 5
+            && capture.emitted_draws.len() == 11
             && matches!(
                 capture.elements[0].clip.geometry(),
                 command::RenderClipGeometry::Rect(_)
@@ -11331,7 +11462,7 @@ fn graph_clip_coverage_is_one_vello_capture_of_ordered_render_clips() {
             && matches!(
                 capture.elements[4].clip.geometry(),
                 command::RenderClipGeometry::Path {
-                    fill_rule: FillRule::EvenOdd,
+                    fill_rule: FillRule::NonZero,
                     ..
                 }
             )
@@ -11340,10 +11471,14 @@ fn graph_clip_coverage_is_one_vello_capture_of_ordered_render_clips() {
                 .iter()
                 .map(|element| element.transform)
                 .eq(expected_transforms)
+            && emitted_clips_are_exact
+            && emitted_fill_is_exact
+            && emitted_end_clips_are_exact
             && capture.uses_coverage_resource_role
             && capture.uses_rgba8_target
             && capture.uses_transparent_base
-            && capture.paints_opaque_white
+            && capture.raster_antialiasing == Antialiasing::Msaa8
+            && capture.raster_target_extent == capture.target_extent
     });
 
     assert!(
@@ -11380,7 +11515,24 @@ fn clip_coverage_preserves_fill_rule_antialiasing_and_signed_mapping() {
         .transform()
         .then(expected_initial_transform)
         .unwrap();
+    let expected_geometry =
+        emitted_vello_fill_geometry_for_test(&c09_signed_even_odd_clip_path_for_test().to_kurbo());
     let preserves_geometry_and_grid = observed.captures.as_slice().first().is_some_and(|capture| {
+        let emitted_clip_is_exact = capture.emitted_draws.first().is_some_and(|draw| {
+            emitted_vello_clip_is_exact_for_test(
+                draw,
+                &expected_geometry,
+                emitted_vello_transform_for_test(expected_effective_transform),
+                VelloFillRuleObservationForTest::EvenOdd,
+            )
+        });
+        let emitted_fill_is_exact = capture.emitted_draws.get(1).is_some_and(|draw| {
+            emitted_vello_coverage_fill_is_exact_for_test(draw, capture.target_extent)
+        });
+        let emitted_end_clip_is_exact = capture
+            .emitted_draws
+            .get(2)
+            .is_some_and(emitted_vello_end_clip_is_exact_for_test);
         capture.elements.as_slice().first().is_some_and(|element| {
             matches!(
                 element.clip.geometry(),
@@ -11390,8 +11542,11 @@ fn clip_coverage_preserves_fill_rule_antialiasing_and_signed_mapping() {
                 }
             ) && element.clip.coordinate_space() == Some(coordinate_space)
                 && element.transform == Transform::identity()
-                && element.effective_transform == expected_effective_transform
         }) && capture.elements.len() == 1
+            && capture.emitted_draws.len() == 3
+            && emitted_clip_is_exact
+            && emitted_fill_is_exact
+            && emitted_end_clip_is_exact
             && capture.antialiasing == antialiasing
             && capture.device_origin == (-3, -2)
             && capture.target_extent == PhysicalSize::new(5, 3)
@@ -11400,7 +11555,8 @@ fn clip_coverage_preserves_fill_rule_antialiasing_and_signed_mapping() {
             && capture.first_texel_center == Point::new(-2.0, -1.2)
             && capture.initial_transform == expected_initial_transform
             && capture.uses_transparent_base
-            && capture.paints_opaque_white
+            && capture.raster_antialiasing == antialiasing
+            && capture.raster_target_extent == capture.target_extent
     });
 
     assert!(

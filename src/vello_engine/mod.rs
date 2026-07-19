@@ -368,6 +368,8 @@ impl VelloPassResourceLifetimeObservation {
 #[cfg(test)]
 pub(crate) struct PreparedVelloPassObservation {
     pub(in crate::vello_engine) target_extent: crate::PhysicalSize,
+    pub(in crate::vello_engine) transparent_base: bool,
+    pub(in crate::vello_engine) antialiasing: crate::Antialiasing,
     pub(in crate::vello_engine) is_rgba8_storage: bool,
     pub(in crate::vello_engine) final_dispatch_targets_output: bool,
     pub(in crate::vello_engine) is_self_consistent: bool,
@@ -384,6 +386,14 @@ pub(crate) struct PreparedVelloPassObservation {
 impl PreparedVelloPassObservation {
     pub(crate) const fn target_extent_for_test(&self) -> crate::PhysicalSize {
         self.target_extent
+    }
+
+    pub(crate) const fn transparent_base_for_test(&self) -> bool {
+        self.transparent_base
+    }
+
+    pub(crate) const fn antialiasing_for_test(&self) -> crate::Antialiasing {
+        self.antialiasing
     }
 
     pub(crate) const fn is_rgba8_storage_for_test(&self) -> bool {

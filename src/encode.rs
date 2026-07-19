@@ -114,19 +114,6 @@ fn push_vello_clip(scene: &mut VelloScene, clip: &RenderClip, transform: Transfo
     }
 }
 
-#[cfg(test)]
-pub(crate) fn clip_coverage_effective_transforms_for_test(
-    elements: &[(RenderClip, Transform)],
-    initial_transform: Transform,
-    target_extent: PhysicalSize,
-) -> Result<Vec<Transform>> {
-    let _scene = encode_vello_clip_coverage_scene(elements, initial_transform, target_extent)?;
-    elements
-        .iter()
-        .map(|(clip, transform)| clip_coverage_transform(clip, *transform, initial_transform))
-        .collect()
-}
-
 fn encode_vello_commands(
     commands: &[RenderCommand],
     scene: &mut VelloScene,

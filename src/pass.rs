@@ -54,6 +54,11 @@ use super::resource::ResourceAccountingFault;
 use super::frame::{FrameContext, FramePlan};
 
 #[cfg(test)]
+use super::vello_engine::{
+    prepared_vello_pass_observation_for_test, scene::VelloPathDrawObservationForTest,
+};
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct C08ExecutableSubsetObservationForTest {
     pub(crate) accepts_exact_rgba_and_bgra: bool,
@@ -100,7 +105,6 @@ pub(crate) enum CompositionReadObservationForTest {
 pub(crate) struct ClipCoverageElementObservationForTest {
     pub(crate) clip: RenderClip,
     pub(crate) transform: Transform,
-    pub(crate) effective_transform: Transform,
 }
 
 #[cfg(test)]
@@ -114,10 +118,12 @@ pub(crate) struct ClipCoverageCaptureObservationForTest {
     pub(crate) raster_scale: f64,
     pub(crate) first_texel_center: Point,
     pub(crate) initial_transform: Transform,
+    pub(crate) emitted_draws: Vec<VelloPathDrawObservationForTest>,
     pub(crate) uses_coverage_resource_role: bool,
     pub(crate) uses_rgba8_target: bool,
     pub(crate) uses_transparent_base: bool,
-    pub(crate) paints_opaque_white: bool,
+    pub(crate) raster_antialiasing: Antialiasing,
+    pub(crate) raster_target_extent: PhysicalSize,
 }
 
 #[cfg(test)]
@@ -2941,6 +2947,13 @@ fn c09_executable_graph_observation(
     })
 }
 
+fn vello_capture_raster_parameters(
+    target_extent: PhysicalSize,
+    antialiasing: Antialiasing,
+) -> Result<RasterParameters> {
+    RasterParameters::try_new(target_extent, peniko::Color::TRANSPARENT, antialiasing)
+}
+
 #[cfg(test)]
 fn graph_clip_coverage_observation(
     commands: RenderCommands,
@@ -2988,23 +3001,30 @@ fn graph_clip_coverage_observation(
                 .iter()
                 .map(|element| (element.clip.clone(), element.transform))
                 .collect::<Vec<_>>();
-            let effective_transforms = super::encode::clip_coverage_effective_transforms_for_test(
+            let scene = encode_vello_clip_coverage_scene(
                 &elements,
                 capture.initial_transform(),
                 capture.target_extent(),
             )
             .ok()?;
+            let emitted_draws = scene.observation_for_test().solid_path_draws_for_test()?;
+            let prepared = scene
+                .prepare_raster(
+                    vello_capture_raster_parameters(
+                        capture.target_extent(),
+                        capture.antialiasing(),
+                    )
+                    .ok()?,
+                )
+                .ok()?;
+            let raster = prepared_vello_pass_observation_for_test(&prepared);
             let elements = coverage
                 .elements
                 .iter()
-                .zip(effective_transforms)
-                .map(
-                    |(element, effective_transform)| ClipCoverageElementObservationForTest {
-                        clip: element.clip.clone(),
-                        transform: element.transform,
-                        effective_transform,
-                    },
-                )
+                .map(|element| ClipCoverageElementObservationForTest {
+                    clip: element.clip.clone(),
+                    transform: element.transform,
+                })
                 .collect();
             Some(ClipCoverageCaptureObservationForTest {
                 elements,
@@ -3018,10 +3038,12 @@ fn graph_clip_coverage_observation(
                     (f64::from(resource.spatial.device_origin.1) + 0.5) / capture.raster_scale(),
                 ),
                 initial_transform: capture.initial_transform(),
+                emitted_draws,
                 uses_coverage_resource_role: resource.role == RuntimeResourceRole::ClipCoverage,
                 uses_rgba8_target: resource.format == RuntimeResourceFormat::ClipCoverageRgba8Unorm,
-                uses_transparent_base: true,
-                paints_opaque_white: true,
+                uses_transparent_base: raster.transparent_base_for_test(),
+                raster_antialiasing: raster.antialiasing_for_test(),
+                raster_target_extent: raster.target_extent_for_test(),
             })
         })
         .collect();
@@ -5444,9 +5466,8 @@ impl<'device> PreparedGraph<'device> {
                 }),
             RuntimeVelloCapture::ClipCoverage(_) => true,
         };
-        let prepared = scene.prepare_raster(RasterParameters::try_new(
+        let prepared = scene.prepare_raster(vello_capture_raster_parameters(
             target_extent,
-            peniko::Color::TRANSPARENT,
             antialiasing,
         )?)?;
         #[cfg(test)]
