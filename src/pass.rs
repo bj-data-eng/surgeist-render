@@ -31,10 +31,11 @@ use super::{
     },
     shader::{
         BindGroupLayoutKey, CompositeParameterBytes, DevicePassCache, PassSpatialUniformBytes,
-        ProvisionalC08PassObjects, ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey,
-        ShaderBindingRoleKey, ShaderCompositeKey, ShaderCompositePathKey, ShaderDataBindingKey,
-        ShaderMaskQualityKey, ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey,
-        ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
+        ProvisionalC08PassObjects, ProvisionalCompositePassObjects,
+        ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
+        ShaderCompositeKey, ShaderCompositePathKey, ShaderDataBindingKey, ShaderMaskQualityKey,
+        ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey, ShaderSamplingEdgeKey,
+        ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
     style::ColorFilterOp,
     texture::EffectTextureDescriptor,
@@ -1626,6 +1627,7 @@ impl ClosedExecutableGraph {
         Ok(Self { lowered, facts })
     }
 
+    #[cfg(test)]
     fn into_lowered(self) -> LoweredGraphPlan {
         self.lowered
     }
@@ -4744,6 +4746,7 @@ impl GraphPreparationIneligibility {
 
 enum PrePreparationGraphClassification {
     ExactC08(C08PreparableGraph),
+    ExactC09(ClosedExecutableGraph),
     LaterCycleTransitional(LoweredGraphPlan),
     Ineligible(GraphPreparationIneligibility),
 }
@@ -4789,6 +4792,7 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
+            PrePreparationGraphClassification::ExactC09(_) => Ok(Self::LaterCycleTransitional),
             PrePreparationGraphClassification::LaterCycleTransitional(_) => {
                 Ok(Self::LaterCycleTransitional)
             }
@@ -4807,7 +4811,8 @@ impl ExecutableGraphDispatchEligibility {
                     PrePreparationGraphClassification::ExactC08(preparable) => {
                         Ok(Self::Exact(preparable))
                     }
-                    PrePreparationGraphClassification::LaterCycleTransitional(_)
+                    PrePreparationGraphClassification::ExactC09(_)
+                    | PrePreparationGraphClassification::LaterCycleTransitional(_)
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C08 dispatch lowering changed its closed eligibility result",
                     )),
@@ -4845,9 +4850,7 @@ impl PrePreparationGraphClassification {
         };
         match C08PreparableGraph::try_from_closed(closed) {
             Ok(preparable) => Self::ExactC08(preparable),
-            Err(closed) if closed.has_layer_composition() => {
-                Self::LaterCycleTransitional((*closed).into_lowered())
-            }
+            Err(closed) if closed.has_layer_composition() => Self::ExactC09(*closed),
             Err(_) => Self::Ineligible(GraphPreparationIneligibility::OutsideClosedExecutableGraph),
         }
     }
@@ -4930,17 +4933,25 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
 
 enum GraphPreparationSource {
     C08(C08PreparableGraph),
+    C09(ClosedExecutableGraph),
     Transitional(LoweredGraphPlan),
 }
 
 impl GraphPreparationSource {
-    fn into_parts(self) -> (LoweredGraphPlan, Option<C08ExecutionFacts>) {
+    fn into_parts(
+        self,
+    ) -> (
+        LoweredGraphPlan,
+        Option<C08ExecutionFacts>,
+        Option<ClosedExecutableGraphFacts>,
+    ) {
         match self {
             Self::C08(preparable) => {
                 let (lowered, execution) = preparable.into_parts();
-                (lowered, Some(execution))
+                (lowered, Some(execution), None)
             }
-            Self::Transitional(lowered) => (lowered, None),
+            Self::C09(closed) => (closed.lowered, None, Some(closed.facts)),
+            Self::Transitional(lowered) => (lowered, None, None),
         }
     }
 }
@@ -5064,6 +5075,7 @@ enum C08ScheduledEncodingKind {
     VelloCapture,
     CanonicalizeCapture,
     SpanSourceOver,
+    LayerComposite,
     Present,
 }
 
@@ -5088,6 +5100,16 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) samples_only_source_with_fixed_premultiplied_blend: bool,
     pub(crate) preserves_signed_source_origin: bool,
     pub(crate) keeps_cache_update_provisional: bool,
+    pub(crate) layer_composite_count: usize,
+    pub(crate) normal_composite_count: usize,
+    pub(crate) destination_composite_count: usize,
+    pub(crate) normal_composites_use_fixed_premultiplied_blend: bool,
+    pub(crate) normal_composites_omit_parent_sample: bool,
+    pub(crate) destination_composites_copy_full_parent: bool,
+    pub(crate) destination_composites_avoid_read_write_alias: bool,
+    pub(crate) layer_composites_bind_exact_resources_and_parameters: bool,
+    pub(crate) layer_composites_preserve_signed_mapping: bool,
+    pub(crate) advances_every_pass_once: bool,
     #[cfg(test)]
     pub(crate) capture_count: usize,
     #[cfg(test)]
@@ -5095,12 +5117,14 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     #[cfg(test)]
     pub(crate) captures_share_one_active_vello_scope: bool,
     #[cfg(test)]
+    pub(crate) graph_work_shares_one_command_encoder: bool,
+    #[cfg(test)]
     pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
 }
 
 impl C08CustomSpineEncodingSummary {
     fn proves_complete_submission(&self) -> bool {
-        self.encodes_custom_passes_in_order
+        let common = self.encodes_custom_passes_in_order
             && self.clears_full_root_once
             && self.uses_exact_prepared_spatial_mapping
             && self.presents_to_exact_external_output
@@ -5112,6 +5136,22 @@ impl C08CustomSpineEncodingSummary {
             && self.samples_only_source_with_fixed_premultiplied_blend
             && self.preserves_signed_source_origin
             && self.keeps_cache_update_provisional
+            && self.advances_every_pass_once;
+        let exact_c08 = self.layer_composite_count == 0;
+        let exact_c09 = self.layer_composite_count > 0
+            && self
+                .normal_composite_count
+                .saturating_add(self.destination_composite_count)
+                == self.layer_composite_count
+            && (self.normal_composite_count == 0
+                || (self.normal_composites_use_fixed_premultiplied_blend
+                    && self.normal_composites_omit_parent_sample))
+            && (self.destination_composite_count == 0
+                || (self.destination_composites_copy_full_parent
+                    && self.destination_composites_avoid_read_write_alias))
+            && self.layer_composites_bind_exact_resources_and_parameters
+            && self.layer_composites_preserve_signed_mapping;
+        common && (exact_c08 || exact_c09)
     }
 }
 
@@ -5154,6 +5194,10 @@ pub(crate) struct C08PendingGraphEncoding {
 
 #[cfg(test)]
 impl C08PendingGraphEncoding {
+    pub(crate) const fn summary_for_test(&self) -> &C08CustomSpineEncodingSummary {
+        &self.summary
+    }
+
     pub(crate) fn into_summary_and_resources(
         self,
     ) -> (C08CustomSpineEncodingSummary, PendingVelloResourceCommit) {
@@ -5232,6 +5276,7 @@ struct C08PreparedPassEncodingRequest {
     reads: Vec<RuntimeReadBinding>,
     result: RuntimeResultBinding,
     spatial_uniform: Option<PassSpatialUniformBytes>,
+    composite_parameters: Option<CompositeParameterBytes>,
     cache_keys: Option<RuntimePassCacheKeys>,
 }
 
@@ -5243,6 +5288,7 @@ impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
             reads: request.runtime.reads.clone(),
             result: request.runtime.result,
             spatial_uniform: request.spatial_uniform.clone(),
+            composite_parameters: request.composite_parameters.clone(),
             cache_keys: request.cache_keys.clone(),
         }
     }
@@ -5272,6 +5318,20 @@ struct C08PassEncodingFacts {
     sampled_only_source: bool,
     fixed_source_over_blend: bool,
     preserved_signed_source_origin: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct C09LayerCompositeEncodingFacts {
+    normal_path: bool,
+    destination_path: bool,
+    fixed_premultiplied_blend: bool,
+    omits_parent_sample: bool,
+    copied_full_parent: bool,
+    avoids_read_write_alias: bool,
+    exact_resources_and_parameters: bool,
+    preserved_signed_mapping: bool,
+    #[cfg(test)]
+    encoder_identity: usize,
 }
 
 struct C08SampledRenderTarget<'target> {
@@ -5399,24 +5459,38 @@ fn exact_c08_read(
 
 fn c08_scheduled_encoding_order_is_exact(
     scheduled: &[C08ScheduledEncodingKind],
-    capture_count: usize,
+    passes: &[RuntimePassPreparationRequest],
 ) -> bool {
-    if capture_count == 0
-        || scheduled.len() != capture_count.saturating_mul(3).saturating_add(2)
-        || scheduled.first() != Some(&C08ScheduledEncodingKind::ClearRoot)
-        || scheduled.last() != Some(&C08ScheduledEncodingKind::Present)
-    {
-        return false;
-    }
-    scheduled[1..scheduled.len() - 1]
-        .chunks_exact(3)
-        .all(|chunk| {
-            chunk
-                == [
-                    C08ScheduledEncodingKind::VelloCapture,
-                    C08ScheduledEncodingKind::CanonicalizeCapture,
-                    C08ScheduledEncodingKind::SpanSourceOver,
-                ]
+    scheduled.len() == passes.len()
+        && scheduled.iter().zip(passes).all(|(scheduled, pass)| {
+            let expected = match &pass.runtime.kind {
+                RuntimePassKind::ClearRoot { .. } => C08ScheduledEncodingKind::ClearRoot,
+                RuntimePassKind::VelloCapture(Some(_)) => C08ScheduledEncodingKind::VelloCapture,
+                RuntimePassKind::CanonicalizeCapture => {
+                    C08ScheduledEncodingKind::CanonicalizeCapture
+                }
+                RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::SpanSourceOver,
+                    ..
+                })) => C08ScheduledEncodingKind::SpanSourceOver,
+                RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::Layer { .. },
+                    ..
+                })) => C08ScheduledEncodingKind::LayerComposite,
+                RuntimePassKind::Present => C08ScheduledEncodingKind::Present,
+                RuntimePassKind::VelloCapture(None)
+                | RuntimePassKind::CopyBackdrop
+                | RuntimePassKind::ColorFilter(_)
+                | RuntimePassKind::BlurHorizontal(_)
+                | RuntimePassKind::BlurVertical(_)
+                | RuntimePassKind::DropShadowColorize(_)
+                | RuntimePassKind::Composite(None)
+                | RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::DropShadow,
+                    ..
+                })) => return false,
+            };
+            *scheduled == expected
         })
 }
 
@@ -5439,6 +5513,7 @@ fn close_f64(left: f64, right: f64) -> bool {
 pub(crate) struct PreparedGraph<'device> {
     plan: RuntimeGraphPreparationPlan,
     c08_execution: Option<C08ExecutionFacts>,
+    c09_execution: Option<ClosedExecutableGraphFacts>,
     resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
     pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
@@ -5545,6 +5620,18 @@ impl<'device> PreparedGraph<'device> {
                 resources,
                 pass_cache_phase.0,
             ),
+            PrePreparationGraphClassification::ExactC09(closed) => {
+                let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
+                Self::try_prepare_inner(
+                    GraphPreparationSource::C09(closed),
+                    selected_working_format,
+                    capabilities,
+                    device,
+                    queue,
+                    resources,
+                    pass_cache_phase,
+                )
+            }
             PrePreparationGraphClassification::LaterCycleTransitional(lowered) => {
                 let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 Self::try_prepare_inner(
@@ -5573,7 +5660,7 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         let (pass_cache, realize_checked_passes) = pass_cache_phase;
-        let (lowered, c08_execution) = source.into_parts();
+        let (lowered, c08_execution, c09_execution) = source.into_parts();
         let plan = RuntimeGraphPreparationPlan::try_derive(
             lowered,
             selected_working_format,
@@ -5584,7 +5671,7 @@ impl<'device> PreparedGraph<'device> {
 
         let mut frame_scope = resources.begin_frame()?;
         frame_scope.abort_provisional_on_drop();
-        if c08_execution.is_some() {
+        if c08_execution.is_some() || c09_execution.is_some() {
             frame_scope.discard_on_drop();
         }
         let mut resource_bindings = BTreeMap::new();
@@ -5621,62 +5708,72 @@ impl<'device> PreparedGraph<'device> {
             }
         }
 
-        let pass_cache_update = if realize_checked_passes && c08_execution.is_some() {
+        let pass_cache_update = if realize_checked_passes {
             let mut update = pass_cache.provisional_update();
-            for keys in plan
-                .passes
-                .iter()
-                .filter_map(|request| request.cache_keys.as_ref())
-            {
-                update
-                    .realize_c08_pass(
-                        device,
-                        pass_cache,
-                        keys.samplers(),
-                        keys.layout(),
-                        keys.shader(),
-                        keys.pipeline(),
-                    )?
-                    .require_encoding_ready()?;
-            }
-            Some(update)
-        } else if realize_checked_passes {
-            let mut update = pass_cache.provisional_update();
-            let mut realized_composite = false;
+            let mut realized_pass = false;
             for request in &plan.passes {
-                let RuntimePassKind::Composite(Some(RuntimeComposite {
-                    kind: RuntimeCompositeKind::Layer { .. },
-                    ..
-                })) = &request.runtime.kind
-                else {
+                let Some(keys) = request.cache_keys.as_ref() else {
                     continue;
                 };
-                let keys = request.cache_keys.as_ref().ok_or_else(|| {
-                    preparation_error("C09 composite preparation lost its exact cache keys")
-                })?;
-                update
-                    .realize_composite_pass(
-                        device,
-                        pass_cache,
-                        keys.samplers(),
-                        keys.layout(),
-                        keys.shader(),
-                        keys.pipeline(),
-                    )?
-                    .require_encoding_ready()?;
-                realized_composite = true;
+                match &request.runtime.kind {
+                    RuntimePassKind::Composite(Some(RuntimeComposite {
+                        kind: RuntimeCompositeKind::Layer { .. },
+                        ..
+                    })) => update
+                        .realize_composite_pass(
+                            device,
+                            pass_cache,
+                            keys.samplers(),
+                            keys.layout(),
+                            keys.shader(),
+                            keys.pipeline(),
+                        )?
+                        .require_encoding_ready()?,
+                    RuntimePassKind::CanonicalizeCapture
+                    | RuntimePassKind::Composite(Some(RuntimeComposite {
+                        kind: RuntimeCompositeKind::SpanSourceOver,
+                        ..
+                    }))
+                    | RuntimePassKind::Present => update
+                        .realize_c08_pass(
+                            device,
+                            pass_cache,
+                            keys.samplers(),
+                            keys.layout(),
+                            keys.shader(),
+                            keys.pipeline(),
+                        )?
+                        .require_encoding_ready()?,
+                    RuntimePassKind::ClearRoot { .. }
+                    | RuntimePassKind::VelloCapture(_)
+                    | RuntimePassKind::CopyBackdrop
+                    | RuntimePassKind::ColorFilter(_)
+                    | RuntimePassKind::BlurHorizontal(_)
+                    | RuntimePassKind::BlurVertical(_)
+                    | RuntimePassKind::DropShadowColorize(_)
+                    | RuntimePassKind::Composite(None)
+                    | RuntimePassKind::Composite(Some(RuntimeComposite {
+                        kind: RuntimeCompositeKind::DropShadow,
+                        ..
+                    })) => {
+                        return Err(preparation_error(
+                            "checked pass realization reached an unsupported graph pass",
+                        ));
+                    }
+                }
+                realized_pass = true;
             }
-            realized_composite.then_some(update)
+            realized_pass.then_some(update)
         } else {
             None
         };
-        let c08_encoding_state = c08_execution
-            .as_ref()
-            .map(|_| C08CustomSpineEncodingState::Ready);
+        let c08_encoding_state = (c08_execution.is_some() || c09_execution.is_some())
+            .then_some(C08CustomSpineEncodingState::Ready);
 
         Ok(Self {
             plan,
             c08_execution,
+            c09_execution,
             resource_bindings,
             kernel_bindings,
             pass_cache_update,
@@ -5785,11 +5882,26 @@ impl<'device> PreparedGraph<'device> {
                 ));
             }
         }
-        let execution = self.c08_execution.as_ref().ok_or_else(|| {
-            preparation_error("the C08 custom scheduler requires validated execution facts")
-        })?;
-        if execution.working_format() != self.plan.working_format
-            || execution.output_format() != self.plan.output_format
+        let (execution_working_format, execution_output_format, expected_capture_count) =
+            if let Some(execution) = self.c08_execution.as_ref() {
+                (
+                    execution.working_format(),
+                    execution.output_format(),
+                    execution.captures().len(),
+                )
+            } else if let Some(execution) = self.c09_execution.as_ref() {
+                (
+                    execution.working_format,
+                    execution.output_format,
+                    execution.captures.len(),
+                )
+            } else {
+                return Err(preparation_error(
+                    "the C08 custom scheduler requires validated execution facts",
+                ));
+            };
+        if execution_working_format != self.plan.working_format
+            || execution_output_format != self.plan.output_format
             || output.format != self.plan.output_format
             || output.extent != self.output_extent()?
         {
@@ -5802,7 +5914,6 @@ impl<'device> PreparedGraph<'device> {
                 "the C08 custom scheduler requires transaction-provisional pass objects",
             ));
         }
-        let expected_capture_count = execution.captures().len();
         if expected_capture_count == 0 || self.next_pass != 0 {
             return Err(preparation_error(
                 "the C08 custom scheduler requires one unstarted capture spine",
@@ -5880,17 +5991,29 @@ impl<'device> PreparedGraph<'device> {
         let mut bounded_capture_handoffs = true;
         let mut custom_encoded = 0_usize;
         let mut custom_completed = 0_usize;
-        let mut clear_count = 0_usize;
+        let mut completed_pass_count = 0_usize;
+        let mut root_clear_count = 0_usize;
         let mut clears_full_root = true;
         let mut exact_spatial = true;
         let mut exact_external_output = false;
         let mut source_over_count = 0_usize;
+        let mut layer_composite_count = 0_usize;
+        let mut normal_composite_count = 0_usize;
+        let mut destination_composite_count = 0_usize;
         let mut parent_and_result_are_distinct = true;
         let mut full_copy_before_bounded_render = true;
         let mut samples_source_with_fixed_blend = true;
         let mut preserves_signed_origin = true;
+        let mut normal_fixed_blend = true;
+        let mut normal_omits_parent_sample = true;
+        let mut destination_copies_full_parent = true;
+        let mut destination_avoids_alias = true;
+        let mut layer_bindings_are_exact = true;
+        let mut layer_signed_mapping_is_exact = true;
         #[cfg(test)]
         let mut capture_observations = Vec::with_capacity(expected_capture_count);
+        #[cfg(test)]
+        let mut composite_encoder_identities = Vec::new();
 
         while let Some(request) = self
             .plan
@@ -5900,14 +6023,17 @@ impl<'device> PreparedGraph<'device> {
         {
             let pass = request.id;
             match &request.kind {
-                RuntimePassKind::ClearRoot { .. } => {
+                RuntimePassKind::ClearRoot { initialization, .. } => {
                     let facts = self.encode_c08_clear_root(encoder, &request)?;
                     custom_encoded = custom_encoded.saturating_add(1);
-                    clear_count = clear_count.saturating_add(1);
-                    clears_full_root &= facts.full_target;
+                    if *initialization == RuntimeInitialization::SurfaceBaseColor {
+                        root_clear_count = root_clear_count.saturating_add(1);
+                        clears_full_root &= facts.full_target;
+                    }
                     scheduled.push(C08ScheduledEncodingKind::ClearRoot);
                     self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
                 }
                 RuntimePassKind::VelloCapture(Some(_)) => {
                     #[cfg(test)]
@@ -5946,6 +6072,7 @@ impl<'device> PreparedGraph<'device> {
                             self.acquired_capture_lease_count_for_test.saturating_add(1);
                     }
                     validated_capture_receipts = validated_capture_receipts.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
                 }
                 RuntimePassKind::CanonicalizeCapture => {
                     let facts = self.encode_c08_canonicalize(encoder, &request)?;
@@ -5954,6 +6081,7 @@ impl<'device> PreparedGraph<'device> {
                     scheduled.push(C08ScheduledEncodingKind::CanonicalizeCapture);
                     self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
                 }
                 RuntimePassKind::Composite(Some(composite))
                     if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
@@ -5970,6 +6098,39 @@ impl<'device> PreparedGraph<'device> {
                     scheduled.push(C08ScheduledEncodingKind::SpanSourceOver);
                     self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
+                }
+                RuntimePassKind::Composite(Some(composite))
+                    if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
+                {
+                    let facts = self.encode_c09_layer_composite(encoder, &request)?;
+                    custom_encoded = custom_encoded.saturating_add(1);
+                    layer_composite_count = layer_composite_count.saturating_add(1);
+                    normal_composite_count =
+                        normal_composite_count.saturating_add(usize::from(facts.normal_path));
+                    destination_composite_count = destination_composite_count
+                        .saturating_add(usize::from(facts.destination_path));
+                    parent_and_result_are_distinct &= facts.avoids_read_write_alias;
+                    full_copy_before_bounded_render &= facts.copied_full_parent;
+                    if facts.normal_path {
+                        samples_source_with_fixed_blend &=
+                            facts.fixed_premultiplied_blend && facts.omits_parent_sample;
+                        normal_fixed_blend &= facts.fixed_premultiplied_blend;
+                        normal_omits_parent_sample &= facts.omits_parent_sample;
+                    }
+                    if facts.destination_path {
+                        destination_copies_full_parent &= facts.copied_full_parent;
+                        destination_avoids_alias &= facts.avoids_read_write_alias;
+                    }
+                    layer_bindings_are_exact &= facts.exact_resources_and_parameters;
+                    layer_signed_mapping_is_exact &= facts.preserved_signed_mapping;
+                    preserves_signed_origin &= facts.preserved_signed_mapping;
+                    #[cfg(test)]
+                    composite_encoder_identities.push(facts.encoder_identity);
+                    scheduled.push(C08ScheduledEncodingKind::LayerComposite);
+                    self.complete_c08_custom_pass(pass)?;
+                    custom_completed = custom_completed.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
                 }
                 RuntimePassKind::Present => {
                     let facts = self.encode_c08_present(encoder, &request, output)?;
@@ -5979,6 +6140,7 @@ impl<'device> PreparedGraph<'device> {
                     scheduled.push(C08ScheduledEncodingKind::Present);
                     self.complete_c08_custom_pass(pass)?;
                     custom_completed = custom_completed.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
                 }
                 RuntimePassKind::VelloCapture(None)
                 | RuntimePassKind::CopyBackdrop
@@ -5995,7 +6157,7 @@ impl<'device> PreparedGraph<'device> {
         }
 
         let encodes_custom_passes_in_order =
-            c08_scheduled_encoding_order_is_exact(&scheduled, expected_capture_count);
+            c08_scheduled_encoding_order_is_exact(&scheduled, &self.plan.passes);
         #[cfg(test)]
         let captures_share_one_command_encoder =
             capture_observations.first().is_some_and(|first| {
@@ -6012,9 +6174,23 @@ impl<'device> PreparedGraph<'device> {
                         .iter()
                         .all(|capture| capture.scope_identity == first.scope_identity)
             });
+        #[cfg(test)]
+        let graph_work_shares_one_command_encoder = capture_observations
+            .first()
+            .map(|capture| capture.encoder_identity)
+            .or_else(|| composite_encoder_identities.first().copied())
+            .is_some_and(|identity| {
+                capture_observations
+                    .iter()
+                    .all(|capture| capture.encoder_identity == identity)
+                    && composite_encoder_identities
+                        .iter()
+                        .all(|composite| *composite == identity)
+            });
+        let total_composite_count = source_over_count.saturating_add(layer_composite_count);
         Ok(C08CustomSpineEncodingSummary {
             encodes_custom_passes_in_order,
-            clears_full_root_once: clear_count == 1 && clears_full_root,
+            clears_full_root_once: root_clear_count == 1 && clears_full_root,
             uses_exact_prepared_spatial_mapping: exact_spatial,
             presents_to_exact_external_output: exact_external_output,
             exposes_bounded_capture_handoff: expected_capture_count > 0
@@ -6024,19 +6200,35 @@ impl<'device> PreparedGraph<'device> {
                 == expected_capture_count,
             completes_custom_passes_after_encoding: custom_encoded > 0
                 && custom_completed == custom_encoded,
-            parent_and_result_are_distinct: source_over_count > 0 && parent_and_result_are_distinct,
-            copies_full_parent_before_bounded_source_render: source_over_count > 0
+            parent_and_result_are_distinct: total_composite_count > 0
+                && parent_and_result_are_distinct,
+            copies_full_parent_before_bounded_source_render: total_composite_count > 0
                 && full_copy_before_bounded_render,
-            samples_only_source_with_fixed_premultiplied_blend: source_over_count > 0
+            samples_only_source_with_fixed_premultiplied_blend: (source_over_count > 0
+                || normal_composite_count > 0
+                || destination_composite_count > 0)
                 && samples_source_with_fixed_blend,
-            preserves_signed_source_origin: source_over_count > 0 && preserves_signed_origin,
+            preserves_signed_source_origin: total_composite_count > 0 && preserves_signed_origin,
             keeps_cache_update_provisional: self.pass_cache_update.is_some(),
+            layer_composite_count,
+            normal_composite_count,
+            destination_composite_count,
+            normal_composites_use_fixed_premultiplied_blend: normal_fixed_blend,
+            normal_composites_omit_parent_sample: normal_omits_parent_sample,
+            destination_composites_copy_full_parent: destination_copies_full_parent,
+            destination_composites_avoid_read_write_alias: destination_avoids_alias,
+            layer_composites_bind_exact_resources_and_parameters: layer_bindings_are_exact,
+            layer_composites_preserve_signed_mapping: layer_signed_mapping_is_exact,
+            advances_every_pass_once: completed_pass_count == self.plan.passes.len()
+                && self.next_pass == self.plan.passes.len(),
             #[cfg(test)]
             capture_count,
             #[cfg(test)]
             captures_share_one_command_encoder,
             #[cfg(test)]
             captures_share_one_active_vello_scope,
+            #[cfg(test)]
+            graph_work_shares_one_command_encoder,
             #[cfg(test)]
             capture_observations,
         })
@@ -6208,9 +6400,39 @@ impl<'device> PreparedGraph<'device> {
             )
     }
 
+    fn c09_composite_pass_objects<'prepared>(
+        &'prepared self,
+        keys: &RuntimePassCacheKeys,
+    ) -> Result<ProvisionalCompositePassObjects<'prepared>> {
+        self.pass_cache_update
+            .as_ref()
+            .ok_or_else(|| preparation_error("C09 provisional pass objects are unavailable"))?
+            .composite_encoding_objects(
+                self.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+    }
+
     fn create_c08_spatial_uniform_buffer(&self, bytes: &PassSpatialUniformBytes) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Surgeist C08 pass spatial uniform"),
+            size: bytes.as_bytes().len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, bytes.as_bytes());
+        buffer
+    }
+
+    fn create_c09_composite_parameter_buffer(
+        &self,
+        bytes: &CompositeParameterBytes,
+    ) -> wgpu::Buffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Surgeist C09 composite parameter uniform"),
             size: bytes.as_bytes().len() as u64,
             usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -6229,16 +6451,23 @@ impl<'device> PreparedGraph<'device> {
                 "the C08 Vello capture has no exact prepared target",
             ));
         };
-        let capture = self
-            .c08_execution
-            .as_ref()
-            .and_then(|execution| {
-                execution
-                    .captures()
-                    .iter()
-                    .find(|capture| capture.pass() == request.id && capture.target() == target)
-            })
-            .ok_or_else(|| preparation_error("the bounded C08 capture handoff is missing"))?;
+        let capture =
+            self.c08_execution
+                .as_ref()
+                .and_then(|execution| {
+                    execution
+                        .captures()
+                        .iter()
+                        .find(|capture| capture.pass() == request.id && capture.target() == target)
+                })
+                .or_else(|| {
+                    self.c09_execution.as_ref().and_then(|execution| {
+                        execution.captures.iter().find(|capture| {
+                            capture.pass() == request.id && capture.target() == target
+                        })
+                    })
+                })
+                .ok_or_else(|| preparation_error("the bounded C08 capture handoff is missing"))?;
         let binding = self.texture_binding_for_pass(request.id, target)?;
         let spatial = self.validate_texture_binding(&binding, target)?;
         if spatial.device_extent != capture.target_extent()
@@ -6269,7 +6498,7 @@ impl<'device> PreparedGraph<'device> {
         request: &C08PreparedPassEncodingRequest,
     ) -> Result<C08PassEncodingFacts> {
         let RuntimePassKind::ClearRoot {
-            initialization: RuntimeInitialization::SurfaceBaseColor,
+            initialization,
             color,
         } = &request.kind
         else {
@@ -6280,9 +6509,21 @@ impl<'device> PreparedGraph<'device> {
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error("the C08 root clear has no target"));
         };
-        if target != self.plan.root_working_image
+        let target_request = self.resource_request(target)?;
+        let exact_initialization = match initialization {
+            RuntimeInitialization::SurfaceBaseColor => {
+                target == self.plan.root_working_image
+                    && target_request.role == RuntimeResourceRole::RootWorkingImage
+            }
+            RuntimeInitialization::Transparent => {
+                *color == Color::TRANSPARENT
+                    && target_request.role == RuntimeResourceRole::IsolationWorkingImage
+            }
+        };
+        if !exact_initialization
             || !request.reads.is_empty()
             || request.spatial_uniform.is_some()
+            || request.composite_parameters.is_some()
             || request.cache_keys.is_some()
         {
             return Err(preparation_error(
@@ -6316,7 +6557,7 @@ impl<'device> PreparedGraph<'device> {
             });
         }
         Ok(C08PassEncodingFacts {
-            full_target: spatial.device_extent == self.output_extent()?,
+            full_target: spatial.device_extent == target_request.spatial.device_extent,
             ..C08PassEncodingFacts::default()
         })
     }
@@ -6459,6 +6700,369 @@ impl<'device> PreparedGraph<'device> {
             fixed_source_over_blend: fixed_blend,
             preserved_signed_source_origin,
             ..C08PassEncodingFacts::default()
+        })
+    }
+
+    fn encode_c09_layer_composite(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C09LayerCompositeEncodingFacts> {
+        let RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind:
+                RuntimeCompositeKind::Layer {
+                    parameters,
+                    clip_coverage,
+                    ..
+                },
+            source_captured_before_outer_semantics: true,
+        })) = &request.kind
+        else {
+            return Err(preparation_error(
+                "the C09 layer composite changed its checked semantic payload",
+            ));
+        };
+        let normal_path = parameters.blend() == BlendMode::Normal;
+        let destination_path = !normal_path;
+        let parent = exact_c08_read(request, RuntimeReadRole::CompositeParent)?;
+        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
+        let clip = clip_coverage
+            .map(|resource| {
+                let read = exact_c08_read(request, RuntimeReadRole::ClipCoverage)?;
+                if read.resource() != resource {
+                    return Err(preparation_error(
+                        "the C09 clip coverage read changed its exact resource",
+                    ));
+                }
+                Ok(read)
+            })
+            .transpose()?;
+        let alpha_mask = parameters
+            .alpha_mask()
+            .map(|mask| {
+                let read = exact_c08_read(request, RuntimeReadRole::AlphaMask)?;
+                if read.resource() != mask.resource() {
+                    return Err(preparation_error(
+                        "the C09 alpha-mask read changed its exact retained upload",
+                    ));
+                }
+                Ok(read)
+            })
+            .transpose()?;
+        let expected_read_count = 2usize
+            .saturating_add(usize::from(clip.is_some()))
+            .saturating_add(usize::from(alpha_mask.is_some()));
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error(
+                "the C09 layer composite has no prepared result",
+            ));
+        };
+        if request.reads.len() != expected_read_count {
+            return Err(preparation_error(
+                "the C09 layer composite contains an absent or duplicated semantic read",
+            ));
+        }
+
+        let parent_binding = self.texture_binding_for_pass(request.id, parent.resource())?;
+        let parent_spatial = self.validate_texture_binding(&parent_binding, parent.resource())?;
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        let clip_binding = clip
+            .map(|read| {
+                let binding = self.texture_binding_for_pass(request.id, read.resource())?;
+                let spatial = self.validate_texture_binding(&binding, read.resource())?;
+                if spatial != target_spatial {
+                    return Err(preparation_error(
+                        "the C09 clip coverage grid changed from its parent mapping",
+                    ));
+                }
+                Ok(binding)
+            })
+            .transpose()?;
+        let mask_binding = alpha_mask
+            .map(|read| {
+                let binding = self.texture_binding_for_pass(request.id, read.resource())?;
+                let spatial = self.validate_texture_binding(&binding, read.resource())?;
+                if parameters
+                    .alpha_mask()
+                    .is_none_or(|mask| spatial.device_extent != mask.image_dimensions())
+                {
+                    return Err(preparation_error(
+                        "the C09 alpha-mask texture changed from its exact image extent",
+                    ));
+                }
+                Ok(binding)
+            })
+            .transpose()?;
+
+        let parent_and_result_are_distinct = parent.resource() != target
+            && parent_binding.allocation_resource() != target_binding.allocation_resource();
+        let sampled_allocations_are_distinct = source_binding.allocation_resource()
+            != target_binding.allocation_resource()
+            && clip_binding.as_ref().is_none_or(|binding| {
+                binding.allocation_resource() != target_binding.allocation_resource()
+            })
+            && mask_binding.as_ref().is_none_or(|binding| {
+                binding.allocation_resource() != target_binding.allocation_resource()
+            });
+        let clip_format_is_exact = match clip {
+            Some(read) => {
+                self.resource_request(read.resource())?.format
+                    == RuntimeResourceFormat::ClipCoverageRgba8Unorm
+            }
+            None => true,
+        };
+        let mask_format_is_exact = match alpha_mask {
+            Some(read) => {
+                self.resource_request(read.resource())?.format
+                    == RuntimeResourceFormat::ResolvedMaskRgba8Unorm
+            }
+            None => true,
+        };
+        if !parent_and_result_are_distinct
+            || !sampled_allocations_are_distinct
+            || parent_spatial != target_spatial
+            || parent_binding.texture().format() != target_binding.texture().format()
+            || self.resource_request(parent.resource())?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || self.resource_request(source.resource())?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || self.resource_request(target)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || !clip_format_is_exact
+            || !mask_format_is_exact
+            || !parent_binding
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::COPY_SRC)
+            || (destination_path
+                && !parent_binding
+                    .texture()
+                    .usage()
+                    .contains(wgpu::TextureUsages::TEXTURE_BINDING))
+            || !target_binding
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT)
+            || !source_binding
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            || clip_binding.as_ref().is_some_and(|binding| {
+                !binding
+                    .texture()
+                    .usage()
+                    .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            })
+            || mask_binding.as_ref().is_some_and(|binding| {
+                !binding
+                    .texture()
+                    .usage()
+                    .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            })
+        {
+            return Err(preparation_error(
+                "C09 parent, source, and distinct composite result bindings are inconsistent",
+            ));
+        }
+
+        let keys = request.cache_keys.as_ref().ok_or_else(|| {
+            preparation_error("the C09 layer composite has no provisional cache keys")
+        })?;
+        if keys.samplers() != [source.sampler_key()] {
+            return Err(preparation_error(
+                "the C09 layer composite changed its one exact source sampler",
+            ));
+        }
+        let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
+            preparation_error("the C09 layer composite has no prepared spatial bytes")
+        })?;
+        let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
+            source_spatial,
+            target_spatial,
+        )?;
+        if spatial != &expected_spatial {
+            return Err(preparation_error(
+                "the C09 layer composite spatial bytes changed after preparation",
+            ));
+        }
+        let composite_parameters = request.composite_parameters.as_ref().ok_or_else(|| {
+            preparation_error("the C09 layer composite has no prepared parameter bytes")
+        })?;
+        let expected_parameters = CompositeParameterBytes::try_from_runtime_layer(parameters)?;
+        if composite_parameters != &expected_parameters {
+            return Err(preparation_error(
+                "the C09 layer composite parameter bytes changed after preparation",
+            ));
+        }
+        let objects = self.c09_composite_pass_objects(keys)?;
+        objects.require_encoding_ready()?;
+        if objects.path()
+            != if normal_path {
+                ShaderCompositePathKey::Normal
+            } else {
+                ShaderCompositePathKey::DestinationSampling
+            }
+            || objects.has_clip_coverage() != clip_binding.is_some()
+            || objects.has_alpha_mask() != mask_binding.is_some()
+        {
+            return Err(preparation_error(
+                "the C09 composite objects changed their checked entry-point interface",
+            ));
+        }
+
+        let copy_extent = wgpu::Extent3d {
+            width: parent_spatial.device_extent.width(),
+            height: parent_spatial.device_extent.height(),
+            depth_or_array_layers: 1,
+        };
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: parent_binding.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: target_binding.texture(),
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            copy_extent,
+        );
+
+        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
+        let preserved_signed_mapping =
+            c08_spatial_uniform_preserves_source_origin(spatial, source_spatial)
+                && region.is_none_or(|region| {
+                    let expected_x = (source_spatial.texel_origin.x()
+                        - target_spatial.texel_origin.x())
+                        * target_spatial.raster_scale;
+                    let expected_y = (source_spatial.texel_origin.y()
+                        - target_spatial.texel_origin.y())
+                        * target_spatial.raster_scale;
+                    close_f64(region.unclipped_x, expected_x)
+                        && close_f64(region.unclipped_y, expected_y)
+                });
+        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let parameter_buffer = self.create_c09_composite_parameter_buffer(composite_parameters);
+        let mut entries = Vec::with_capacity(expected_read_count.saturating_add(4));
+        entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(source_binding.view()),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
+        });
+        if destination_path {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(parent_binding.view()),
+            });
+        }
+        if let Some(binding) = &clip_binding {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(binding.view()),
+            });
+        }
+        if let Some(binding) = &mask_binding {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(binding.view()),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: spatial_buffer.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 6,
+            resource: parameter_buffer.as_entire_binding(),
+        });
+        let binds_parent_sample = entries.iter().any(|entry| entry.binding == 2);
+        let expected_entry_count = 4usize
+            .saturating_add(usize::from(destination_path))
+            .saturating_add(usize::from(clip_binding.is_some()))
+            .saturating_add(usize::from(mask_binding.is_some()));
+        if entries.len() != expected_entry_count || binds_parent_sample != destination_path {
+            return Err(preparation_error(
+                "the C09 composite bind group contains a dummy or missing resource",
+            ));
+        }
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C09 exact layer-composite bindings"),
+            layout: objects.bind_group_layout(),
+            entries: &entries,
+        });
+        #[cfg(test)]
+        let encoder_identity = std::ptr::from_mut(&mut *encoder) as usize;
+        if let Some(region) = region {
+            if region.scissor_x.saturating_add(region.scissor_width)
+                > target_spatial.device_extent.width()
+                || region.scissor_y.saturating_add(region.scissor_height)
+                    > target_spatial.device_extent.height()
+            {
+                return Err(preparation_error(
+                    "the C09 bounded composite exceeds its exact parent extent",
+                ));
+            }
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("Surgeist C09 bounded layer composite"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: target_binding.view(),
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(objects.render_pipeline());
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_viewport(
+                region.viewport_x,
+                region.viewport_y,
+                region.viewport_width,
+                region.viewport_height,
+                0.0,
+                1.0,
+            );
+            pass.set_scissor_rect(
+                region.scissor_x,
+                region.scissor_y,
+                region.scissor_width,
+                region.scissor_height,
+            );
+            pass.draw(0..3, 0..1);
+        }
+
+        Ok(C09LayerCompositeEncodingFacts {
+            normal_path,
+            destination_path,
+            fixed_premultiplied_blend: normal_path && objects.uses_fixed_source_over_blend(),
+            omits_parent_sample: normal_path && !binds_parent_sample,
+            copied_full_parent: copy_extent.width == target_binding.texture().width()
+                && copy_extent.height == target_binding.texture().height(),
+            avoids_read_write_alias: parent_and_result_are_distinct
+                && sampled_allocations_are_distinct,
+            exact_resources_and_parameters: spatial == &expected_spatial
+                && &expected_parameters == composite_parameters
+                && binds_parent_sample == destination_path
+                && objects.uses_fixed_source_over_blend() == normal_path
+                && objects.uses_replace_blend() == destination_path,
+            preserved_signed_mapping,
+            #[cfg(test)]
+            encoder_identity,
         })
     }
 

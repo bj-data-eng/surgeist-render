@@ -292,6 +292,19 @@ pub(crate) struct C08CustomSpineEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C09OrderedGraphEncodingObservationForTest {
+    pub(crate) encodes_clip_mask_opacity_and_blend_in_authored_order: bool,
+    pub(crate) normal_uses_fixed_premultiplied_blend: bool,
+    pub(crate) normal_omits_parent_sample: bool,
+    pub(crate) destination_copies_full_parent: bool,
+    pub(crate) destination_avoids_read_write_alias: bool,
+    pub(crate) composite_count: usize,
+    pub(crate) one_graph_command_encoder: bool,
+    pub(crate) transaction_committed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct C08CaptureFailureObservationForTest {
     pub(crate) capture_failure_is_reported: bool,
     pub(crate) complete_pass_is_rejected: bool,
@@ -3251,6 +3264,120 @@ impl Backend {
                 && pass_cache_after == pass_cache_before,
             encodes_without_submission_or_sync: true,
         })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c09_ordered_graph_encoding_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C09OrderedGraphEncodingObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C09 graph encoding observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let super::frame::FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "C09 graph encoding observation requires a validated GPU graph",
+            ));
+        };
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (device, queue) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 graph encoding observation lost its ready device",
+            )?;
+            (ready.device.clone(), ready.queue.clone())
+        };
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let (output_texture, output_view) =
+            create_headless_texture(&device, output_extent, Format::Rgba8)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C09 caller-owned graph observation encoder"),
+        });
+        let pending = match prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await
+        {
+            Ok(pending) => pending,
+            Err(_) => {
+                drop(encoder.finish());
+                drop(prepared);
+                transaction
+                    .finish(RuntimeOperation::EffectRendering)
+                    .await?;
+                return Ok(C09OrderedGraphEncodingObservationForTest::default());
+            }
+        };
+        let summary = pending.summary_for_test();
+        let mut observed = C09OrderedGraphEncodingObservationForTest {
+            encodes_clip_mask_opacity_and_blend_in_authored_order: summary
+                .encodes_custom_passes_in_order
+                && summary.layer_composites_bind_exact_resources_and_parameters
+                && summary.layer_composites_preserve_signed_mapping
+                && summary.advances_every_pass_once,
+            normal_uses_fixed_premultiplied_blend: summary.normal_composite_count > 0
+                && summary.normal_composites_use_fixed_premultiplied_blend,
+            normal_omits_parent_sample: summary.normal_composite_count > 0
+                && summary.normal_composites_omit_parent_sample,
+            destination_copies_full_parent: summary.destination_composites_copy_full_parent
+                && summary.destination_composite_count > 0,
+            destination_avoids_read_write_alias: summary
+                .destination_composites_avoid_read_write_alias
+                && summary.destination_composite_count > 0,
+            composite_count: summary.layer_composite_count,
+            one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
+            transaction_committed: false,
+        };
+        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        drop(output_view);
+        let payload = C08GraphSubmissionPayload::new(
+            encoder.finish(),
+            prepared_submission,
+            HeadlessPublication::new(output_texture),
+        );
+        let committed = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 graph encoding observation lost its pass cache before commit",
+            )?;
+            transaction
+                .submit_c08_graph(
+                    &device,
+                    &queue,
+                    &mut ready.pass_cache,
+                    payload,
+                    RuntimeOperation::EffectRendering,
+                )
+                .await?
+        };
+        let _ = committed.into_parts();
+        observed.transaction_committed = true;
+        Ok(observed)
     }
 
     #[cfg(test)]

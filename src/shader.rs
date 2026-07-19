@@ -909,6 +909,25 @@ impl ProvisionalDevicePassCacheUpdate {
         })
     }
 
+    pub(crate) fn composite_encoding_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalCompositePassObjects<'a>> {
+        self.composite_pass_objects(
+            cache,
+            CompositePassKeyRefs {
+                samplers,
+                layout,
+                shader,
+                pipeline,
+            },
+        )
+    }
+
     #[cfg(test)]
     pub(crate) fn contains_composite_pass_for_test(
         &self,
@@ -1049,45 +1068,34 @@ impl ProvisionalCompositePassObjects<'_> {
         Ok(())
     }
 
-    #[cfg(test)]
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn source_sampler(&self) -> &wgpu::Sampler {
         self.source_sampler
     }
 
-    #[cfg(test)]
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
         self.layout
     }
 
-    #[cfg(test)]
-    #[cfg(not(target_arch = "wasm32"))]
     pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
         self.pipeline
     }
 
-    #[cfg(test)]
     pub(crate) const fn path(&self) -> ShaderCompositePathKey {
         self.description.path
     }
 
-    #[cfg(test)]
     pub(crate) const fn has_clip_coverage(&self) -> bool {
         self.description.has_clip_coverage
     }
 
-    #[cfg(test)]
     pub(crate) const fn has_alpha_mask(&self) -> bool {
         self.description.has_alpha_mask
     }
 
-    #[cfg(test)]
     pub(crate) const fn uses_fixed_source_over_blend(&self) -> bool {
         matches!(self.description.path, ShaderCompositePathKey::Normal)
     }
 
-    #[cfg(test)]
     pub(crate) const fn uses_replace_blend(&self) -> bool {
         matches!(
             self.description.path,

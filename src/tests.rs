@@ -12502,6 +12502,81 @@ fn c09_selected_backend_and_requests_for_test() -> (
 }
 
 #[test]
+fn c09_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
+    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+        identity,
+        c09_composition_commands_for_test(),
+        c09_composition_frame_context_for_test(),
+    ))
+    .expect("the C09 graph must reach its checked one-shot encoding observation");
+
+    assert!(
+        observed.encodes_clip_mask_opacity_and_blend_in_authored_order,
+        "C09 composition has no one-shot GPU encoding"
+    );
+}
+
+#[test]
+fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
+    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+        identity,
+        c09_shader_composite_commands_for_test(BlendMode::Normal, true, true),
+        c09_composition_frame_context_for_test(),
+    ))
+    .expect("normal composition must reach its checked one-shot encoding observation");
+
+    assert!(
+        observed.normal_uses_fixed_premultiplied_blend && observed.normal_omits_parent_sample,
+        "normal composition sampled its parent or used wrong factors"
+    );
+}
+
+#[test]
+fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
+    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+        identity,
+        c09_shader_composite_commands_for_test(BlendMode::Multiply, true, true),
+        c09_composition_frame_context_for_test(),
+    ))
+    .expect("destination sampling must reach its checked one-shot encoding observation");
+
+    assert!(
+        observed.destination_copies_full_parent && observed.destination_avoids_read_write_alias,
+        "destination sampling aliases its output"
+    );
+}
+
+#[test]
+fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
+    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+        identity,
+        c09_composition_commands_for_test(),
+        c09_composition_frame_context_for_test(),
+    ))
+    .expect("multiple composites must reach their checked one-shot encoding observation");
+    let submission = submission_scope.observation_for_test();
+
+    assert!(
+        observed.composite_count == 2
+            && observed.one_graph_command_encoder
+            && observed.transaction_committed
+            && submission.queue_submission_count_for_test() == 1
+            && submission.transaction_generation_for_test().is_some()
+            && submission.transaction_generation_for_test()
+                == submission.active_generation_for_test()
+            && submission.scopes_resolved_for_test()
+            && submission.prepared_frame_committed_for_test()
+            && submission.capture_resources_committed_for_test(),
+        "composition split the frame transaction"
+    );
+}
+
+#[test]
 fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
