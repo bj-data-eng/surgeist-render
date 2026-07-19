@@ -1,7 +1,7 @@
 # GPU Render Pipeline C09 Composition Clip Mask And Blend Passes
 
 ## Header
-- Cycle: `C09`; owner: `surgeist-render`; status: `reviewed`.
+- Cycle: `C09`; owner: `surgeist-render`; status: `in_progress`.
 - Cycle base and published prerequisite: `44fd908f60a4b0d1b073c7f9a11ebab8c1472ee6` (C08).
 - Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S09, S16, S18-S19, S23, S25, S27-S30, and C09-applicable S31-S34 evidence.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at `c1a203393b2549603c0a0d5698099f55018abe2e`, normalized SHA-256 `70b345be31ac5bf4fcae72e2d3c5901c8e04ad0b2c26080851bd2c50d7150cde`, entry `C09 Composition Clip Mask And Blend Passes`.
