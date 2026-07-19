@@ -45,7 +45,8 @@ use super::{
     },
     resource::{
         AllocationGeneration, GaussianKernelKey, GaussianKernelPlan, GaussianKernelSamplingForm,
-        ResourceCacheKey, ResourceIdentity, ResourceManager, WorkingFormat,
+        ResourceAccountingFault, ResourceCacheKey, ResourceIdentity, ResourceManager,
+        ResourceRetentionOutcome, WorkingFormat,
     },
     shader::{DevicePassCache, device_pass_cache_owns_exact_key_spaces_for_test},
     surface::{HeadlessResources, SurfaceBackend},
@@ -6966,6 +6967,206 @@ fn resource_byte_accounting_overflow_is_typed() {
     );
     assert_eq!(manager.observation_for_test().retained_bytes, u64::MAX);
     assert_eq!(manager.observation_for_test().leased_count, 1);
+}
+
+#[test]
+fn c08_discard_accounting_mismatch_faults_resource_manager_without_clamping() {
+    let manager = ResourceManager::default();
+    let mut unrelated_frame = manager.begin_frame().unwrap();
+    let unrelated_lease = unrelated_frame
+        .acquire(modeled_resource_key_for_test(41), 8)
+        .unwrap();
+    let unrelated_identity = unrelated_lease.resource_identity();
+    let mut discarded_frame = manager.begin_frame().unwrap();
+    let discarded_lease = discarded_frame
+        .acquire(modeled_resource_key_for_test(42), 16)
+        .unwrap();
+    let discarded_identity = discarded_lease.resource_identity();
+    discarded_frame.discard_on_drop();
+    manager.inject_retained_byte_mismatch_before_discard_for_test();
+
+    let drop_result = catch_unwind(AssertUnwindSafe(|| drop(discarded_frame)));
+    assert!(drop_result.is_ok(), "C08 discard-on-drop must not panic");
+
+    let after_discard = manager.observation_for_test();
+    assert_eq!(after_discard.retained_bytes, 7);
+    assert_eq!(after_discard.accounted_entry_bytes, Some(8));
+    let expected_fault = ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes: 7,
+        registered_entry_bytes: 8,
+    };
+    assert_eq!(
+        after_discard.accounting_fault_for_test(),
+        Some(expected_fault)
+    );
+    assert_eq!(after_discard.active_frame_count, 1);
+    assert_eq!(after_discard.leased_count, 1);
+    assert!(
+        after_discard
+            .entry_identities_for_test()
+            .contains(&unrelated_identity),
+        "discard removed a resource leased by an unrelated active frame"
+    );
+    assert!(
+        !after_discard
+            .entry_identities_for_test()
+            .contains(&discarded_identity),
+        "discarded C08 resource remained registered for reuse"
+    );
+
+    let begin_error = match manager.begin_frame() {
+        Ok(_) => panic!("C08 discard accepted a retained-byte mismatch by saturation/clamping"),
+        Err(error) => error,
+    };
+    let preflight_error = manager
+        .preflight_graph_acquisitions(&[])
+        .expect_err("faulted resource accounting must block graph preflight");
+    let acquire_error = unrelated_frame
+        .acquire(modeled_resource_key_for_test(45), 4)
+        .expect_err("faulted resource accounting must block acquisition and reuse");
+    for error in [&begin_error, &preflight_error, &acquire_error] {
+        assert_eq!(error.code(), ErrorCode::RenderFailed);
+        assert_eq!(
+            error.message(),
+            "resource manager is unavailable after a retained-byte accounting invariant failure"
+        );
+    }
+    assert_eq!(manager.observation_for_test(), after_discard);
+
+    unrelated_frame.release(unrelated_lease).unwrap();
+    assert_eq!(manager.observation_for_test().resolved_lease_count, 1);
+    let finish_result = catch_unwind(AssertUnwindSafe(|| unrelated_frame.finish()));
+    assert!(
+        finish_result.is_ok(),
+        "an unrelated active frame must remain safely resolvable after the fault"
+    );
+    assert_eq!(
+        finish_result.unwrap().retention(),
+        ResourceRetentionOutcome::AccountingFault {
+            fault: expected_fault,
+        }
+    );
+    let after_unrelated_finish = manager.observation_for_test();
+    assert_eq!(after_unrelated_finish.active_frame_count, 0);
+    assert_eq!(after_unrelated_finish.resolved_lease_count, 0);
+    assert_eq!(after_unrelated_finish.leased_count, 0);
+    assert_eq!(after_unrelated_finish.idle_count, 1);
+    assert_eq!(
+        after_unrelated_finish.accounting_fault_for_test(),
+        Some(expected_fault)
+    );
+    assert!(
+        after_unrelated_finish
+            .entry_identities_for_test()
+            .contains(&unrelated_identity),
+        "resolving the unrelated frame must not clear its resource to recover accounting"
+    );
+    assert!(manager.begin_frame().is_err());
+}
+
+#[test]
+fn resource_manager_observation_reports_checked_entry_total_overflow() {
+    let manager = ResourceManager::default();
+    let mut frame = manager.begin_frame().unwrap();
+    let first = frame.acquire(modeled_resource_key_for_test(43), 1).unwrap();
+    let second = frame.acquire(modeled_resource_key_for_test(44), 1).unwrap();
+    let originals = manager.inject_registered_entry_total_overflow_for_test(
+        first.resource_identity(),
+        second.resource_identity(),
+    );
+
+    let accounted_entry_bytes = manager.observation_for_test().accounted_entry_bytes;
+    manager.restore_registered_entry_byte_lengths_for_test(originals);
+    frame.release(first).unwrap();
+    frame.release(second).unwrap();
+    let _ = frame.finish();
+
+    assert_eq!(
+        accounted_entry_bytes, None,
+        "resource observation saturated an overflowing registered-entry total"
+    );
+}
+
+#[test]
+fn c08_discard_records_underflow_and_surviving_total_overflow_without_panicking() {
+    let underflow_manager = ResourceManager::default();
+    let mut underflow_frame = underflow_manager.begin_frame().unwrap();
+    let underflow_lease = underflow_frame
+        .acquire(modeled_resource_key_for_test(46), 8)
+        .unwrap();
+    let underflow_identity = underflow_lease.resource_identity();
+    underflow_frame.discard_on_drop();
+    underflow_manager.inject_retained_byte_underflow_before_discard_for_test();
+
+    let underflow_drop = catch_unwind(AssertUnwindSafe(|| drop(underflow_frame)));
+    assert!(underflow_drop.is_ok(), "discard underflow must not panic");
+    let underflow_observation = underflow_manager.observation_for_test();
+    assert_eq!(
+        underflow_observation.accounting_fault_for_test(),
+        Some(ResourceAccountingFault::RetainedByteUnderflow {
+            retained_bytes: 0,
+            discarded_entry_bytes: 8,
+        })
+    );
+    assert!(
+        !underflow_observation
+            .entry_identities_for_test()
+            .contains(&underflow_identity)
+    );
+    assert_eq!(underflow_observation.accounted_entry_bytes, Some(0));
+    assert!(underflow_manager.begin_frame().is_err());
+
+    let overflow_manager = ResourceManager::default();
+    let mut survivor_frame = overflow_manager.begin_frame().unwrap();
+    let first_survivor = survivor_frame
+        .acquire(modeled_resource_key_for_test(47), 1)
+        .unwrap();
+    let second_survivor = survivor_frame
+        .acquire(modeled_resource_key_for_test(48), 1)
+        .unwrap();
+    let mut overflow_discard_frame = overflow_manager.begin_frame().unwrap();
+    let overflow_discarded = overflow_discard_frame
+        .acquire(modeled_resource_key_for_test(49), 1)
+        .unwrap();
+    let overflow_discarded_identity = overflow_discarded.resource_identity();
+    let _originals = overflow_manager.inject_registered_entry_total_overflow_for_test(
+        first_survivor.resource_identity(),
+        second_survivor.resource_identity(),
+    );
+    overflow_discard_frame.discard_on_drop();
+
+    let overflow_drop = catch_unwind(AssertUnwindSafe(|| drop(overflow_discard_frame)));
+    assert!(
+        overflow_drop.is_ok(),
+        "surviving-entry total overflow during discard must not panic"
+    );
+    let overflow_observation = overflow_manager.observation_for_test();
+    assert_eq!(
+        overflow_observation.accounting_fault_for_test(),
+        Some(ResourceAccountingFault::SurvivingEntryByteTotalOverflow)
+    );
+    assert_eq!(overflow_observation.accounted_entry_bytes, None);
+    assert!(
+        !overflow_observation
+            .entry_identities_for_test()
+            .contains(&overflow_discarded_identity)
+    );
+    assert!(
+        overflow_observation
+            .entry_identities_for_test()
+            .contains(&first_survivor.resource_identity())
+    );
+    assert!(
+        overflow_observation
+            .entry_identities_for_test()
+            .contains(&second_survivor.resource_identity())
+    );
+    assert!(overflow_manager.begin_frame().is_err());
+
+    survivor_frame.release(first_survivor).unwrap();
+    survivor_frame.release(second_survivor).unwrap();
+    let survivor_finish = catch_unwind(AssertUnwindSafe(|| survivor_frame.finish()));
+    assert!(survivor_finish.is_ok());
 }
 
 #[test]
@@ -25025,7 +25226,9 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
     assert_eq!(resources_after_failure.leased_count, 0);
     assert_eq!(
         resources_after_failure.retained_bytes,
-        resources_after_failure.accounted_entry_bytes
+        resources_after_failure
+            .accounted_entry_bytes
+            .expect("post-submit failure resource accounting must have an exact total")
     );
     let retained_aborted_identities = aborted_prepared_identities
         .iter()
@@ -25102,7 +25305,9 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
     assert_eq!(resources_after_retry.leased_count, 0);
     assert_eq!(
         resources_after_retry.retained_bytes,
-        resources_after_retry.accounted_entry_bytes
+        resources_after_retry
+            .accounted_entry_bytes
+            .expect("clean retry resource accounting must have an exact total")
     );
     assert!(retry_prepared_identities.iter().all(|identity| {
         resources_after_retry
@@ -25242,7 +25447,9 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
     assert_eq!(resources_after_cancellation.leased_count, 0);
     assert_eq!(
         resources_after_cancellation.retained_bytes,
-        resources_after_cancellation.accounted_entry_bytes
+        resources_after_cancellation
+            .accounted_entry_bytes
+            .expect("canceled frame resource accounting must have an exact total")
     );
     let retained_canceled_identities = canceled_prepared_identities
         .iter()
@@ -25319,7 +25526,9 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
     assert_eq!(resources_after_retry.leased_count, 0);
     assert_eq!(
         resources_after_retry.retained_bytes,
-        resources_after_retry.accounted_entry_bytes
+        resources_after_retry
+            .accounted_entry_bytes
+            .expect("clean retry resource accounting must have an exact total")
     );
     assert!(retry_prepared_identities.iter().all(|identity| {
         resources_after_retry

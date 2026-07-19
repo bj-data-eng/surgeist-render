@@ -1,5 +1,5 @@
 use super::{
-    Error, ResourceCacheBudget, Result,
+    BackendErrorCode, Error, ResourceCacheBudget, Result,
     backend::DeviceCapabilities,
     image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
     texture::{
@@ -480,6 +480,19 @@ pub(crate) struct ResourceLifecycleStats {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ResourceAccountingFault {
+    RetainedByteUnderflow {
+        retained_bytes: u64,
+        discarded_entry_bytes: u64,
+    },
+    SurvivingEntryByteTotalOverflow,
+    RetainedByteMismatch {
+        retained_bytes: u64,
+        registered_entry_bytes: u64,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResourceEntryState {
     Idle { last_used_frame: FrameIdentity },
     Leased { frame: FrameIdentity },
@@ -559,6 +572,7 @@ struct ResourceManagerState {
     next_frame: u64,
     next_resource: u64,
     retained_bytes: u64,
+    accounting_fault: Option<ResourceAccountingFault>,
     active_frames: BTreeSet<FrameIdentity>,
     resolved_leases: BTreeSet<(FrameIdentity, ResourceIdentity)>,
     entries: BTreeMap<ResourceIdentity, ResourceEntry>,
@@ -575,6 +589,52 @@ enum IdleReuse {
 }
 
 impl ResourceManagerState {
+    const ACCOUNTING_FAULT_MESSAGE: &'static str =
+        "resource manager is unavailable after a retained-byte accounting invariant failure";
+
+    fn accounting_fault_error() -> Error {
+        Error::new(
+            BackendErrorCode::RenderFailed,
+            Self::ACCOUNTING_FAULT_MESSAGE,
+        )
+    }
+
+    fn ensure_accounting_healthy(&self) -> Result<()> {
+        if self.accounting_fault.is_some() {
+            return Err(Self::accounting_fault_error());
+        }
+        Ok(())
+    }
+
+    fn record_accounting_fault(&mut self, fault: ResourceAccountingFault) {
+        if self.accounting_fault.is_none() {
+            self.accounting_fault = Some(fault);
+        }
+    }
+
+    fn checked_registered_entry_bytes(&self) -> Option<u64> {
+        self.entries
+            .values()
+            .try_fold(0_u64, |bytes, entry| bytes.checked_add(entry.byte_len))
+    }
+
+    fn checked_idle_summary(&self) -> Option<(usize, u64)> {
+        let retained_count = self
+            .entries
+            .values()
+            .filter(|entry| matches!(entry.state, ResourceEntryState::Idle { .. }))
+            .count();
+        let retained_byte_len = self
+            .entries
+            .values()
+            .filter_map(|entry| match entry.state {
+                ResourceEntryState::Idle { .. } => Some(entry.byte_len),
+                ResourceEntryState::Leased { .. } => None,
+            })
+            .try_fold(0_u64, u64::checked_add)?;
+        Some((retained_count, retained_byte_len))
+    }
+
     fn invalid_lease(resource: ResourceIdentity, reason: &'static str) -> Error {
         Error::invalid_value("resource lease", resource.get(), reason)
     }
@@ -588,6 +648,7 @@ impl ResourceManagerState {
         idle_reuse: IdleReuse,
         create_payload: impl FnOnce() -> Result<ResourcePayload>,
     ) -> Result<ResourceLease> {
+        self.ensure_accounting_healthy()?;
         if self.identity != *manager_identity || !self.active_frames.contains(&frame) {
             return Err(Error::invalid_value(
                 "resource frame",
@@ -685,6 +746,7 @@ impl ResourceManagerState {
     }
 
     fn preflight_graph_acquisitions(&self, requests: &[ResourceAllocationPreflight]) -> Result<()> {
+        self.ensure_accounting_healthy()?;
         let mut selected_idle = BTreeSet::new();
         let mut retained_bytes = self.retained_bytes;
         let mut next_resource = self.next_resource;
@@ -957,6 +1019,9 @@ impl ResourceManagerState {
     }
 
     fn retire_idle_vello_atlases(&mut self) {
+        if self.accounting_fault.is_some() {
+            return;
+        }
         let retired = self
             .entries
             .iter()
@@ -999,6 +1064,9 @@ impl ResourceManagerState {
                 }
             }
         }
+        if let Some(fault) = self.accounting_fault {
+            return FrameCleanup::accounting_fault(fault);
+        }
         self.trim_idle()
     }
 
@@ -1019,26 +1087,71 @@ impl ResourceManagerState {
             })
             .collect::<Vec<_>>();
         let mut cleanup = FrameCleanup::default();
+        let mut retained_after_discard = self
+            .accounting_fault
+            .is_none()
+            .then_some(self.retained_bytes);
+        let mut detected_fault = None;
         for identity in discarded {
             if let Some(entry) = self.entries.remove(&identity) {
-                self.retained_bytes = self.retained_bytes.saturating_sub(entry.byte_len);
+                if let Some(retained_bytes) = retained_after_discard {
+                    if let Some(remaining) = retained_bytes.checked_sub(entry.byte_len) {
+                        retained_after_discard = Some(remaining);
+                    } else {
+                        detected_fault = Some(ResourceAccountingFault::RetainedByteUnderflow {
+                            retained_bytes,
+                            discarded_entry_bytes: entry.byte_len,
+                        });
+                        retained_after_discard = None;
+                    }
+                }
                 self.stats.evictions = self.stats.evictions.saturating_add(1);
                 cleanup.evicted_resources.push(identity);
             }
         }
+        if let Some(retained_bytes) = retained_after_discard {
+            self.retained_bytes = retained_bytes;
+        }
         self.resolved_leases
             .retain(|(resolved_frame, _)| *resolved_frame != frame);
 
-        let (retained_count, retained_byte_len) = self
-            .entries
-            .values()
-            .filter_map(|entry| match entry.state {
-                ResourceEntryState::Idle { .. } => Some(entry.byte_len),
-                ResourceEntryState::Leased { .. } => None,
-            })
-            .fold((0_usize, 0_u64), |(count, bytes), byte_len| {
-                (count.saturating_add(1), bytes.saturating_add(byte_len))
-            });
+        if detected_fault.is_none() && self.accounting_fault.is_none() {
+            detected_fault = match (
+                retained_after_discard,
+                self.checked_registered_entry_bytes(),
+            ) {
+                (_, None) => Some(ResourceAccountingFault::SurvivingEntryByteTotalOverflow),
+                (Some(retained_bytes), Some(registered_entry_bytes))
+                    if retained_bytes != registered_entry_bytes =>
+                {
+                    Some(ResourceAccountingFault::RetainedByteMismatch {
+                        retained_bytes,
+                        registered_entry_bytes,
+                    })
+                }
+                (Some(_), Some(_)) => None,
+                (None, Some(registered_entry_bytes)) => {
+                    Some(ResourceAccountingFault::RetainedByteMismatch {
+                        retained_bytes: self.retained_bytes,
+                        registered_entry_bytes,
+                    })
+                }
+            };
+        }
+        if let Some(fault) = detected_fault {
+            self.record_accounting_fault(fault);
+        }
+        if let Some(fault) = self.accounting_fault {
+            cleanup.retention = ResourceRetentionOutcome::AccountingFault { fault };
+            return cleanup;
+        }
+
+        let Some((retained_count, retained_byte_len)) = self.checked_idle_summary() else {
+            let fault = ResourceAccountingFault::SurvivingEntryByteTotalOverflow;
+            self.record_accounting_fault(fault);
+            cleanup.retention = ResourceRetentionOutcome::AccountingFault { fault };
+            return cleanup;
+        };
         cleanup.retention = if retained_count == 0 {
             ResourceRetentionOutcome::NoIdleResources
         } else {
@@ -1051,6 +1164,9 @@ impl ResourceManagerState {
     }
 
     fn trim_idle(&mut self) -> FrameCleanup {
+        if let Some(fault) = self.accounting_fault {
+            return FrameCleanup::accounting_fault(fault);
+        }
         let mut idle = self
             .entries
             .iter()
@@ -1080,21 +1196,12 @@ impl ResourceManagerState {
             self.stats.evictions = self.stats.evictions.saturating_add(1);
             cleanup.evicted_resources.push(identity);
         }
-        let (retained_count, retained_byte_len) = self
-            .entries
-            .values()
-            .filter_map(|entry| match entry.state {
-                ResourceEntryState::Idle { .. } => Some(entry.byte_len),
-                ResourceEntryState::Leased { .. } => None,
-            })
-            .fold((0_usize, 0_u64), |(count, bytes), byte_len| {
-                (
-                    count.saturating_add(1),
-                    bytes
-                        .checked_add(byte_len)
-                        .expect("idle resource bytes must fit retained accounting"),
-                )
-            });
+        let Some((retained_count, retained_byte_len)) = self.checked_idle_summary() else {
+            let fault = ResourceAccountingFault::SurvivingEntryByteTotalOverflow;
+            self.record_accounting_fault(fault);
+            cleanup.retention = ResourceRetentionOutcome::AccountingFault { fault };
+            return cleanup;
+        };
         cleanup.retention = if cleanup.evicted_resources.is_empty() {
             if retained_count == 0 {
                 ResourceRetentionOutcome::NoIdleResources
@@ -1130,6 +1237,7 @@ impl ResourceManager {
                 next_frame: 0,
                 next_resource: 0,
                 retained_bytes: 0,
+                accounting_fault: None,
                 active_frames: BTreeSet::new(),
                 resolved_leases: BTreeSet::new(),
                 entries: BTreeMap::new(),
@@ -1143,6 +1251,7 @@ impl ResourceManager {
 
     pub(crate) fn begin_frame(&self) -> Result<FrameResourceScope> {
         let mut state = lock_state(&self.state);
+        state.ensure_accounting_healthy()?;
         let next_frame = state.next_frame.checked_add(1).ok_or_else(|| {
             Error::invalid_value(
                 "resource frame identity",
@@ -1203,6 +1312,65 @@ impl ResourceManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn inject_retained_byte_mismatch_before_discard_for_test(&self) {
+        let mut state = lock_state(&self.state);
+        state.retained_bytes = state
+            .retained_bytes
+            .checked_sub(1)
+            .expect("the accounting-mismatch fixture requires retained bytes");
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_retained_byte_underflow_before_discard_for_test(&self) {
+        lock_state(&self.state).retained_bytes = 0;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn inject_registered_entry_total_overflow_for_test(
+        &self,
+        first: ResourceIdentity,
+        second: ResourceIdentity,
+    ) -> [(ResourceIdentity, u64); 2] {
+        let mut state = lock_state(&self.state);
+        let first_original = state
+            .entries
+            .get(&first)
+            .expect("the first overflow-fixture resource must remain registered")
+            .byte_len;
+        let second_original = state
+            .entries
+            .get(&second)
+            .expect("the second overflow-fixture resource must remain registered")
+            .byte_len;
+        state
+            .entries
+            .get_mut(&first)
+            .expect("the first overflow-fixture resource must remain registered")
+            .byte_len = u64::MAX;
+        state
+            .entries
+            .get_mut(&second)
+            .expect("the second overflow-fixture resource must remain registered")
+            .byte_len = 1;
+        [(first, first_original), (second, second_original)]
+    }
+
+    #[cfg(test)]
+    pub(crate) fn restore_registered_entry_byte_lengths_for_test(
+        &self,
+        originals: [(ResourceIdentity, u64); 2],
+    ) {
+        let mut state = lock_state(&self.state);
+        for (identity, byte_len) in originals {
+            state
+                .entries
+                .get_mut(&identity)
+                .expect("the restored overflow-fixture resource must remain registered")
+                .byte_len = byte_len;
+        }
+    }
+
+    #[cfg(test)]
     pub(crate) fn observation_for_test(&self) -> ResourceManagerObservationForTest {
         let state = lock_state(&self.state);
         let idle_count = state
@@ -1247,10 +1415,8 @@ impl ResourceManager {
             idle_count,
             leased_count: state.entries.len().saturating_sub(idle_count),
             retained_bytes: state.retained_bytes,
-            accounted_entry_bytes: state
-                .entries
-                .values()
-                .fold(0_u64, |bytes, entry| bytes.saturating_add(entry.byte_len)),
+            accounted_entry_bytes: state.checked_registered_entry_bytes(),
+            accounting_fault: state.accounting_fault,
             active_frame_count: state.active_frames.len(),
             resolved_lease_count: state.resolved_leases.len(),
             entry_identities: state.entries.keys().copied().collect(),
@@ -1885,6 +2051,9 @@ pub(crate) enum ResourceRetentionOutcome {
         retained_count: usize,
         retained_byte_len: u64,
     },
+    AccountingFault {
+        fault: ResourceAccountingFault,
+    },
 }
 
 #[cfg(test)]
@@ -1921,9 +2090,24 @@ pub(crate) struct FrameCleanup {
 }
 
 impl FrameCleanup {
+    fn accounting_fault(fault: ResourceAccountingFault) -> Self {
+        Self {
+            evicted_resources: Vec::new(),
+            retention: ResourceRetentionOutcome::AccountingFault { fault },
+        }
+    }
+
     pub(crate) fn followed_by(mut self, mut later: Self) -> Self {
         self.evicted_resources.append(&mut later.evicted_resources);
-        self.retention = later.retention;
+        self.retention = match (self.retention, later.retention) {
+            (ResourceRetentionOutcome::AccountingFault { fault }, _) => {
+                ResourceRetentionOutcome::AccountingFault { fault }
+            }
+            (_, ResourceRetentionOutcome::AccountingFault { fault }) => {
+                ResourceRetentionOutcome::AccountingFault { fault }
+            }
+            (_, later) => later,
+        };
         self
     }
 
@@ -1965,7 +2149,8 @@ pub(crate) struct ResourceManagerObservationForTest {
     pub(crate) idle_count: usize,
     pub(crate) leased_count: usize,
     pub(crate) retained_bytes: u64,
-    pub(crate) accounted_entry_bytes: u64,
+    pub(crate) accounted_entry_bytes: Option<u64>,
+    accounting_fault: Option<ResourceAccountingFault>,
     pub(crate) active_frame_count: usize,
     pub(crate) resolved_lease_count: usize,
     entry_identities: Vec<ResourceIdentity>,
@@ -1984,6 +2169,10 @@ pub(crate) struct ResourceManagerObservationForTest {
 
 #[cfg(test)]
 impl ResourceManagerObservationForTest {
+    pub(crate) const fn accounting_fault_for_test(&self) -> Option<ResourceAccountingFault> {
+        self.accounting_fault
+    }
+
     pub(crate) fn entry_identities_for_test(&self) -> &[ResourceIdentity] {
         &self.entry_identities
     }
