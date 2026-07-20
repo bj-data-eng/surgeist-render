@@ -127,7 +127,8 @@
 
 - Outcome: implement ordered outer clips, resolved alpha masks at every image
   quality, opacity, isolation, and all currently supported blend modes.
-- Specification: S09, S16, S18-S19, S23, S25, S27-S30, and applicable S31-S34.
+- Specification: S09, C09-applicable S11, S16, S18-S19, S23, S25,
+  S27-S30, applicable S31-S34, and per-cycle S36-S37 evidence.
 - Prerequisites: C08.
 - Entry state: bounded raster content remains a canonical GPU working image.
 - Exit evidence: GPU composition matches ordering/sampling oracles while broad
@@ -173,7 +174,7 @@
 
 ## C13 GPU Only Cutover And Matrix Reconciliation
 
-- Outcome: expose final routes/capabilities/statistics, remove CPU/materialized
+- Outcome: expose final remaining routes/capabilities/statistics, remove CPU/materialized
   execution and superseded public phases, isolate the oracle to tests, and
   reconcile every primitive/property/diagnostic inventory row.
 - Specification: S01, S03, S11, S14, S20, S25, S27, remaining S29-S30C rows, S35,
