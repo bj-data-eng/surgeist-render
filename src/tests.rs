@@ -22981,6 +22981,17 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
+    let parameters_before = surface.last_parameters;
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the configured C08 surface must retain a ready device"))
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the configured C08 surface must retain a resource manager"))
+        .internal_resource_manager_observation_for_test();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
@@ -22997,9 +23008,9 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     let presented = presented_observation_for_test(&surface);
     assert_eq!(presented.acquire_attempt_count_for_test(), 1);
     assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 0);
-    assert_eq!(presented.discarded_count_for_test(), 1);
-    assert!(take_last_presented_texture_for_test(&mut surface).is_none());
+    assert_eq!(presented.present_count_for_test(), 1);
+    assert_eq!(presented.discarded_count_for_test(), 0);
+    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
     assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     assert!(graph_submission.scopes_resolved_for_test());
     assert!(graph_submission.presentation_scopes_resolved_for_test());
@@ -23007,8 +23018,35 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     assert!(!graph_submission.capture_resources_committed_for_test());
     assert!(!graph_submission.presented_host_effect_applied_for_test());
     assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(surface.last_parameters, None);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
     assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .unwrap_or_else(|| {
+                panic!("the C08 present-scope failure must retain the ready device")
+            })
+            .device_pass_cache_counts_for_test(),
+        cache_before
+    );
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| {
+            panic!("the C08 present-scope failure must return provisional resources")
+        })
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after.leased_count, 0);
+    assert_eq!(resources_after.active_frame_count, 0);
+    assert_eq!(
+        resources_after.retained_count_for_test(),
+        resources_before.retained_count_for_test()
+    );
+    assert_eq!(
+        resources_after.retained_byte_len_for_test(),
+        resources_before.retained_byte_len_for_test()
+    );
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
@@ -28000,7 +28038,7 @@ fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
     };
     pollster::block_on(renderer.render(&mut surface, &first, first_parameters))
         .expect("the first frame must establish the public state to preserve");
-    let prior_pixels = pollster::block_on(renderer.read_headless(&surface))
+    let _prior_pixels = pollster::block_on(renderer.read_headless(&surface))
         .expect("the first frame must establish readable pixels");
     let prior_texture = match &surface.backend {
         SurfaceBackend::Headless {
@@ -28009,9 +28047,9 @@ fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
         } => texture.clone(),
         _ => panic!("the readable headless frame must retain its published texture"),
     };
-    let prior_stats = renderer.stats();
     let prior_parameters = surface.last_parameters;
     let prior_uploaded_images = renderer.uploaded_images_for_test();
+    let prior_publication_count = surface.headless_publication_count_for_test();
 
     let replacement =
         Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 255, 255, 255]))
@@ -28022,41 +28060,69 @@ fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
         Rect::new(0.0, 0.0, 2.0, 2.0),
         ImageFit::Stretch,
     );
+    let next_parameters = Parameters {
+        base_color: Color::TRANSPARENT,
+        debug: false,
+    };
     let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
-    let error = pollster::block_on(renderer.render(
-        &mut surface,
-        &next,
-        Parameters {
-            base_color: Color::TRANSPARENT,
-            debug: false,
-        },
-    ))
-    .expect_err("a terminal signal before publication must fail the active frame");
+    let current = pollster::block_on(renderer.render(&mut surface, &next, next_parameters))
+        .unwrap_or_else(|error| {
+            panic!("a terminal signal after clean finish rewrote the completed frame: {error}")
+        });
     drop(loss);
 
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    let current_texture = match &surface.backend {
+        SurfaceBackend::Headless {
+            resources: HeadlessResources::Ready { texture },
+            ..
+        } => texture.clone(),
+        _ => panic!("the completed frame must install its headless publication"),
+    };
+    assert_ne!(
+        current_texture, prior_texture,
+        "the completed frame must replace the prior published texture"
+    );
+    assert_eq!(renderer.stats(), current);
+    assert_eq!(surface.last_parameters, Some(next_parameters));
+    assert_ne!(surface.last_parameters, prior_parameters);
+    assert_ne!(renderer.uploaded_images_for_test(), prior_uploaded_images);
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        prior_publication_count + 1
+    );
+
+    let committed_stats = renderer.stats();
+    let committed_parameters = surface.last_parameters;
+    let committed_uploaded_images = renderer.uploaded_images_for_test();
+    let committed_publication_count = surface.headless_publication_count_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let error = pollster::block_on(renderer.render(&mut surface, &next, Parameters::default()))
+        .expect_err("the operation after an idle terminal signal must fail deterministically");
     assert_runtime_device_lost(
         error,
         RuntimeOperation::SurfaceRendering,
         DeviceLossReason::Unknown,
     );
-    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    assert_eq!(submission.queue_submission_count_for_test(), 0);
+    assert_eq!(renderer.stats(), committed_stats);
+    assert_eq!(surface.last_parameters, committed_parameters);
+    assert_eq!(
+        renderer.uploaded_images_for_test(),
+        committed_uploaded_images
+    );
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        committed_publication_count
+    );
     match &surface.backend {
         SurfaceBackend::Headless {
             resources: HeadlessResources::Ready { texture },
             ..
-        } => assert_eq!(
-            texture, &prior_texture,
-            "the terminal failure must retain the exact texture containing the prior public pixels"
-        ),
-        _ => panic!("the terminal failure must retain the prior headless publication"),
+        } => assert_eq!(texture, &current_texture),
+        _ => panic!("the rejected next operation must preserve the completed publication"),
     }
-    assert_eq!(renderer.stats(), prior_stats);
-    assert_eq!(surface.last_parameters, prior_parameters);
-    assert_eq!(renderer.uploaded_images_for_test(), prior_uploaded_images);
-    assert!(
-        prior_pixels.rgba().iter().any(|channel| *channel != 0),
-        "the preserved public frame must have established non-empty pixels before the race"
-    );
 }
 
 #[test]
@@ -29539,7 +29605,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
 
 #[cfg(feature = "render-window")]
 #[test]
-fn presented_c09_masked_blended_present_scope_failure_discards_without_publication() {
+fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_publication() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
     let mask = c09_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
@@ -29597,16 +29663,16 @@ fn presented_c09_masked_blended_present_scope_failure_discards_without_publicati
     let direct_submission = direct_scope.observation_for_test();
     let failure = ScopedC08GraphPostSubmitControlForTest::present_failing();
     let error = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
-        .expect_err("the injected C09 present-scope failure must abort before presentation");
+        .expect_err("the injected C09 present-scope failure must abort public publication");
 
     assert_eq!(error.code(), ErrorCode::PresentFailed);
     assert!(failure.scope_resolution_observed_for_test());
     let presented = presented_observation_for_test(&surface);
     assert_eq!(presented.acquire_attempt_count_for_test(), 1);
     assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 0);
-    assert_eq!(presented.discarded_count_for_test(), 1);
-    assert!(take_last_presented_texture_for_test(&mut surface).is_none());
+    assert_eq!(presented.present_count_for_test(), 1);
+    assert_eq!(presented.discarded_count_for_test(), 0);
+    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
     assert_eq!(submission.queue_submission_count_for_test(), 1);
     assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
@@ -29646,6 +29712,124 @@ fn presented_c09_masked_blended_present_scope_failure_discards_without_publicati
         resources_before.retained_byte_len_for_test()
     );
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
+    let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[160],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .blend(BlendMode::Multiply)
+            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
+        |scene| {
+            scene.fill(rect, c09_color_for_test([224, 64, 32, 192]));
+        },
+    );
+
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .unwrap_or_else(|error| {
+        panic!("presented C09 terminal coverage requires a compatible renderer: {error}")
+    });
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    renderer.select_exact_graph_working_format_for_test(working_format);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let parameters = Parameters {
+        base_color: c09_color_for_test([48, 160, 208, 255]),
+        debug: true,
+    };
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let target_before = presented_target_identity_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
+        .unwrap_or_else(|error| {
+            panic!("a terminal signal after clean finish rewrote the completed C09 frame: {error}")
+        });
+    drop(loss);
+
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(graph_submission.presentation_scopes_resolved_for_test());
+    assert!(graph_submission.prepared_frame_committed_for_test());
+    assert!(graph_submission.capture_resources_committed_for_test());
+    assert!(graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(
+        graph_submission.resource_retention_for_test(),
+        Some(C08GraphResourceRetentionForTest::RetainedReusable),
+        "the clean transaction must commit its prepared resources and pass-cache entries before terminal cleanup"
+    );
+    let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
+    assert!(!prepared_identities.is_empty());
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.present_count_for_test(), 1);
+    assert_eq!(presented.discarded_count_for_test(), 0);
+    assert_eq!(renderer.stats(), stats);
+    assert_eq!(surface.last_parameters, Some(parameters));
+    assert_eq!(surface.state(), SurfaceState::Available);
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Presented);
+    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
+    assert_eq!(presented_target_identity_for_test(&surface), target_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+
+    let committed_stats = renderer.stats();
+    let committed_parameters = surface.last_parameters;
+    let committed_lifecycle = presented_lifecycle_for_test(&surface);
+    let committed_target = presented_target_identity_for_test(&surface);
+    let committed_resource = presented_resource_id_for_test(&surface);
+    let next_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let next_submission = next_submission_scope.observation_for_test();
+    let next_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let next_graph_submission = next_graph_scope.observation_for_test();
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect_err("the operation after an idle C09 terminal signal must fail deterministically");
+    assert_runtime_device_lost(
+        error,
+        RuntimeOperation::SurfaceRendering,
+        DeviceLossReason::Unknown,
+    );
+    assert_eq!(next_submission.queue_submission_count_for_test(), 0);
+    assert_eq!(next_graph_submission.queue_submission_count_for_test(), 0);
+    assert!(!next_graph_submission.prepared_frame_committed_for_test());
+    assert!(!next_graph_submission.capture_resources_committed_for_test());
+    assert!(!next_graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(presented_observation_for_test(&surface), presented);
+    assert_eq!(renderer.stats(), committed_stats);
+    assert_eq!(surface.last_parameters, committed_parameters);
+    assert_eq!(presented_lifecycle_for_test(&surface), committed_lifecycle);
+    assert_eq!(
+        presented_target_identity_for_test(&surface),
+        committed_target
+    );
+    assert_eq!(presented_resource_id_for_test(&surface), committed_resource);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
 }
 
 #[test]

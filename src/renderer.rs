@@ -840,7 +840,7 @@ impl Renderer {
                 .backend
                 .as_mut()
                 .expect("surface preflight confirmed the renderer backend is available");
-            let frame = match execution {
+            match execution {
                 PreparedRendererExecution::DirectVello(vello_scene) => {
                     let transaction = backend.begin_gpu_operation(
                         device_identity,
@@ -862,22 +862,28 @@ impl Renderer {
                         feature = "render-window",
                         all(feature = "render-web", target_arch = "wasm32")
                     ))]
-                    let frame = if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
-                        render_exact_presented_graph_surface(backend, surface, graph).await
-                    } else {
-                        render_exact_headless_graph_surface(backend, surface, graph).await
-                    };
+                    {
+                        if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                            render_exact_presented_graph_surface(backend, surface, graph).await
+                        } else {
+                            render_exact_headless_graph_surface(backend, surface, graph).await
+                        }
+                    }
                     #[cfg(not(any(
                         feature = "render-window",
                         all(feature = "render-web", target_arch = "wasm32")
                     )))]
-                    let frame = render_exact_headless_graph_surface(backend, surface, graph).await;
-                    frame
+                    {
+                        render_exact_headless_graph_surface(backend, surface, graph).await
+                    }
                 }
-            };
-            backend.observe_device_terminal(device_identity);
-            frame
+            }
         };
+        if frame.is_err()
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.observe_device_terminal(device_identity);
+        }
         let frame = match frame {
             Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
                 self.configure_presented_surface_if_needed(
@@ -910,11 +916,6 @@ impl Renderer {
         mut publication: RenderPublication,
         frame_start: Instant,
     ) -> Result<Stats> {
-        let publication_signal = self
-            .backend
-            .as_mut()
-            .expect("surface preflight confirmed the renderer backend is available")
-            .publication_signal(device_identity, RuntimeOperation::SurfaceRendering)?;
         let timings = publication.frame.timings();
         publication.stats.render_time = timings.render_time;
         publication.stats.present_time = timings.present_time;
@@ -924,18 +925,21 @@ impl Renderer {
         let publication =
             published.expect("a clean GPU transaction must commit its staged public state");
         #[cfg(test)]
-        inject_final_publication_loss_for_test(&publication_signal);
-        match publication_signal.commit_if_no_terminal(RuntimeOperation::SurfaceRendering, || {
-            publication.commit(self, surface)
-        }) {
-            Ok(stats) => Ok(stats),
-            Err(error) => {
-                if let Some(backend) = self.backend.as_mut() {
-                    backend.observe_device_terminal(device_identity);
-                }
-                Err(error)
-            }
+        {
+            let Some(publication_signal) = self
+                .backend
+                .as_mut()
+                .and_then(|backend| backend.device_signal_for_test(device_identity))
+            else {
+                panic!("a clean frame must retain its device signal until publication");
+            };
+            inject_final_publication_loss_for_test(&publication_signal);
         }
+        let stats = publication.commit(self, surface);
+        if let Some(backend) = self.backend.as_mut() {
+            backend.observe_device_terminal(device_identity);
+        }
+        Ok(stats)
     }
 
     /// Private T5 entry for forcing ordinary commands through the exact
@@ -1082,34 +1086,41 @@ impl Renderer {
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
-            let frame = if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
-                render_exact_presented_graph_surface(
-                    backend,
-                    surface,
-                    ExactSurfaceGraph::C08(preparable),
-                )
-                .await
-            } else {
+            {
+                if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                    render_exact_presented_graph_surface(
+                        backend,
+                        surface,
+                        ExactSurfaceGraph::C08(preparable),
+                    )
+                    .await
+                } else {
+                    render_exact_headless_graph_surface(
+                        backend,
+                        surface,
+                        ExactSurfaceGraph::C08(preparable),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            )))]
+            {
                 render_exact_headless_graph_surface(
                     backend,
                     surface,
                     ExactSurfaceGraph::C08(preparable),
                 )
                 .await
-            };
-            #[cfg(not(any(
-                feature = "render-window",
-                all(feature = "render-web", target_arch = "wasm32")
-            )))]
-            let frame = render_exact_headless_graph_surface(
-                backend,
-                surface,
-                ExactSurfaceGraph::C08(preparable),
-            )
-            .await;
-            backend.observe_device_terminal(device_identity);
-            frame
+            }
         };
+        if frame.is_err()
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.observe_device_terminal(device_identity);
+        }
         let frame = match frame {
             Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
                 self.configure_presented_surface_if_needed(

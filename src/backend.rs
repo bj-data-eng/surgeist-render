@@ -1501,6 +1501,10 @@ impl DeviceSignal {
     }
 
     /// Linearizes public state with terminal signal delivery.
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
     pub(crate) fn commit_if_no_terminal<T>(
         &self,
         operation: RuntimeOperation,
@@ -2399,6 +2403,10 @@ impl Backend {
         state.terminal().map(|terminal| terminal.error(operation))
     }
 
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
     pub(crate) fn publication_signal(
         &mut self,
         identity: DeviceSlotIdentity,
