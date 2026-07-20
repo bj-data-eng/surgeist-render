@@ -3252,12 +3252,17 @@ fn executable_vello_capture_facts(
             .then(Transform::scale(spatial.raster_scale, spatial.raster_scale).ok()?)
             .ok()?;
     let initial_transform = match work {
-        RuntimeVelloCapture::Span(span) => span
-            .capture_transform
-            .then(span.parent_to_surface)
-            .ok()?
-            .then(grid_transform)
-            .ok()?,
+        RuntimeVelloCapture::Span(span) => match span.scope {
+            RuntimeVelloSpanScope::CurrentParent => span
+                .capture_transform
+                .then(span.parent_to_surface)
+                .ok()?
+                .then(grid_transform)
+                .ok()?,
+            RuntimeVelloSpanScope::LayerSource => {
+                span.capture_transform.then(grid_transform).ok()?
+            }
+        },
         RuntimeVelloCapture::ClipCoverage(_) => grid_transform,
     };
     Some(ExecutableVelloCaptureFacts {
@@ -5386,13 +5391,41 @@ impl C08RenderRegion {
         let unclipped_end_y = (source.texel_origin.y() + source_height
             - destination.texel_origin.y())
             * destination.raster_scale;
+        Self::bounded_unclipped(
+            [unclipped_x, unclipped_y, unclipped_end_x, unclipped_end_y],
+            destination,
+            "the C08 signed bounded render mapping is non-finite",
+            "the C08 bounded viewport or scissor cannot represent its signed mapping",
+        )
+    }
+
+    fn bounded_transformed_source(
+        source: RuntimeSpatialDescriptor,
+        destination: RuntimeSpatialDescriptor,
+        source_to_destination: Transform,
+    ) -> Result<(Option<Self>, [f64; 4])> {
+        let bounds =
+            c09_transformed_source_device_bounds(source, destination, source_to_destination)?;
+        let region = Self::bounded_unclipped(
+            bounds,
+            destination,
+            "the C09 transformed bounded render mapping is non-finite",
+            "the C09 transformed viewport or scissor cannot represent its signed mapping",
+        )?;
+        Ok((region, bounds))
+    }
+
+    fn bounded_unclipped(
+        [unclipped_x, unclipped_y, unclipped_end_x, unclipped_end_y]: [f64; 4],
+        destination: RuntimeSpatialDescriptor,
+        non_finite_message: &'static str,
+        invalid_region_message: &'static str,
+    ) -> Result<Option<Self>> {
         if [unclipped_x, unclipped_y, unclipped_end_x, unclipped_end_y]
             .iter()
             .any(|value| !value.is_finite())
         {
-            return Err(preparation_error(
-                "the C08 signed bounded render mapping is non-finite",
-            ));
+            return Err(preparation_error(non_finite_message));
         }
 
         let destination_width = f64::from(destination.device_extent.width());
@@ -5422,9 +5455,7 @@ impl C08RenderRegion {
             || scissor_end_x <= scissor_x
             || scissor_end_y <= scissor_y
         {
-            return Err(preparation_error(
-                "the C08 bounded viewport or scissor cannot represent its signed mapping",
-            ));
+            return Err(preparation_error(invalid_region_message));
         }
         Ok(Some(Self {
             viewport_x,
@@ -5439,6 +5470,43 @@ impl C08RenderRegion {
             unclipped_y,
         }))
     }
+}
+
+fn c09_transformed_source_device_bounds(
+    source: RuntimeSpatialDescriptor,
+    destination: RuntimeSpatialDescriptor,
+    source_to_destination: Transform,
+) -> Result<[f64; 4]> {
+    let source_width = f64::from(source.device_extent.width()) / source.raster_scale;
+    let source_height = f64::from(source.device_extent.height()) / source.raster_scale;
+    let source_end_x = source.texel_origin.x() + source_width;
+    let source_end_y = source.texel_origin.y() + source_height;
+    let [a, b, c, d, e, f] = source_to_destination.as_array();
+    let mut minimum_x = f64::INFINITY;
+    let mut minimum_y = f64::INFINITY;
+    let mut maximum_x = f64::NEG_INFINITY;
+    let mut maximum_y = f64::NEG_INFINITY;
+    for (source_x, source_y) in [
+        (source.texel_origin.x(), source.texel_origin.y()),
+        (source_end_x, source.texel_origin.y()),
+        (source.texel_origin.x(), source_end_y),
+        (source_end_x, source_end_y),
+    ] {
+        let destination_x = a * source_x + c * source_y + e;
+        let destination_y = b * source_x + d * source_y + f;
+        let device_x = (destination_x - destination.texel_origin.x()) * destination.raster_scale;
+        let device_y = (destination_y - destination.texel_origin.y()) * destination.raster_scale;
+        if !device_x.is_finite() || !device_y.is_finite() {
+            return Err(preparation_error(
+                "the C09 transformed source bounds are non-finite",
+            ));
+        }
+        minimum_x = minimum_x.min(device_x);
+        minimum_y = minimum_y.min(device_y);
+        maximum_x = maximum_x.max(device_x);
+        maximum_y = maximum_y.max(device_y);
+    }
+    Ok([minimum_x, minimum_y, maximum_x, maximum_y])
 }
 
 fn exact_c08_read(
@@ -6711,6 +6779,7 @@ impl<'device> PreparedGraph<'device> {
         let RuntimePassKind::Composite(Some(RuntimeComposite {
             kind:
                 RuntimeCompositeKind::Layer {
+                    transform,
                     parameters,
                     clip_coverage,
                     ..
@@ -6934,18 +7003,16 @@ impl<'device> PreparedGraph<'device> {
             copy_extent,
         );
 
-        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
+        let (region, transformed_source_bounds) = C08RenderRegion::bounded_transformed_source(
+            source_spatial,
+            target_spatial,
+            *transform,
+        )?;
         let preserved_signed_mapping =
             c08_spatial_uniform_preserves_source_origin(spatial, source_spatial)
                 && region.is_none_or(|region| {
-                    let expected_x = (source_spatial.texel_origin.x()
-                        - target_spatial.texel_origin.x())
-                        * target_spatial.raster_scale;
-                    let expected_y = (source_spatial.texel_origin.y()
-                        - target_spatial.texel_origin.y())
-                        * target_spatial.raster_scale;
-                    close_f64(region.unclipped_x, expected_x)
-                        && close_f64(region.unclipped_y, expected_y)
+                    close_f64(region.unclipped_x, transformed_source_bounds[0])
+                        && close_f64(region.unclipped_y, transformed_source_bounds[1])
                 });
         let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
         let parameter_buffer = self.create_c09_composite_parameter_buffer(composite_parameters);

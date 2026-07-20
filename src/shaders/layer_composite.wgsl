@@ -59,8 +59,20 @@ fn destination_point(destination_position: vec2<f32>) -> vec2<f32> {
         + destination_position / spatial.destination_origin_scale.z;
 }
 
+fn layer_local_point(destination_position: vec2<f32>) -> vec2<f32> {
+    let point = destination_point(destination_position);
+    return vec2<f32>(
+        parameters.affine_linear.x * point.x
+            + parameters.affine_linear.z * point.y
+            + parameters.affine_translation.x,
+        parameters.affine_linear.y * point.x
+            + parameters.affine_linear.w * point.y
+            + parameters.affine_translation.y,
+    );
+}
+
 fn source_texel(destination_position: vec2<f32>) -> vec2<f32> {
-    return (destination_point(destination_position) - spatial.source_origin_scale.xy)
+    return (layer_local_point(destination_position) - spatial.source_origin_scale.xy)
         * spatial.source_origin_scale.z;
 }
 
@@ -141,15 +153,7 @@ fn mitchell_netravali(distance_value: f32) -> f32 {
 }
 
 fn sample_mask_alpha(destination_position: vec2<f32>) -> f32 {
-    let point = destination_point(destination_position);
-    let local = vec2<f32>(
-        parameters.affine_linear.x * point.x
-            + parameters.affine_linear.z * point.y
-            + parameters.affine_translation.x,
-        parameters.affine_linear.y * point.x
-            + parameters.affine_linear.w * point.y
-            + parameters.affine_translation.y,
-    );
+    let local = layer_local_point(destination_position);
     let minimum = parameters.mask_bounds.xy;
     let maximum = minimum + parameters.mask_bounds.zw;
     if (any(local < minimum) || any(local > maximum)) {

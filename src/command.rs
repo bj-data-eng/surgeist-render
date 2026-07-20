@@ -159,7 +159,7 @@ impl RenderLayerMask {
     fn from_resolved(mask: &ResolvedLayerAlphaMask, capabilities: Capabilities) -> Result<Self> {
         capabilities.ensure_supported(UnsupportedPrimitive::new(
             PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::MaterializedAlphaMaskExecution,
+            PrimitiveOperation::ResolvedAlphaMaskExecution,
         ))?;
         let image_size = mask.image().size();
         let annihilates_source = image_size.width() == 0.0 || image_size.height() == 0.0;
@@ -172,6 +172,7 @@ impl RenderLayerMask {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub(crate) const fn image(&self) -> &Image {
         self.upload.image()
     }
@@ -342,11 +343,11 @@ impl LayerPassPlan {
         if has_resolved_mask {
             capabilities.ensure_supported(UnsupportedPrimitive::new(
                 PrimitiveFamily::MasksAndClips,
-                PrimitiveOperation::MaterializedAlphaMaskExecution,
+                PrimitiveOperation::ResolvedAlphaMaskExecution,
             ))?;
             return Ok(Self::new(
                 LayerPassRequirement::OffscreenTexture(
-                    PrimitiveOperation::MaterializedAlphaMaskExecution,
+                    PrimitiveOperation::ResolvedAlphaMaskExecution,
                 ),
                 LayerPassKind::OffscreenTexture,
                 bounds,
@@ -583,7 +584,7 @@ fn command_contains_backdrop_capture(command: &RenderCommand) -> bool {
 fn nested_backdrop_capture_error() -> Error {
     let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BackdropExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     ));
     error.append_message(
         ": nested backdrop capture crosses a layer isolation boundary and is not normalized in this task",
@@ -594,7 +595,7 @@ fn nested_backdrop_capture_error() -> Error {
 fn transformed_backdrop_capture_error() -> Error {
     let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BackdropExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     ));
     error.append_message(
         ": transformed backdrop capture requires coordinate-space reconciliation before materialized execution",
@@ -605,7 +606,7 @@ fn transformed_backdrop_capture_error() -> Error {
 fn repeated_top_level_backdrop_capture_error() -> Error {
     let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BackdropExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     ));
     error.append_message(
         ": repeated top-level backdrop capture requires staged source reconciliation before materialized execution",

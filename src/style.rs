@@ -1244,11 +1244,11 @@ impl ColorFilterOp {
             FilterOpKind::Sepia(amount) => Ok(Self::Sepia(*amount)),
             FilterOpKind::Blur(_) => Err(UnsupportedPrimitive::new(
                 PrimitiveFamily::Filters,
-                PrimitiveOperation::ColorFilterBlur,
+                PrimitiveOperation::GpuBlurFilterExecution,
             )),
             FilterOpKind::DropShadow(_) => Err(UnsupportedPrimitive::new(
                 PrimitiveFamily::Filters,
-                PrimitiveOperation::ColorFilterDropShadow,
+                PrimitiveOperation::GpuDropShadowFilterExecution,
             )),
         }
     }
@@ -1377,7 +1377,7 @@ impl BackdropFilterInput {
         ))?;
         capabilities.ensure_supported(UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::MaterializedBackdropFilterExecution,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
         ))
     }
 
@@ -1398,7 +1398,7 @@ fn validate_backdrop_filter_list(filters: &FilterList) -> Result<()> {
             "must contain at least one supported filter operation",
         ));
     }
-    filters.materialized_image_filter_pipeline()?;
+    let _ordered_plan = filters.ordered_filter_plan();
     Ok(())
 }
 

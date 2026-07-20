@@ -1,4 +1,3 @@
-#[cfg(test)]
 use super::resource::WorkingFormat;
 #[cfg(any(
     feature = "render-window",
@@ -7,14 +6,14 @@ use super::resource::WorkingFormat;
 use super::surface::{PresentedLifecycle, PresentedSurfaceState, ResizeState};
 use super::{
     backend::*,
-    command::{RenderCommand, RenderCommands},
+    command::RenderCommands,
     encode::encode_vello_scene,
-    frame::{FrameContext, FramePlan},
+    frame::{
+        FrameContext, FramePlan, GpuRenderGraph, GraphLoweringCompositeKind, GraphLoweringPassKind,
+    },
     geometry::physical_size,
     gpu_transaction::{GpuOperationDraft, GpuOperationStage},
-    pass::{
-        C08PreparableGraph, ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest,
-    },
+    pass::{ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest},
     readback::read_texture_rgba,
     stats::collect_render_stats,
     surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
@@ -26,8 +25,6 @@ use super::{
 use std::{cell::RefCell, sync::Arc};
 use std::{
     collections::HashSet,
-    future::Future,
-    pin::Pin,
     time::{Duration, Instant},
 };
 
@@ -52,19 +49,20 @@ pub struct Renderer {
     preexecution_frame_gate_observation: PreexecutionFrameGateObservationForTest,
     #[cfg(test)]
     dispatch_observation: RendererDispatchObservationForTest,
+    #[cfg(test)]
+    exact_graph_working_format: Option<WorkingFormat>,
 }
 
 #[must_use = "the renderer dispatch boundary must resolve to exactly one execution route"]
 enum RendererFrameDispatch {
     DirectVello(RenderCommands),
-    ExactC08Graph(C08PreparableGraph),
-    LaterCycleTransitional,
+    ExactGraph(ExactSurfaceGraph),
 }
 
 #[must_use = "prepared renderer execution must reach its selected GPU transaction"]
 enum PreparedRendererExecution {
     DirectVello(VelloScene),
-    ExactC08Graph(C08PreparableGraph),
+    ExactGraph(ExactSurfaceGraph),
 }
 
 #[cfg(test)]
@@ -223,6 +221,8 @@ impl Renderer {
             preexecution_frame_gate_observation: PreexecutionFrameGateObservationForTest::default(),
             #[cfg(test)]
             dispatch_observation: RendererDispatchObservationForTest::default(),
+            #[cfg(test)]
+            exact_graph_working_format: None,
         })
     }
 
@@ -652,6 +652,7 @@ impl Renderer {
         plan: FramePlan,
         output_format: Format,
         working_format: ExecutableGraphWorkingFormatRequest,
+        selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
     ) -> Result<RendererFrameDispatch> {
         #[cfg(test)]
@@ -686,9 +687,12 @@ impl Renderer {
                             .exact_c08_graph_routes
                             .saturating_add(1);
                     }
-                    Ok(RendererFrameDispatch::ExactC08Graph(preparable))
+                    Ok(RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(
+                        preparable,
+                    )))
                 }
                 ExecutableGraphDispatchEligibility::LaterCycleTransitional => {
+                    ensure_c09_graph_or_return_future_diagnostic(&graph)?;
                     #[cfg(test)]
                     {
                         self.dispatch_observation.transitional_graph_routes = self
@@ -696,7 +700,14 @@ impl Renderer {
                             .transitional_graph_routes
                             .saturating_add(1);
                     }
-                    Ok(RendererFrameDispatch::LaterCycleTransitional)
+                    Ok(RendererFrameDispatch::ExactGraph(
+                        ExactSurfaceGraph::try_c09(
+                            &graph,
+                            selected_working_format,
+                            output_format,
+                            capabilities,
+                        )?,
+                    ))
                 }
             },
         }
@@ -748,7 +759,7 @@ impl Renderer {
                 PreexecutionFrameGateObservationForTest::default();
         }
         let normalized = scene.normalize(self.capabilities())?;
-        let transitional_source = normalized.clone();
+        let graph_source = normalized.clone();
         let frame_context = FrameContext::try_new(
             surface.size(),
             surface.scale(),
@@ -771,12 +782,36 @@ impl Renderer {
                     "the renderer dispatch boundary lost immutable device capabilities",
                 )
             })?;
+        #[cfg(test)]
+        let (working_format, selected_working_format) = match self.exact_graph_working_format {
+            Some(working_format) => {
+                capabilities.validate_supported_working_format(working_format)?;
+                (
+                    ExecutableGraphWorkingFormatRequest::Exact(working_format),
+                    working_format,
+                )
+            }
+            None => {
+                let policy = self.options.effect_quality_policy();
+                (
+                    ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(policy),
+                    capabilities.resolve_effect_working_format(policy)?,
+                )
+            }
+        };
+        #[cfg(not(test))]
+        let (working_format, selected_working_format) = {
+            let policy = self.options.effect_quality_policy();
+            (
+                ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(policy),
+                capabilities.resolve_effect_working_format(policy)?,
+            )
+        };
         let dispatch = self.classify_frame_dispatch(
             frame_plan,
             runtime_surface_format(surface),
-            ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
-                self.options.effect_quality_policy(),
-            ),
+            working_format,
+            selected_working_format,
             &capabilities,
         )?;
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
@@ -789,42 +824,8 @@ impl Renderer {
                     PreparedRendererExecution::DirectVello(vello_scene),
                 )
             }
-            RendererFrameDispatch::ExactC08Graph(preparable) => (
-                transitional_source,
-                PreparedRendererExecution::ExactC08Graph(preparable),
-            ),
-            RendererFrameDispatch::LaterCycleTransitional => {
-                #[cfg(test)]
-                {
-                    self.preexecution_frame_gate_observation
-                        .plan_count_at_transitional_effect_execution = Some(
-                        self.preexecution_frame_gate_observation
-                            .validated_plan_count,
-                    );
-                }
-                let normalized = RenderCommands::new(
-                    self.materialize_resolved_backdrops(
-                        transitional_source.commands,
-                        surface.scale(),
-                        surface.options.format,
-                        parameters,
-                    )
-                    .await?,
-                );
-                let normalized = RenderCommands::new(
-                    self.materialize_resolved_layer_masks(
-                        normalized.commands,
-                        surface.scale(),
-                        surface.options.format,
-                        parameters,
-                    )
-                    .await?,
-                );
-                let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
-                (
-                    normalized,
-                    PreparedRendererExecution::DirectVello(vello_scene),
-                )
+            RendererFrameDispatch::ExactGraph(graph) => {
+                (graph_source, PreparedRendererExecution::ExactGraph(graph))
             }
         };
         let mut uploaded_images = self.uploaded_images.clone();
@@ -856,40 +857,21 @@ impl Renderer {
                     )
                     .await
                 }
-                PreparedRendererExecution::ExactC08Graph(preparable) => {
-                    let working_format = preparable.working_format();
+                PreparedRendererExecution::ExactGraph(graph) => {
                     #[cfg(any(
                         feature = "render-window",
                         all(feature = "render-web", target_arch = "wasm32")
                     ))]
                     let frame = if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
-                        render_c08_presented_graph_surface(
-                            backend,
-                            surface,
-                            preparable,
-                            working_format,
-                        )
-                        .await
+                        render_exact_presented_graph_surface(backend, surface, graph).await
                     } else {
-                        render_c08_headless_graph_surface(
-                            backend,
-                            surface,
-                            preparable,
-                            working_format,
-                        )
-                        .await
+                        render_exact_headless_graph_surface(backend, surface, graph).await
                     };
                     #[cfg(not(any(
                         feature = "render-window",
                         all(feature = "render-web", target_arch = "wasm32")
                     )))]
-                    let frame = render_c08_headless_graph_surface(
-                        backend,
-                        surface,
-                        preparable,
-                        working_format,
-                    )
-                    .await;
+                    let frame = render_exact_headless_graph_surface(backend, surface, graph).await;
                     frame
                 }
             };
@@ -1037,11 +1019,12 @@ impl Renderer {
             FramePlan::GpuGraph(graph),
             output_format,
             ExecutableGraphWorkingFormatRequest::Exact(working_format),
+            working_format,
             &capabilities,
         )? {
-            RendererFrameDispatch::ExactC08Graph(preparable) => preparable,
+            RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(preparable)) => preparable,
             RendererFrameDispatch::DirectVello(_)
-            | RendererFrameDispatch::LaterCycleTransitional => {
+            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09 { .. }) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
                     "the private forced graph is outside the exact executable C08 subset",
@@ -1100,19 +1083,30 @@ impl Renderer {
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
             let frame = if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
-                render_c08_presented_graph_surface(backend, surface, preparable, working_format)
-                    .await
+                render_exact_presented_graph_surface(
+                    backend,
+                    surface,
+                    ExactSurfaceGraph::C08(preparable),
+                )
+                .await
             } else {
-                render_c08_headless_graph_surface(backend, surface, preparable, working_format)
-                    .await
+                render_exact_headless_graph_surface(
+                    backend,
+                    surface,
+                    ExactSurfaceGraph::C08(preparable),
+                )
+                .await
             };
             #[cfg(not(any(
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             )))]
-            let frame =
-                render_c08_headless_graph_surface(backend, surface, preparable, working_format)
-                    .await;
+            let frame = render_exact_headless_graph_surface(
+                backend,
+                surface,
+                ExactSurfaceGraph::C08(preparable),
+            )
+            .await;
             backend.observe_device_terminal(device_identity);
             frame
         };
@@ -1394,6 +1388,7 @@ impl Renderer {
             .ok()
     }
 
+    #[cfg(test)]
     pub(crate) fn default_offscreen_render_context(
         &mut self,
     ) -> Option<OffscreenRenderGpuContext<'_>> {
@@ -1453,6 +1448,14 @@ impl Renderer {
     #[cfg(test)]
     pub(crate) const fn dispatch_observation_for_test(&self) -> RendererDispatchObservationForTest {
         self.dispatch_observation
+    }
+
+    #[cfg(test)]
+    pub(crate) fn select_exact_graph_working_format_for_test(
+        &mut self,
+        working_format: WorkingFormat,
+    ) {
+        self.exact_graph_working_format = Some(working_format);
     }
 
     #[must_use]
@@ -2129,317 +2132,6 @@ impl Renderer {
         scope_result
     }
 
-    fn materialize_resolved_backdrops<'a>(
-        &'a mut self,
-        commands: Vec<RenderCommand>,
-        scale: f64,
-        format: Format,
-        parameters: Parameters,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<RenderCommand>>> + 'a>> {
-        Box::pin(async move {
-            let mut materialized = Vec::with_capacity(commands.len());
-            for command in commands {
-                materialized.push(
-                    self.materialize_resolved_backdrop(
-                        command,
-                        &materialized,
-                        scale,
-                        format,
-                        parameters,
-                    )
-                    .await?,
-                );
-            }
-            Ok(materialized)
-        })
-    }
-
-    async fn materialize_resolved_backdrop(
-        &mut self,
-        command: RenderCommand,
-        previous_siblings: &[RenderCommand],
-        scale: f64,
-        format: Format,
-        parameters: Parameters,
-    ) -> Result<RenderCommand> {
-        let RenderCommand::Layer {
-            mut layer,
-            children,
-        } = command
-        else {
-            return Ok(command);
-        };
-        let mut children = self
-            .materialize_resolved_backdrops(children, scale, format, parameters)
-            .await?;
-        let Some(backdrop) = layer.backdrop.clone() else {
-            return Ok(RenderCommand::Layer { layer, children });
-        };
-
-        reject_backdrop_execution(previous_siblings)?;
-        let source_commands = self
-            .materialize_resolved_layer_masks(previous_siblings.to_vec(), scale, format, parameters)
-            .await?;
-        let bounds = backdrop.capture_bounds();
-        let physical_size = physical_size(bounds.rect().size(), scale)?;
-        let local_scene = self.backdrop_source_scene(&layer, source_commands, bounds, scale)?;
-        let request =
-            OffscreenLocalSceneRenderRequest::for_backdrop(bounds, scale, format, parameters);
-        let options = self.options;
-        let Some(context) = self.default_offscreen_render_context() else {
-            return Err(Error::runtime_unavailable(
-                RuntimeOperation::SurfaceRendering,
-                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "materialized backdrop captures require an available wgpu device context",
-            ));
-        };
-        let rendered = render_internal_vello_local_scene_to_offscreen_texture(
-            Some(context),
-            options,
-            &local_scene,
-            request,
-        )
-        .await?;
-        let source = {
-            let Some(device_identity) = self.default_device else {
-                return Err(Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "materialized backdrop captures require an available wgpu device",
-                ));
-            };
-            let Some(backend) = self.backend.as_mut() else {
-                return Err(Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "materialized backdrop captures require an available wgpu backend",
-                ));
-            };
-            read_texture_rgba(
-                backend,
-                device_identity,
-                rendered.texture()?,
-                physical_size,
-                RuntimeOperation::SurfaceRendering,
-            )
-            .await?
-        };
-        rendered.release()?;
-        let filtered = image::ResolvedMaterializedImageFilterExecution::try_new_for_image_buffer(
-            backdrop.filters(),
-            &source,
-        )?
-        .execute_to_image_buffer()?;
-        let filtered_size = filtered.size();
-        let image = Image::from_rgba(
-            Size::new(
-                f64::from(filtered_size.width()),
-                f64::from(filtered_size.height()),
-            ),
-            filtered.into_rgba(),
-        )?;
-        let image_command = RenderCommand::Image {
-            image,
-            rect: bounds.rect(),
-            fit: ImageFit::Stretch,
-        };
-        let backdrop_command = if let Some(clip) = backdrop.clip().cloned() {
-            RenderCommand::Layer {
-                layer: command::NormalizedLayer {
-                    clip: Some(clip),
-                    transform: Transform::identity(),
-                    opacity: 1.0,
-                    blend: BlendMode::Normal,
-                    mask: None,
-                    backdrop: None,
-                    isolation: command::LayerIsolation::ClipOnly,
-                    pass_plan: layer.pass_plan,
-                },
-                children: vec![image_command],
-            }
-        } else {
-            image_command
-        };
-        children.insert(0, backdrop_command);
-        layer.backdrop = None;
-
-        Ok(RenderCommand::Layer { layer, children })
-    }
-
-    fn materialize_resolved_layer_masks<'a>(
-        &'a mut self,
-        commands: Vec<RenderCommand>,
-        scale: f64,
-        format: Format,
-        parameters: Parameters,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<RenderCommand>>> + 'a>> {
-        Box::pin(async move {
-            let mut materialized = Vec::with_capacity(commands.len());
-            for command in commands {
-                materialized.push(
-                    self.materialize_resolved_layer_mask(command, scale, format, parameters)
-                        .await?,
-                );
-            }
-            Ok(materialized)
-        })
-    }
-
-    async fn materialize_resolved_layer_mask(
-        &mut self,
-        command: RenderCommand,
-        scale: f64,
-        format: Format,
-        parameters: Parameters,
-    ) -> Result<RenderCommand> {
-        let RenderCommand::Layer { layer, children } = command else {
-            return Ok(command);
-        };
-        let children = self
-            .materialize_resolved_layer_masks(children, scale, format, parameters)
-            .await?;
-        if layer.backdrop.is_some() {
-            return Err(backdrop_execution_error());
-        }
-        let Some(mask) = layer.mask.clone() else {
-            return Ok(RenderCommand::Layer { layer, children });
-        };
-
-        let bounds = layer.pass_plan.bounds().ok_or_else(|| {
-            Error::invalid_value(
-                "materialized masked layer bounds",
-                "unknown",
-                "must be explicit before rendering resolved layer alpha masks",
-            )
-        })?;
-        let physical_size = physical_size(bounds.rect().size(), scale)?;
-
-        let local_scene = self.mask_source_scene(&layer, children, bounds, scale)?;
-        let request =
-            OffscreenLocalSceneRenderRequest::for_resolved_mask(bounds, scale, format, parameters);
-        let options = self.options;
-        let Some(context) = self.default_offscreen_render_context() else {
-            return Err(Error::runtime_unavailable(
-                RuntimeOperation::SurfaceRendering,
-                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "resolved layer alpha masks require an available wgpu device context",
-            ));
-        };
-        let rendered = render_internal_vello_local_scene_to_offscreen_texture(
-            Some(context),
-            options,
-            &local_scene,
-            request,
-        )
-        .await?;
-        let source = {
-            let Some(device_identity) = self.default_device else {
-                return Err(Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "resolved layer alpha masks require an available wgpu device",
-                ));
-            };
-            let Some(backend) = self.backend.as_mut() else {
-                return Err(Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "resolved layer alpha masks require an available wgpu backend",
-                ));
-            };
-            read_texture_rgba(
-                backend,
-                device_identity,
-                rendered.texture()?,
-                physical_size,
-                RuntimeOperation::SurfaceRendering,
-            )
-            .await?
-        };
-        rendered.release()?;
-        let masked = image::StagedResolvedAlphaMaskExecution::try_new(
-            &source,
-            bounds.rect(),
-            mask.image(),
-            mask.bounds(),
-        )?
-        .execute_to_image_buffer()?;
-        let masked_size = masked.size();
-        let image = Image::from_rgba(
-            Size::new(
-                f64::from(masked_size.width()),
-                f64::from(masked_size.height()),
-            ),
-            masked.into_rgba(),
-        )?;
-        let image_command = RenderCommand::Image {
-            image,
-            rect: bounds.rect(),
-            fit: ImageFit::Stretch,
-        };
-        Ok(RenderCommand::Layer {
-            layer: command::NormalizedLayer {
-                clip: None,
-                mask: None,
-                backdrop: None,
-                ..layer
-            },
-            children: vec![image_command],
-        })
-    }
-
-    fn mask_source_scene(
-        &self,
-        layer: &command::NormalizedLayer,
-        children: Vec<RenderCommand>,
-        bounds: command::OffscreenBounds,
-        scale: f64,
-    ) -> Result<VelloScene> {
-        let source_layer = command::NormalizedLayer {
-            clip: layer.clip.clone(),
-            transform: Transform::translation(-bounds.rect().x(), -bounds.rect().y())?,
-            opacity: 1.0,
-            blend: BlendMode::Normal,
-            mask: None,
-            backdrop: None,
-            isolation: if layer.clip.is_some() {
-                command::LayerIsolation::ClipOnly
-            } else {
-                command::LayerIsolation::None
-            },
-            pass_plan: layer.pass_plan,
-        };
-        let commands = RenderCommands::new(vec![RenderCommand::Layer {
-            layer: source_layer,
-            children,
-        }]);
-        encode_vello_scene(&commands, scale)
-    }
-
-    fn backdrop_source_scene(
-        &self,
-        layer: &command::NormalizedLayer,
-        source_commands: Vec<RenderCommand>,
-        bounds: command::OffscreenBounds,
-        scale: f64,
-    ) -> Result<VelloScene> {
-        let source_layer = command::NormalizedLayer {
-            clip: None,
-            transform: Transform::translation(-bounds.rect().x(), -bounds.rect().y())?,
-            opacity: 1.0,
-            blend: BlendMode::Normal,
-            mask: None,
-            backdrop: None,
-            isolation: command::LayerIsolation::None,
-            pass_plan: layer.pass_plan,
-        };
-        let commands = RenderCommands::new(vec![RenderCommand::Layer {
-            layer: source_layer,
-            children: source_commands,
-        }]);
-        encode_vello_scene(&commands, scale)
-    }
-
     #[must_use]
     pub const fn capabilities(&self) -> Capabilities {
         Capabilities::CURRENT
@@ -2497,28 +2189,78 @@ fn surface_identity_mismatch(
     Error::runtime_capability_unavailable(diagnostic)
 }
 
-fn reject_backdrop_execution(commands: &[RenderCommand]) -> Result<()> {
-    for command in commands {
-        let RenderCommand::Layer { layer, children } = command else {
-            continue;
-        };
-        if layer.backdrop.is_some() {
-            return Err(backdrop_execution_error());
+fn ensure_c09_graph_or_return_future_diagnostic(graph: &GpuRenderGraph) -> Result<()> {
+    let mut has_layer_composite = false;
+    let mut has_copy_backdrop = false;
+    let mut has_color_filter = false;
+    let mut has_blur = false;
+    let mut has_drop_shadow = false;
+
+    for pass in graph.lowering_view()?.passes() {
+        match pass.kind()? {
+            GraphLoweringPassKind::ClearRoot { .. }
+            | GraphLoweringPassKind::VelloCapture(Some(_))
+            | GraphLoweringPassKind::CanonicalizeCapture
+            | GraphLoweringPassKind::Present => {}
+            GraphLoweringPassKind::CopyBackdrop => has_copy_backdrop = true,
+            GraphLoweringPassKind::ColorFilter(Some(_)) => has_color_filter = true,
+            GraphLoweringPassKind::BlurHorizontal(Some(_))
+            | GraphLoweringPassKind::BlurVertical(Some(_)) => has_blur = true,
+            GraphLoweringPassKind::DropShadowColorize(Some(_)) => has_drop_shadow = true,
+            GraphLoweringPassKind::Composite(Some(composite)) => match composite.kind() {
+                GraphLoweringCompositeKind::SpanSourceOver => {}
+                GraphLoweringCompositeKind::Layer { .. } => has_layer_composite = true,
+                GraphLoweringCompositeKind::DropShadow => has_drop_shadow = true,
+            },
+            GraphLoweringPassKind::VelloCapture(None)
+            | GraphLoweringPassKind::ColorFilter(None)
+            | GraphLoweringPassKind::BlurHorizontal(None)
+            | GraphLoweringPassKind::BlurVertical(None)
+            | GraphLoweringPassKind::DropShadowColorize(None)
+            | GraphLoweringPassKind::Composite(None) => {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "a malformed GPU graph reached production dispatch",
+                ));
+            }
         }
-        reject_backdrop_execution(children)?;
+    }
+
+    let unsupported = if has_copy_backdrop {
+        Some((
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ))
+    } else if has_drop_shadow {
+        Some((
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+        ))
+    } else if has_color_filter {
+        Some((
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
+        ))
+    } else if has_blur {
+        Some((
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+        ))
+    } else {
+        None
+    };
+    if let Some((family, operation)) = unsupported {
+        return Err(Error::unsupported_render_primitive(
+            UnsupportedPrimitive::new(family, operation),
+        ));
+    }
+    if !has_layer_composite {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "a graph outside the exact C08/C09 subset reached production dispatch",
+        ));
     }
     Ok(())
-}
-
-fn backdrop_execution_error() -> Error {
-    let mut error = Error::unsupported_render_primitive(UnsupportedPrimitive::new(
-        PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BackdropExecution,
-    ));
-    error.append_message(
-        ": backdrop capture was planned during normalization but render-time backdrop execution is not implemented",
-    );
-    error
 }
 
 /// Renderer configuration that is fixed when a [`Renderer`] is created.

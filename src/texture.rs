@@ -189,14 +189,7 @@ impl EffectTextureDescriptor {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum TextureUsageIntent {
-    OffscreenLayer,
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C07 runtime pass lowering consumes the intermediate texture role in T5"
-        )
-    )]
+    #[cfg(test)]
     IntermediatePass,
     ReadbackReference,
 }
@@ -206,7 +199,6 @@ pub(crate) struct TextureDescriptor {
     physical_size: PhysicalSize,
     format: Format,
     intent: TextureUsageIntent,
-    byte_len: u64,
 }
 
 impl TextureDescriptor {
@@ -238,7 +230,7 @@ impl TextureDescriptor {
                     "must fit in u64",
                 )
             })?;
-        let byte_len = pixel_count
+        pixel_count
             .checked_mul(u64::from(format.bytes_per_pixel()))
             .ok_or_else(|| {
                 Error::invalid_value(
@@ -251,7 +243,6 @@ impl TextureDescriptor {
             physical_size,
             format,
             intent,
-            byte_len,
         })
     }
 
@@ -268,85 +259,29 @@ impl TextureDescriptor {
         self.intent
     }
 
-    pub(crate) const fn byte_len(self) -> u64 {
-        self.byte_len
-    }
-
-    pub(crate) const fn cache_key(self) -> TextureCacheKey {
-        TextureCacheKey {
-            physical_size: self.physical_size,
-            format: self.format,
-            intent: self.intent,
-        }
-    }
-
     pub(crate) const fn wgpu_usage(self) -> wgpu::TextureUsages {
         match (self.intent, self.format) {
-            (
-                TextureUsageIntent::OffscreenLayer | TextureUsageIntent::IntermediatePass,
-                Format::Rgba8,
-            ) => wgpu::TextureUsages::RENDER_ATTACHMENT
-                .union(wgpu::TextureUsages::STORAGE_BINDING)
-                .union(wgpu::TextureUsages::TEXTURE_BINDING)
-                .union(wgpu::TextureUsages::COPY_SRC)
-                .union(wgpu::TextureUsages::COPY_DST),
-            (
-                TextureUsageIntent::OffscreenLayer | TextureUsageIntent::IntermediatePass,
-                Format::Bgra8,
-            ) => wgpu::TextureUsages::RENDER_ATTACHMENT
-                .union(wgpu::TextureUsages::TEXTURE_BINDING)
-                .union(wgpu::TextureUsages::COPY_SRC)
-                .union(wgpu::TextureUsages::COPY_DST),
+            #[cfg(test)]
+            (TextureUsageIntent::IntermediatePass, Format::Rgba8) => {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    .union(wgpu::TextureUsages::STORAGE_BINDING)
+                    .union(wgpu::TextureUsages::TEXTURE_BINDING)
+                    .union(wgpu::TextureUsages::COPY_SRC)
+                    .union(wgpu::TextureUsages::COPY_DST)
+            }
+            #[cfg(test)]
+            (TextureUsageIntent::IntermediatePass, Format::Bgra8) => {
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    .union(wgpu::TextureUsages::TEXTURE_BINDING)
+                    .union(wgpu::TextureUsages::COPY_SRC)
+                    .union(wgpu::TextureUsages::COPY_DST)
+            }
             (TextureUsageIntent::ReadbackReference, _) => wgpu::TextureUsages::RENDER_ATTACHMENT
                 .union(wgpu::TextureUsages::STORAGE_BINDING)
                 .union(wgpu::TextureUsages::TEXTURE_BINDING)
                 .union(wgpu::TextureUsages::COPY_SRC)
                 .union(wgpu::TextureUsages::COPY_DST),
         }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct TextureCacheKey {
-    physical_size: PhysicalSize,
-    format: Format,
-    intent: TextureUsageIntent,
-}
-
-impl TextureCacheKey {
-    pub(crate) const fn from_descriptor(descriptor: TextureDescriptor) -> Self {
-        descriptor.cache_key()
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum TransitionalTextureRole {
-    #[cfg(test)]
-    Offscreen,
-    ResolvedMask,
-    Backdrop,
-}
-
-impl TransitionalTextureRole {
-    pub(crate) const fn label(self) -> &'static str {
-        match self {
-            #[cfg(test)]
-            Self::Offscreen => "Surgeist transitional offscreen target",
-            Self::ResolvedMask => "Surgeist transitional resolved-mask target",
-            Self::Backdrop => "Surgeist transitional backdrop target",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) struct TransitionalTextureKey {
-    role: TransitionalTextureRole,
-    descriptor: TextureCacheKey,
-}
-
-impl TransitionalTextureKey {
-    pub(crate) const fn new(role: TransitionalTextureRole, descriptor: TextureCacheKey) -> Self {
-        Self { role, descriptor }
     }
 }
 

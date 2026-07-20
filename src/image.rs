@@ -1,7 +1,7 @@
+use super::{BackendErrorCode, Error, PhysicalSize, Result, Size};
 #[cfg(test)]
-use super::ResolvedLayerAlphaMask;
 use super::{
-    BackendErrorCode, Error, FilterList, FilteredImagePaint, PhysicalSize, Rect, Result, Size,
+    FilterList, FilteredImagePaint, Rect, ResolvedLayerAlphaMask,
     filter::{
         BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
         FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
@@ -333,6 +333,7 @@ impl ResolvedMaskUploadDescriptor {
         Ok(())
     }
 
+    #[cfg(test)]
     pub(crate) const fn image(&self) -> &Image {
         &self.image
     }
@@ -371,54 +372,6 @@ impl ResolvedMaskUploadDescriptor {
     }
 }
 
-/// Temporary full-semantics staging bridge retained through C09 T6.
-#[derive(Debug)]
-pub(crate) struct StagedResolvedAlphaMaskExecution<'a> {
-    source: &'a ImageBuffer,
-    source_bounds: Rect,
-    mask_image: &'a Image,
-    mask_bounds: Rect,
-}
-
-impl<'a> StagedResolvedAlphaMaskExecution<'a> {
-    pub(crate) fn try_new(
-        source: &'a ImageBuffer,
-        source_bounds: Rect,
-        mask_image: &'a Image,
-        mask_bounds: Rect,
-    ) -> Result<Self> {
-        validate_image_buffer_rgba_len(source.size(), source.rgba().len())?;
-        super::validation::validate_point(
-            source_bounds.origin(),
-            "staged resolved-mask source bounds",
-        )?;
-        super::validation::validate_positive_f64(
-            source_bounds.width(),
-            "staged resolved-mask source bounds width",
-        )?;
-        super::validation::validate_positive_f64(
-            source_bounds.height(),
-            "staged resolved-mask source bounds height",
-        )?;
-        Ok(Self {
-            source,
-            source_bounds,
-            mask_image,
-            mask_bounds,
-        })
-    }
-
-    pub(crate) fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
-        let source = straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(self.source)?;
-        let masked = source.apply_resolved_alpha_mask(
-            self.source_bounds,
-            self.mask_image,
-            self.mask_bounds,
-        )?;
-        premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&masked)
-    }
-}
-
 #[cfg(test)]
 pub(crate) fn execute_transitional_resolved_mask_bridge_for_test(
     source: &ImageBuffer,
@@ -427,8 +380,19 @@ pub(crate) fn execute_transitional_resolved_mask_bridge_for_test(
     mask_bounds: Rect,
 ) -> Result<ImageBuffer> {
     let mask = ResolvedLayerAlphaMask::try_new(image, mask_bounds)?;
-    StagedResolvedAlphaMaskExecution::try_new(source, source_bounds, mask.image(), mask.bounds())?
-        .execute_to_image_buffer()
+    validate_image_buffer_rgba_len(source.size(), source.rgba().len())?;
+    super::validation::validate_point(source_bounds.origin(), "resolved-mask source bounds")?;
+    super::validation::validate_positive_f64(
+        source_bounds.width(),
+        "resolved-mask source bounds width",
+    )?;
+    super::validation::validate_positive_f64(
+        source_bounds.height(),
+        "resolved-mask source bounds height",
+    )?;
+    let source = straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(source)?;
+    let masked = source.apply_resolved_alpha_mask(source_bounds, mask.image(), mask.bounds())?;
+    premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&masked)
 }
 
 /// Render-local boundary for a resolved image/filter intent plus materialized RGBA bytes.
@@ -438,25 +402,25 @@ pub(crate) fn execute_transitional_resolved_mask_bridge_for_test(
 /// image bytes to premultiplied RGBA8 reference pixels, applies the ordered
 /// materialized-image filter pipeline, then emits straight RGBA8 again for
 /// paint/upload.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Debug)]
 pub(crate) struct ResolvedMaterializedImageFilterExecution<'a> {
     source: ResolvedMaterializedImageFilterSource<'a>,
     pipeline: MaterializedImageFilterPipeline,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) type ResolvedImageColorFilterExecution<'a> =
     ResolvedMaterializedImageFilterExecution<'a>;
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 #[derive(Debug)]
 enum ResolvedMaterializedImageFilterSource<'a> {
     Image(&'a Image),
     ImageBuffer(&'a ImageBuffer),
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
     pub(crate) fn try_new(paint: &FilteredImagePaint, image: &'a Image) -> Result<Self> {
         let pipeline = compile_materialized_image_filter_pipeline(paint.filters())?;
@@ -525,7 +489,7 @@ impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
     }
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn straight_rgba8_image_to_premultiplied_rgba8_reference(
     image: &Image,
 ) -> Result<ReferencePremultipliedRgba8Buffer> {
@@ -537,7 +501,7 @@ pub(crate) fn straight_rgba8_image_to_premultiplied_rgba8_reference(
     straight_rgba8_bytes_to_premultiplied_rgba8_reference(size, &image.bytes)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(
     image_buffer: &ImageBuffer,
 ) -> Result<ReferencePremultipliedRgba8Buffer> {
@@ -545,7 +509,7 @@ pub(crate) fn straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(
     straight_rgba8_bytes_to_premultiplied_rgba8_reference(image_buffer.size(), image_buffer.rgba())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(
     buffer: &ReferencePremultipliedRgba8Buffer,
 ) -> Result<ImageBuffer> {
@@ -568,7 +532,7 @@ pub(crate) fn premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(
     ImageBuffer::try_new(size, rgba)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn compile_materialized_image_filter_pipeline(
     filters: &FilterList,
 ) -> Result<MaterializedImageFilterPipeline> {
@@ -584,7 +548,7 @@ fn compile_materialized_image_filter_pipeline(
     Ok(pipeline)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn execute_materialized_filter_pipeline(
     source: &ReferencePremultipliedRgba8Buffer,
     pipeline: &MaterializedImageFilterPipeline,
@@ -641,7 +605,7 @@ fn execute_materialized_filter_pipeline(
     Ok(current)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn plan_clipped_materialized_blur_output_size(
     size: PhysicalSize,
     blur: super::FilterBlur,
@@ -667,7 +631,7 @@ fn plan_clipped_materialized_blur_output_size(
     ))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn plan_clipped_materialized_drop_shadow_output_size(
     size: PhysicalSize,
     shadow: &super::FilterDropShadow,
@@ -693,7 +657,7 @@ fn plan_clipped_materialized_drop_shadow_output_size(
     ))
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn straight_rgba8_bytes_to_premultiplied_rgba8_reference(
     size: PhysicalSize,
     rgba: &[u8],
@@ -708,7 +672,7 @@ fn straight_rgba8_bytes_to_premultiplied_rgba8_reference(
     ReferencePremultipliedRgba8Buffer::from_pixels(size, pixels)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn straight_rgba8_pixel_to_premultiplied_rgba8(
     red: u8,
     green: u8,
@@ -727,7 +691,7 @@ fn straight_rgba8_pixel_to_premultiplied_rgba8(
     )
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn premultiplied_rgba8_pixel_to_straight_rgba8(pixel: PremultipliedRgba8) -> [u8; 4] {
     if pixel.alpha() == 0 {
         return [0, 0, 0, 0];
@@ -741,7 +705,7 @@ fn premultiplied_rgba8_pixel_to_straight_rgba8(pixel: PremultipliedRgba8) -> [u8
     ]
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize) -> Result<()> {
     if size.width() == 0 {
         return Err(Error::invalid_value(
@@ -778,12 +742,12 @@ pub(crate) fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize
     Ok(())
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn premultiply_straight_rgba8_channel(channel: u8, alpha: u8) -> u8 {
     round_byte(f64::from(channel) * f64::from(alpha) / 255.0)
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn unpremultiply_rgba8_channel(channel: u8, alpha: u8) -> u8 {
     round_byte(f64::from(channel) * 255.0 / f64::from(alpha))
 }
@@ -814,7 +778,7 @@ fn stable_hash<T: std::hash::Hash>(value: &T) -> u64 {
     hasher.finish()
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 fn round_byte(value: f64) -> u8 {
     value.round().clamp(0.0, 255.0) as u8
 }

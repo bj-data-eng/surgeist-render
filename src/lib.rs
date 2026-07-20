@@ -21,6 +21,7 @@ mod layer;
 mod paint;
 mod pass;
 mod readback;
+#[cfg(test)]
 mod reference;
 mod renderer;
 mod resource;
@@ -51,13 +52,6 @@ pub use error::{
     RuntimeCapabilityUnavailable, RuntimeCapabilityUnavailableReason, RuntimeOperation,
     SurfaceIdentityMismatchKind, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
 };
-pub use filter::{
-    BlurPolicy, BlurRadiusInterpretation, CompiledColorFilterPipeline, DevicePixelConversionPolicy,
-    FilterClipBounds, FilterDeviceBounds, FilterExecutionRegion, FilterInflatedBounds,
-    FilterOutset, FilterRegionPlan, FilterSourceBounds, KernelSupportRadius, LargeBlurRadiusAction,
-    LargeBlurRadiusPolicy, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
-    TransparentEdgeSamplingPolicy,
-};
 pub use geometry::{
     CoordinateSpaceId, CoordinateSpaceKind, CoordinateSpaceTag, PhysicalSize, Point, Radii, Rect,
     Size, Transform,
@@ -79,9 +73,9 @@ pub use style::{
     BackgroundClipGeometryKind, BackgroundLayer, BackgroundNormalizationInput, BackgroundPosition,
     BackgroundRepeat, BackgroundSize, BackgroundSizeKind, BackgroundStack, BorderEdges, BorderSide,
     BorderStyle, BoxDecorationBreak, BoxDecorationFragment, BoxDecorationInput, BoxSide,
-    ClipGeometry, ClipGeometryKind, ClipInput, ClipInputKind, ColorFilterOp, ColorFilterPipeline,
-    FilterAmount, FilterAngle, FilterBlur, FilterDropShadow, FilterList, FilterOp, FilterOpKind,
-    FilteredImagePaint, ImageAttachmentPlan, ImagePlacementInput, ImageRepeatMode, ImageRepeatPlan,
+    ClipGeometry, ClipGeometryKind, ClipInput, ClipInputKind, FilterAmount, FilterAngle,
+    FilterBlur, FilterDropShadow, FilterList, FilterOp, FilterOpKind, FilteredImagePaint,
+    ImageAttachmentPlan, ImagePlacementInput, ImageRepeatMode, ImageRepeatPlan,
     ImageResourceDensity, MaskCompositeMode, MaskInput, MaskLayer, MaskLayerStack, MaskMode,
     MaskSource, MaskSourceKind, NormalizedBackgroundCommand, NormalizedBackgroundCommandKind,
     NormalizedBackgroundLayer, NormalizedBackgroundLayerSource, NormalizedBackgroundStack,

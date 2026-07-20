@@ -1,3 +1,4 @@
+use super::frame::GpuRenderGraph;
 #[cfg(test)]
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
@@ -5,12 +6,12 @@ use super::gpu_transaction::{
 use super::pass::{C08ExternalOutputView, C08PreparableGraph, LoweredGraphPlan, PreparedGraph};
 #[cfg(test)]
 use super::pass::{C08PassCacheRequestsForTest, C09CompositeCacheRequestsForTest};
-use super::resource::{
-    FrameCleanup, FrameResourceScope, ResourceIdentity, ResourceLease, ResourceManager,
-    WorkingFormat,
-};
+use super::resource::{FrameCleanup, ResourceManager, WorkingFormat};
 #[cfg(test)]
-use super::resource::{ManagerIdentity, ResourceManagerObservationForTest};
+use super::resource::{
+    FrameResourceScope, ManagerIdentity, ResourceIdentity, ResourceLease,
+    ResourceManagerObservationForTest,
+};
 #[cfg(test)]
 use super::shader::DevicePassCacheCountsForTest;
 use super::surface::{HeadlessPublication, SurfaceBackend};
@@ -31,20 +32,17 @@ use super::vello_engine::{
 #[cfg(test)]
 use super::vello_engine::{PreparedVelloPass, VelloAtlasOutcome};
 use super::*;
+#[cfg(test)]
+use super::{command::OffscreenBounds, geometry::physical_size, texture::EffectTextureDescriptor};
 use super::{
-    command::OffscreenBounds,
-    geometry::physical_size,
     gpu_transaction::{
         C08GraphOutputCommit, C08GraphSubmissionPayload, GpuOperationStage,
         GpuOperationTransaction, InternalVelloPayload,
     },
     shader::{DevicePassCache, ProvisionalDevicePassCacheUpdate},
-    texture::{
-        TextureDescriptor, TextureUsageIntent, TransitionalTextureRole, headless_texture_descriptor,
-    },
+    texture::{TextureDescriptor, headless_texture_descriptor},
 };
 use std::{
-    fmt,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -52,6 +50,7 @@ use std::{
 #[cfg(test)]
 use std::{
     cell::RefCell,
+    fmt,
     sync::atomic::{AtomicUsize, Ordering},
     sync::{Condvar, Weak},
     task::{Context, Poll, Waker},
@@ -207,6 +206,59 @@ pub(crate) struct Backend {
     instance: wgpu::Instance,
     device_states: Vec<DeviceState>,
     resource_cache_budget: ResourceCacheBudget,
+}
+
+/// One validated C08 or C09 graph selected for atomic surface execution.
+#[must_use = "an exact surface graph must enter its GPU transaction"]
+pub(crate) enum ExactSurfaceGraph {
+    C08(C08PreparableGraph),
+    C09 {
+        lowered: LoweredGraphPlan,
+        working_format: WorkingFormat,
+        output_format: Format,
+    },
+}
+
+impl ExactSurfaceGraph {
+    pub(crate) fn try_c09(
+        graph: &GpuRenderGraph,
+        working_format: WorkingFormat,
+        output_format: Format,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<Self> {
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            graph,
+            working_format,
+            output_format,
+            capabilities,
+        )?;
+        Ok(Self::C09 {
+            lowered,
+            working_format,
+            output_format,
+        })
+    }
+
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        match self {
+            Self::C08(preparable) => preparable.working_format(),
+            Self::C09 { working_format, .. } => *working_format,
+        }
+    }
+
+    pub(crate) const fn output_format(&self) -> Format {
+        match self {
+            Self::C08(preparable) => preparable.output_format(),
+            Self::C09 { output_format, .. } => *output_format,
+        }
+    }
+
+    fn known_output_extent(&self) -> Result<Option<PhysicalSize>> {
+        match self {
+            Self::C08(preparable) => preparable.output_extent().map(Some),
+            Self::C09 { .. } => Ok(None),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -824,10 +876,12 @@ fn encode_c09_gpu_vectors_for_test(
     let mask_view = mask_texture
         .as_ref()
         .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
+    let vector_source_origin = Point::new(-1.0, -1.0);
+    let vector_source_size = PhysicalSize::new(7, 4);
     let spatial_bytes = super::pass::pass_spatial_uniform_bytes_for_test(
-        Point::new(0.0, 0.0),
+        vector_source_origin,
         1.0,
-        PhysicalSize::new(1, 1),
+        vector_source_size,
         Point::new(0.0, 0.0),
         1.0,
         PhysicalSize::new(1, 1),
@@ -850,7 +904,7 @@ fn encode_c09_gpu_vectors_for_test(
             })?;
         let source = c09_vector_texture(
             &ready.device,
-            PhysicalSize::new(1, 1),
+            vector_source_size,
             working_format.texture_format(),
             wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
             "Surgeist C09 GPU vector source",
@@ -1200,6 +1254,14 @@ impl DeviceCapabilities {
             working_format.texture_format(),
             working_format.required_usages(),
         )
+    }
+
+    fn for_selected_working_format(mut self, working_format: WorkingFormat) -> Result<Self> {
+        self.validate_supported_working_format(working_format)?;
+        if working_format == WorkingFormat::ReducedPrecision {
+            self.high_precision = false;
+        }
+        Ok(self)
     }
 
     pub(crate) fn validate_effect_texture_extent(&self, requested: PhysicalSize) -> Result<()> {
@@ -2429,22 +2491,21 @@ impl Backend {
         .map(|prepared| prepared.with_vello_engine(&ready.engine))
     }
 
-    fn prepare_c08_graph_resources(
+    fn prepare_exact_surface_graph_resources(
         &mut self,
         identity: DeviceSlotIdentity,
-        preparable: C08PreparableGraph,
-        selected_working_format: WorkingFormat,
+        graph: ExactSurfaceGraph,
     ) -> Result<PreparedGraph<'_>> {
         let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "GPU device slot is unavailable for C08 graph preparation",
+                "GPU device slot is unavailable for exact graph preparation",
             )
         })?;
         if state.generation != identity.generation {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "GPU device generation changed before C08 graph preparation",
+                "GPU device generation changed before exact graph preparation",
             ));
         }
         if let Some(terminal) = state.terminal() {
@@ -2453,25 +2514,41 @@ impl Backend {
         if !state.signal.has_active_operation() {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "C08 graph preparation requires one active GPU transaction",
+                "exact graph preparation requires one active GPU transaction",
             ));
         }
-        let capabilities = state.capabilities;
+        let selected_working_format = graph.working_format();
+        let capabilities = state
+            .capabilities
+            .for_selected_working_format(selected_working_format)?;
         let ready = state.ready().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "ready GPU device resources disappeared before C08 graph preparation",
+                "ready GPU device resources disappeared before exact graph preparation",
             )
         })?;
-        PreparedGraph::try_prepare_c08_with_working_format(
-            preparable,
-            selected_working_format,
-            &capabilities,
-            &ready.device,
-            &ready.queue,
-            &ready.resources,
-            (&ready.pass_cache, true),
-        )
+        match graph {
+            ExactSurfaceGraph::C08(preparable) => {
+                PreparedGraph::try_prepare_c08_with_working_format(
+                    preparable,
+                    selected_working_format,
+                    &capabilities,
+                    &ready.device,
+                    &ready.queue,
+                    &ready.resources,
+                    (&ready.pass_cache, true),
+                )
+            }
+            ExactSurfaceGraph::C09 { lowered, .. } => PreparedGraph::try_prepare(
+                lowered,
+                EffectQualityPolicy::AllowReducedPrecision,
+                &capabilities,
+                &ready.device,
+                &ready.queue,
+                &ready.resources,
+                (&ready.pass_cache, true),
+            ),
+        }
         .map(|prepared| prepared.with_vello_engine(&ready.engine))
     }
 
@@ -3907,11 +3984,13 @@ impl Backend {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct OffscreenRenderGpuContext<'a> {
     backend: &'a mut Backend,
     device_identity: DeviceSlotIdentity,
 }
 
+#[cfg(test)]
 impl<'a> OffscreenRenderGpuContext<'a> {
     #[must_use]
     pub(crate) fn new(backend: &'a mut Backend, device_identity: DeviceSlotIdentity) -> Self {
@@ -3925,14 +4004,15 @@ impl<'a> OffscreenRenderGpuContext<'a> {
 /// Describes a Vello scene that has already been encoded in offscreen-local
 /// coordinates; bounds size allocates the target texture, not a scene crop.
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(test)]
 pub(crate) struct OffscreenLocalSceneRenderRequest {
     bounds: OffscreenBounds,
     scale: f64,
     format: Format,
     parameters: Parameters,
-    resource_role: TransitionalTextureRole,
 }
 
+#[cfg(test)]
 impl OffscreenLocalSceneRenderRequest {
     #[must_use]
     #[cfg(test)]
@@ -3947,55 +4027,26 @@ impl OffscreenLocalSceneRenderRequest {
             scale,
             format,
             parameters,
-            resource_role: TransitionalTextureRole::Offscreen,
-        }
-    }
-
-    pub(crate) const fn for_resolved_mask(
-        bounds: OffscreenBounds,
-        scale: f64,
-        format: Format,
-        parameters: Parameters,
-    ) -> Self {
-        Self {
-            bounds,
-            scale,
-            format,
-            parameters,
-            resource_role: TransitionalTextureRole::ResolvedMask,
-        }
-    }
-
-    pub(crate) const fn for_backdrop(
-        bounds: OffscreenBounds,
-        scale: f64,
-        format: Format,
-        parameters: Parameters,
-    ) -> Self {
-        Self {
-            bounds,
-            scale,
-            format,
-            parameters,
-            resource_role: TransitionalTextureRole::Backdrop,
         }
     }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+#[cfg(test)]
 pub(crate) struct OffscreenRenderTarget {
     #[cfg(test)]
     resource_identity: ResourceIdentity,
     #[cfg(test)]
     bounds: OffscreenBounds,
-    descriptor: TextureDescriptor,
+    descriptor: EffectTextureDescriptor,
 }
 
+#[cfg(test)]
 impl OffscreenRenderTarget {
     fn new(
         _resource_identity: ResourceIdentity,
         _bounds: OffscreenBounds,
-        descriptor: TextureDescriptor,
+        descriptor: EffectTextureDescriptor,
     ) -> Self {
         Self {
             #[cfg(test)]
@@ -4019,12 +4070,13 @@ impl OffscreenRenderTarget {
     }
 
     #[must_use]
-    pub(crate) const fn descriptor(self) -> TextureDescriptor {
+    pub(crate) const fn descriptor(self) -> EffectTextureDescriptor {
         self.descriptor
     }
 }
 
 #[must_use = "offscreen rendered texture leases must be resolved by their device resource frame"]
+#[cfg(test)]
 pub(crate) struct OffscreenRenderedTextureLease {
     target: OffscreenRenderTarget,
     frame_scope: Option<FrameResourceScope>,
@@ -4032,6 +4084,7 @@ pub(crate) struct OffscreenRenderedTextureLease {
     timings: RenderTimings,
 }
 
+#[cfg(test)]
 impl fmt::Debug for OffscreenRenderedTextureLease {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -4042,6 +4095,7 @@ impl fmt::Debug for OffscreenRenderedTextureLease {
     }
 }
 
+#[cfg(test)]
 impl OffscreenRenderedTextureLease {
     #[must_use]
     #[cfg(test)]
@@ -4101,7 +4155,7 @@ impl OffscreenRenderedTextureLease {
                 "offscreen texture resource lease was already resolved",
             )
         })?;
-        frame_scope.transitional_texture(resource)
+        frame_scope.effect_texture(resource)
     }
 
     fn discard(&mut self) {
@@ -4115,6 +4169,7 @@ impl OffscreenRenderedTextureLease {
     }
 }
 
+#[cfg(test)]
 impl Drop for OffscreenRenderedTextureLease {
     fn drop(&mut self) {
         self.discard();
@@ -4126,11 +4181,12 @@ pub(crate) fn offscreen_local_scene_texture_descriptor(
     bounds: OffscreenBounds,
     scale: f64,
     format: Format,
-) -> Result<TextureDescriptor> {
+) -> Result<EffectTextureDescriptor> {
     let physical_size = offscreen_local_scene_physical_size(bounds, scale, format)?;
     offscreen_local_scene_texture_descriptor_for_physical_size(physical_size, format)
 }
 
+#[cfg(test)]
 fn offscreen_local_scene_physical_size(
     bounds: OffscreenBounds,
     scale: f64,
@@ -4146,13 +4202,29 @@ fn offscreen_local_scene_physical_size(
     physical_size(bounds.rect().size(), scale)
 }
 
+#[cfg(test)]
 fn offscreen_local_scene_texture_descriptor_for_physical_size(
     physical_size: PhysicalSize,
     format: Format,
-) -> Result<TextureDescriptor> {
-    TextureDescriptor::try_new(physical_size, format, TextureUsageIntent::OffscreenLayer)
+) -> Result<EffectTextureDescriptor> {
+    if format != Format::Rgba8 {
+        return Err(Error::invalid_value(
+            "offscreen Vello scene texture format",
+            format!("{format:?}"),
+            "must be Rgba8 for minimal offscreen Vello targets",
+        ));
+    }
+    EffectTextureDescriptor::try_capture(
+        physical_size,
+        wgpu::TextureUsages::RENDER_ATTACHMENT
+            .union(wgpu::TextureUsages::STORAGE_BINDING)
+            .union(wgpu::TextureUsages::TEXTURE_BINDING)
+            .union(wgpu::TextureUsages::COPY_SRC)
+            .union(wgpu::TextureUsages::COPY_DST),
+    )
 }
 
+#[cfg(test)]
 pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
     context: Option<OffscreenRenderGpuContext<'_>>,
     options: Options,
@@ -4169,9 +4241,16 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
             "offscreen Vello local scene rendering requires an available wgpu device context",
         ));
     };
-    if let Some(capabilities) = context.backend.device_capabilities(context.device_identity) {
-        capabilities.validate_effect_texture_extent(physical_size)?;
-    }
+    let capabilities = context
+        .backend
+        .device_capabilities(context.device_identity)
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "offscreen device capabilities are unavailable before allocation",
+            )
+        })?;
+    capabilities.validate_effect_texture_extent(physical_size)?;
     let descriptor =
         offscreen_local_scene_texture_descriptor_for_physical_size(physical_size, request.format)?;
     let mut rendered = {
@@ -4184,11 +4263,8 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
         #[cfg(test)]
         record_offscreen_texture_acquire_for_test();
         let mut frame_scope = ready.resources.begin_frame()?;
-        let resource = frame_scope.acquire_transitional_texture(
-            &ready.device,
-            request.resource_role,
-            descriptor,
-        )?;
+        let resource =
+            frame_scope.acquire_effect_texture(&ready.device, &capabilities, descriptor)?;
         let target =
             OffscreenRenderTarget::new(resource.resource_identity(), request.bounds, descriptor);
         OffscreenRenderedTextureLease {
@@ -4216,7 +4292,7 @@ pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
                 target_extent: rendered.target.descriptor().physical_size(),
                 base_color: request.parameters.base_color,
                 antialiasing: options.antialiasing(),
-                target_usage: rendered.target.descriptor().wgpu_usage(),
+                target_usage: rendered.target.descriptor().usage(),
             },
         )
         .await;
@@ -4297,12 +4373,14 @@ impl SurfaceFrameCommit {
     }
 }
 
-pub(crate) async fn render_c08_headless_graph_surface(
+pub(crate) async fn render_exact_headless_graph_surface(
     backend: &mut Backend,
     surface: &Surface,
-    preparable: C08PreparableGraph,
-    selected_working_format: WorkingFormat,
+    graph: ExactSurfaceGraph,
 ) -> Result<SurfaceFrameCommit> {
+    let selected_working_format = graph.working_format();
+    let graph_output_format = graph.output_format();
+    let known_output_extent = graph.known_output_extent()?;
     let (device_identity, physical_size) = match &surface.backend {
         SurfaceBackend::Headless {
             device_identity,
@@ -4313,7 +4391,7 @@ pub(crate) async fn render_c08_headless_graph_surface(
             return Err(Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "the C08 graph executor requires a device-backed headless surface",
+                "the exact graph executor requires a device-backed headless surface",
             ));
         }
         #[cfg(any(
@@ -4323,20 +4401,19 @@ pub(crate) async fn render_c08_headless_graph_surface(
         SurfaceBackend::Presented { .. } => {
             return Err(Error::new(
                 BackendErrorCode::UnsupportedBackend,
-                "presented C08 graph execution belongs to its later delivery task",
+                "presented exact graph execution requires the presented executor",
             ));
         }
     };
     if physical_size.width() == 0
         || physical_size.height() == 0
         || surface.options.format != Format::Rgba8
-        || preparable.output_format() != surface.options.format
-        || preparable.working_format() != selected_working_format
-        || preparable.output_extent()? != physical_size
+        || graph_output_format != surface.options.format
+        || known_output_extent.is_some_and(|extent| extent != physical_size)
     {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            "the C08 headless draft differs from the exact eligible graph output",
+            "the headless draft differs from the exact eligible graph output",
         ));
     }
     let capabilities = backend
@@ -4344,7 +4421,7 @@ pub(crate) async fn render_c08_headless_graph_surface(
         .ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "the C08 graph executor lost immutable device capabilities",
+                "the exact graph executor lost immutable device capabilities",
             )
         })?;
     capabilities.validate_supported_working_format(selected_working_format)?;
@@ -4359,29 +4436,25 @@ pub(crate) async fn render_c08_headless_graph_surface(
             device_identity,
             RuntimeOperation::SurfaceRendering,
             BackendErrorCode::RenderFailed,
-            "the C08 graph executor lost its ready device before draft allocation",
+            "the exact graph executor lost its ready device before draft allocation",
         )?;
         (ready.device.clone(), ready.queue.clone())
     };
     let render_start = Instant::now();
     let (draft_texture, draft_view) =
         create_headless_texture(&device, physical_size, surface.options.format)?;
-    let mut prepared = backend.prepare_c08_graph_resources(
-        device_identity,
-        preparable,
-        selected_working_format,
-    )?;
+    let mut prepared = backend.prepare_exact_surface_graph_resources(device_identity, graph)?;
     if prepared.output_extent()? != physical_size
         || prepared.output_format() != surface.options.format
         || prepared.working_format() != selected_working_format
     {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            "prepared C08 graph output changed after eligibility validation",
+            "prepared exact graph output changed after eligibility validation",
         ));
     }
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist C08 headless graph encoder"),
+        label: Some("Surgeist exact headless graph encoder"),
     });
     let pending_encoding = prepared
         .encode_c08_custom_spine(
@@ -4400,7 +4473,7 @@ pub(crate) async fn render_c08_headless_graph_surface(
             device_identity,
             RuntimeOperation::SurfaceRendering,
             BackendErrorCode::RenderFailed,
-            "the C08 graph executor lost its ready device before submission",
+            "the exact graph executor lost its ready device before submission",
         )?;
         transaction
             .submit_c08_graph(
@@ -4427,7 +4500,7 @@ pub(crate) async fn render_c08_headless_graph_surface(
         C08GraphOutputCommit::Presented => {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "the headless C08 graph transaction returned a presented host effect",
+                "the headless exact graph transaction returned a presented host effect",
             ));
         }
     };
@@ -4445,12 +4518,14 @@ pub(crate) async fn render_c08_headless_graph_surface(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-pub(crate) async fn render_c08_presented_graph_surface(
+pub(crate) async fn render_exact_presented_graph_surface(
     backend: &mut Backend,
     surface: &mut Surface,
-    preparable: C08PreparableGraph,
-    selected_working_format: WorkingFormat,
+    graph: ExactSurfaceGraph,
 ) -> Result<SurfaceFrameCommit> {
+    let selected_working_format = graph.working_format();
+    let graph_output_format = graph.output_format();
+    let known_output_extent = graph.known_output_extent()?;
     let (device_identity, physical_size, output_format) = match &surface.backend {
         SurfaceBackend::Presented {
             surface: native,
@@ -4462,7 +4537,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
                 PresentedLifecycle::ResizePending { .. } => {
                     return Err(Error::new(
                         BackendErrorCode::SurfaceConfigureFailed,
-                        "presented C08 graph execution started before configuration committed",
+                        "presented exact graph execution started before configuration committed",
                     ));
                 }
                 PresentedLifecycle::NonRenderable { .. } => {
@@ -4471,7 +4546,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
                         RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
                             state: RenderSurfaceAvailability::NonRenderable,
                         },
-                        "presented C08 graph output is not renderable",
+                        "presented exact graph output is not renderable",
                     ));
                 }
                 PresentedLifecycle::Occluded { .. } => {
@@ -4480,7 +4555,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
                         RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
                             state: RenderSurfaceAvailability::Occluded,
                         },
-                        "presented C08 graph output is occluded",
+                        "presented exact graph output is occluded",
                     ));
                 }
                 PresentedLifecycle::Lost => {
@@ -4489,14 +4564,14 @@ pub(crate) async fn render_c08_presented_graph_surface(
                         RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
                             state: RenderSurfaceAvailability::Lost,
                         },
-                        "presented C08 graph output is lost",
+                        "presented exact graph output is lost",
                     ));
                 }
             }
             let resources = native.committed().ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::SurfaceConfigureFailed,
-                    "ready presented C08 graph output has no committed configuration",
+                    "ready presented exact graph output has no committed configuration",
                 )
             })?;
             let physical_size = PhysicalSize::new(resources.config.width, resources.config.height);
@@ -4505,7 +4580,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
             {
                 return Err(Error::new(
                     BackendErrorCode::SurfaceConfigureFailed,
-                    "presented C08 graph output differs from its committed configuration",
+                    "presented exact graph output differs from its committed configuration",
                 ));
             }
             let output_format = match native.format {
@@ -4514,7 +4589,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
                 _ => {
                     return Err(Error::new(
                         BackendErrorCode::PresentFailed,
-                        "presented C08 graph output is not an advertised RGBA8 or BGRA8 format",
+                        "presented exact graph output is not an advertised RGBA8 or BGRA8 format",
                     ));
                 }
             };
@@ -4523,19 +4598,18 @@ pub(crate) async fn render_c08_presented_graph_surface(
         SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
             return Err(Error::new(
                 BackendErrorCode::UnsupportedBackend,
-                "presented C08 graph execution requires a presented surface",
+                "presented exact graph execution requires a presented surface",
             ));
         }
     };
     if physical_size.width() == 0
         || physical_size.height() == 0
-        || preparable.output_format() != output_format
-        || preparable.working_format() != selected_working_format
-        || preparable.output_extent()? != physical_size
+        || graph_output_format != output_format
+        || known_output_extent.is_some_and(|extent| extent != physical_size)
     {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            "the presented C08 graph differs from the exact eligible output",
+            "the presented graph differs from the exact eligible output",
         ));
     }
     let capabilities = backend
@@ -4543,7 +4617,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
         .ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "the presented C08 graph executor lost immutable device capabilities",
+                "the presented exact graph executor lost immutable device capabilities",
             )
         })?;
     capabilities.validate_supported_working_format(selected_working_format)?;
@@ -4558,23 +4632,19 @@ pub(crate) async fn render_c08_presented_graph_surface(
             device_identity,
             RuntimeOperation::SurfaceRendering,
             BackendErrorCode::RenderFailed,
-            "the presented C08 graph lost its ready device before preparation",
+            "the presented exact graph lost its ready device before preparation",
         )?;
         (ready.device.clone(), ready.queue.clone())
     };
     let render_start = Instant::now();
-    let mut prepared = backend.prepare_c08_graph_resources(
-        device_identity,
-        preparable,
-        selected_working_format,
-    )?;
+    let mut prepared = backend.prepare_exact_surface_graph_resources(device_identity, graph)?;
     if prepared.output_extent()? != physical_size
         || prepared.output_format() != output_format
         || prepared.working_format() != selected_working_format
     {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            "prepared presented C08 graph output changed after eligibility validation",
+            "prepared presented exact graph output changed after eligibility validation",
         ));
     }
 
@@ -4655,13 +4725,13 @@ pub(crate) async fn render_c08_presented_graph_surface(
             }
         },
         SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
-            unreachable!("presented C08 graph output changed after eligibility validation")
+            unreachable!("presented exact graph output changed after eligibility validation")
         }
     };
 
     let output_view = acquired.create_view();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist C08 presented graph encoder"),
+        label: Some("Surgeist exact presented graph encoder"),
     });
     let pending_encoding = prepared
         .encode_c08_custom_spine(
@@ -4678,7 +4748,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
             device_identity,
             RuntimeOperation::SurfaceRendering,
             BackendErrorCode::RenderFailed,
-            "the presented C08 graph lost its ready device before submission",
+            "the presented exact graph lost its ready device before submission",
         )?;
         transaction
             .submit_c08_graph(
@@ -4694,7 +4764,7 @@ pub(crate) async fn render_c08_presented_graph_surface(
     if !matches!(output, C08GraphOutputCommit::Presented) {
         return Err(Error::new(
             BackendErrorCode::PresentFailed,
-            "the presented C08 graph transaction returned a headless publication",
+            "the presented exact graph transaction returned a headless publication",
         ));
     }
     Ok(SurfaceFrameCommit::presented_graph(

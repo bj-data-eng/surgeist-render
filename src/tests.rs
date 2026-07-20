@@ -41,6 +41,12 @@ use super::{
     backend::*,
     command,
     encode::*,
+    filter::{
+        BlurPolicy, BlurRadiusInterpretation, CompiledColorFilterPipeline, FilterClipBounds,
+        FilterOutset, FilterRegionPlan, FilterSourceBounds, KernelSupportRadius,
+        LargeBlurRadiusAction, LargeBlurRadiusPolicy, MaterializedImageFilterStep,
+        TransparentEdgeSamplingPolicy,
+    },
     image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
     pass::pass_spatial_uniform_bytes_for_test,
     reference::{
@@ -53,9 +59,10 @@ use super::{
         ResourceRetentionOutcome, WorkingFormat,
     },
     shader::{DevicePassCache, device_pass_cache_owns_exact_key_spaces_for_test},
+    style::{ColorFilterOp, ColorFilterPipeline},
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
-        EffectTextureDescriptor, TextureCacheKey, TextureDescriptor, TextureUsageIntent,
+        EffectTextureDescriptor, EffectTextureRole, TextureDescriptor, TextureUsageIntent,
         headless_texture_descriptor,
     },
 };
@@ -4068,20 +4075,9 @@ fn options_default_requires_high_precision_and_bounds_retention() {
 #[test]
 fn resource_cache_budget_zero_disables_idle_retention() {
     let disabled = ResourceCacheBudget::new(0);
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(1, 1),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
     let manager = ResourceManager::new(disabled);
     let mut frame = manager.begin_frame().unwrap();
-    let lease = frame
-        .acquire(
-            ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor)),
-            descriptor.byte_len(),
-        )
-        .unwrap();
+    let lease = frame.acquire(modeled_resource_key_for_test(1), 4).unwrap();
     frame.release(lease).unwrap();
     let cleanup = frame.finish();
 
@@ -6236,26 +6232,14 @@ fn css_drop_shadow_rejects_non_solid_shadow_paint() {
 fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_effects() {
     let capabilities = Capabilities::CURRENT;
 
+    assert!(capabilities.filters().supports_ordered_filter_lists());
+    assert!(!capabilities.filters().supports_gpu_blur_filter_execution());
     assert!(
-        capabilities
+        !capabilities
             .filters()
-            .supports_materialized_image_filter_classification()
+            .supports_gpu_drop_shadow_filter_execution()
     );
-    assert!(
-        capabilities
-            .filters()
-            .supports_materialized_blur_filter_execution()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_materialized_drop_shadow_filter_execution()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_filter_region_outset_planning()
-    );
+    assert!(capabilities.filters().supports_filter_region_planning());
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(
         !capabilities
@@ -6268,18 +6252,18 @@ fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_e
     assert!(
         capabilities
             .masks_clips()
-            .supports_materialized_alpha_mask_execution()
+            .supports_resolved_alpha_mask_execution()
     );
     assert!(
         !capabilities
             .offscreen_pipeline()
-            .supports_filter_execution()
+            .supports_layer_filter_execution()
     );
     assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
     assert!(
         !capabilities
             .offscreen_pipeline()
-            .supports_backdrop_execution()
+            .supports_broad_backdrop_execution()
     );
 }
 
@@ -6325,6 +6309,7 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
     let clip = FilterClipBounds::try_new(Rect::new(8.0, 8.0, 12.0, 12.0)).unwrap();
     let blur_outset = FilterOutset::from_blur(blur, BlurPolicy::css_filter_default()).unwrap();
     let blur_region = FilterRegionPlan::try_new(source, blur_outset, Some(clip)).unwrap();
+    assert_eq!(blur_region.source_bounds(), source);
     assert_eq!(
         blur_region.inflated_bounds().rect(),
         Rect::new(5.0, 5.0, 14.0, 14.0)
@@ -6574,16 +6559,8 @@ fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_i
 fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
     let capabilities = Capabilities::CURRENT;
 
-    assert!(
-        capabilities
-            .filters()
-            .supports_color_filter_classification()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_color_filter_pipeline_execution()
-    );
+    assert!(capabilities.filters().supports_ordered_filter_lists());
+    assert!(!capabilities.filters().supports_gpu_color_filter_execution());
     assert!(
         capabilities
             .image_sampling()
@@ -6598,7 +6575,7 @@ fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
     assert!(
         !capabilities
             .offscreen_pipeline()
-            .supports_filter_execution()
+            .supports_layer_filter_execution()
     );
 }
 
@@ -6652,7 +6629,7 @@ fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
         ),
         UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropExecution,
+            PrimitiveOperation::BroadBackdropExecution,
         ),
     ] {
         let error = Capabilities::CURRENT
@@ -6733,61 +6710,56 @@ fn assert_premultiplied(pixel: PremultipliedRgba8) {
 #[test]
 fn texture_descriptor_equality_uses_size_format_and_intent() {
     let size = PhysicalSize::new(32, 16);
-    let layer = TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::OffscreenLayer)
-        .unwrap();
-    let same = TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::OffscreenLayer)
-        .unwrap();
+    let readback =
+        TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::ReadbackReference)
+            .unwrap();
+    let same =
+        TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::ReadbackReference)
+            .unwrap();
     let different_intent =
         TextureDescriptor::try_new(size, Format::Rgba8, TextureUsageIntent::IntermediatePass)
             .unwrap();
 
-    assert_eq!(layer, same);
-    assert_ne!(layer, different_intent);
-    assert_eq!(layer.physical_size(), size);
-    assert_eq!(layer.format(), Format::Rgba8);
-    assert_eq!(layer.intent(), TextureUsageIntent::OffscreenLayer);
-    assert_eq!(layer.byte_len(), 32 * 16 * 4);
+    assert_eq!(readback, same);
+    assert_ne!(readback, different_intent);
+    assert_eq!(readback.physical_size(), size);
+    assert_eq!(readback.format(), Format::Rgba8);
+    assert_eq!(readback.intent(), TextureUsageIntent::ReadbackReference);
 }
 
 #[test]
 fn texture_cache_keys_are_stable_without_raw_resources() {
-    let descriptor = TextureDescriptor::try_new(
+    let descriptor = EffectTextureDescriptor::try_capture(
         PhysicalSize::new(8, 4),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
+        wgpu::TextureUsages::TEXTURE_BINDING,
     )
     .unwrap();
 
-    assert_eq!(
-        TextureCacheKey::from_descriptor(descriptor),
-        TextureCacheKey::from_descriptor(descriptor)
-    );
+    assert_eq!(descriptor.cache_key(), descriptor.cache_key(),);
     assert_ne!(
-        TextureCacheKey::from_descriptor(descriptor),
-        TextureCacheKey::from_descriptor(
-            TextureDescriptor::try_new(
-                PhysicalSize::new(8, 4),
-                Format::Rgba8,
-                TextureUsageIntent::ReadbackReference,
-            )
-            .unwrap()
+        descriptor.cache_key(),
+        EffectTextureDescriptor::try_coverage(
+            PhysicalSize::new(8, 4),
+            wgpu::TextureUsages::TEXTURE_BINDING,
         )
+        .unwrap()
+        .cache_key()
     );
 }
 
 #[test]
 fn texture_cache_records_misses_reuse_hits_and_live_count() {
-    let descriptor = TextureDescriptor::try_new(
+    let descriptor = EffectTextureDescriptor::try_capture(
         PhysicalSize::new(4, 4),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
+        wgpu::TextureUsages::TEXTURE_BINDING,
     )
     .unwrap();
-    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let key = ResourceCacheKey::EffectTexture(descriptor.cache_key());
+    let byte_len = descriptor.checked_byte_len().unwrap();
     let manager = ResourceManager::default();
 
     let mut first_frame = manager.begin_frame().unwrap();
-    let first = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let first = first_frame.acquire(key, byte_len).unwrap();
     assert_eq!(manager.stats().allocations, 1);
     assert_eq!(manager.stats().misses, 1);
     assert_eq!(manager.stats().hits, 0);
@@ -6796,7 +6768,7 @@ fn texture_cache_records_misses_reuse_hits_and_live_count() {
     first_frame.release(first).unwrap();
     let _ = first_frame.finish();
     let mut second_frame = manager.begin_frame().unwrap();
-    let _second = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let _second = second_frame.acquire(key, byte_len).unwrap();
 
     assert_eq!(manager.stats().allocations, 1);
     assert_eq!(manager.stats().misses, 1);
@@ -6805,13 +6777,17 @@ fn texture_cache_records_misses_reuse_hits_and_live_count() {
 }
 
 fn modeled_resource_key_for_test(discriminator: u32) -> ResourceCacheKey {
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(discriminator.max(1), 1),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
+    modeled_effect_texture_for_test(PhysicalSize::new(discriminator.max(1), 1)).0
+}
+
+fn modeled_effect_texture_for_test(physical_size: PhysicalSize) -> (ResourceCacheKey, u64) {
+    let descriptor =
+        EffectTextureDescriptor::try_capture(physical_size, wgpu::TextureUsages::TEXTURE_BINDING)
+            .unwrap();
+    (
+        ResourceCacheKey::EffectTexture(descriptor.cache_key()),
+        descriptor.checked_byte_len().unwrap(),
     )
-    .unwrap();
-    ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor))
 }
 
 #[test]
@@ -8553,20 +8529,10 @@ fn gaussian_kernel_buffer_keys_include_the_exact_plan() {
 
 #[test]
 fn texture_cache_release_and_eviction_accounting_is_deterministic() {
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(2, 2),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
+    let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(2, 2));
     let manager = ResourceManager::new(ResourceCacheBudget::DISABLED);
     let mut frame = manager.begin_frame().unwrap();
-    let lease = frame
-        .acquire(
-            ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor)),
-            descriptor.byte_len(),
-        )
-        .unwrap();
+    let lease = frame.acquire(key, byte_len).unwrap();
     frame.release(lease).unwrap();
     let cleanup = frame.finish();
 
@@ -8579,21 +8545,15 @@ fn texture_cache_release_and_eviction_accounting_is_deterministic() {
 
 #[test]
 fn texture_cache_rejects_stale_handle_after_reuse() {
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(3, 3),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(3, 3));
     let manager = ResourceManager::default();
     let mut first_frame = manager.begin_frame().unwrap();
-    let first = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let first = first_frame.acquire(key, byte_len).unwrap();
     let stale = first.token_for_test();
     first_frame.release(first).unwrap();
     let _ = first_frame.finish();
     let mut second_frame = manager.begin_frame().unwrap();
-    let current = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let current = second_frame.acquire(key, byte_len).unwrap();
     let error = second_frame
         .release_injected_for_test(stale)
         .expect_err("stale frame leases must not release a new lease");
@@ -8607,20 +8567,14 @@ fn texture_cache_rejects_stale_handle_after_reuse() {
 
 #[test]
 fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(5, 5),
-        Format::Rgba8,
-        TextureUsageIntent::IntermediatePass,
-    )
-    .unwrap();
-    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(5, 5));
     let first_manager = ResourceManager::default();
     let second_manager = ResourceManager::default();
     let mut first_frame = first_manager.begin_frame().unwrap();
     let mut second_frame = second_manager.begin_frame().unwrap();
 
-    let foreign = first_frame.acquire(key, descriptor.byte_len()).unwrap();
-    let local = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let foreign = first_frame.acquire(key, byte_len).unwrap();
+    let local = second_frame.acquire(key, byte_len).unwrap();
     let error = second_frame
         .release(foreign)
         .expect_err("foreign handles must not release matching local entries");
@@ -8634,20 +8588,14 @@ fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
 
 #[test]
 fn texture_cache_default_construction_rejects_same_descriptor_foreign_release() {
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(7, 7),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(7, 7));
     let first_manager = ResourceManager::default();
     let second_manager = ResourceManager::default();
     let mut first_frame = first_manager.begin_frame().unwrap();
     let mut second_frame = second_manager.begin_frame().unwrap();
 
-    let foreign = first_frame.acquire(key, descriptor.byte_len()).unwrap();
-    let local = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let foreign = first_frame.acquire(key, byte_len).unwrap();
+    let local = second_frame.acquire(key, byte_len).unwrap();
     let error = second_frame
         .release(foreign)
         .expect_err("default-constructed caches must still have unique identities");
@@ -8664,7 +8612,7 @@ fn texture_descriptors_reject_zero_size_and_overflow() {
     let zero_width = TextureDescriptor::try_new(
         PhysicalSize::new(0, 1),
         Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
+        TextureUsageIntent::ReadbackReference,
     )
     .expect_err("zero-width textures should be rejected");
     assert_eq!(zero_width.code(), ErrorCode::InvalidInput);
@@ -8708,20 +8656,14 @@ fn texture_lifecycle_accounting_is_separate_from_image_cache_stats() {
         .fill(Rect::new(1.0, 0.0, 1.0, 1.0), Paint::image(image));
     let image_stats = scene.stats();
 
-    let descriptor = TextureDescriptor::try_new(
-        PhysicalSize::new(4, 4),
-        Format::Rgba8,
-        TextureUsageIntent::OffscreenLayer,
-    )
-    .unwrap();
-    let key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(descriptor));
+    let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(4, 4));
     let manager = ResourceManager::default();
     let mut first_frame = manager.begin_frame().unwrap();
-    let first = first_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let first = first_frame.acquire(key, byte_len).unwrap();
     first_frame.release(first).unwrap();
     let _ = first_frame.finish();
     let mut second_frame = manager.begin_frame().unwrap();
-    let _second = second_frame.acquire(key, descriptor.byte_len()).unwrap();
+    let _second = second_frame.acquire(key, byte_len).unwrap();
 
     assert_eq!(image_stats.images, 2);
     assert_eq!(image_stats.cache_misses, 1);
@@ -8890,8 +8832,8 @@ fn offscreen_texture_allocation_uses_explicit_bounded_layer_descriptor() {
     let descriptor = offscreen_local_scene_texture_descriptor(bounds, 2.0, Format::Rgba8).unwrap();
 
     assert_eq!(descriptor.physical_size(), PhysicalSize::new(20, 12));
-    assert_eq!(descriptor.format(), Format::Rgba8);
-    assert_eq!(descriptor.intent(), TextureUsageIntent::OffscreenLayer);
+    assert_eq!(descriptor.texture_format(), wgpu::TextureFormat::Rgba8Unorm);
+    assert_eq!(descriptor.role(), EffectTextureRole::Capture);
 }
 
 #[test]
@@ -9293,26 +9235,28 @@ fn sequence9_guardrail_layer_pass_plans_keep_finite_bounds_without_offscreen_tex
 }
 
 #[test]
-fn sequence9_guardrail_texture_lifecycle_is_deterministic_for_nested_layer_bounds() {
+fn retained_capture_texture_lifecycle_is_deterministic_for_nested_layer_bounds() {
     let outer_bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap();
     let inner_bounds = command::OffscreenBounds::try_new(Rect::new(2.0, 1.0, 3.0, 2.0)).unwrap();
     let outer = offscreen_local_scene_texture_descriptor(outer_bounds, 1.0, Format::Rgba8).unwrap();
     let inner = offscreen_local_scene_texture_descriptor(inner_bounds, 1.0, Format::Rgba8).unwrap();
-    let outer_key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(outer));
-    let inner_key = ResourceCacheKey::transitional_texture(TextureCacheKey::from_descriptor(inner));
+    let outer_key = ResourceCacheKey::EffectTexture(outer.cache_key());
+    let inner_key = ResourceCacheKey::EffectTexture(inner.cache_key());
+    let outer_byte_len = outer.checked_byte_len().unwrap();
+    let inner_byte_len = inner.checked_byte_len().unwrap();
     let manager = ResourceManager::default();
 
     let mut first_frame = manager.begin_frame().unwrap();
-    let outer_first = first_frame.acquire(outer_key, outer.byte_len()).unwrap();
-    let inner_first = first_frame.acquire(inner_key, inner.byte_len()).unwrap();
+    let outer_first = first_frame.acquire(outer_key, outer_byte_len).unwrap();
+    let inner_first = first_frame.acquire(inner_key, inner_byte_len).unwrap();
     let outer_identity = outer_first.resource_identity();
     let inner_identity = inner_first.resource_identity();
     first_frame.release(inner_first).unwrap();
     first_frame.release(outer_first).unwrap();
     let _ = first_frame.finish();
     let mut second_frame = manager.begin_frame().unwrap();
-    let outer_second = second_frame.acquire(outer_key, outer.byte_len()).unwrap();
-    let inner_second = second_frame.acquire(inner_key, inner.byte_len()).unwrap();
+    let outer_second = second_frame.acquire(outer_key, outer_byte_len).unwrap();
+    let inner_second = second_frame.acquire(inner_key, inner_byte_len).unwrap();
 
     assert_eq!(outer_second.resource_identity(), outer_identity);
     assert_eq!(inner_second.resource_identity(), inner_identity);
@@ -14731,7 +14675,7 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
 }
 
 #[test]
-fn render_plans_before_transitional_effect_execution() {
+fn render_plans_before_future_effect_diagnostic() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
         .expect("the pre-execution frame-gate fixture requires a headless surface");
@@ -14742,14 +14686,23 @@ fn render_plans_before_transitional_effect_execution() {
             scene.fill(Rect::new(1.0, 1.0, 4.0, 3.0), Color::BLACK);
         });
 
-    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect("the supported bounded-backdrop render must complete");
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .unwrap_err();
     let observation = renderer.preexecution_frame_gate_observation_for_test();
 
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ))
+    );
     assert!(
         observation.validated_plan_count == 1
-            && observation.plan_count_at_transitional_effect_execution == Some(1),
-        "renderer entered transitional effect execution before one validated plan"
+            && observation
+                .plan_count_at_transitional_effect_execution
+                .is_none(),
+        "renderer did not validate exactly one plan before the future-pass diagnostic"
     );
 }
 
@@ -15066,10 +15019,10 @@ fn filter_color_pipeline_rejects_blur_with_typed_diagnostic() {
         unsupported,
         UnsupportedPrimitive::new(
             PrimitiveFamily::Filters,
-            PrimitiveOperation::ColorFilterBlur
+            PrimitiveOperation::GpuBlurFilterExecution
         )
     );
-    assert_eq!(unsupported.label(), "color filter blur");
+    assert_eq!(unsupported.label(), "GPU blur filter execution");
 }
 
 #[test]
@@ -15093,10 +15046,10 @@ fn filter_color_pipeline_rejects_drop_shadow_with_typed_diagnostic() {
         unsupported,
         UnsupportedPrimitive::new(
             PrimitiveFamily::Filters,
-            PrimitiveOperation::ColorFilterDropShadow
+            PrimitiveOperation::GpuDropShadowFilterExecution
         )
     );
-    assert_eq!(unsupported.label(), "color filter drop-shadow");
+    assert_eq!(unsupported.label(), "GPU drop-shadow filter execution");
 }
 
 #[test]
@@ -15278,12 +15231,12 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
     ));
     let offscreen = Capabilities::CURRENT.offscreen_pipeline();
     assert!(offscreen.supports_bounded_backdrop_capture());
-    assert!(offscreen.supports_materialized_backdrop_filter_execution());
-    assert!(!offscreen.supports_backdrop_execution());
+    assert!(!offscreen.supports_bounded_backdrop_filter_execution());
+    assert!(!offscreen.supports_broad_backdrop_execution());
 }
 
 #[test]
-fn render_materializes_bounded_backdrop_capture_from_prior_siblings() {
+fn bounded_backdrop_capture_stays_future_before_filter_execution() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -15312,22 +15265,11 @@ fn render_materializes_bounded_backdrop_capture_from_prior_siblings() {
     };
     assert!(layer.backdrop.is_some());
 
-    let output = render_scene_to_required_headless(&scene, Size::new(2.0, 1.0));
-
-    let prior_only_backdrop = pixel_rgba(&output, 0, 0);
-    assert!(
-        prior_only_backdrop[1] > 200 && prior_only_backdrop[2] > 200,
-        "red prior content should be inverted into cyan: {prior_only_backdrop:?}"
-    );
-    let later_content = pixel_rgba(&output, 1, 0);
-    assert!(
-        later_content[1] > 200 && later_content[0] < 80 && later_content[2] < 80,
-        "later sibling content should render after capture, not into it: {later_content:?}"
-    );
+    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(2.0, 1.0));
 }
 
 #[test]
-fn render_backdrop_filter_order_is_preserved() {
+fn authored_backdrop_filter_orders_stay_future_gpu_passes() {
     let source_rect = Rect::new(0.0, 0.0, 3.0, 1.0);
     let bounds = BackdropCaptureBounds::try_new(source_rect).unwrap();
     let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
@@ -15374,14 +15316,12 @@ fn render_backdrop_filter_order_is_preserved() {
             |_| {},
         );
 
-    let color_first = render_scene_to_required_headless(&color_before_blur, Size::new(3.0, 1.0));
-    let blur_first = render_scene_to_required_headless(&blur_before_color, Size::new(3.0, 1.0));
-
-    assert_ne!(color_first.rgba(), blur_first.rgba());
+    assert_bounded_backdrop_filter_execution_is_future(&color_before_blur, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_future(&blur_before_color, Size::new(3.0, 1.0));
 }
 
 #[test]
-fn render_backdrop_clip_limits_filtered_image_to_requested_region() {
+fn clipped_backdrop_filter_stays_a_future_gpu_pass() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -15403,22 +15343,11 @@ fn render_backdrop_clip_limits_filtered_image_to_requested_region() {
         )
         .layer(layer, |_| {});
 
-    let output = render_scene_to_required_headless(&scene, Size::new(5.0, 5.0));
-
-    let outside_clip = pixel_rgba(&output, 0, 0);
-    assert!(
-        outside_clip[0] > 200 && outside_clip[1] < 80 && outside_clip[2] < 80,
-        "filtered backdrop should not leak outside the rounded clip: {outside_clip:?}"
-    );
-    let inside_clip = pixel_rgba(&output, 2, 2);
-    assert!(
-        inside_clip[1] > 200 && inside_clip[2] > 200,
-        "filtered backdrop should render inside the rounded clip: {inside_clip:?}"
-    );
+    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(5.0, 5.0));
 }
 
 #[test]
-fn render_backdrop_foreground_composites_over_filtered_backdrop() {
+fn backdrop_foreground_composition_stays_a_future_gpu_pass() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -15437,18 +15366,7 @@ fn render_backdrop_foreground_composites_over_filtered_backdrop() {
             scene.fill(Rect::new(1.0, 0.0, 1.0, 1.0), Color::BLACK);
         });
 
-    let output = render_scene_to_required_headless(&scene, Size::new(3.0, 1.0));
-
-    let backdrop_only = pixel_rgba(&output, 0, 0);
-    assert!(
-        backdrop_only[1] > 200 && backdrop_only[2] > 200,
-        "filtered backdrop should sit behind foreground: {backdrop_only:?}"
-    );
-    let foreground = pixel_rgba(&output, 1, 0);
-    assert!(
-        foreground[0] < 80 && foreground[1] < 80 && foreground[2] < 80,
-        "foreground content should composite over backdrop: {foreground:?}"
-    );
+    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(3.0, 1.0));
 }
 
 #[test]
@@ -15509,7 +15427,7 @@ fn nested_backdrop_layer_normalization_reports_typed_boundary() {
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropExecution,
+            PrimitiveOperation::BroadBackdropExecution,
         ))
     );
     assert!(error.message().contains("nested backdrop capture"));
@@ -15538,7 +15456,7 @@ fn transformed_backdrop_layer_normalization_reports_typed_boundary() {
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropExecution,
+            PrimitiveOperation::BroadBackdropExecution,
         ))
     );
     assert!(error.message().contains("transformed backdrop capture"));
@@ -15569,7 +15487,7 @@ fn repeated_top_level_backdrop_normalization_reports_typed_boundary() {
         error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropExecution,
+            PrimitiveOperation::BroadBackdropExecution,
         ))
     );
     assert!(
@@ -15657,7 +15575,7 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
 }
 
 #[test]
-fn sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foreground_order() {
+fn sequence13_bounded_backdrop_order_stays_planned_before_future_execution() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -15704,27 +15622,11 @@ fn sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foregrou
         command::RenderCommand::Fill { .. }
     ));
 
-    let output = render_scene_to_required_headless(&scene, Size::new(3.0, 1.0));
-
-    let prior_backdrop = pixel_rgba(&output, 0, 0);
-    assert!(
-        prior_backdrop[1] > 200 && prior_backdrop[2] > 200,
-        "prior red sibling should be captured then inverted: {prior_backdrop:?}"
-    );
-    let foreground = pixel_rgba(&output, 1, 0);
-    assert!(
-        foreground[0] < 80 && foreground[1] < 80 && foreground[2] < 80,
-        "foreground child should composite over the filtered backdrop: {foreground:?}"
-    );
-    let later_sibling = pixel_rgba(&output, 2, 0);
-    assert!(
-        later_sibling[1] > 200 && later_sibling[0] < 80 && later_sibling[2] < 80,
-        "later sibling should paint after backdrop capture, not feed it: {later_sibling:?}"
-    );
+    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(3.0, 1.0));
 }
 
 #[test]
-fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
+fn sequence13_backdrop_filter_chain_preserves_future_pass_inputs() {
     let source_rect = Rect::new(0.0, 0.0, 3.0, 1.0);
     let bounds = BackdropCaptureBounds::try_new(source_rect).unwrap();
     let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
@@ -15770,13 +15672,8 @@ fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
             |_| {},
         );
 
-    let color_first = render_scene_to_required_headless(&color_before_blur, Size::new(3.0, 1.0));
-    let blur_first = render_scene_to_required_headless(&blur_before_color, Size::new(3.0, 1.0));
-    assert_ne!(
-        color_first.rgba(),
-        blur_first.rgba(),
-        "materialized backdrop filters must execute in authored order"
-    );
+    assert_bounded_backdrop_filter_execution_is_future(&color_before_blur, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_future(&blur_before_color, Size::new(3.0, 1.0));
 
     let clip = ClipInput::try_shape(Shape::rounded_rect(
         Rect::new(1.0, 1.0, 3.0, 3.0),
@@ -15804,18 +15701,7 @@ fn sequence13_backdrop_filter_chain_preserves_order_and_clipping() {
             Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
         )
         .layer(clipped_layer, |_| {});
-    let clipped = render_scene_to_required_headless(&clipped_scene, Size::new(5.0, 5.0));
-
-    let outside_clip = pixel_rgba(&clipped, 0, 0);
-    assert!(
-        outside_clip[0] > 200 && outside_clip[1] < 80 && outside_clip[2] < 80,
-        "filtered backdrop should stay clipped out at the rounded corner: {outside_clip:?}"
-    );
-    let inside_clip = pixel_rgba(&clipped, 2, 2);
-    assert!(
-        inside_clip[1] > 200 && inside_clip[2] > 200,
-        "filtered backdrop should appear inside the rounded clip: {inside_clip:?}"
-    );
+    assert_bounded_backdrop_filter_execution_is_future(&clipped_scene, Size::new(5.0, 5.0));
 }
 
 #[test]
@@ -15826,7 +15712,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
     );
     let unsupported_broad = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BackdropExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     );
     for unsupported in [unsupported_isolation, unsupported_broad] {
         let error = Capabilities::CURRENT
@@ -16063,14 +15949,16 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
     assert!(offscreen.supports_direct_vello_opacity_isolation());
     assert!(offscreen.supports_direct_vello_blend_isolation());
     assert!(offscreen.supports_bounded_backdrop_capture());
-    assert!(offscreen.supports_materialized_backdrop_filter_execution());
+    assert!(!offscreen.supports_bounded_backdrop_filter_execution());
     assert!(!offscreen.supports_offscreen_layer_rendering());
-    assert!(!offscreen.supports_texture_cache_upload_lifecycle());
-    assert!(!offscreen.supports_rect_fullscreen_shader_passes());
-    assert!(!offscreen.supports_nested_opacity_planning());
+    assert!(offscreen.supports_persistent_effect_resources());
+    assert!(offscreen.supports_bounded_vello_capture());
+    assert!(offscreen.supports_image_pass_execution());
+    assert!(offscreen.supports_composite_pass_execution());
+    assert!(offscreen.supports_nested_opacity_composition());
     assert!(!offscreen.supports_mask_execution());
-    assert!(!offscreen.supports_filter_execution());
-    assert!(!offscreen.supports_backdrop_execution());
+    assert!(!offscreen.supports_layer_filter_execution());
+    assert!(!offscreen.supports_broad_backdrop_execution());
     assert!(!offscreen.supports_backdrop_isolation_composition());
 
     let compositing = capabilities.compositing();
@@ -16083,7 +15971,7 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
 
     let masks = capabilities.masks_clips();
     assert!(masks.supports_shape_clips());
-    assert!(masks.supports_materialized_alpha_mask_execution());
+    assert!(masks.supports_resolved_alpha_mask_execution());
     assert!(!masks.supports_clip_reference_execution());
     assert!(!masks.supports_layer_masks());
     assert!(!masks.supports_luminance_mask_mode());
@@ -16096,12 +15984,8 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
             PrimitiveOperation::BoundedBackdropCapture,
         ),
         UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::MaterializedBackdropFilterExecution,
-        ),
-        UnsupportedPrimitive::new(
             PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::MaterializedAlphaMaskExecution,
+            PrimitiveOperation::ResolvedAlphaMaskExecution,
         ),
     ] {
         capabilities
@@ -16112,7 +15996,11 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
     for unsupported in [
         UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropExecution,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BroadBackdropExecution,
         ),
         UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
@@ -16740,19 +16628,22 @@ fn sequence12_capabilities_claim_only_implemented_mask_clip_and_no_broad_backdro
     let capabilities = Capabilities::CURRENT;
     let masks_clips = capabilities.masks_clips();
     assert!(masks_clips.supports_shape_clips());
-    assert!(masks_clips.supports_materialized_alpha_mask_execution());
+    assert!(masks_clips.supports_resolved_alpha_mask_execution());
     assert!(!masks_clips.supports_clip_reference_execution());
     assert!(!masks_clips.supports_layer_masks());
     assert!(!masks_clips.supports_luminance_mask_mode());
     assert!(!masks_clips.supports_multi_layer_mask_composition());
     assert!(!masks_clips.supports_mask_composite_modes());
 
-    capabilities
-        .ensure_supported(UnsupportedPrimitive::new(
-            PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::MaterializedAlphaMaskExecution,
-        ))
-        .expect("materialized alpha-mask execution is the narrow supported mask execution path");
+    assert!(
+        capabilities
+            .ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::ResolvedAlphaMaskExecution,
+            ))
+            .is_ok(),
+        "resolved alpha-mask execution is the narrow supported mask execution path"
+    );
     for operation in [
         PrimitiveOperation::ClipReferenceExecution,
         PrimitiveOperation::LayerMask,
@@ -16776,18 +16667,14 @@ fn sequence12_capabilities_claim_only_implemented_mask_clip_and_no_broad_backdro
     assert!(offscreen.supports_direct_vello_blend_isolation());
     assert!(!offscreen.supports_offscreen_layer_rendering());
     assert!(!offscreen.supports_mask_execution());
-    assert!(!offscreen.supports_filter_execution());
-    assert!(!offscreen.supports_backdrop_execution());
+    assert!(!offscreen.supports_layer_filter_execution());
+    assert!(!offscreen.supports_broad_backdrop_execution());
 
+    assert!(!capabilities.filters().supports_gpu_blur_filter_execution());
     assert!(
-        capabilities
+        !capabilities
             .filters()
-            .supports_materialized_blur_filter_execution()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_materialized_drop_shadow_filter_execution()
+            .supports_gpu_drop_shadow_filter_execution()
     );
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(!capabilities.shadows().supports_text_shadows());
@@ -18685,7 +18572,7 @@ fn renderer_reports_backend_capabilities_by_family() {
     assert!(
         capabilities
             .masks_clips()
-            .supports_materialized_alpha_mask_execution()
+            .supports_resolved_alpha_mask_execution()
     );
     assert!(capabilities.compositing().supports_layer_opacity());
     assert!(capabilities.compositing().supports_blend_modes());
@@ -18810,12 +18697,14 @@ fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
     assert!(capabilities.supports_direct_vello_opacity_isolation());
     assert!(capabilities.supports_direct_vello_blend_isolation());
     assert!(!capabilities.supports_offscreen_layer_rendering());
-    assert!(!capabilities.supports_texture_cache_upload_lifecycle());
-    assert!(!capabilities.supports_rect_fullscreen_shader_passes());
-    assert!(!capabilities.supports_nested_opacity_planning());
+    assert!(capabilities.supports_persistent_effect_resources());
+    assert!(capabilities.supports_bounded_vello_capture());
+    assert!(capabilities.supports_image_pass_execution());
+    assert!(capabilities.supports_composite_pass_execution());
+    assert!(capabilities.supports_nested_opacity_composition());
     assert!(!capabilities.supports_mask_execution());
-    assert!(!capabilities.supports_filter_execution());
-    assert!(!capabilities.supports_backdrop_execution());
+    assert!(!capabilities.supports_layer_filter_execution());
+    assert!(!capabilities.supports_broad_backdrop_execution());
 }
 
 #[test]
@@ -18823,9 +18712,9 @@ fn backdrop_capability_accessors_claim_only_narrow_materialized_execution() {
     let capabilities = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(capabilities.supports_bounded_backdrop_capture());
-    assert!(capabilities.supports_materialized_backdrop_filter_execution());
+    assert!(!capabilities.supports_bounded_backdrop_filter_execution());
     assert!(!capabilities.supports_backdrop_isolation_composition());
-    assert!(!capabilities.supports_backdrop_execution());
+    assert!(!capabilities.supports_broad_backdrop_execution());
 }
 
 #[test]
@@ -18850,13 +18739,16 @@ fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution
     assert!(capabilities.supports_shape_clips());
     assert!(!capabilities.supports_clip_reference_execution());
     assert!(!capabilities.supports_layer_masks());
-    assert!(capabilities.supports_materialized_alpha_mask_execution());
-    Capabilities::CURRENT
-        .ensure_supported(UnsupportedPrimitive::new(
-            PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::MaterializedAlphaMaskExecution,
-        ))
-        .expect("materialized alpha-mask execution is supported by the current CPU boundary");
+    assert!(capabilities.supports_resolved_alpha_mask_execution());
+    assert!(
+        Capabilities::CURRENT
+            .ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::MasksAndClips,
+                PrimitiveOperation::ResolvedAlphaMaskExecution,
+            ))
+            .is_ok(),
+        "resolved alpha-mask execution is supported by the GPU graph boundary"
+    );
     assert!(!capabilities.supports_luminance_mask_mode());
     assert!(!capabilities.supports_multi_layer_mask_composition());
     assert!(!capabilities.supports_mask_composite_modes());
@@ -18870,19 +18762,24 @@ fn affected_capability_queries_map_one_to_one_to_primitive_operations() {
         (
             capabilities
                 .masks_clips()
-                .supports_materialized_alpha_mask_execution(),
+                .supports_resolved_alpha_mask_execution(),
             PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::MaterializedAlphaMaskExecution,
+            PrimitiveOperation::ResolvedAlphaMaskExecution,
         ),
         (
-            offscreen.supports_rect_fullscreen_shader_passes(),
+            offscreen.supports_image_pass_execution(),
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::RectFullscreenShaderPass,
+            PrimitiveOperation::ImagePassExecution,
         ),
         (
-            offscreen.supports_nested_opacity_planning(),
+            offscreen.supports_composite_pass_execution(),
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::NestedOpacityPlanning,
+            PrimitiveOperation::CompositePassExecution,
+        ),
+        (
+            offscreen.supports_nested_opacity_composition(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::NestedOpacityComposition,
         ),
     ];
 
@@ -18901,16 +18798,8 @@ fn affected_capability_queries_map_one_to_one_to_primitive_operations() {
 fn color_filter_capability_names_granular_execution_without_broad_effects() {
     let capabilities = Capabilities::CURRENT;
 
-    assert!(
-        capabilities
-            .filters()
-            .supports_color_filter_classification()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_color_filter_pipeline_execution()
-    );
+    assert!(capabilities.filters().supports_ordered_filter_lists());
+    assert!(!capabilities.filters().supports_gpu_color_filter_execution());
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(
         !capabilities
@@ -18925,7 +18814,7 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
     assert!(
         !capabilities
             .offscreen_pipeline()
-            .supports_filter_execution()
+            .supports_layer_filter_execution()
     );
 }
 
@@ -18933,26 +18822,14 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
 fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() {
     let capabilities = Capabilities::CURRENT;
 
+    assert!(capabilities.filters().supports_ordered_filter_lists());
+    assert!(!capabilities.filters().supports_gpu_blur_filter_execution());
     assert!(
-        capabilities
+        !capabilities
             .filters()
-            .supports_materialized_image_filter_classification()
+            .supports_gpu_drop_shadow_filter_execution()
     );
-    assert!(
-        capabilities
-            .filters()
-            .supports_materialized_blur_filter_execution()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_materialized_drop_shadow_filter_execution()
-    );
-    assert!(
-        capabilities
-            .filters()
-            .supports_filter_region_outset_planning()
-    );
+    assert!(capabilities.filters().supports_filter_region_planning());
     assert!(!capabilities.shadows().supports_inset_box_shadows());
     assert!(!capabilities.shadows().supports_text_shadows());
     assert!(!capabilities.filters().supports_layer_filters());
@@ -18964,30 +18841,28 @@ fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() 
     assert!(
         !capabilities
             .offscreen_pipeline()
-            .supports_filter_execution()
+            .supports_layer_filter_execution()
     );
 }
 
 #[test]
 fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
-    let supported_cases = [
-        (
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::MaterializedBlurFilterExecution,
-            "materialized blur filter execution",
-        ),
-        (
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::MaterializedDropShadowFilterExecution,
-            "materialized drop-shadow filter execution",
-        ),
-        (
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::FilterRegionOutsetPlanning,
-            "filter-region/outset planning",
-        ),
-    ];
+    let supported_cases = [(
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::FilterRegionPlanning,
+        "filter-region planning",
+    )];
     let unsupported_cases = [
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+            "GPU blur filter execution",
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+            "GPU drop-shadow filter execution",
+        ),
         (
             PrimitiveFamily::Shadows,
             PrimitiveOperation::InsetBoxShadow,
@@ -19003,9 +18878,10 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
     for (family, operation, label) in supported_cases {
         let supported = UnsupportedPrimitive::new(family, operation);
         assert_eq!(supported.label(), label);
-        Capabilities::CURRENT
-            .ensure_supported(supported)
-            .expect("Task 4 enables materialized blur execution and its planning pieces");
+        assert!(
+            Capabilities::CURRENT.ensure_supported(supported).is_ok(),
+            "filter-region planning remains available before GPU execution"
+        );
     }
 
     for (family, operation, label) in unsupported_cases {
@@ -19164,12 +19040,10 @@ fn unsupported_3d_transforms_report_typed_diagnostics() {
 fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
     for operation in [
         PrimitiveOperation::OffscreenLayerRendering,
-        PrimitiveOperation::TextureCacheUploadLifecycle,
-        PrimitiveOperation::RectFullscreenShaderPass,
-        PrimitiveOperation::NestedOpacityPlanning,
         PrimitiveOperation::MaskExecution,
-        PrimitiveOperation::FilterExecution,
-        PrimitiveOperation::BackdropExecution,
+        PrimitiveOperation::LayerFilterExecution,
+        PrimitiveOperation::BroadBackdropExecution,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
         PrimitiveOperation::BackdropIsolationComposition,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::OffscreenPipeline, operation);
@@ -20567,7 +20441,7 @@ fn sequence14_capabilities_advertise_only_render_owned_text_behavior() {
     assert!(
         !capabilities
             .offscreen_pipeline()
-            .supports_filter_execution()
+            .supports_layer_filter_execution()
     );
     assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
 
@@ -20992,7 +20866,7 @@ fn matrix_full_effect_stack_diagnostics_stop_at_unsupported_boundaries() {
         backdrop_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropExecution,
+            PrimitiveOperation::BroadBackdropExecution,
         ))
     );
     assert!(
@@ -29024,6 +28898,791 @@ fn graph_render_path_submits_without_map_or_cpu_wait() {
     );
 }
 
+#[derive(Debug)]
+struct C09ProductionFrameForTest {
+    output: ImageBuffer,
+    stats: Stats,
+    working_format: WorkingFormat,
+    queue_submissions: usize,
+    graph_submissions: usize,
+    direct_submissions: usize,
+    publication_count: usize,
+}
+
+fn c09_mask_image_from_alpha_for_test(
+    size: PhysicalSize,
+    alpha: &[u8],
+    quality: ImageQuality,
+    extend: Extend,
+) -> Image {
+    let pixel_count = usize::try_from(size.width())
+        .unwrap()
+        .checked_mul(usize::try_from(size.height()).unwrap())
+        .unwrap();
+    assert_eq!(alpha.len(), pixel_count);
+    let bytes = alpha
+        .iter()
+        .copied()
+        .flat_map(|alpha| [17, 211, 93, alpha])
+        .collect::<Vec<_>>();
+    Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        bytes,
+    )
+    .unwrap()
+    .quality(quality)
+    .extend(extend)
+}
+
+fn c09_premultiplied_pixel_for_test(straight: [u8; 4]) -> PremultipliedRgba8 {
+    PremultipliedRgba8::try_new(
+        c08_premul8_for_test(straight[0], straight[3]),
+        c08_premul8_for_test(straight[1], straight[3]),
+        c08_premul8_for_test(straight[2], straight[3]),
+        straight[3],
+    )
+    .unwrap()
+}
+
+fn c09_reference_solid_for_test(
+    size: PhysicalSize,
+    straight: [u8; 4],
+) -> ReferencePremultipliedRgba8Buffer {
+    let pixel_count = usize::try_from(size.width())
+        .unwrap()
+        .checked_mul(usize::try_from(size.height()).unwrap())
+        .unwrap();
+    ReferencePremultipliedRgba8Buffer::from_pixels(
+        size,
+        vec![c09_premultiplied_pixel_for_test(straight); pixel_count],
+    )
+    .unwrap()
+}
+
+fn c09_reference_straight_bytes_for_test(buffer: &ReferencePremultipliedRgba8Buffer) -> Vec<u8> {
+    image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(buffer)
+        .unwrap()
+        .into_rgba()
+}
+
+fn c09_color_for_test(straight: [u8; 4]) -> Color {
+    Color::try_rgba(
+        f32::from(straight[0]) / 255.0,
+        f32::from(straight[1]) / 255.0,
+        f32::from(straight[2]) / 255.0,
+        f32::from(straight[3]) / 255.0,
+    )
+    .unwrap()
+}
+
+fn c09_pixels_match_for_test(
+    actual: &[u8],
+    expected: &[u8],
+    working_format: WorkingFormat,
+    tolerance: u8,
+) -> bool {
+    actual.len() == expected.len()
+        && actual
+            .chunks_exact(4)
+            .zip(expected.chunks_exact(4))
+            .all(|(actual, expected)| match working_format {
+                WorkingFormat::HighPrecision => actual
+                    .iter()
+                    .copied()
+                    .zip(expected.iter().copied())
+                    .all(|(actual, expected)| actual.abs_diff(expected) <= tolerance),
+                WorkingFormat::ReducedPrecision => {
+                    actual[3].abs_diff(expected[3]) <= tolerance
+                        && (0..3).all(|channel| {
+                            c08_premul8_for_test(actual[channel], actual[3])
+                                .abs_diff(c08_premul8_for_test(expected[channel], expected[3]))
+                                <= tolerance
+                        })
+                }
+            })
+}
+
+fn render_c09_headless_for_test(
+    scene: &Scene,
+    size: Size,
+    parameters: Parameters,
+    working_format: WorkingFormat,
+) -> C09ProductionFrameForTest {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| {
+        panic!("C09 production execution requires a compatible renderer: {error}")
+    });
+    renderer.select_exact_graph_working_format_for_test(working_format);
+    let mut surface =
+        pollster::block_on(renderer.create_headless(size, 1.0)).unwrap_or_else(|error| {
+            panic!("C09 production execution requires a headless surface: {error}")
+        });
+    let publication_before = surface.headless_publication_count_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let stats = pollster::block_on(renderer.render(&mut surface, scene, parameters))
+        .unwrap_or_else(|error| {
+            panic!("the C09 fixture must reach its current production render route: {error}")
+        });
+    let queue_submissions = submission.queue_submission_count_for_test();
+    let graph_submissions = graph_submission.queue_submission_count_for_test();
+    let direct_submissions = direct_submission.queue_submission_count_for_test();
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let publication_count = surface
+        .headless_publication_count_for_test()
+        .saturating_sub(publication_before);
+    let output = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+        panic!("the C09 fixture publication must be explicitly readable: {error}")
+    });
+    C09ProductionFrameForTest {
+        output,
+        stats,
+        working_format,
+        queue_submissions,
+        graph_submissions,
+        direct_submissions,
+        publication_count,
+    }
+}
+
+fn c09_frame_used_one_atomic_graph_submission_for_test(
+    rendered: &C09ProductionFrameForTest,
+) -> bool {
+    rendered.queue_submissions == 1
+        && rendered.graph_submissions == 1
+        && rendered.direct_submissions == 0
+        && rendered.publication_count == 1
+        && rendered.stats.commands > 0
+}
+
+fn c09_supported_working_formats_for_test() -> Vec<WorkingFormat> {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("C09 format coverage requires a compatible renderer: {error}"));
+    c08_supported_working_formats_for_test(&mut renderer)
+}
+
+#[test]
+fn resolved_alpha_mask_preserves_partial_alpha_and_nested_order() {
+    let size = PhysicalSize::new(4, 2);
+    let bounds = Rect::new(0.0, 0.0, 4.0, 2.0);
+    let inner_mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[128],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let outer_mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[160],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new().with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(outer_mask.clone(), bounds).unwrap(),
+        ),
+        |scene| {
+            scene.fill(bounds, c09_color_for_test([32, 64, 224, 255]));
+            scene.layer(
+                Layer::new().with_resolved_alpha_mask(
+                    ResolvedLayerAlphaMask::try_new(inner_mask.clone(), bounds).unwrap(),
+                ),
+                |scene| {
+                    scene.fill(bounds, c09_color_for_test([240, 48, 16, 255]));
+                },
+            );
+        },
+    );
+
+    let inner = c09_reference_solid_for_test(size, [240, 48, 16, 255])
+        .apply_resolved_alpha_mask(bounds, &inner_mask, bounds)
+        .unwrap();
+    let parent = c09_reference_solid_for_test(size, [32, 64, 224, 255]);
+    let expected = inner
+        .source_over(&parent)
+        .unwrap()
+        .apply_resolved_alpha_mask(bounds, &outer_mask, bounds)
+        .unwrap();
+    let expected = c09_reference_straight_bytes_for_test(&expected);
+
+    let preserves_nested_order =
+        c09_supported_working_formats_for_test()
+            .into_iter()
+            .all(|working_format| {
+                let rendered = render_c09_headless_for_test(
+                    &scene,
+                    Size::new(4.0, 2.0),
+                    Parameters::default(),
+                    working_format,
+                );
+                rendered.output.size() == size
+                    && c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
+                    && c09_pixels_match_for_test(
+                        rendered.output.rgba(),
+                        &expected,
+                        rendered.working_format,
+                        2,
+                    )
+            });
+
+    assert!(
+        preserves_nested_order,
+        "resolved masks do not compose inner to outer on GPU"
+    );
+}
+
+fn c09_mask_quality_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
+    let qualities = [ImageQuality::Low, ImageQuality::Medium, ImageQuality::High];
+    let extends = [Extend::Pad, Extend::Repeat, Extend::Reflect];
+    let tile_size = PhysicalSize::new(12, 8);
+    let mut expected = Vec::with_capacity(12 * 8 * qualities.len() * extends.len() * 4);
+    let mut scene = Scene::new();
+    let mut case_index = 0_u32;
+    for quality in qualities {
+        for extend in extends {
+            let mask = c09_mask_image_from_alpha_for_test(
+                PhysicalSize::new(2, 2),
+                &[16, 96, 160, 240],
+                quality,
+                extend,
+            );
+            let mask_bounds = Rect::new(1.0, 1.0, 4.0, 2.0);
+            let source_bounds = Rect::new(0.0, 0.0, 6.0, 4.0);
+            let transform = Transform::try_new([
+                2.0,
+                0.0,
+                0.0,
+                2.0,
+                0.0,
+                f64::from(case_index * tile_size.height()),
+            ])
+            .unwrap();
+            scene.layer(
+                Layer::new()
+                    .try_transform(transform)
+                    .unwrap()
+                    .with_resolved_alpha_mask(
+                        ResolvedLayerAlphaMask::try_new(mask.clone(), mask_bounds).unwrap(),
+                    ),
+                |scene| {
+                    scene.fill(source_bounds, c09_color_for_test([255, 255, 255, 255]));
+                },
+            );
+            let reference = c09_reference_solid_for_test(tile_size, [255, 255, 255, 255])
+                .apply_resolved_alpha_mask(source_bounds, &mask, mask_bounds)
+                .unwrap();
+            expected.extend(c09_reference_straight_bytes_for_test(&reference));
+            case_index += 1;
+        }
+    }
+    (
+        scene,
+        PhysicalSize::new(tile_size.width(), case_index * tile_size.height()),
+        expected,
+    )
+}
+
+#[test]
+fn resolved_alpha_mask_low_medium_high_and_extend_modes_match_boundary_oracle() {
+    let (scene, size, expected) = c09_mask_quality_scene_and_oracle_for_test();
+    let matches_boundary_oracle =
+        c09_supported_working_formats_for_test()
+            .into_iter()
+            .all(|working_format| {
+                let rendered = render_c09_headless_for_test(
+                    &scene,
+                    Size::new(f64::from(size.width()), f64::from(size.height())),
+                    Parameters::default(),
+                    working_format,
+                );
+                rendered.output.size() == size
+                    && c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
+                    && c09_pixels_match_for_test(
+                        rendered.output.rgba(),
+                        &expected,
+                        rendered.working_format,
+                        2,
+                    )
+            });
+
+    assert!(
+        matches_boundary_oracle,
+        "GPU mask quality or edge sampling exceeds S34"
+    );
+}
+
+fn c09_blend_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
+    let modes = [
+        BlendMode::Normal,
+        BlendMode::Multiply,
+        BlendMode::Screen,
+        BlendMode::Overlay,
+        BlendMode::Darken,
+        BlendMode::Lighten,
+        BlendMode::Plus,
+    ];
+    let source = [204, 64, 153, 160];
+    let opaque_destination = [51, 179, 102, 255];
+    let tile_width = 2_u32;
+    let tile_height = 2_u32;
+    let size = PhysicalSize::new(
+        tile_width * u32::try_from(modes.len()).unwrap(),
+        tile_height * 2,
+    );
+    let mut expected = vec![0_u8; usize::try_from(size.width() * size.height() * 4).unwrap()];
+    let mut scene = Scene::new();
+    for (base_index, destination) in [[0, 0, 0, 0], opaque_destination].into_iter().enumerate() {
+        for (mode_index, mode) in modes.into_iter().enumerate() {
+            let x = f64::from(u32::try_from(mode_index).unwrap() * tile_width);
+            let y = f64::from(u32::try_from(base_index).unwrap() * tile_height);
+            let rect = Rect::new(x, y, f64::from(tile_width), f64::from(tile_height));
+            if destination[3] != 0 {
+                scene.fill(rect, c09_color_for_test(destination));
+            }
+            let mask = c09_mask_image_from_alpha_for_test(
+                PhysicalSize::new(1, 1),
+                &[255],
+                ImageQuality::Low,
+                Extend::Pad,
+            );
+            scene.layer(
+                Layer::new()
+                    .blend(mode)
+                    .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
+                |scene| {
+                    scene.fill(rect, c09_color_for_test(source));
+                },
+            );
+            let expected_pixel = c09_premultiplied_pixel_for_test(source)
+                .blend_over(c09_premultiplied_pixel_for_test(destination), mode);
+            let expected_pixel = c09_reference_straight_bytes_for_test(
+                &ReferencePremultipliedRgba8Buffer::from_pixels(
+                    PhysicalSize::new(1, 1),
+                    vec![expected_pixel],
+                )
+                .unwrap(),
+            );
+            for pixel_y in 0..tile_height {
+                for pixel_x in 0..tile_width {
+                    let output_x = u32::try_from(mode_index).unwrap() * tile_width + pixel_x;
+                    let output_y = u32::try_from(base_index).unwrap() * tile_height + pixel_y;
+                    let offset = usize::try_from((output_y * size.width() + output_x) * 4).unwrap();
+                    expected[offset..offset + 4].copy_from_slice(&expected_pixel);
+                }
+            }
+        }
+    }
+    (scene, size, expected)
+}
+
+#[test]
+fn all_supported_blends_match_oracle_over_transparent_and_opaque_bases() {
+    let (scene, size, expected) = c09_blend_scene_and_oracle_for_test();
+    let blends_match = c09_supported_working_formats_for_test()
+        .into_iter()
+        .all(|working_format| {
+            let rendered = render_c09_headless_for_test(
+                &scene,
+                Size::new(f64::from(size.width()), f64::from(size.height())),
+                Parameters::default(),
+                working_format,
+            );
+            rendered.output.size() == size
+                && c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
+                && c09_pixels_match_for_test(
+                    rendered.output.rgba(),
+                    &expected,
+                    rendered.working_format,
+                    3,
+                )
+        });
+
+    assert!(blends_match, "GPU blend output exceeds S34");
+}
+
+#[test]
+fn plus_blend_clamps_high_precision_results() {
+    let source = [255, 128, 64, 204];
+    let destination = [128, 255, 192, 204];
+    let rect = Rect::new(0.0, 0.0, 4.0, 4.0);
+    let mut scene = Scene::new();
+    scene.fill(rect, c09_color_for_test(destination));
+    scene.layer(
+        Layer::new()
+            .blend(BlendMode::Plus)
+            .with_resolved_alpha_mask(
+                ResolvedLayerAlphaMask::try_new(
+                    c09_mask_image_from_alpha_for_test(
+                        PhysicalSize::new(1, 1),
+                        &[255],
+                        ImageQuality::Low,
+                        Extend::Pad,
+                    ),
+                    rect,
+                )
+                .unwrap(),
+            ),
+        |scene| {
+            scene.fill(rect, c09_color_for_test(source));
+        },
+    );
+    let expected_pixel = c09_premultiplied_pixel_for_test(source).blend_over(
+        c09_premultiplied_pixel_for_test(destination),
+        BlendMode::Plus,
+    );
+    let expected = c09_reference_straight_bytes_for_test(
+        &ReferencePremultipliedRgba8Buffer::from_pixels(
+            PhysicalSize::new(4, 4),
+            vec![expected_pixel; 16],
+        )
+        .unwrap(),
+    );
+    let rendered = render_c09_headless_for_test(
+        &scene,
+        Size::new(4.0, 4.0),
+        Parameters::default(),
+        WorkingFormat::HighPrecision,
+    );
+
+    assert!(
+        c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
+            && c09_pixels_match_for_test(
+                rendered.output.rgba(),
+                &expected,
+                WorkingFormat::HighPrecision,
+                3,
+            ),
+        "Plus exceeded the unit interval"
+    );
+}
+
+#[test]
+fn outer_clip_precedes_mask_and_opacity_on_unfiltered_sources() {
+    let surface_size = PhysicalSize::new(4, 2);
+    let source_bounds = Rect::new(0.0, 0.0, 4.0, 2.0);
+    let clip_bounds = Rect::new(1.0, 0.0, 2.0, 2.0);
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[128],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_clip(Shape::rect(clip_bounds))
+            .unwrap()
+            .try_opacity(0.5)
+            .unwrap()
+            .with_resolved_alpha_mask(
+                ResolvedLayerAlphaMask::try_new(mask.clone(), source_bounds).unwrap(),
+            ),
+        |scene| {
+            scene.fill(source_bounds, c09_color_for_test([224, 48, 16, 255]));
+        },
+    );
+    let masked = c09_reference_solid_for_test(surface_size, [224, 48, 16, 255])
+        .apply_resolved_alpha_mask(source_bounds, &mask, source_bounds)
+        .unwrap()
+        .apply_opacity(0.5)
+        .unwrap();
+    let mut expected = c09_reference_straight_bytes_for_test(&masked);
+    for y in 0..surface_size.height() {
+        for x in [0_u32, 3] {
+            let offset = usize::try_from((y * surface_size.width() + x) * 4).unwrap();
+            expected[offset..offset + 4].fill(0);
+        }
+    }
+    let rendered = render_c09_headless_for_test(
+        &scene,
+        Size::new(4.0, 2.0),
+        Parameters::default(),
+        WorkingFormat::HighPrecision,
+    );
+
+    assert!(
+        c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
+            && rendered.output.size() == surface_size
+            && c09_pixels_match_for_test(
+                rendered.output.rgba(),
+                &expected,
+                WorkingFormat::HighPrecision,
+                2,
+            ),
+        "C09 outer operations changed order"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn render_window_smoke_executes_masked_and_blended_graph_frames() {
+    let source = [224, 64, 32, 192];
+    let destination = [48, 160, 208, 255];
+    let mask_alpha = 160_u8;
+    let rect = Rect::new(0.0, 0.0, 4.0, 4.0);
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[mask_alpha],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .blend(BlendMode::Multiply)
+            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask.clone(), rect).unwrap()),
+        |scene| {
+            scene.fill(rect, c09_color_for_test(source));
+        },
+    );
+    let expected_source = c09_reference_solid_for_test(PhysicalSize::new(1, 1), source)
+        .apply_resolved_alpha_mask(rect, &mask, rect)
+        .unwrap();
+    let expected = expected_source
+        .blend_over(
+            &c09_reference_solid_for_test(PhysicalSize::new(1, 1), destination),
+            BlendMode::Multiply,
+        )
+        .unwrap();
+    let expected = c09_reference_straight_bytes_for_test(&expected);
+    let parameters = Parameters {
+        base_color: c09_color_for_test(destination),
+        debug: false,
+    };
+
+    let presented_atomically = [Format::Rgba8, Format::Bgra8].into_iter().all(|format| {
+        let mut renderer = pollster::block_on(Renderer::new(
+            Options::default()
+                .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+        ))
+        .unwrap_or_else(|error| {
+            panic!("presented C09 coverage requires a compatible renderer: {error}")
+        });
+        let working_format = default_c08_working_format_for_test(&mut renderer);
+        renderer.select_exact_graph_working_format_for_test(working_format);
+        let mut surface = display_free_presented_surface_for_test(
+            &mut renderer,
+            SurfaceOptions {
+                size: Size::new(4.0, 4.0),
+                format,
+                ..SurfaceOptions::default()
+            },
+        );
+        pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+            .unwrap_or_else(|error| {
+                panic!("presented C09 coverage requires a configured output: {error}")
+            });
+        let observation = presented_observation_handle_for_test(&surface);
+        let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+        let submission = submission_scope.observation_for_test();
+        let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+        let graph_submission = graph_scope.observation_for_test();
+        let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+        let direct_submission = direct_scope.observation_for_test();
+        let stats = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
+        let submitted_atomically = stats.is_ok()
+            && submission.queue_submission_count_for_test() == 1
+            && graph_submission.queue_submission_count_for_test() == 1
+            && graph_submission.scopes_resolved_for_test()
+            && graph_submission.presentation_scopes_resolved_for_test()
+            && graph_submission.prepared_frame_committed_for_test()
+            && graph_submission.capture_resources_committed_for_test()
+            && graph_submission.presented_host_effect_applied_for_test()
+            && direct_submission.queue_submission_count_for_test() == 0;
+        drop(direct_scope);
+        drop(graph_scope);
+        drop(submission_scope);
+        let presentation = observation.snapshot_for_test();
+        let presented_texture = take_last_presented_texture_for_test(&mut surface);
+        let pixel = presented_texture.and_then(|texture| {
+            pollster::block_on(
+                renderer.read_render_texture_for_test(&texture, PhysicalSize::new(4, 4)),
+            )
+            .ok()
+            .and_then(|image| {
+                let offset = (4 + 1) * 4;
+                let raw: [u8; 4] = image.rgba().get(offset..offset + 4)?.try_into().ok()?;
+                Some(match format {
+                    Format::Rgba8 => raw,
+                    Format::Bgra8 => [raw[2], raw[1], raw[0], raw[3]],
+                })
+            })
+        });
+        submitted_atomically
+            && presentation.acquire_count_for_test() == 1
+            && presentation.present_count_for_test() == 1
+            && presentation.discarded_count_for_test() == 0
+            && surface.headless_publication_count_for_test() == 0
+            && renderer.stats() == stats.unwrap()
+            && surface.last_parameters == Some(parameters)
+            && pixel.is_some_and(|pixel| {
+                c09_pixels_match_for_test(&pixel, &expected, working_format, 3)
+            })
+    });
+
+    assert!(
+        presented_atomically,
+        "presented C09 composition did not commit atomically"
+    );
+}
+
+#[test]
+fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publication() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(64 * 1024 * 1024)),
+    ))
+    .unwrap_or_else(|error| {
+        panic!("C10 diagnostic coverage requires a compatible renderer: {error}")
+    });
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
+        .unwrap_or_else(|error| {
+            panic!("C10 diagnostic coverage requires a headless surface: {error}")
+        });
+    let mut baseline = Scene::new();
+    baseline.fill(
+        Rect::new(0.0, 0.0, 8.0, 6.0),
+        c09_color_for_test([32, 64, 96, 255]),
+    );
+    pollster::block_on(renderer.render(&mut surface, &baseline, Parameters::default()))
+        .unwrap_or_else(|error| {
+            panic!("C10 diagnostic coverage requires a published baseline: {error}")
+        });
+    let pixels_before = pollster::block_on(renderer.read_headless(&surface))
+        .unwrap_or_else(|error| panic!("the C10 diagnostic baseline must be readable: {error}"));
+    let stats_before = renderer.stats();
+    let publication_before = surface.headless_publication_count_for_test();
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .internal_resource_manager_observation_for_test();
+
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25).unwrap(),
+    )])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut future = Scene::new();
+    future
+        .fill(
+            Rect::new(0.0, 0.0, 8.0, 6.0),
+            c09_color_for_test([192, 64, 32, 255]),
+        )
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(2.0, 1.0, 3.0, 3.0),
+                c09_color_for_test([16, 224, 96, 192]),
+            );
+        });
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let result = pollster::block_on(renderer.render(&mut surface, &future, Parameters::default()));
+    let no_gpu_work = submission.queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 0
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let pixels_after =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("a rejected C10 graph must retain its prior publication: {error}")
+        });
+    let diagnostic_is_exact = result.as_ref().err().is_some_and(|error| {
+        error.code() == ErrorCode::UnsupportedPrimitive
+            && error.unsupported_primitive().is_some_and(|diagnostic| {
+                diagnostic.family() == PrimitiveFamily::OffscreenPipeline
+                    && diagnostic.operation().label() == "bounded backdrop filter execution"
+            })
+    });
+    let cache_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .device_pass_cache_counts_for_test();
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .internal_resource_manager_observation_for_test();
+
+    assert!(
+        diagnostic_is_exact
+            && no_gpu_work
+            && renderer.stats() == stats_before
+            && surface.headless_publication_count_for_test() == publication_before
+            && pixels_after == pixels_before
+            && cache_after == cache_before
+            && resources_after == resources_before,
+        "a future graph entered CPU execution or changed publication"
+    );
+}
+
+#[test]
+fn cpu_reference_algorithms_are_test_only_after_gpu_cutover() {
+    let lib_source = include_str!("lib.rs");
+    let filter_source = include_str!("filter.rs");
+    let image_source = include_str!("image.rs");
+    let renderer_source = include_str!("renderer.rs");
+    let capability_source = include_str!("capability.rs");
+    let error_source = include_str!("error.rs");
+    let reference_module_is_test_only = lib_source.contains("#[cfg(test)]\nmod reference;");
+    let cpu_imports_are_test_only = filter_source.contains(
+        "#[cfg(test)]\nuse super::{\n    reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer}",
+    ) && image_source.contains("#[cfg(test)]\nuse super::{")
+        && image_source.contains(
+            "reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer}",
+        );
+    let cpu_execution_is_test_only = image_source.contains(
+        "#[cfg(test)]\n#[derive(Debug)]\npub(crate) struct ResolvedMaterializedImageFilterExecution",
+    ) && filter_source.contains(
+        "#[cfg(test)]\n#[derive(Clone, Debug, PartialEq)]\npub struct CompiledColorFilterPipeline",
+    );
+    let production_route_is_gpu_only = !renderer_source.contains("materialize_resolved_layer_mask")
+        && !renderer_source.contains("materialize_resolved_backdrop")
+        && !image_source.contains("StagedResolvedAlphaMaskExecution")
+        && !lib_source.contains("MaterializedImageFilterPipeline")
+        && !lib_source.contains("CompiledColorFilterPipeline");
+    let old_execution_contract_is_absent = !capability_source.contains("materialized_")
+        && !error_source.contains("MaterializedAlphaMaskExecution")
+        && !error_source.contains("MaterializedBackdropFilterExecution");
+
+    assert!(
+        reference_module_is_test_only
+            && cpu_imports_are_test_only
+            && cpu_execution_is_test_only
+            && production_route_is_gpu_only
+            && old_execution_contract_is_absent,
+        "CPU pixel code remains in the production module graph"
+    );
+}
+
 #[test]
 fn repeated_frames_reuse_resources_without_growth_or_readback() {
     let mut renderer = pollster::block_on(Renderer::new(
@@ -29031,10 +29690,12 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .expect("repeated C08 reuse coverage requires a renderer");
+    .unwrap_or_else(|error| panic!("repeated C08 reuse coverage requires a renderer: {error}"));
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
-        .expect("repeated C08 reuse coverage requires a headless surface");
+        .unwrap_or_else(|error| {
+            panic!("repeated C08 reuse coverage requires a headless surface: {error}")
+        });
     let mut scene = Scene::new();
     scene
         .fill(
@@ -29054,17 +29715,17 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             Parameters::default(),
             working_format,
         ))
-        .expect("C08 reuse warm-up frames must succeed");
+        .unwrap_or_else(|error| panic!("C08 reuse warm-up frames must succeed: {error}"));
     }
     let expected = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the warmed C08 publication must be readable");
+        .unwrap_or_else(|error| panic!("the warmed C08 publication must be readable: {error}"));
     let warmed_resources = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the warmed C08 device must remain ready")
+        .unwrap_or_else(|| panic!("the warmed C08 device must remain ready"))
         .internal_resource_manager_observation_for_test();
     let warmed_cache = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the warmed C08 device must retain its pass cache")
+        .unwrap_or_else(|| panic!("the warmed C08 device must retain its pass cache"))
         .device_pass_cache_counts_for_test();
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -29083,11 +29744,11 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             Parameters::default(),
             working_format,
         ))
-        .expect("repeated exact C08 frames must succeed");
+        .unwrap_or_else(|error| panic!("repeated exact C08 frames must succeed: {error}"));
         public_stats.push(C08PublicStatsForTest::from(result.stats));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("repeated exact C08 frames must retain the ready device");
+            .unwrap_or_else(|| panic!("repeated exact C08 frames must retain the ready device"));
         resource_observations.push(ready.internal_resource_manager_observation_for_test());
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
@@ -29222,7 +29883,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
 }
 
 #[test]
-fn renderer_dispatch_routes_only_closed_c08_graph_subset_to_gpu_executor() {
+fn renderer_dispatch_routes_closed_c08_and_c09_graph_subsets_to_gpu_executor() {
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
@@ -29277,10 +29938,12 @@ fn renderer_dispatch_routes_only_closed_c08_graph_subset_to_gpu_executor() {
             && dispatch.direct_vello_routes == 1
             && dispatch.exact_c08_graph_routes == 1
             && dispatch.transitional_graph_routes == 1
-            && graph_submission.queue_submission_count_for_test() == 1
+            && graph_submission.queue_submission_count_for_test() == 2
             && frame_gate.validated_plan_count == 1
-            && frame_gate.plan_count_at_transitional_effect_execution == Some(1),
-        "renderer has no closed C08 graph dispatch boundary"
+            && frame_gate
+                .plan_count_at_transitional_effect_execution
+                .is_none(),
+        "renderer has no closed C08/C09 graph dispatch boundary"
     );
 }
 
@@ -31170,13 +31833,13 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
             "{caller} must route its texture download through the private readback owner"
         );
     }
-    for caller in [
-        "async fn materialize_resolved_backdrop(",
-        "async fn materialize_resolved_layer_mask(",
+    for removed_cpu_route in [
+        "materialize_resolved_backdrop",
+        "materialize_resolved_layer_mask",
     ] {
         assert!(
-            source_braced_block_from_marker(renderer_source, caller).contains(readback_entry),
-            "{caller} must route its texture download through the private readback owner"
+            !renderer_code.contains(removed_cpu_route),
+            "{removed_cpu_route} must remain absent from the production renderer"
         );
     }
 
@@ -31219,12 +31882,6 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         "offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available",
         "offscreen_reuses_resources_across_repeated_bounded_requests",
         "shader_clear_fill_pass_encodes_when_gpu_context_is_available",
-        "render_materializes_bounded_backdrop_capture_from_prior_siblings",
-        "render_backdrop_filter_order_is_preserved",
-        "render_backdrop_clip_limits_filtered_image_to_requested_region",
-        "render_backdrop_foreground_composites_over_filtered_backdrop",
-        "sequence13_bounded_backdrop_capture_materializes_prior_siblings_with_foreground_order",
-        "sequence13_backdrop_filter_chain_preserves_order_and_clipping",
         "ahem_font_data_renders_ascent_and_descent_glyph_bands",
     ] {
         let body =
@@ -31243,9 +31900,10 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
 }
 
 #[test]
-fn materialized_mask_render_preserves_final_transaction_generation() {
-    let submission_scope =
-        gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
+fn gpu_mask_render_preserves_single_transaction_generation() {
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("materialized-mask transaction coverage requires a renderer");
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 1.0), 1.0))
@@ -31267,23 +31925,31 @@ fn materialized_mask_render_preserves_final_transaction_generation() {
         .expect("materialized masks must render through the production path");
     let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
     let submission = submission_scope.observation_for_test();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_submission = direct_scope.observation_for_test();
 
     assert_eq!(
         submission.queue_submission_count_for_test(),
-        2,
-        "the real materialized-mask path must submit its offscreen raster before the final surface raster"
+        1,
+        "the production mask path must submit exactly one graph transaction"
     );
     assert_eq!(
         submission.active_generation_for_test(),
         submission.transaction_generation_for_test(),
-        "the final surface submission must retain its own active DeviceSignal generation after materialization"
+        "the graph submission must retain its active DeviceSignal generation"
     );
     assert!(
         submission
             .transaction_generation_for_test()
             .is_some_and(|generation| generation != 0),
-        "the final surface submission must retain a nonzero transaction generation"
+        "the graph submission must retain a nonzero transaction generation"
     );
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(
+        graph_submission.active_generation_for_test(),
+        graph_submission.transaction_generation_for_test()
+    );
+    assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
     assert!(pixel_alpha(&output, 0, 0) > 200);
     assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
 }
@@ -31614,6 +32280,56 @@ fn render_scene_to_required_headless(scene: &Scene, size: Size) -> ImageBuffer {
         .expect("required headless scene rendering needs an available host adapter");
     pollster::block_on(renderer.read_headless(&surface))
         .expect("required headless scene readback must complete")
+}
+
+fn assert_bounded_backdrop_filter_execution_is_future(scene: &Scene, size: Size) {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
+    let stats_before = renderer.stats();
+    let publication_before = surface.headless_publication_count_for_test();
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .internal_resource_manager_observation_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+
+    let error = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
+        .unwrap_err();
+    let cache_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .device_pass_cache_counts_for_test();
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap()
+        .internal_resource_manager_observation_for_test();
+
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ))
+    );
+    assert_eq!(submission.queue_submission_count_for_test(), 0);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 0);
+    assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        publication_before
+    );
+    assert_eq!(cache_after, cache_before);
+    assert_eq!(resources_after, resources_before);
 }
 
 fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {

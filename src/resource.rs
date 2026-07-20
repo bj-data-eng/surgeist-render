@@ -2,10 +2,7 @@ use super::{
     BackendErrorCode, Error, ResourceCacheBudget, Result,
     backend::DeviceCapabilities,
     image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
-    texture::{
-        EffectTextureDescriptor, EffectTextureKey, TextureCacheKey, TransitionalTextureKey,
-        TransitionalTextureRole,
-    },
+    texture::{EffectTextureDescriptor, EffectTextureKey},
     vello_engine::{VelloAtlasOutcome, VelloBufferKey, VelloImageKey},
 };
 use std::{
@@ -394,25 +391,12 @@ pub(crate) enum ResourceCacheKey {
     EffectTexture(EffectTextureKey),
     ResolvedMaskUpload(ResolvedMaskUploadKey),
     GaussianKernelBuffer(GaussianKernelKey),
-    TransitionalTexture(TransitionalTextureKey),
 }
 
 impl ResourceCacheKey {
     #[cfg(test)]
-    pub(crate) const fn transitional_texture(key: TextureCacheKey) -> Self {
-        Self::transitional_texture_for_role(TransitionalTextureRole::Offscreen, key)
-    }
-
-    pub(crate) const fn transitional_texture_for_role(
-        role: TransitionalTextureRole,
-        key: TextureCacheKey,
-    ) -> Self {
-        Self::TransitionalTexture(TransitionalTextureKey::new(role, key))
-    }
-
-    #[cfg(test)]
     const fn accepts_modeled_payload(self) -> bool {
-        matches!(self, Self::VelloAtlas | Self::TransitionalTexture(_))
+        matches!(self, Self::VelloAtlas | Self::EffectTexture(_))
     }
 
     const fn is_vello_atlas(self) -> bool {
@@ -531,26 +515,22 @@ enum ResourcePayload {
     GaussianKernelBuffer {
         buffer: wgpu::Buffer,
     },
-    TransitionalTexture {
-        texture: wgpu::Texture,
-        view: wgpu::TextureView,
-    },
 }
 
 impl ResourcePayload {
     const fn matches_key(&self, key: ResourceCacheKey) -> bool {
         match (self, key) {
             #[cfg(test)]
-            (
-                Self::Modeled,
-                ResourceCacheKey::VelloAtlas | ResourceCacheKey::TransitionalTexture(_),
-            ) => true,
+            (Self::Modeled, ResourceCacheKey::VelloAtlas | ResourceCacheKey::EffectTexture(_)) => {
+                true
+            }
             (Self::VelloBuffer { .. }, ResourceCacheKey::VelloBuffer(_))
             | (Self::VelloImage { .. }, ResourceCacheKey::VelloImage(_))
             | (Self::EffectTexture { .. }, ResourceCacheKey::EffectTexture(_))
             | (Self::ResolvedMaskUpload { .. }, ResourceCacheKey::ResolvedMaskUpload(_))
-            | (Self::GaussianKernelBuffer { .. }, ResourceCacheKey::GaussianKernelBuffer(_))
-            | (Self::TransitionalTexture { .. }, ResourceCacheKey::TransitionalTexture(_)) => true,
+            | (Self::GaussianKernelBuffer { .. }, ResourceCacheKey::GaussianKernelBuffer(_)) => {
+                true
+            }
             _ => false,
         }
     }
@@ -564,7 +544,6 @@ impl ResourcePayload {
             Self::EffectTexture { .. } => "EffectTexture",
             Self::ResolvedMaskUpload { .. } => "ResolvedMaskUpload",
             Self::GaussianKernelBuffer { .. } => "GaussianKernelBuffer",
-            Self::TransitionalTexture { .. } => "TransitionalTexture",
         }
     }
 }
@@ -901,7 +880,7 @@ impl ResourceManagerState {
             return Err(Error::invalid_value(
                 "modeled resource key",
                 format!("{key:?}"),
-                "must use a Vello or transitional namespace",
+                "must use a Vello atlas or effect texture namespace",
             ));
         }
         self.acquire_with_payload(
@@ -1015,7 +994,7 @@ impl ResourceManagerState {
             return Err(Error::invalid_value(
                 "modeled resource key",
                 format!("{key:?}"),
-                "must use a Vello or transitional namespace",
+                "must use a Vello atlas or effect texture namespace",
             ));
         }
         if byte_len == 0 {
@@ -1778,20 +1757,6 @@ impl FrameResourceScope {
         }
     }
 
-    pub(crate) fn transitional_texture<'scope>(
-        &'scope self,
-        lease: &'scope ResourceLease,
-    ) -> Result<(&'scope wgpu::Texture, &'scope wgpu::TextureView)> {
-        match self.validated_payload(lease)? {
-            ResourcePayload::TransitionalTexture { texture, view } => Ok((texture, view)),
-            _ => Err(Error::invalid_value(
-                "resource lease payload",
-                lease.resource_identity().get(),
-                "must contain a transitional offscreen texture",
-            )),
-        }
-    }
-
     pub(crate) fn acquire_vello_buffer(
         &mut self,
         device: &wgpu::Device,
@@ -1893,43 +1858,6 @@ impl FrameResourceScope {
                     array_layer_count: None,
                 });
                 Ok(ResourcePayload::VelloImage { texture, view })
-            },
-        )
-    }
-
-    pub(crate) fn acquire_transitional_texture(
-        &mut self,
-        device: &wgpu::Device,
-        role: TransitionalTextureRole,
-        descriptor: super::texture::TextureDescriptor,
-    ) -> Result<ResourceLease> {
-        let key = ResourceCacheKey::transitional_texture_for_role(
-            role,
-            TextureCacheKey::from_descriptor(descriptor),
-        );
-        lock_state(&self.state).acquire_with_payload(
-            &self.manager_identity,
-            self.frame,
-            key,
-            descriptor.byte_len(),
-            IdleReuse::Allowed,
-            || {
-                let texture = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some(role.label()),
-                    size: wgpu::Extent3d {
-                        width: descriptor.physical_size().width(),
-                        height: descriptor.physical_size().height(),
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::from(descriptor.format()),
-                    usage: descriptor.wgpu_usage(),
-                    view_formats: &[],
-                });
-                let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-                Ok(ResourcePayload::TransitionalTexture { texture, view })
             },
         )
     }

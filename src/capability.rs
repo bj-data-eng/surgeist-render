@@ -196,18 +196,17 @@ impl Capabilities {
         },
         filters: FilterCapabilities {
             layer_filters: false,
-            color_filter_classification: true,
-            color_filter_pipeline_execution: true,
-            materialized_image_filter_classification: true,
-            materialized_blur_filter_execution: true,
-            materialized_drop_shadow_filter_execution: true,
-            filter_region_outset_planning: true,
+            ordered_filter_lists: true,
+            gpu_color_filter_execution: false,
+            gpu_blur_filter_execution: false,
+            gpu_drop_shadow_filter_execution: false,
+            filter_region_planning: true,
         },
         masks_clips: MaskClipCapabilities {
             shape_clips: true,
             clip_reference_execution: false,
             layer_masks: false,
-            materialized_alpha_mask_execution: true,
+            resolved_alpha_mask_execution: true,
             luminance_mask_mode: false,
             multi_layer_mask_composition: false,
             mask_composite_modes: false,
@@ -242,14 +241,16 @@ impl Capabilities {
             direct_vello_opacity_isolation: true,
             direct_vello_blend_isolation: true,
             offscreen_layer_rendering: false,
-            texture_cache_upload_lifecycle: false,
-            rect_fullscreen_shader_passes: false,
-            nested_opacity_planning: false,
+            persistent_effect_resources: true,
+            bounded_vello_capture: true,
+            image_pass_execution: true,
+            composite_pass_execution: true,
+            nested_opacity_composition: true,
             mask_execution: false,
-            filter_execution: false,
-            backdrop_execution: false,
+            layer_filter_execution: false,
+            broad_backdrop_execution: false,
             bounded_backdrop_capture: true,
-            materialized_backdrop_filter_execution: true,
+            bounded_backdrop_filter_execution: false,
             backdrop_isolation_composition: false,
         },
         surfaces: SurfaceCapabilities {
@@ -386,34 +387,21 @@ impl Capabilities {
             (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter) => {
                 self.filters.supports_layer_filters()
             }
-            (PrimitiveFamily::Filters, PrimitiveOperation::ColorFilterClassification) => {
-                self.filters.supports_color_filter_classification()
+            (PrimitiveFamily::Filters, PrimitiveOperation::OrderedFilterList) => {
+                self.filters.supports_ordered_filter_lists()
             }
-            (PrimitiveFamily::Filters, PrimitiveOperation::ColorFilterPipelineExecution) => {
-                self.filters.supports_color_filter_pipeline_execution()
+            (PrimitiveFamily::Filters, PrimitiveOperation::GpuColorFilterExecution) => {
+                self.filters.supports_gpu_color_filter_execution()
             }
-            (
-                PrimitiveFamily::Filters,
-                PrimitiveOperation::MaterializedImageFilterClassification,
-            ) => self
-                .filters
-                .supports_materialized_image_filter_classification(),
-            (PrimitiveFamily::Filters, PrimitiveOperation::MaterializedBlurFilterExecution) => {
-                self.filters.supports_materialized_blur_filter_execution()
+            (PrimitiveFamily::Filters, PrimitiveOperation::GpuBlurFilterExecution) => {
+                self.filters.supports_gpu_blur_filter_execution()
             }
-            (
-                PrimitiveFamily::Filters,
-                PrimitiveOperation::MaterializedDropShadowFilterExecution,
-            ) => self
-                .filters
-                .supports_materialized_drop_shadow_filter_execution(),
-            (PrimitiveFamily::Filters, PrimitiveOperation::FilterRegionOutsetPlanning) => {
-                self.filters.supports_filter_region_outset_planning()
+            (PrimitiveFamily::Filters, PrimitiveOperation::GpuDropShadowFilterExecution) => {
+                self.filters.supports_gpu_drop_shadow_filter_execution()
             }
-            (
-                PrimitiveFamily::Filters,
-                PrimitiveOperation::ColorFilterBlur | PrimitiveOperation::ColorFilterDropShadow,
-            ) => false,
+            (PrimitiveFamily::Filters, PrimitiveOperation::FilterRegionPlanning) => {
+                self.filters.supports_filter_region_planning()
+            }
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ShapeClip) => {
                 self.masks_clips.supports_shape_clips()
             }
@@ -424,12 +412,9 @@ impl Capabilities {
                 self.masks_clips.supports_layer_masks()
             }
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::AlphaMaskSourceExecution) => false,
-            (
-                PrimitiveFamily::MasksAndClips,
-                PrimitiveOperation::MaterializedAlphaMaskExecution,
-            ) => self
-                .masks_clips
-                .supports_materialized_alpha_mask_execution(),
+            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ResolvedAlphaMaskExecution) => {
+                self.masks_clips.supports_resolved_alpha_mask_execution()
+            }
             (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LuminanceMaskMode) => {
                 self.masks_clips.supports_luminance_mask_mode()
             }
@@ -472,37 +457,41 @@ impl Capabilities {
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::OffscreenLayerRendering) => {
                 self.offscreen_pipeline.supports_offscreen_layer_rendering()
             }
-            (
-                PrimitiveFamily::OffscreenPipeline,
-                PrimitiveOperation::TextureCacheUploadLifecycle,
-            ) => self
-                .offscreen_pipeline
-                .supports_texture_cache_upload_lifecycle(),
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::RectFullscreenShaderPass) => {
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::PersistentEffectResources) => {
                 self.offscreen_pipeline
-                    .supports_rect_fullscreen_shader_passes()
+                    .supports_persistent_effect_resources()
             }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::NestedOpacityPlanning) => {
-                self.offscreen_pipeline.supports_nested_opacity_planning()
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BoundedVelloCapture) => {
+                self.offscreen_pipeline.supports_bounded_vello_capture()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::ImagePassExecution) => {
+                self.offscreen_pipeline.supports_image_pass_execution()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::CompositePassExecution) => {
+                self.offscreen_pipeline.supports_composite_pass_execution()
+            }
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::NestedOpacityComposition) => {
+                self.offscreen_pipeline
+                    .supports_nested_opacity_composition()
             }
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::MaskExecution) => {
                 self.offscreen_pipeline.supports_mask_execution()
             }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::FilterExecution) => {
-                self.offscreen_pipeline.supports_filter_execution()
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::LayerFilterExecution) => {
+                self.offscreen_pipeline.supports_layer_filter_execution()
             }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BackdropExecution) => {
-                self.offscreen_pipeline.supports_backdrop_execution()
+            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BroadBackdropExecution) => {
+                self.offscreen_pipeline.supports_broad_backdrop_execution()
             }
             (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BoundedBackdropCapture) => {
                 self.offscreen_pipeline.supports_bounded_backdrop_capture()
             }
             (
                 PrimitiveFamily::OffscreenPipeline,
-                PrimitiveOperation::MaterializedBackdropFilterExecution,
+                PrimitiveOperation::BoundedBackdropFilterExecution,
             ) => self
                 .offscreen_pipeline
-                .supports_materialized_backdrop_filter_execution(),
+                .supports_bounded_backdrop_filter_execution(),
             (
                 PrimitiveFamily::OffscreenPipeline,
                 PrimitiveOperation::BackdropIsolationComposition,
@@ -793,12 +782,11 @@ impl ShadowCapabilities {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterCapabilities {
     layer_filters: bool,
-    color_filter_classification: bool,
-    color_filter_pipeline_execution: bool,
-    materialized_image_filter_classification: bool,
-    materialized_blur_filter_execution: bool,
-    materialized_drop_shadow_filter_execution: bool,
-    filter_region_outset_planning: bool,
+    ordered_filter_lists: bool,
+    gpu_color_filter_execution: bool,
+    gpu_blur_filter_execution: bool,
+    gpu_drop_shadow_filter_execution: bool,
+    filter_region_planning: bool,
 }
 
 impl FilterCapabilities {
@@ -807,34 +795,34 @@ impl FilterCapabilities {
         self.layer_filters
     }
 
+    /// Returns whether authored filter lists preserve their exact operation order.
     #[must_use]
-    pub const fn supports_color_filter_classification(self) -> bool {
-        self.color_filter_classification
+    pub const fn supports_ordered_filter_lists(self) -> bool {
+        self.ordered_filter_lists
     }
 
+    /// Returns whether color-filter graph passes execute on the GPU.
     #[must_use]
-    pub const fn supports_color_filter_pipeline_execution(self) -> bool {
-        self.color_filter_pipeline_execution
+    pub const fn supports_gpu_color_filter_execution(self) -> bool {
+        self.gpu_color_filter_execution
     }
 
+    /// Returns whether blur graph passes execute on the GPU.
     #[must_use]
-    pub const fn supports_materialized_image_filter_classification(self) -> bool {
-        self.materialized_image_filter_classification
+    pub const fn supports_gpu_blur_filter_execution(self) -> bool {
+        self.gpu_blur_filter_execution
     }
 
+    /// Returns whether drop-shadow graph passes execute on the GPU.
     #[must_use]
-    pub const fn supports_materialized_blur_filter_execution(self) -> bool {
-        self.materialized_blur_filter_execution
+    pub const fn supports_gpu_drop_shadow_filter_execution(self) -> bool {
+        self.gpu_drop_shadow_filter_execution
     }
 
+    /// Returns whether filter execution regions and outsets are planned before execution.
     #[must_use]
-    pub const fn supports_materialized_drop_shadow_filter_execution(self) -> bool {
-        self.materialized_drop_shadow_filter_execution
-    }
-
-    #[must_use]
-    pub const fn supports_filter_region_outset_planning(self) -> bool {
-        self.filter_region_outset_planning
+    pub const fn supports_filter_region_planning(self) -> bool {
+        self.filter_region_planning
     }
 }
 
@@ -843,7 +831,7 @@ pub struct MaskClipCapabilities {
     shape_clips: bool,
     clip_reference_execution: bool,
     layer_masks: bool,
-    materialized_alpha_mask_execution: bool,
+    resolved_alpha_mask_execution: bool,
     luminance_mask_mode: bool,
     multi_layer_mask_composition: bool,
     mask_composite_modes: bool,
@@ -865,9 +853,10 @@ impl MaskClipCapabilities {
         self.layer_masks
     }
 
+    /// Returns whether resolved image alpha masks execute in the GPU composition graph.
     #[must_use]
-    pub const fn supports_materialized_alpha_mask_execution(self) -> bool {
-        self.materialized_alpha_mask_execution
+    pub const fn supports_resolved_alpha_mask_execution(self) -> bool {
+        self.resolved_alpha_mask_execution
     }
 
     #[must_use]
@@ -1035,14 +1024,16 @@ pub struct OffscreenPipelineCapabilities {
     direct_vello_opacity_isolation: bool,
     direct_vello_blend_isolation: bool,
     offscreen_layer_rendering: bool,
-    texture_cache_upload_lifecycle: bool,
-    rect_fullscreen_shader_passes: bool,
-    nested_opacity_planning: bool,
+    persistent_effect_resources: bool,
+    bounded_vello_capture: bool,
+    image_pass_execution: bool,
+    composite_pass_execution: bool,
+    nested_opacity_composition: bool,
     mask_execution: bool,
-    filter_execution: bool,
-    backdrop_execution: bool,
+    layer_filter_execution: bool,
+    broad_backdrop_execution: bool,
     bounded_backdrop_capture: bool,
-    materialized_backdrop_filter_execution: bool,
+    bounded_backdrop_filter_execution: bool,
     backdrop_isolation_composition: bool,
 }
 
@@ -1062,19 +1053,34 @@ impl OffscreenPipelineCapabilities {
         self.offscreen_layer_rendering
     }
 
+    /// Returns whether effect textures and uploads use persistent device-owned resources.
     #[must_use]
-    pub const fn supports_texture_cache_upload_lifecycle(self) -> bool {
-        self.texture_cache_upload_lifecycle
+    pub const fn supports_persistent_effect_resources(self) -> bool {
+        self.persistent_effect_resources
     }
 
+    /// Returns whether bounded Vello spans can be captured into graph resources.
     #[must_use]
-    pub const fn supports_rect_fullscreen_shader_passes(self) -> bool {
-        self.rect_fullscreen_shader_passes
+    pub const fn supports_bounded_vello_capture(self) -> bool {
+        self.bounded_vello_capture
     }
 
+    /// Returns whether image-processing graph passes execute on the GPU.
     #[must_use]
-    pub const fn supports_nested_opacity_planning(self) -> bool {
-        self.nested_opacity_planning
+    pub const fn supports_image_pass_execution(self) -> bool {
+        self.image_pass_execution
+    }
+
+    /// Returns whether graph composition passes execute on the GPU.
+    #[must_use]
+    pub const fn supports_composite_pass_execution(self) -> bool {
+        self.composite_pass_execution
+    }
+
+    /// Returns whether nested opacity is composed in ordered GPU passes.
+    #[must_use]
+    pub const fn supports_nested_opacity_composition(self) -> bool {
+        self.nested_opacity_composition
     }
 
     #[must_use]
@@ -1083,13 +1089,13 @@ impl OffscreenPipelineCapabilities {
     }
 
     #[must_use]
-    pub const fn supports_filter_execution(self) -> bool {
-        self.filter_execution
+    pub const fn supports_layer_filter_execution(self) -> bool {
+        self.layer_filter_execution
     }
 
     #[must_use]
-    pub const fn supports_backdrop_execution(self) -> bool {
-        self.backdrop_execution
+    pub const fn supports_broad_backdrop_execution(self) -> bool {
+        self.broad_backdrop_execution
     }
 
     #[must_use]
@@ -1098,8 +1104,8 @@ impl OffscreenPipelineCapabilities {
     }
 
     #[must_use]
-    pub const fn supports_materialized_backdrop_filter_execution(self) -> bool {
-        self.materialized_backdrop_filter_execution
+    pub const fn supports_bounded_backdrop_filter_execution(self) -> bool {
+        self.bounded_backdrop_filter_execution
     }
 
     #[must_use]

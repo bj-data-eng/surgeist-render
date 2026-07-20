@@ -1,16 +1,21 @@
 use super::{
     Error, Rect, Result,
+    style::{ColorFilterOp, FilterBlur, FilterDropShadow, FilterList, FilterOpKind},
+};
+#[cfg(test)]
+use super::{
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
-    style::{
-        ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow, FilterList, FilterOpKind,
-        UnitFilterAmount,
-    },
+    style::{ColorFilterPipeline, UnitFilterAmount},
 };
 
+#[cfg(test)]
 const LUMA_RED: f64 = 0.213;
+#[cfg(test)]
 const LUMA_GREEN: f64 = 0.715;
+#[cfg(test)]
 const LUMA_BLUE: f64 = 0.072;
 pub(crate) const CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS: f64 = 2.5;
+#[cfg(test)]
 const DEFAULT_MAX_BLUR_RADIUS: f64 = 256.0;
 
 /// Source bounds for a pixel-moving filter operation.
@@ -56,6 +61,7 @@ pub struct FilterClipBounds {
 }
 
 impl FilterClipBounds {
+    #[cfg(test)]
     pub fn try_new(rect: Rect) -> Result<Self> {
         validate_filter_bounds(rect, "filter clip bounds")?;
         Ok(Self { rect })
@@ -88,8 +94,11 @@ impl FilterExecutionRegion {
 /// Complete region plan for one pixel-moving filter step.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FilterRegionPlan {
+    #[cfg(test)]
     source: FilterSourceBounds,
+    #[cfg(test)]
     inflated: FilterInflatedBounds,
+    #[cfg(test)]
     clip: Option<FilterClipBounds>,
     execution: FilterExecutionRegion,
 }
@@ -113,24 +122,30 @@ impl FilterRegionPlan {
         };
         let execution = FilterExecutionRegion::try_new(execution_rect)?;
         Ok(Self {
+            #[cfg(test)]
             source,
+            #[cfg(test)]
             inflated,
+            #[cfg(test)]
             clip,
             execution,
         })
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn source_bounds(self) -> FilterSourceBounds {
         self.source
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn inflated_bounds(self) -> FilterInflatedBounds {
         self.inflated
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn clip_bounds(self) -> Option<FilterClipBounds> {
         self.clip
     }
@@ -161,10 +176,12 @@ impl FilterOutset {
         }
     }
 
+    #[cfg(test)]
     pub fn try_uniform(amount: f64) -> Result<Self> {
         Self::try_new(amount, amount, amount, amount)
     }
 
+    #[cfg(test)]
     pub fn try_new(left: f64, top: f64, right: f64, bottom: f64) -> Result<Self> {
         validate_filter_outset_value(left, "filter outset left")?;
         validate_filter_outset_value(top, "filter outset top")?;
@@ -178,11 +195,13 @@ impl FilterOutset {
         })
     }
 
+    #[cfg(test)]
     pub fn from_blur(blur: FilterBlur, policy: BlurPolicy) -> Result<Self> {
         Self::try_uniform(policy.support_radius(blur)?)
     }
 
     /// Computes the signed logical outsets for an executable filter drop shadow.
+    #[cfg(test)]
     pub fn from_drop_shadow(shadow: &FilterDropShadow, policy: BlurPolicy) -> Result<Self> {
         let support = policy.support_radius(shadow.blur())?;
         let offset = shadow.offset();
@@ -195,21 +214,25 @@ impl FilterOutset {
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn left(self) -> f64 {
         self.left
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn top(self) -> f64 {
         self.top
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn right(self) -> f64 {
         self.right
     }
 
     #[must_use]
+    #[cfg(test)]
     pub const fn bottom(self) -> f64 {
         self.bottom
     }
@@ -225,27 +248,29 @@ impl FilterOutset {
 }
 
 /// How a blur radius value maps to Gaussian standard deviation.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BlurRadiusInterpretation {
     CssLengthAsStandardDeviation,
-    VelloShadowBlurRadiusAsDiameter,
 }
 
+#[cfg(test)]
 impl BlurRadiusInterpretation {
     const fn standard_deviation(self, radius: f64) -> f64 {
         match self {
             Self::CssLengthAsStandardDeviation => radius,
-            Self::VelloShadowBlurRadiusAsDiameter => radius * 0.5,
         }
     }
 }
 
 /// Kernel support radius measured as a multiple of Gaussian standard deviation.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KernelSupportRadius {
     standard_deviation_multiple: f64,
 }
 
+#[cfg(test)]
 impl KernelSupportRadius {
     pub fn try_standard_deviation_multiple(standard_deviation_multiple: f64) -> Result<Self> {
         if !standard_deviation_multiple.is_finite() || standard_deviation_multiple <= 0.0 {
@@ -271,18 +296,21 @@ impl KernelSupportRadius {
 }
 
 /// Whether large blur radii are rejected or clamped before kernel planning.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum LargeBlurRadiusAction {
     Reject,
     Clamp,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LargeBlurRadiusPolicy {
     action: LargeBlurRadiusAction,
     max_radius: f64,
 }
 
+#[cfg(test)]
 impl LargeBlurRadiusPolicy {
     pub fn try_reject_above(max_radius: f64) -> Result<Self> {
         Self::try_new(LargeBlurRadiusAction::Reject, max_radius)
@@ -329,12 +357,14 @@ impl LargeBlurRadiusPolicy {
 }
 
 /// Sampling outside source bounds for blur kernels.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TransparentEdgeSamplingPolicy {
     TransparentBlack,
 }
 
 /// Blur planning policy for CPU/reference and backend-compatible blur models.
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BlurPolicy {
     radius_interpretation: BlurRadiusInterpretation,
@@ -343,6 +373,7 @@ pub struct BlurPolicy {
     edge_sampling: TransparentEdgeSamplingPolicy,
 }
 
+#[cfg(test)]
 impl BlurPolicy {
     pub fn try_new(
         radius_interpretation: BlurRadiusInterpretation,
@@ -392,11 +423,6 @@ impl BlurPolicy {
     }
 
     #[must_use]
-    pub const fn kernel_support(self) -> KernelSupportRadius {
-        self.kernel_support
-    }
-
-    #[must_use]
     pub const fn large_radius_policy(self) -> LargeBlurRadiusPolicy {
         self.large_radius
     }
@@ -426,12 +452,8 @@ pub(crate) fn vello_outer_shadow_support_radius(blur_radius: f64) -> Result<f64>
             "must be finite and non-negative",
         ));
     }
-    let standard_deviation =
-        BlurRadiusInterpretation::VelloShadowBlurRadiusAsDiameter.standard_deviation(blur_radius);
-    let support = KernelSupportRadius {
-        standard_deviation_multiple: CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS,
-    }
-    .support_radius(standard_deviation);
+    let standard_deviation = blur_radius * 0.5;
+    let support = standard_deviation * CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS;
     if !support.is_finite() {
         return Err(Error::invalid_value(
             "box shadow blur support",
@@ -539,6 +561,7 @@ fn validate_filter_bounds(rect: Rect, name: &str) -> Result<()> {
     validate_positive_dimension(rect.height(), &format!("{name} height"))
 }
 
+#[cfg(test)]
 fn validate_filter_outset_value(value: f64, name: &str) -> Result<()> {
     if !value.is_finite() || value < 0.0 {
         return Err(Error::invalid_value(
@@ -685,6 +708,13 @@ impl AlgorithmFilterPlan {
     }
 }
 
+impl FilterList {
+    /// Returns the backend-facing ordered filter plan without executing pixels.
+    pub(crate) fn ordered_filter_plan(&self) -> AlgorithmFilterPlan {
+        AlgorithmFilterPlan::from_filter_list(self)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) enum AlgorithmFilterStep {
     ColorRun(AlgorithmColorFilterRun),
@@ -753,11 +783,13 @@ fn push_algorithm_color_operation(
 /// This is an execution plan shape, not execution itself. Color-only runs are
 /// compiled into the existing color pipeline, while pixel-moving operations
 /// remain named steps for later region planning and byte execution.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterializedImageFilterPipeline {
     steps: Vec<MaterializedImageFilterStep>,
 }
 
+#[cfg(test)]
 impl MaterializedImageFilterPipeline {
     pub fn try_from_filter_list(filters: &FilterList) -> Result<Option<Self>> {
         let ops = filters.ops();
@@ -815,6 +847,7 @@ impl MaterializedImageFilterPipeline {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterializedImageFilterStep {
     ColorFilters(CompiledColorFilterPipeline),
@@ -823,6 +856,7 @@ pub enum MaterializedImageFilterStep {
     DropShadow(FilterDropShadow),
 }
 
+#[cfg(test)]
 impl FilterList {
     pub fn materialized_image_filter_pipeline(
         &self,
@@ -831,6 +865,7 @@ impl FilterList {
     }
 }
 
+#[cfg(test)]
 fn flush_materialized_color_run(
     steps: &mut Vec<MaterializedImageFilterStep>,
     color_run: &mut Vec<ColorFilterOp>,
@@ -851,12 +886,14 @@ fn flush_materialized_color_run(
 /// diagnostics/proof while executing grouped color-matrix runs and explicit
 /// opacity steps. Opacity is sequenced instead of folded into color runs because
 /// it changes premultiplied alpha at its ordered position.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompiledColorFilterPipeline {
     source_ops: Vec<ColorFilterOp>,
     steps: Vec<CompiledColorFilterStep>,
 }
 
+#[cfg(test)]
 impl CompiledColorFilterPipeline {
     pub fn try_from_pipeline(pipeline: &ColorFilterPipeline) -> Result<Self> {
         Self::try_from_ops(pipeline.ops().to_vec())
@@ -910,6 +947,7 @@ impl CompiledColorFilterPipeline {
 /// still stores ordered transforms rather than one collapsed matrix because the
 /// reference policy clamps and rounds after each source operation; collapsing
 /// those transforms would change CSS-visible order/rounding for some chains.
+#[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
 enum CompiledColorFilterStep {
     Identity,
@@ -918,6 +956,7 @@ enum CompiledColorFilterStep {
     Opacity(UnitFilterAmount),
 }
 
+#[cfg(test)]
 impl CompiledColorFilterStep {
     fn apply_to_pixel(&self, pixel: PremultipliedRgba8) -> Result<PremultipliedRgba8> {
         match self {
@@ -935,11 +974,13 @@ impl CompiledColorFilterStep {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct StraightColorTransform {
     matrix: [[f64; 4]; 3],
 }
 
+#[cfg(test)]
 impl StraightColorTransform {
     fn from_op(op: ColorFilterOp) -> Option<Self> {
         match op {
@@ -1118,6 +1159,7 @@ impl StraightColorTransform {
     }
 }
 
+#[cfg(test)]
 fn compile_steps(source_ops: &[ColorFilterOp]) -> Vec<CompiledColorFilterStep> {
     if source_ops.iter().any(is_zero_opacity) {
         return vec![CompiledColorFilterStep::TransparentBlack];
@@ -1149,6 +1191,7 @@ fn compile_steps(source_ops: &[ColorFilterOp]) -> Vec<CompiledColorFilterStep> {
     steps
 }
 
+#[cfg(test)]
 fn flush_color_run(
     steps: &mut Vec<CompiledColorFilterStep>,
     color_run: &mut Vec<StraightColorTransform>,
@@ -1160,10 +1203,12 @@ fn flush_color_run(
     }
 }
 
+#[cfg(test)]
 fn is_zero_opacity(op: &ColorFilterOp) -> bool {
     matches!(op, ColorFilterOp::Opacity(amount) if amount.value() == 0.0)
 }
 
+#[cfg(test)]
 fn is_identity_op(op: ColorFilterOp) -> bool {
     match op {
         ColorFilterOp::Brightness(amount)
