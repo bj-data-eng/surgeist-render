@@ -1598,6 +1598,28 @@ impl ResourceManager {
             .filter(|entry| entry.key.is_transient_vello_image())
             .map(|entry| entry.byte_len)
             .sum();
+        let effect_texture_count = state
+            .entries
+            .values()
+            .filter(|entry| matches!(entry.key, ResourceCacheKey::EffectTexture(_)))
+            .count();
+        let resolved_mask_upload_keys = state
+            .entries
+            .values()
+            .filter_map(|entry| match entry.key {
+                ResourceCacheKey::ResolvedMaskUpload(key) => Some(key),
+                ResourceCacheKey::VelloAtlas
+                | ResourceCacheKey::VelloBuffer(_)
+                | ResourceCacheKey::VelloImage(_)
+                | ResourceCacheKey::EffectTexture(_)
+                | ResourceCacheKey::GaussianKernelBuffer(_) => None,
+            })
+            .collect();
+        let gaussian_kernel_count = state
+            .entries
+            .values()
+            .filter(|entry| matches!(entry.key, ResourceCacheKey::GaussianKernelBuffer(_)))
+            .count();
         ResourceManagerObservationForTest {
             idle_count,
             leased_count: state.entries.len().saturating_sub(idle_count),
@@ -1617,6 +1639,9 @@ impl ResourceManager {
             committed_transient_buffer_byte_len,
             committed_transient_image_count,
             committed_transient_image_byte_len,
+            effect_texture_count,
+            resolved_mask_upload_keys,
+            gaussian_kernel_count,
             recovery_outcome: state.pending_vello_atlas_recovery,
         }
     }
@@ -2356,6 +2381,9 @@ pub(crate) struct ResourceManagerObservationForTest {
     committed_transient_buffer_byte_len: u64,
     committed_transient_image_count: usize,
     committed_transient_image_byte_len: u64,
+    effect_texture_count: usize,
+    resolved_mask_upload_keys: Vec<ResolvedMaskUploadKey>,
+    gaussian_kernel_count: usize,
     recovery_outcome: Option<VelloAtlasOutcome>,
 }
 
@@ -2403,6 +2431,18 @@ impl ResourceManagerObservationForTest {
 
     pub(crate) const fn committed_transient_image_byte_len_for_test(&self) -> u64 {
         self.committed_transient_image_byte_len
+    }
+
+    pub(crate) const fn effect_texture_count_for_test(&self) -> usize {
+        self.effect_texture_count
+    }
+
+    pub(crate) fn resolved_mask_upload_keys_for_test(&self) -> &[ResolvedMaskUploadKey] {
+        &self.resolved_mask_upload_keys
+    }
+
+    pub(crate) const fn gaussian_kernel_count_for_test(&self) -> usize {
+        self.gaussian_kernel_count
     }
 
     pub(crate) const fn recovery_outcome_for_test(&self) -> Option<VelloAtlasOutcome> {

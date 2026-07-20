@@ -68,7 +68,7 @@ pub(crate) struct C08ExecutableSubsetObservationForTest {
     pub(crate) rejects_missing_or_reordered_spine_passes: bool,
     pub(crate) rejects_malformed_dependencies_reads_results_and_releases: bool,
     pub(crate) rejects_later_cycle_plan: bool,
-    pub(crate) preserves_direct_and_transitional_planner_routes: bool,
+    pub(crate) preserves_direct_and_graph_planner_routes: bool,
 }
 
 #[cfg(test)]
@@ -80,7 +80,7 @@ pub(crate) struct C09ExecutableGraphObservationForTest {
     pub(crate) rejects_missing_payloads: bool,
     pub(crate) rejects_malformed_graph_facts: bool,
     pub(crate) rejects_unsupported_output_binding: bool,
-    pub(crate) preserves_transitional_c09_dispatch: bool,
+    pub(crate) preserves_exact_c09_dispatch: bool,
 }
 
 #[cfg(test)]
@@ -3289,7 +3289,7 @@ fn c08_executable_subset_observation(
         Ok(FramePlan::DirectVello(_))
     );
     let later_cycle_plan = later_cycle_commands.clone().plan_for(context).ok()?;
-    let transitional_route = matches!(&later_cycle_plan, FramePlan::GpuGraph(_));
+    let graph_route = matches!(&later_cycle_plan, FramePlan::GpuGraph(_));
     let FramePlan::GpuGraph(later_cycle_graph) = later_cycle_plan else {
         return None;
     };
@@ -3343,7 +3343,7 @@ fn c08_executable_subset_observation(
             &rgba,
         ),
         rejects_later_cycle_plan: C08PreparableGraph::try_from_lowered(later_cycle).is_err(),
-        preserves_direct_and_transitional_planner_routes: direct_route && transitional_route,
+        preserves_direct_and_graph_planner_routes: direct_route && graph_route,
     })
 }
 
@@ -3495,14 +3495,14 @@ fn c09_executable_graph_observation(
     let mut unsupported_output = c09_lowered;
     unsupported_output.passes[present_index].result = RuntimeResultBinding::Output(Format::Bgra8);
     let rejects_unsupported_output_binding = rejects(unsupported_output);
-    let preserves_transitional_c09_dispatch = matches!(
+    let preserves_exact_c09_dispatch = matches!(
         ExecutableGraphDispatchEligibility::try_classify(
             &c09_graph,
             Format::Rgba8,
             ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
             &capabilities,
         ),
-        Ok(ExecutableGraphDispatchEligibility::LaterCycleTransitional)
+        Ok(ExecutableGraphDispatchEligibility::ExactC09)
     );
 
     Some(C09ExecutableGraphObservationForTest {
@@ -3512,7 +3512,7 @@ fn c09_executable_graph_observation(
         rejects_missing_payloads,
         rejects_malformed_graph_facts,
         rejects_unsupported_output_binding,
-        preserves_transitional_c09_dispatch,
+        preserves_exact_c09_dispatch,
     })
 }
 
@@ -4729,9 +4729,9 @@ struct PreparedKernelBinding {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum TransitionalPassSemantics {
+enum DispatchPassSemantics {
     ClosedExecutable,
-    LaterCycle,
+    FuturePass,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4752,7 +4752,7 @@ impl GraphPreparationIneligibility {
 enum PrePreparationGraphClassification {
     ExactC08(C08PreparableGraph),
     ExactC09(ClosedExecutableGraph),
-    LaterCycleTransitional(LoweredGraphPlan),
+    FuturePasses,
     Ineligible(GraphPreparationIneligibility),
 }
 
@@ -4778,8 +4778,9 @@ impl ExecutableGraphWorkingFormatRequest {
 
 #[must_use = "the closed graph dispatch result must select exactly one renderer route"]
 pub(crate) enum ExecutableGraphDispatchEligibility {
-    Exact(C08PreparableGraph),
-    LaterCycleTransitional,
+    ExactC08(C08PreparableGraph),
+    ExactC09,
+    FuturePasses,
 }
 
 impl ExecutableGraphDispatchEligibility {
@@ -4797,10 +4798,8 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
-            PrePreparationGraphClassification::ExactC09(_) => Ok(Self::LaterCycleTransitional),
-            PrePreparationGraphClassification::LaterCycleTransitional(_) => {
-                Ok(Self::LaterCycleTransitional)
-            }
+            PrePreparationGraphClassification::ExactC09(_) => Ok(Self::ExactC09),
+            PrePreparationGraphClassification::FuturePasses => Ok(Self::FuturePasses),
             PrePreparationGraphClassification::Ineligible(ineligibility) => {
                 Err(ineligibility.into_error())
             }
@@ -4814,10 +4813,10 @@ impl ExecutableGraphDispatchEligibility {
                 )?;
                 match PrePreparationGraphClassification::classify(lowered) {
                     PrePreparationGraphClassification::ExactC08(preparable) => {
-                        Ok(Self::Exact(preparable))
+                        Ok(Self::ExactC08(preparable))
                     }
                     PrePreparationGraphClassification::ExactC09(_)
-                    | PrePreparationGraphClassification::LaterCycleTransitional(_)
+                    | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C08 dispatch lowering changed its closed eligibility result",
                     )),
@@ -4832,12 +4831,12 @@ impl PrePreparationGraphClassification {
         let closed = match ClosedExecutableGraph::try_from_lowered(lowered) {
             Ok(closed) => closed,
             Err(lowered) => {
-                let mut contains_later_cycle_semantics = false;
+                let mut contains_future_passes = false;
                 for pass in &lowered.passes {
-                    match transitional_pass_semantics(&pass.kind) {
-                        Some(TransitionalPassSemantics::ClosedExecutable) => {}
-                        Some(TransitionalPassSemantics::LaterCycle) => {
-                            contains_later_cycle_semantics = true;
+                    match dispatch_pass_semantics(&pass.kind) {
+                        Some(DispatchPassSemantics::ClosedExecutable) => {}
+                        Some(DispatchPassSemantics::FuturePass) => {
+                            contains_future_passes = true;
                         }
                         None => {
                             return Self::Ineligible(
@@ -4846,8 +4845,8 @@ impl PrePreparationGraphClassification {
                         }
                     }
                 }
-                return if contains_later_cycle_semantics {
-                    Self::LaterCycleTransitional(lowered)
+                return if contains_future_passes {
+                    Self::FuturePasses
                 } else {
                     Self::Ineligible(GraphPreparationIneligibility::OutsideClosedExecutableGraph)
                 };
@@ -4861,18 +4860,18 @@ impl PrePreparationGraphClassification {
     }
 }
 
-fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPassSemantics> {
+fn dispatch_pass_semantics(kind: &RuntimePassKind) -> Option<DispatchPassSemantics> {
     match kind {
         RuntimePassKind::ClearRoot {
             initialization: RuntimeInitialization::SurfaceBaseColor,
             ..
         }
         | RuntimePassKind::CanonicalizeCapture
-        | RuntimePassKind::Present => Some(TransitionalPassSemantics::ClosedExecutable),
+        | RuntimePassKind::Present => Some(DispatchPassSemantics::ClosedExecutable),
         RuntimePassKind::ClearRoot {
             initialization: RuntimeInitialization::Transparent,
             color,
-        } if *color == Color::TRANSPARENT => Some(TransitionalPassSemantics::ClosedExecutable),
+        } if *color == Color::TRANSPARENT => Some(DispatchPassSemantics::ClosedExecutable),
         RuntimePassKind::ClearRoot {
             initialization: RuntimeInitialization::Transparent,
             ..
@@ -4891,7 +4890,7 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
                     .iter()
                     .all(|value| value.is_finite()) =>
         {
-            Some(TransitionalPassSemantics::ClosedExecutable)
+            Some(DispatchPassSemantics::ClosedExecutable)
         }
         RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::ClipCoverage(coverage)))
             if !coverage.elements.is_empty()
@@ -4903,19 +4902,17 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
                         .all(|value| value.is_finite())
                 }) =>
         {
-            Some(TransitionalPassSemantics::ClosedExecutable)
+            Some(DispatchPassSemantics::ClosedExecutable)
         }
         RuntimePassKind::VelloCapture(_) => None,
         RuntimePassKind::CopyBackdrop
         | RuntimePassKind::ColorFilter(Some(_))
-        | RuntimePassKind::DropShadowColorize(Some(_)) => {
-            Some(TransitionalPassSemantics::LaterCycle)
-        }
+        | RuntimePassKind::DropShadowColorize(Some(_)) => Some(DispatchPassSemantics::FuturePass),
         RuntimePassKind::BlurHorizontal(Some(blur)) if blur.axis == RuntimeBlurAxis::Horizontal => {
-            Some(TransitionalPassSemantics::LaterCycle)
+            Some(DispatchPassSemantics::FuturePass)
         }
         RuntimePassKind::BlurVertical(Some(blur)) if blur.axis == RuntimeBlurAxis::Vertical => {
-            Some(TransitionalPassSemantics::LaterCycle)
+            Some(DispatchPassSemantics::FuturePass)
         }
         RuntimePassKind::ColorFilter(None)
         | RuntimePassKind::BlurHorizontal(_)
@@ -4927,9 +4924,9 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
         {
             Some(match composite.kind {
                 RuntimeCompositeKind::SpanSourceOver | RuntimeCompositeKind::Layer { .. } => {
-                    TransitionalPassSemantics::ClosedExecutable
+                    DispatchPassSemantics::ClosedExecutable
                 }
-                RuntimeCompositeKind::DropShadow => TransitionalPassSemantics::LaterCycle,
+                RuntimeCompositeKind::DropShadow => DispatchPassSemantics::FuturePass,
             })
         }
         RuntimePassKind::Composite(Some(_)) => None,
@@ -4939,7 +4936,6 @@ fn transitional_pass_semantics(kind: &RuntimePassKind) -> Option<TransitionalPas
 enum GraphPreparationSource {
     C08(C08PreparableGraph),
     C09(ClosedExecutableGraph),
-    Transitional(LoweredGraphPlan),
 }
 
 impl GraphPreparationSource {
@@ -4956,7 +4952,6 @@ impl GraphPreparationSource {
                 (lowered, Some(execution), None)
             }
             Self::C09(closed) => (closed.lowered, None, Some(closed.facts)),
-            Self::Transitional(lowered) => (lowered, None, None),
         }
     }
 }
@@ -5700,18 +5695,9 @@ impl<'device> PreparedGraph<'device> {
                     pass_cache_phase,
                 )
             }
-            PrePreparationGraphClassification::LaterCycleTransitional(lowered) => {
-                let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
-                Self::try_prepare_inner(
-                    GraphPreparationSource::Transitional(lowered),
-                    selected_working_format,
-                    capabilities,
-                    device,
-                    queue,
-                    resources,
-                    (pass_cache_phase.0, false),
-                )
-            }
+            PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
+                "a future GPU pass cannot enter C09 resource preparation",
+            )),
             PrePreparationGraphClassification::Ineligible(ineligibility) => {
                 Err(ineligibility.into_error())
             }
@@ -7586,6 +7572,9 @@ impl<'device> PreparedGraph<'device> {
 
     #[cfg(test)]
     pub(crate) fn exercise_for_test(&mut self) -> Result<PreparedGraphExerciseObservationForTest> {
+        if self.c09_execution.is_some() {
+            self.c08_encoding_state = None;
+        }
         let _ = (
             self.generation(),
             self.working_format(),
@@ -7596,6 +7585,12 @@ impl<'device> PreparedGraph<'device> {
         for pass in &self.plan.passes {
             vocabulary[runtime_pass_kind_index(&pass.runtime.kind)] = true;
         }
+        let closed_c09_vocabulary = vocabulary[0]
+            && vocabulary[1]
+            && vocabulary[2]
+            && vocabulary[8]
+            && vocabulary[9]
+            && vocabulary[3..8].iter().all(|present| !present);
         let complete_resource_and_pass_handoff = self
             .plan
             .resources
@@ -7608,11 +7603,12 @@ impl<'device> PreparedGraph<'device> {
                 .passes
                 .last()
                 .is_some_and(|pass| pass.runtime.id == self.plan.final_present)
-            && vocabulary.into_iter().all(|present| present)
+            && closed_c09_vocabulary
             && !self.plan.resources.is_empty()
-            && !self.plan.kernels.is_empty();
+            && self.plan.kernels.is_empty();
 
         let mut has_capture = false;
+        let mut has_coverage = false;
         let mut has_working = false;
         let mut has_mask = false;
         let exact_resources = self.plan.resources.iter().all(|request| {
@@ -7623,6 +7619,16 @@ impl<'device> PreparedGraph<'device> {
                 ) => {
                     has_capture = true;
                     descriptor.role() == EffectTextureRole::Capture
+                        && descriptor.working_format().is_none()
+                        && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
+                        && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
+                }
+                (
+                    RuntimeResourceFormat::ClipCoverageRgba8Unorm,
+                    RuntimeAllocationRequest::EffectTexture(descriptor),
+                ) => {
+                    has_coverage = true;
+                    descriptor.role() == EffectTextureRole::Coverage
                         && descriptor.working_format().is_none()
                         && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
                         && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
@@ -7661,8 +7667,13 @@ impl<'device> PreparedGraph<'device> {
                     .iter()
                     .any(|pass| pass.kernel == Some(kernel.key))
         });
-        let exact_capture_working_mask_and_kernel_allocations =
-            has_capture && has_working && has_mask && exact_resources && exact_kernels;
+        let exact_capture_coverage_working_and_mask_allocations = has_capture
+            && has_coverage
+            && has_working
+            && has_mask
+            && exact_resources
+            && exact_kernels
+            && self.plan.kernels.is_empty();
         let spatial_bytes_and_cache_keys_preserved = self.plan.passes.iter().all(|pass| {
             pass.cache_keys == pass.runtime.cache_keys
                 && pass.spatial_uniform.is_some() == pass.cache_keys.is_some()
@@ -7784,7 +7795,7 @@ impl<'device> PreparedGraph<'device> {
 
         Ok(PreparedGraphExerciseObservationForTest {
             complete_resource_and_pass_handoff,
-            exact_capture_working_mask_and_kernel_allocations,
+            exact_capture_coverage_working_and_mask_allocations,
             typed_bindings_and_last_use_releases,
             spatial_bytes_and_cache_keys_preserved,
         })
@@ -7944,7 +7955,7 @@ pub(crate) struct PreparedAllocationIdentitiesForTest {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PreparedGraphExerciseObservationForTest {
     pub(crate) complete_resource_and_pass_handoff: bool,
-    pub(crate) exact_capture_working_mask_and_kernel_allocations: bool,
+    pub(crate) exact_capture_coverage_working_and_mask_allocations: bool,
     pub(crate) typed_bindings_and_last_use_releases: bool,
     pub(crate) spatial_bytes_and_cache_keys_preserved: bool,
 }

@@ -69,7 +69,6 @@ enum PreparedRendererExecution {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PreexecutionFrameGateObservationForTest {
     pub(crate) validated_plan_count: u8,
-    pub(crate) plan_count_at_transitional_effect_execution: Option<u8>,
 }
 
 #[cfg(test)]
@@ -78,14 +77,15 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) boundary_invocations: usize,
     pub(crate) direct_vello_routes: usize,
     pub(crate) exact_c08_graph_routes: usize,
-    pub(crate) transitional_graph_routes: usize,
+    pub(crate) exact_c09_graph_routes: usize,
+    pub(crate) future_pass_rejections: usize,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct ResourcePreparationObservationForTest {
     pub(crate) complete_resource_and_pass_handoff: bool,
-    pub(crate) exact_capture_working_mask_and_kernel_allocations: bool,
+    pub(crate) exact_capture_coverage_working_and_mask_allocations: bool,
     pub(crate) typed_bindings_and_last_use_releases: bool,
     pub(crate) spatial_bytes_and_cache_keys_preserved: bool,
     pub(crate) allocation_preflight_is_atomic: bool,
@@ -679,7 +679,7 @@ impl Renderer {
                 working_format,
                 capabilities,
             )? {
-                ExecutableGraphDispatchEligibility::Exact(preparable) => {
+                ExecutableGraphDispatchEligibility::ExactC08(preparable) => {
                     #[cfg(test)]
                     {
                         self.dispatch_observation.exact_c08_graph_routes = self
@@ -691,13 +691,12 @@ impl Renderer {
                         preparable,
                     )))
                 }
-                ExecutableGraphDispatchEligibility::LaterCycleTransitional => {
-                    ensure_c09_graph_or_return_future_diagnostic(&graph)?;
+                ExecutableGraphDispatchEligibility::ExactC09 => {
                     #[cfg(test)]
                     {
-                        self.dispatch_observation.transitional_graph_routes = self
+                        self.dispatch_observation.exact_c09_graph_routes = self
                             .dispatch_observation
-                            .transitional_graph_routes
+                            .exact_c09_graph_routes
                             .saturating_add(1);
                     }
                     Ok(RendererFrameDispatch::ExactGraph(
@@ -707,6 +706,20 @@ impl Renderer {
                             output_format,
                             capabilities,
                         )?,
+                    ))
+                }
+                ExecutableGraphDispatchEligibility::FuturePasses => {
+                    #[cfg(test)]
+                    {
+                        self.dispatch_observation.future_pass_rejections = self
+                            .dispatch_observation
+                            .future_pass_rejections
+                            .saturating_add(1);
+                    }
+                    reject_future_graph_with_typed_diagnostic(&graph)?;
+                    Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "a future GPU graph had no unavailable execution pass",
                     ))
                 }
             },
@@ -1809,8 +1822,8 @@ impl Renderer {
 
         Ok(ResourcePreparationObservationForTest {
             complete_resource_and_pass_handoff: first_exercise.complete_resource_and_pass_handoff,
-            exact_capture_working_mask_and_kernel_allocations: first_exercise
-                .exact_capture_working_mask_and_kernel_allocations,
+            exact_capture_coverage_working_and_mask_allocations: first_exercise
+                .exact_capture_coverage_working_and_mask_allocations,
             typed_bindings_and_last_use_releases: first_exercise
                 .typed_bindings_and_last_use_releases,
             spatial_bytes_and_cache_keys_preserved: first_exercise
@@ -2200,8 +2213,7 @@ fn surface_identity_mismatch(
     Error::runtime_capability_unavailable(diagnostic)
 }
 
-fn ensure_c09_graph_or_return_future_diagnostic(graph: &GpuRenderGraph) -> Result<()> {
-    let mut has_layer_composite = false;
+fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<()> {
     let mut has_copy_backdrop = false;
     let mut has_color_filter = false;
     let mut has_blur = false;
@@ -2220,7 +2232,7 @@ fn ensure_c09_graph_or_return_future_diagnostic(graph: &GpuRenderGraph) -> Resul
             GraphLoweringPassKind::DropShadowColorize(Some(_)) => has_drop_shadow = true,
             GraphLoweringPassKind::Composite(Some(composite)) => match composite.kind() {
                 GraphLoweringCompositeKind::SpanSourceOver => {}
-                GraphLoweringCompositeKind::Layer { .. } => has_layer_composite = true,
+                GraphLoweringCompositeKind::Layer { .. } => {}
                 GraphLoweringCompositeKind::DropShadow => has_drop_shadow = true,
             },
             GraphLoweringPassKind::VelloCapture(None)
@@ -2265,13 +2277,10 @@ fn ensure_c09_graph_or_return_future_diagnostic(graph: &GpuRenderGraph) -> Resul
             UnsupportedPrimitive::new(family, operation),
         ));
     }
-    if !has_layer_composite {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "a graph outside the exact C08/C09 subset reached production dispatch",
-        ));
-    }
-    Ok(())
+    Err(Error::new(
+        BackendErrorCode::RenderFailed,
+        "a future GPU graph had no unavailable execution pass",
+    ))
 }
 
 /// Renderer configuration that is fixed when a [`Renderer`] is created.

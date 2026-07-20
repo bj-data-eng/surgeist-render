@@ -683,6 +683,7 @@ struct C08GraphSubmissionObservationStateForTest {
     active_generation: Option<u64>,
     capture_lease_count: usize,
     prepared_frame_resource_identities: Vec<super::resource::ResourceIdentity>,
+    prepared_frame_resource_identity_history: Vec<Vec<super::resource::ResourceIdentity>>,
     scopes_resolved: bool,
     #[cfg(any(
         feature = "render-window",
@@ -693,6 +694,7 @@ struct C08GraphSubmissionObservationStateForTest {
     capture_resources_committed: bool,
     committed_output: Option<C08GraphCommittedOutputForTest>,
     resource_retention: Option<C08GraphResourceRetentionForTest>,
+    resource_retention_history: Vec<C08GraphResourceRetentionForTest>,
 }
 
 #[cfg(test)]
@@ -730,6 +732,9 @@ impl C08GraphSubmissionObservationForTest {
         state.transaction_generation = Some(transaction_generation);
         state.active_generation = active_generation;
         state.capture_lease_count = capture_lease_count;
+        state
+            .prepared_frame_resource_identity_history
+            .push(prepared_frame_resource_identities.clone());
         state.prepared_frame_resource_identities = prepared_frame_resource_identities;
     }
 
@@ -763,13 +768,17 @@ impl C08GraphSubmissionObservationForTest {
         state.prepared_frame_committed = true;
         state.capture_resources_committed = true;
         state.committed_output = Some(output);
-        state.resource_retention = if retention.retains_reusable_resources() {
+        let observed_retention = if retention.retains_reusable_resources() {
             Some(C08GraphResourceRetentionForTest::RetainedReusable)
         } else if retention.released_all_idle_resources() {
             Some(C08GraphResourceRetentionForTest::ReleasedAllIdle)
         } else {
             None
         };
+        state.resource_retention = observed_retention;
+        if let Some(observed_retention) = observed_retention {
+            state.resource_retention_history.push(observed_retention);
+        }
     }
 
     pub(crate) fn queue_submission_count_for_test(&self) -> usize {
@@ -807,6 +816,16 @@ impl C08GraphSubmissionObservationForTest {
             .lock()
             .expect("C08 graph submission observation must remain available")
             .prepared_frame_resource_identities
+            .clone()
+    }
+
+    pub(crate) fn prepared_frame_resource_identity_history_for_test(
+        &self,
+    ) -> Vec<Vec<super::resource::ResourceIdentity>> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .prepared_frame_resource_identity_history
             .clone()
     }
 
@@ -852,6 +871,16 @@ impl C08GraphSubmissionObservationForTest {
             .lock()
             .expect("C08 graph submission observation must remain available")
             .resource_retention
+    }
+
+    pub(crate) fn resource_retention_history_for_test(
+        &self,
+    ) -> Vec<C08GraphResourceRetentionForTest> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .resource_retention_history
+            .clone()
     }
 
     #[cfg(feature = "render-window")]

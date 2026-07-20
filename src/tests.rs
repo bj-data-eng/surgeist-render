@@ -96,6 +96,34 @@ const AHEM_GLYPH_X: u32 = 58;
 const AHEM_GLYPH_DESCENT_P: u32 = 82;
 const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
 
+trait UnwrapOrPanicForTest<T> {
+    #[track_caller]
+    fn unwrap_or_panic_for_test(self, message: &str) -> T;
+}
+
+impl<T> UnwrapOrPanicForTest<T> for Option<T> {
+    #[track_caller]
+    fn unwrap_or_panic_for_test(self, message: &str) -> T {
+        match self {
+            Some(value) => value,
+            None => panic!("{message}"),
+        }
+    }
+}
+
+impl<T, E> UnwrapOrPanicForTest<T> for std::result::Result<T, E>
+where
+    E: std::fmt::Debug,
+{
+    #[track_caller]
+    fn unwrap_or_panic_for_test(self, message: &str) -> T {
+        match self {
+            Ok(value) => value,
+            Err(error) => panic!("{message}: {error:?}"),
+        }
+    }
+}
+
 #[test]
 fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {
     let manifest_dependencies = manifest_dependency_records(include_str!("../Cargo.toml"));
@@ -4929,7 +4957,7 @@ fn resolved_alpha_mask_execution_accepts_independent_image_extent() {
         mask,
         Rect::new(0.0, 0.0, 2.0, 1.0),
     )
-    .expect("mask storage extent must remain independent from semantic bounds");
+    .unwrap_or_panic_for_test("mask storage extent must remain independent from semantic bounds");
 
     assert_eq!(masked, source);
 }
@@ -8246,21 +8274,21 @@ fn resolved_mask_normalization_preserves_image_identity_sampling_and_local_bound
     scene.layer(
         Layer::new()
             .try_install_resolved_alpha_mask_contract_for_test(image, bounds)
-            .expect("the valid resolved-mask normalization fixture must install"),
+            .unwrap_or_panic_for_test("the valid resolved-mask normalization fixture must install"),
         |scene| {
             scene.fill(bounds, Color::BLACK);
         },
     );
     let normalized = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the valid resolved-mask fixture must normalize");
+        .unwrap_or_panic_for_test("the valid resolved-mask fixture must normalize");
     let [command::RenderCommand::Layer { layer, .. }] = normalized.commands.as_slice() else {
         panic!("the resolved-mask fixture must normalize to one layer");
     };
     let mask = layer
         .mask
         .as_ref()
-        .expect("the normalized layer must retain its resolved mask");
+        .unwrap_or_panic_for_test("the normalized layer must retain its resolved mask");
     let upload = mask.upload();
     let key = upload.cache_key();
     let preserves_contract = key.image_id() == expected_id
@@ -8301,7 +8329,7 @@ fn transitional_resolved_mask_bridge_preserves_bounds_quality_extend_and_transfo
                 image,
                 mask_bounds,
             )
-            .expect("the staged resolved-mask fixture must execute");
+            .unwrap_or_panic_for_test("the staged resolved-mask fixture must execute");
             outputs.push((
                 quality,
                 extend,
@@ -8317,7 +8345,7 @@ fn transitional_resolved_mask_bridge_preserves_bounds_quality_extend_and_transfo
             .find_map(|(candidate_quality, candidate_extend, alpha)| {
                 (*candidate_quality == quality && *candidate_extend == extend).then_some(alpha)
             })
-            .expect("every quality/extend pair must have one staged result")
+            .unwrap_or_panic_for_test("every quality/extend pair must have one staged result")
     };
     let low_pad = observed(ImageQuality::Low, Extend::Pad);
     let low_repeat = observed(ImageQuality::Low, Extend::Repeat);
@@ -8340,14 +8368,14 @@ fn transitional_resolved_mask_bridge_preserves_bounds_quality_extend_and_transfo
             .try_transform(transform)
             .unwrap()
             .try_install_resolved_alpha_mask_contract_for_test(transformed_mask, mask_bounds)
-            .expect("the transformed staged mask fixture must install"),
+            .unwrap_or_panic_for_test("the transformed staged mask fixture must install"),
         |scene| {
             scene.fill(source_bounds, Color::BLACK);
         },
     );
     let normalized = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the transformed staged mask fixture must normalize");
+        .unwrap_or_panic_for_test("the transformed staged mask fixture must normalize");
     let [command::RenderCommand::Layer { layer, .. }] = normalized.commands.as_slice() else {
         panic!("the transformed mask fixture must normalize to one layer");
     };
@@ -11047,7 +11075,7 @@ fn c08_executor_accepts_only_clear_capture_canonicalize_span_source_over_and_pre
             && observed.rejects_missing_or_reordered_spine_passes
             && observed.rejects_malformed_dependencies_reads_results_and_releases
             && observed.rejects_later_cycle_plan
-            && observed.preserves_direct_and_transitional_planner_routes,
+            && observed.preserves_direct_and_graph_planner_routes,
         "C08 has no closed pre-allocation executable subset"
     );
 }
@@ -11578,7 +11606,7 @@ fn c09_executor_accepts_only_spine_and_ordered_layer_composition() {
             && observed.rejects_missing_payloads
             && observed.rejects_malformed_graph_facts
             && observed.rejects_unsupported_output_binding
-            && observed.preserves_transitional_c09_dispatch,
+            && observed.preserves_exact_c09_dispatch,
         "C09 has no closed pre-allocation subset"
     );
 }
@@ -11902,17 +11930,21 @@ fn c08_preparation_rejects_later_cycle_plan_without_resource_or_cache_mutation()
         .with_effect_quality_policy(policy)
         .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
     let mut renderer = pollster::block_on(Renderer::new(options))
-        .expect("C08 preparation rejection requires a real selected WGPU device");
+        .unwrap_or_panic_for_test("C08 preparation rejection requires a real selected WGPU device");
     let _surface = pollster::block_on(renderer.create_headless(Size::new(16.0, 12.0), 1.0))
-        .expect("C08 preparation rejection requires a device-backed headless surface");
+        .unwrap_or_panic_for_test(
+            "C08 preparation rejection requires a device-backed headless surface",
+        );
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("C08 preparation rejection requires one ready device bundle");
+        .unwrap_or_panic_for_test("C08 preparation rejection requires one ready device bundle");
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
     let working_format = capabilities
         .resolve_effect_working_format(policy)
-        .expect("the selected C08 device must resolve its immutable working format");
+        .unwrap_or_panic_for_test(
+            "the selected C08 device must resolve its immutable working format",
+        );
     let context = super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.0,
@@ -11922,7 +11954,7 @@ fn c08_preparation_rejects_later_cycle_plan_without_resource_or_cache_mutation()
     .unwrap();
     let super::frame::FramePlan::GpuGraph(graph) = runtime_lowering_commands_for_test()
         .plan_for(context)
-        .expect("the later-cycle fixture must remain a validated graph plan")
+        .unwrap_or_panic_for_test("the later-cycle fixture must remain a validated graph plan")
     else {
         panic!("the later-cycle fixture must retain its transitional graph route");
     };
@@ -11932,7 +11964,7 @@ fn c08_preparation_rejects_later_cycle_plan_without_resource_or_cache_mutation()
         Format::Rgba8,
         &capabilities,
     )
-    .expect("the later-cycle fixture must reach validated runtime lowering");
+    .unwrap_or_panic_for_test("the later-cycle fixture must reach validated runtime lowering");
     let resources = ResourceManager::new(ResourceCacheBudget::new(1024 * 1024));
     let mut pass_cache = DevicePassCache::new();
     let _ = pass_cache.seed_sampler_for_test(ready.device_for_test());
@@ -12003,33 +12035,38 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
     let options = Options::default()
         .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
         .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
-    let mut renderer = pollster::block_on(Renderer::new(options))
-        .expect("resource preparation coverage requires a real selected WGPU device");
+    let mut renderer = pollster::block_on(Renderer::new(options)).unwrap_or_panic_for_test(
+        "resource preparation coverage requires a real selected WGPU device",
+    );
     let surface = pollster::block_on(renderer.create_headless(Size::new(16.0, 12.0), 1.0))
-        .expect("resource preparation coverage requires a device-backed headless surface");
+        .unwrap_or_panic_for_test(
+            "resource preparation coverage requires a device-backed headless surface",
+        );
     let stats_before = renderer.stats();
     let capabilities_before = renderer.runtime_capabilities(&surface);
     let surface_state_before = surface.resource_state();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("resource preparation coverage requires one ready device bundle")
+        .unwrap_or_panic_for_test("resource preparation coverage requires one ready device bundle")
         .internal_resource_manager_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
 
     let observed = renderer
         .resource_preparation_observation_for_test(
-            runtime_lowering_commands_for_test(),
+            c09_composition_commands_for_test(),
             Size::new(16.0, 12.0),
             1.0,
             Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
             Format::Rgba8,
         )
-        .expect("the representative graph must reach the private preparation observation");
+        .unwrap_or_panic_for_test(
+            "the representative graph must reach the private preparation observation",
+        );
 
     let resources_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("resource preparation must leave the selected device ready")
+        .unwrap_or_panic_for_test("resource preparation must leave the selected device ready")
         .internal_resource_manager_observation_for_test();
     let public_state_unchanged = renderer.stats() == stats_before
         && renderer.runtime_capabilities(&surface) == capabilities_before
@@ -12037,12 +12074,14 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
         && surface.last_parameters.is_none();
     let bounded_after_cleanup = resources_before.leased_count == 0
         && resources_after.leased_count == 0
-        && resources_after.entry_count > 0
+        && resources_after.active_frame_count == 0
+        && resources_after.resolved_lease_count == 0
+        && resources_after.accounted_entry_bytes == Some(resources_after.retained_bytes)
         && resources_after.retained_bytes <= options.resource_cache_budget().bytes();
 
     assert!(
         observed.complete_resource_and_pass_handoff
-            && observed.exact_capture_working_mask_and_kernel_allocations
+            && observed.exact_capture_coverage_working_and_mask_allocations
             && observed.typed_bindings_and_last_use_releases
             && observed.spatial_bytes_and_cache_keys_preserved
             && observed.allocation_preflight_is_atomic
@@ -12053,13 +12092,13 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
             && submission.readback_queue_submission_count_for_test() == 0
             && public_state_unchanged
             && bounded_after_cleanup,
-        "C08 has no complete private resource and pass preparation handoff"
+        "C09 has no complete private resource and pass preparation handoff: observed={observed:?}, resources_before={resources_before:?}, resources_after={resources_after:?}, public_state_unchanged={public_state_unchanged}, bounded_after_cleanup={bounded_after_cleanup}"
     );
 }
 
 #[test]
 fn resource_budget_and_device_loss_preserve_public_stats_contract() {
-    let commands = runtime_lowering_commands_for_test();
+    let commands = c09_composition_commands_for_test();
     let route_before = super::frame::frame_plan_result_observation_for_test(
         commands.clone(),
         Size::new(16.0, 12.0),
@@ -12072,9 +12111,13 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
         .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
         .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
     let mut ordinary = pollster::block_on(Renderer::new(ordinary_options))
-        .expect("ordinary-budget preparation coverage requires a real selected WGPU device");
+        .unwrap_or_panic_for_test(
+            "ordinary-budget preparation coverage requires a real selected WGPU device",
+        );
     let ordinary_surface = pollster::block_on(ordinary.create_headless(Size::new(16.0, 12.0), 1.0))
-        .expect("ordinary-budget coverage requires a device-backed headless surface");
+        .unwrap_or_panic_for_test(
+            "ordinary-budget coverage requires a device-backed headless surface",
+        );
     let ordinary_stats = ordinary.stats();
     let ordinary_capabilities = ordinary.runtime_capabilities(&ordinary_surface);
     let ordinary_observation = ordinary
@@ -12085,10 +12128,10 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             Color::BLACK,
             Format::Rgba8,
         )
-        .expect("ordinary-budget preparation must reach the private handoff");
+        .unwrap_or_panic_for_test("ordinary-budget preparation must reach the private handoff");
     let ordinary_resources = ordinary
         .default_ready_device_state_borrow_for_test()
-        .expect("ordinary-budget preparation must retain one ready device")
+        .unwrap_or_panic_for_test("ordinary-budget preparation must retain one ready device")
         .internal_resource_manager_observation_for_test();
     let ordinary_public_unchanged = ordinary.stats() == ordinary_stats
         && ordinary.runtime_capabilities(&ordinary_surface) == ordinary_capabilities
@@ -12097,9 +12140,11 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
     let disabled_options =
         ordinary_options.with_resource_cache_budget(ResourceCacheBudget::DISABLED);
     let mut disabled = pollster::block_on(Renderer::new(disabled_options))
-        .expect("zero-budget preparation coverage requires a real selected WGPU device");
+        .unwrap_or_panic_for_test(
+            "zero-budget preparation coverage requires a real selected WGPU device",
+        );
     let disabled_surface = pollster::block_on(disabled.create_headless(Size::new(16.0, 12.0), 1.0))
-        .expect("zero-budget coverage requires a device-backed headless surface");
+        .unwrap_or_panic_for_test("zero-budget coverage requires a device-backed headless surface");
     let disabled_stats = disabled.stats();
     let disabled_capabilities = disabled.runtime_capabilities(&disabled_surface);
     let disabled_observation = disabled
@@ -12110,14 +12155,16 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             Color::BLACK,
             Format::Rgba8,
         )
-        .expect("zero-budget preparation must reach the private handoff");
+        .unwrap_or_panic_for_test("zero-budget preparation must reach the private handoff");
     let zero_budget_resources = disabled
         .default_ready_device_state_borrow_for_test()
-        .expect("zero-budget preparation must retain one ready device before loss")
+        .unwrap_or_panic_for_test(
+            "zero-budget preparation must retain one ready device before loss",
+        )
         .internal_resource_manager_observation_for_test();
     let drop_witness = disabled
         .default_ready_device_state_borrow_for_test()
-        .expect("terminal cleanup coverage requires the same ready device bundle")
+        .unwrap_or_panic_for_test("terminal cleanup coverage requires the same ready device bundle")
         .drop_witness_for_test();
     let disabled_public_before_loss = disabled.stats() == disabled_stats
         && disabled.runtime_capabilities(&disabled_surface) == disabled_capabilities
@@ -12143,10 +12190,18 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             && ordinary_public_unchanged
             && disabled_public_before_loss
             && ordinary_resources.leased_count == 0
-            && ordinary_resources.entry_count > 0
+            && ordinary_resources.active_frame_count == 0
+            && ordinary_resources.resolved_lease_count == 0
+            && ordinary_resources.accounted_entry_bytes == Some(ordinary_resources.retained_bytes)
+            && ordinary_resources.retained_bytes
+                <= ordinary_options.resource_cache_budget().bytes()
             && zero_budget_resources.leased_count == 0
+            && zero_budget_resources.active_frame_count == 0
+            && zero_budget_resources.resolved_lease_count == 0
             && zero_budget_resources.idle_count == 0
+            && zero_budget_resources.entry_count == 0
             && zero_budget_resources.retained_bytes == 0
+            && zero_budget_resources.accounted_entry_bytes == Some(0)
             && disabled.stats() == disabled_stats
             && terminal_capabilities
                 == RuntimeCapabilities::Unavailable(
@@ -12546,17 +12601,19 @@ fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
 fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("C08 checked shader realization requires backend selection")
-        .expect("C08 checked shader realization requires a host adapter");
+        .unwrap_or_panic_for_test("C08 checked shader realization requires backend selection")
+        .unwrap_or_panic_for_test("C08 checked shader realization requires a host adapter");
     let capabilities = {
         let ready = backend
             .ready_device_state_borrow_for_test(identity)
-            .expect("C08 checked shader realization requires a ready device");
+            .unwrap_or_panic_for_test("C08 checked shader realization requires a ready device");
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test())
     };
     let working_format = capabilities
         .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)
-        .expect("C08 checked shader realization requires one supported working format");
+        .unwrap_or_panic_for_test(
+            "C08 checked shader realization requires one supported working format",
+        );
     let commands = c08_shader_commands_for_test();
     let context = c08_shader_frame_context_for_test();
     let rgba_requests = super::pass::c08_pass_cache_requests_for_test(
@@ -12566,7 +12623,7 @@ fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries(
         working_format,
         Format::Rgba8,
     )
-    .expect("C08 RGBA shader realization requires exact lowered pass keys");
+    .unwrap_or_panic_for_test("C08 RGBA shader realization requires exact lowered pass keys");
     let bgra_requests = super::pass::c08_pass_cache_requests_for_test(
         commands,
         context,
@@ -12574,13 +12631,15 @@ fn c08_shader_cache_realizes_checked_programs_without_publishing_failed_entries(
         working_format,
         Format::Bgra8,
     )
-    .expect("C08 BGRA shader realization requires exact lowered pass keys");
+    .unwrap_or_panic_for_test("C08 BGRA shader realization requires exact lowered pass keys");
     let observed = pollster::block_on(backend.c08_shader_cache_realization_observation_for_test(
         identity,
         &rgba_requests,
         &bgra_requests,
     ))
-    .expect("C08 checked shader realization must reach its transaction observation");
+    .unwrap_or_panic_for_test(
+        "C08 checked shader realization must reach its transaction observation",
+    );
 
     assert!(
         observed.realizes_all_checked_programs
@@ -13086,13 +13145,16 @@ fn c08_zero_capture_spine_is_rejected_before_preparation() {
     let options = Options::default()
         .with_effect_quality_policy(policy)
         .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
-    let mut renderer = pollster::block_on(Renderer::new(options))
-        .expect("zero-capture C08 rejection requires a real selected WGPU device");
+    let mut renderer = pollster::block_on(Renderer::new(options)).unwrap_or_panic_for_test(
+        "zero-capture C08 rejection requires a real selected WGPU device",
+    );
     let _surface = pollster::block_on(renderer.create_headless(Size::new(16.0, 12.0), 1.0))
-        .expect("zero-capture C08 rejection requires a device-backed headless surface");
+        .unwrap_or_panic_for_test(
+            "zero-capture C08 rejection requires a device-backed headless surface",
+        );
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("zero-capture C08 rejection requires one ready device bundle");
+        .unwrap_or_panic_for_test("zero-capture C08 rejection requires one ready device bundle");
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
     let resources = ResourceManager::new(ResourceCacheBudget::new(1024 * 1024));
@@ -13107,7 +13169,7 @@ fn c08_zero_capture_spine_is_rejected_before_preparation() {
         capabilities,
         policy,
     )
-    .expect("the zero-capture fixture must reach validated runtime lowering");
+    .unwrap_or_panic_for_test("the zero-capture fixture must reach validated runtime lowering");
     let preparation = super::pass::PreparedGraph::try_prepare(
         lowered,
         policy,
@@ -13133,15 +13195,15 @@ fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObserva
     let submission = submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("C08 custom-spine encoding requires backend selection")
-        .expect("C08 custom-spine encoding requires a host adapter");
+        .unwrap_or_panic_for_test("C08 custom-spine encoding requires backend selection")
+        .unwrap_or_panic_for_test("C08 custom-spine encoding requires a host adapter");
     let mut observed = pollster::block_on(backend.c08_custom_spine_encoding_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
         c08_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
-    .expect("C08 custom-spine encoding must reach its private observation");
+    .unwrap_or_panic_for_test("C08 custom-spine encoding must reach its private observation");
     observed.encodes_without_submission_or_sync &= submission.queue_submission_count_for_test()
         == 0
         && submission.readback_queue_submission_count_for_test() == 0;
@@ -13187,8 +13249,8 @@ fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
     let vello_submission = vello_submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("multiple C08 captures require backend selection")
-        .expect("multiple C08 captures require a host adapter");
+        .unwrap_or_panic_for_test("multiple C08 captures require backend selection")
+        .unwrap_or_panic_for_test("multiple C08 captures require a host adapter");
     let observed = pollster::block_on(
         backend.c08_multiple_vello_capture_encoding_observation_for_test(
             identity,
@@ -13197,7 +13259,7 @@ fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
             c08_shader_frame_context_for_test(),
         ),
     )
-    .expect("the validated two-capture fixture must reach graph encoding");
+    .unwrap_or_panic_for_test("the validated two-capture fixture must reach graph encoding");
     let no_queue_submit = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -13223,8 +13285,8 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
     let vello_submission = vello_submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("later C08 capture failure requires backend selection")
-        .expect("later C08 capture failure requires a host adapter");
+        .unwrap_or_panic_for_test("later C08 capture failure requires backend selection")
+        .unwrap_or_panic_for_test("later C08 capture failure requires a host adapter");
     let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
@@ -13232,7 +13294,7 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
         c08_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::LaterCaptureEncoding,
     ))
-    .expect("later C08 capture failure must reach its private observation");
+    .unwrap_or_panic_for_test("later C08 capture failure must reach its private observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -13260,8 +13322,8 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
     let vello_submission = vello_submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("shared C08 scope failure requires backend selection")
-        .expect("shared C08 scope failure requires a host adapter");
+        .unwrap_or_panic_for_test("shared C08 scope failure requires backend selection")
+        .unwrap_or_panic_for_test("shared C08 scope failure requires a host adapter");
     let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
@@ -13269,7 +13331,7 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
         c08_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::SharedScopeResolution,
     ))
-    .expect("shared C08 scope failure must reach its private observation");
+    .unwrap_or_panic_for_test("shared C08 scope failure must reach its private observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -13293,8 +13355,8 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
 fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("C08 capture raster contracts require backend selection")
-        .expect("C08 capture raster contracts require a host adapter");
+        .unwrap_or_panic_for_test("C08 capture raster contracts require backend selection")
+        .unwrap_or_panic_for_test("C08 capture raster contracts require a host adapter");
     let commands = c08_vello_capture_commands_for_test();
     let mut contract_is_exact = true;
     for antialiasing in [
@@ -13317,7 +13379,9 @@ fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
                 antialiasing,
             ),
         )
-        .expect("the bounded C08 capture must reach its raster contract observation");
+        .unwrap_or_panic_for_test(
+            "the bounded C08 capture must reach its raster contract observation",
+        );
         contract_is_exact &= observed.lowers_with_exact_initial_transform
             && observed.uses_transparent_base
             && observed.uses_requested_antialiasing
@@ -13337,15 +13401,15 @@ fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
 fn c08_capture_failure_is_abort_only_and_cannot_retry_on_new_encoder() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .expect("C08 capture-failure coverage requires backend selection")
-        .expect("C08 capture-failure coverage requires a host adapter");
+        .unwrap_or_panic_for_test("C08 capture-failure coverage requires backend selection")
+        .unwrap_or_panic_for_test("C08 capture-failure coverage requires a host adapter");
     let observed = pollster::block_on(backend.c08_capture_failure_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
         c08_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
-    .expect("C08 capture-failure coverage must reach its private observation");
+    .unwrap_or_panic_for_test("C08 capture-failure coverage must reach its private observation");
     let pass_source = include_str!("pass.rs");
     let raster_source = include_str!("vello_engine/raster.rs");
     let vello_module_source = include_str!("vello_engine/mod.rs");
@@ -13398,10 +13462,10 @@ fn c07_contains_no_placeholder_custom_shader_program() {
     });
     let shader_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/shaders");
     let mut shader_files = fs::read_dir(&shader_directory)
-        .expect("the C08 shader source directory must exist")
+        .unwrap_or_panic_for_test("the C08 shader source directory must exist")
         .map(|entry| {
             entry
-                .expect("the C08 shader directory entry must be readable")
+                .unwrap_or_panic_for_test("the C08 shader directory entry must be readable")
                 .file_name()
                 .to_string_lossy()
                 .into_owned()
@@ -13438,7 +13502,7 @@ fn graph_base_color_is_initialized_once_and_isolation_is_transparent() {
     let observed = super::frame::semantic_graph_base_initialization_observation_for_test(
         bounded_offscreen_pass_plan_for_graph_probe(),
     )
-    .expect("the initialization graph must validate");
+    .unwrap_or_panic_for_test("the initialization graph must validate");
     assert!(observed.observes_bounded_offscreen_pass);
     assert!(
         observed.surface_base_initializations == 1
@@ -13462,7 +13526,9 @@ fn observe_frame_plan(
 ) -> FramePlanResultObservation {
     let normalized = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the planning fixture must normalize before resolved-frame planning");
+        .unwrap_or_panic_for_test(
+            "the planning fixture must normalize before resolved-frame planning",
+        );
     super::frame::frame_plan_result_observation_for_test(
         normalized,
         surface_size,
@@ -13531,7 +13597,7 @@ fn direct_vello_is_the_least_powerful_plan_for_effect_free_scenes() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the observation must be complete");
+        .unwrap_or_panic_for_test("the observation must be complete");
 
     assert_eq!(
         plan.route,
@@ -13573,7 +13639,7 @@ fn nested_non_normal_blend_stays_in_masked_layer_source_vello_span() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the masked blend fixture must produce a complete frame plan");
+        .unwrap_or_panic_for_test("the masked blend fixture must produce a complete frame plan");
 
     assert_eq!(
         plan.vello_spans,
@@ -13613,10 +13679,9 @@ fn nested_mask_boundary_makes_following_multiply_an_ordered_graph_composite() {
         Antialiasing::Area,
         Color::TRANSPARENT,
     );
-    let plan = result
-        .plan
-        .as_ref()
-        .expect("the nested-mask blend fixture must produce a complete frame plan");
+    let plan = result.plan.as_ref().unwrap_or_panic_for_test(
+        "the nested-mask blend fixture must produce a complete frame plan",
+    );
 
     assert_eq!(
         (&plan.vello_spans, &plan.graph_layer_blends),
@@ -13676,7 +13741,7 @@ fn clip_only_wrapper_does_not_make_nested_multiply_capture_local() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the clip-only blend fixture must produce a complete frame plan");
+        .unwrap_or_panic_for_test("the clip-only blend fixture must produce a complete frame plan");
 
     assert_eq!(
         (&plan.vello_spans, &plan.graph_layer_blends),
@@ -13854,14 +13919,14 @@ fn transparent_resolved_mask_image_extent_is_independent_from_local_bounds() {
     );
     let normalized = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the mismatched transparent-mask fixture must normalize");
+        .unwrap_or_panic_for_test("the mismatched transparent-mask fixture must normalize");
     let context = super::frame::FrameContext::try_new(
         Size::new(8.0, 8.0),
         1.0,
         Antialiasing::Area,
         Color::TRANSPARENT,
     )
-    .expect("the mismatched transparent-mask frame context must resolve");
+    .unwrap_or_panic_for_test("the mismatched transparent-mask frame context must resolve");
     assert!(
         normalized.plan_for(context).is_ok(),
         "mask image extent was incorrectly coupled to layer-local bounds"
@@ -13881,14 +13946,14 @@ fn transparent_resolved_mask_prunes_mixed_source_independent_of_image_extent() {
     );
     let normalized = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the mixed-source transparent-mask fixture must normalize");
+        .unwrap_or_panic_for_test("the mixed-source transparent-mask fixture must normalize");
     let context = super::frame::FrameContext::try_new(
         Size::new(8.0, 8.0),
         1.0,
         Antialiasing::Area,
         Color::TRANSPARENT,
     )
-    .expect("the mixed-source transparent-mask frame context must resolve");
+    .unwrap_or_panic_for_test("the mixed-source transparent-mask frame context must resolve");
     assert!(
         normalized.plan_for(context).is_ok(),
         "transparent mask image extent prevented semantic source pruning"
@@ -13959,14 +14024,12 @@ fn root_output_domain_prunes_off_surface_backdrop_dependency_and_retains_partial
         observe_source_and_capture(Rect::new(8.0, 0.0, 2.0, 2.0), Rect::new(8.0, 0.0, 2.0, 2.0));
     let partial_overlap =
         observe_source_and_capture(Rect::new(7.0, 0.0, 2.0, 2.0), Rect::new(7.0, 0.0, 2.0, 2.0));
-    let off_surface = off_surface
-        .plan
-        .as_ref()
-        .expect("the off-surface backdrop fixture must produce one complete plan");
-    let partial_overlap = partial_overlap
-        .plan
-        .as_ref()
-        .expect("the partial-overlap backdrop fixture must produce one complete plan");
+    let off_surface = off_surface.plan.as_ref().unwrap_or_panic_for_test(
+        "the off-surface backdrop fixture must produce one complete plan",
+    );
+    let partial_overlap = partial_overlap.plan.as_ref().unwrap_or_panic_for_test(
+        "the partial-overlap backdrop fixture must produce one complete plan",
+    );
 
     assert!(
         off_surface.route == FramePlanRouteObservation::DirectVello
@@ -14060,10 +14123,9 @@ fn zero_opacity_backdrop_preserves_foreground_without_graph_boundary() {
         Antialiasing::Area,
         Color::TRANSPARENT,
     );
-    let plan = result
-        .plan
-        .as_ref()
-        .expect("the zero-opacity backdrop fixture must produce a complete frame plan");
+    let plan = result.plan.as_ref().unwrap_or_panic_for_test(
+        "the zero-opacity backdrop fixture must produce a complete frame plan",
+    );
 
     assert!(
         plan.route == FramePlanRouteObservation::DirectVello
@@ -14098,14 +14160,14 @@ fn zero_opacity_backdrop_preserves_resolved_device_range_failure() {
             .layer(backdrop, |_| {});
         let normalized = scene
             .normalize(Capabilities::CURRENT)
-            .expect("the huge-backdrop fixture must normalize");
+            .unwrap_or_panic_for_test("the huge-backdrop fixture must normalize");
         let context = super::frame::FrameContext::try_new(
             Size::new(8.0, 8.0),
             1.0,
             Antialiasing::Area,
             Color::TRANSPARENT,
         )
-        .expect("the huge-backdrop frame context must resolve");
+        .unwrap_or_panic_for_test("the huge-backdrop frame context must resolve");
         normalized.plan_for(context)
     };
     let transparent = plan_with_opacity(0.0);
@@ -14157,10 +14219,9 @@ fn empty_masked_subtree_does_not_select_graph_or_split_vello_span() {
         Antialiasing::Area,
         Color::TRANSPARENT,
     );
-    let plan = result
-        .plan
-        .as_ref()
-        .expect("the empty-source planning fixture must produce one complete plan");
+    let plan = result.plan.as_ref().unwrap_or_panic_for_test(
+        "the empty-source planning fixture must produce one complete plan",
+    );
 
     assert!(
         plan.route == FramePlanRouteObservation::DirectVello
@@ -14204,7 +14265,7 @@ fn zero_area_masked_source_does_not_select_graph_or_split_vello_span() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the zero-area-source fixture must produce one complete plan");
+        .unwrap_or_panic_for_test("the zero-area-source fixture must produce one complete plan");
 
     assert!(
         plan.route == FramePlanRouteObservation::DirectVello
@@ -14248,10 +14309,9 @@ fn rank_deficient_masked_source_does_not_select_graph_or_split_vello_span() {
         Antialiasing::Area,
         Color::TRANSPARENT,
     );
-    let plan = result
-        .plan
-        .as_ref()
-        .expect("the rank-deficient-source fixture must produce one complete plan");
+    let plan = result.plan.as_ref().unwrap_or_panic_for_test(
+        "the rank-deficient-source fixture must produce one complete plan",
+    );
 
     assert!(
         plan.route == FramePlanRouteObservation::DirectVello
@@ -14383,7 +14443,7 @@ fn gpu_graph_is_selected_only_for_supported_custom_requirements() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the observation must be complete");
+        .unwrap_or_panic_for_test("the observation must be complete");
 
     assert_eq!(
         plan.route,
@@ -14461,7 +14521,7 @@ fn maximal_vello_spans_preserve_authored_command_order() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the observation must be complete");
+        .unwrap_or_panic_for_test("the observation must be complete");
     let expected = vec![
         VelloSpanObservation {
             scope: VelloSpanScopeObservation::CurrentParent,
@@ -14518,7 +14578,7 @@ fn backdrop_plan_depends_on_current_parent_not_cloned_commands() {
     let plan = result
         .plan
         .as_ref()
-        .expect("the observation must be complete");
+        .unwrap_or_panic_for_test("the observation must be complete");
 
     assert_eq!(
         plan.backdrop_dependency,
@@ -14596,7 +14656,7 @@ fn graph_planning_requires_explicit_text_ink_bounds_only_for_bounded_subtrees() 
     let empty_plan = empty_result
         .plan
         .as_ref()
-        .expect("empty text must still permit the surrounding supported graph");
+        .unwrap_or_panic_for_test("empty text must still permit the surrounding supported graph");
     assert_eq!(empty_plan.empty_text_resource_count, 0);
     assert!(
         empty_plan
@@ -14678,7 +14738,9 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
 fn render_plans_before_future_effect_diagnostic() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
-        .expect("the pre-execution frame-gate fixture requires a headless surface");
+        .unwrap_or_panic_for_test(
+            "the pre-execution frame-gate fixture requires a headless surface",
+        );
     let mut scene = Scene::new();
     scene
         .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
@@ -14698,10 +14760,7 @@ fn render_plans_before_future_effect_diagnostic() {
         ))
     );
     assert!(
-        observation.validated_plan_count == 1
-            && observation
-                .plan_count_at_transitional_effect_execution
-                .is_none(),
+        observation.validated_plan_count == 1,
         "renderer did not validate exactly one plan before the future-pass diagnostic"
     );
 }
@@ -14724,8 +14783,8 @@ fn materialized_image_filter_classifier_preserves_mixed_filter_order() {
 
     let pipeline = list
         .materialized_image_filter_pipeline()
-        .expect("materialized image filters should classify")
-        .expect("non-empty filter lists should produce a pipeline");
+        .unwrap_or_panic_for_test("materialized image filters should classify")
+        .unwrap_or_panic_for_test("non-empty filter lists should produce a pipeline");
 
     assert_eq!(pipeline.steps().len(), 5);
     assert!(matches!(
@@ -14783,8 +14842,8 @@ fn materialized_image_filter_classifier_accepts_blur_and_drop_shadow() {
 
     let pipeline = list
         .materialized_image_filter_pipeline()
-        .expect("blur and drop-shadow should classify")
-        .expect("non-empty materialized filter lists should produce a pipeline");
+        .unwrap_or_panic_for_test("blur and drop-shadow should classify")
+        .unwrap_or_panic_for_test("non-empty materialized filter lists should produce a pipeline");
 
     assert_eq!(
         pipeline.steps(),
@@ -15222,7 +15281,7 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
     let capture = layer
         .backdrop
         .as_ref()
-        .expect("backdrop capture is planned");
+        .unwrap_or_panic_for_test("backdrop capture is planned");
     assert_eq!(capture.filters(), &filters);
     assert_eq!(capture.capture_bounds().rect(), bounds.rect());
     assert!(matches!(
@@ -15259,7 +15318,9 @@ fn bounded_backdrop_capture_stays_future_before_filter_execution() {
 
     let normalized = scene
         .normalize(Capabilities::CURRENT)
-        .expect("backdrop planning should remain inspectable through normalization");
+        .unwrap_or_panic_for_test(
+            "backdrop planning should remain inspectable through normalization",
+        );
     let command::RenderCommand::Layer { layer, .. } = &normalized.commands[1] else {
         panic!("expected normalized backdrop layer");
     };
@@ -15543,7 +15604,7 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
     let rounded_capture = rounded_layer
         .backdrop
         .as_ref()
-        .expect("rounded backdrop capture is planned");
+        .unwrap_or_panic_for_test("rounded backdrop capture is planned");
 
     let mut path_scene = Scene::new();
     path_scene.layer(path_layer, |scene| {
@@ -15559,7 +15620,7 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
     let path_capture = path_layer
         .backdrop
         .as_ref()
-        .expect("path backdrop capture is planned");
+        .unwrap_or_panic_for_test("path backdrop capture is planned");
 
     assert!(matches!(
         rounded_capture.clip().map(command::RenderClip::geometry),
@@ -15602,7 +15663,10 @@ fn sequence13_bounded_backdrop_order_stays_planned_before_future_execution() {
     let command::RenderCommand::Layer { layer, children } = &normalized.commands[1] else {
         panic!("expected bounded backdrop layer command");
     };
-    let capture = layer.backdrop.as_ref().expect("backdrop capture planned");
+    let capture = layer
+        .backdrop
+        .as_ref()
+        .unwrap_or_panic_for_test("backdrop capture planned");
     assert_eq!(
         layer.pass_plan.requirement(),
         command::LayerPassRequirement::BoundedBackdropCapture
@@ -15990,7 +16054,7 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
     ] {
         capabilities
             .ensure_supported(supported)
-            .expect("narrow Sequence 13 capability should be advertised");
+            .unwrap_or_panic_for_test("narrow Sequence 13 capability should be advertised");
     }
 
     for unsupported in [
@@ -16040,7 +16104,7 @@ fn background_blend_lists_model_normal_layers_and_reject_blend_modes() {
         BackgroundBlendMode::Normal,
         BackgroundBlendMode::Normal,
     ])
-    .expect("normal-only background blending is a no-op model");
+    .unwrap_or_panic_for_test("normal-only background blending is a no-op model");
 
     assert_eq!(
         list.modes(),
@@ -16311,7 +16375,7 @@ fn clip_inputs_diagnose_unresolved_reference_boundaries() {
     assert_eq!(error.code(), ErrorCode::UnresolvedResource);
     let diagnostic = error
         .unresolved_resource_diagnostic()
-        .expect("clip references should report an unresolved resource");
+        .unwrap_or_panic_for_test("clip references should report an unresolved resource");
     assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Clip);
     assert_eq!(diagnostic.identifier(), "#content-clip");
 }
@@ -16321,7 +16385,7 @@ fn shape_clip_inputs_match_current_capability_contract() {
     let clip = ClipInput::try_shape(Shape::rect(Rect::new(0.0, 0.0, 8.0, 6.0))).unwrap();
 
     clip.ensure_supported(Capabilities::CURRENT)
-        .expect("shape clips are supported by the current Vello layer path");
+        .unwrap_or_panic_for_test("shape clips are supported by the current Vello layer path");
     assert!(Capabilities::CURRENT.masks_clips().supports_shape_clips());
 }
 
@@ -22374,7 +22438,6 @@ fn planner_failure_precedes_pending_presented_surface_configuration() {
     assert_eq!(surface.last_parameters, parameters_before);
     let frame_gate = renderer.preexecution_frame_gate_observation_for_test();
     assert_eq!(frame_gate.validated_plan_count, 0);
-    assert_eq!(frame_gate.plan_count_at_transitional_effect_execution, None);
 }
 
 #[cfg(feature = "render-window")]
@@ -28854,7 +28917,8 @@ fn reduced_precision_low_alpha_pixels_use_alpha_and_premul8_tolerances() {
 fn high_precision_low_alpha_pixels_preserve_straight_rgb() {
     let expected = c08_alpha_extreme_pixels_for_test();
     let rendered = render_c08_alpha_vector_for_test(&expected, Some(WorkingFormat::HighPrecision));
-    let width = u32::try_from(expected.len()).expect("the C08 pixel vector must fit in u32");
+    let width = u32::try_from(expected.len())
+        .unwrap_or_panic_for_test("the C08 pixel vector must fit in u32");
     let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
         && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
     let stable_straight_rgb = rendered
@@ -28891,10 +28955,10 @@ fn graph_render_path_submits_without_map_or_cpu_wait() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .expect("C08 graph submission coverage requires a renderer");
+    .unwrap_or_panic_for_test("C08 graph submission coverage requires a renderer");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-        .expect("C08 graph submission coverage requires a headless surface");
+        .unwrap_or_panic_for_test("C08 graph submission coverage requires a headless surface");
     let publication_before = surface.headless_publication_count_for_test();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
@@ -28904,7 +28968,9 @@ fn graph_render_path_submits_without_map_or_cpu_wait() {
         Parameters::default(),
         working_format,
     ))
-    .expect("the private forced route must invoke the production C08 graph executor");
+    .unwrap_or_panic_for_test(
+        "the private forced route must invoke the production C08 graph executor",
+    );
 
     let production_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
         && graph_submission.transaction_generation_for_test()
@@ -29135,6 +29201,54 @@ fn c09_supported_working_formats_for_test() -> Vec<WorkingFormat> {
     ))
     .unwrap_or_else(|error| panic!("C09 format coverage requires a compatible renderer: {error}"));
     c08_supported_working_formats_for_test(&mut renderer)
+}
+
+fn c09_reuse_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>, ResolvedMaskUploadKey) {
+    let size = PhysicalSize::new(4, 4);
+    let bounds = Rect::new(0.0, 0.0, 4.0, 4.0);
+    let source = [224, 64, 32, 192];
+    let destination = [48, 160, 208, 255];
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(2, 2),
+        &[160, 160, 160, 160],
+        ImageQuality::High,
+        Extend::Reflect,
+    );
+    let mask_key = ResolvedMaskUploadDescriptor::try_from_image(mask.clone())
+        .unwrap_or_else(|error| panic!("the C09 reuse mask must produce an upload key: {error}"))
+        .cache_key();
+    let layer = Layer::new()
+        .try_clip(Shape::rect(bounds))
+        .unwrap_or_else(|error| panic!("the C09 reuse clip must be valid: {error}"))
+        .try_opacity(0.75)
+        .unwrap_or_else(|error| panic!("the C09 reuse opacity must be valid: {error}"))
+        .blend(BlendMode::Multiply)
+        .with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(mask.clone(), bounds)
+                .unwrap_or_else(|error| panic!("the C09 reuse mask bounds must be valid: {error}")),
+        );
+    let mut scene = Scene::new();
+    scene
+        .fill(bounds, c09_color_for_test(destination))
+        .layer(layer, |scene| {
+            scene.fill(bounds, c09_color_for_test(source));
+        });
+
+    let source = c09_reference_solid_for_test(size, source)
+        .apply_resolved_alpha_mask(bounds, &mask, bounds)
+        .unwrap_or_else(|error| panic!("the C09 reuse mask oracle must resolve: {error}"))
+        .apply_opacity(0.75)
+        .unwrap_or_else(|error| panic!("the C09 reuse opacity oracle must resolve: {error}"));
+    let destination = c09_reference_solid_for_test(size, destination);
+    let expected = source
+        .blend_over(&destination, BlendMode::Multiply)
+        .unwrap_or_else(|error| panic!("the C09 reuse blend oracle must resolve: {error}"));
+    (
+        scene,
+        size,
+        c09_reference_straight_bytes_for_test(&expected),
+        mask_key,
+    )
 }
 
 #[test]
@@ -29979,6 +30093,522 @@ fn cpu_reference_algorithms_are_test_only_after_gpu_cutover() {
 }
 
 #[test]
+fn c09_capabilities_name_only_gpu_semantics_and_keep_broad_masks_diagnostic() {
+    let capabilities = Capabilities::CURRENT;
+    let filters = capabilities.filters();
+    let masks = capabilities.masks_clips();
+    let offscreen = capabilities.offscreen_pipeline();
+    let supported = [
+        (
+            masks.supports_resolved_alpha_mask_execution(),
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::ResolvedAlphaMaskExecution,
+        ),
+        (
+            offscreen.supports_image_pass_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::ImagePassExecution,
+        ),
+        (
+            offscreen.supports_composite_pass_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::CompositePassExecution,
+        ),
+        (
+            offscreen.supports_nested_opacity_composition(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::NestedOpacityComposition,
+        ),
+        (
+            filters.supports_ordered_filter_lists(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::OrderedFilterList,
+        ),
+        (
+            filters.supports_filter_region_planning(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::FilterRegionPlanning,
+        ),
+        (
+            offscreen.supports_persistent_effect_resources(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::PersistentEffectResources,
+        ),
+        (
+            offscreen.supports_bounded_vello_capture(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedVelloCapture,
+        ),
+        (
+            offscreen.supports_bounded_backdrop_capture(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropCapture,
+        ),
+    ];
+    let rejected = [
+        (
+            filters.supports_gpu_color_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
+        ),
+        (
+            filters.supports_gpu_blur_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+        ),
+        (
+            filters.supports_gpu_drop_shadow_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+        ),
+        (
+            offscreen.supports_bounded_backdrop_filter_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ),
+        (
+            offscreen.supports_layer_filter_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::LayerFilterExecution,
+        ),
+        (
+            offscreen.supports_broad_backdrop_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BroadBackdropExecution,
+        ),
+        (
+            masks.supports_layer_masks(),
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ),
+        (
+            offscreen.supports_mask_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::MaskExecution,
+        ),
+        (
+            masks.supports_luminance_mask_mode(),
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LuminanceMaskMode,
+        ),
+        (
+            masks.supports_multi_layer_mask_composition(),
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MultiLayerMaskComposition,
+        ),
+        (
+            masks.supports_mask_composite_modes(),
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::MaskCompositeMode,
+        ),
+        (
+            offscreen.supports_offscreen_layer_rendering(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::OffscreenLayerRendering,
+        ),
+        (
+            offscreen.supports_backdrop_isolation_composition(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropIsolationComposition,
+        ),
+    ];
+    let supported_are_exact = supported.into_iter().all(|(query, family, operation)| {
+        query
+            && capabilities
+                .ensure_supported(UnsupportedPrimitive::new(family, operation))
+                .is_ok()
+    });
+    let rejected_are_exact = rejected.into_iter().all(|(query, family, operation)| {
+        let expected = UnsupportedPrimitive::new(family, operation);
+        !query
+            && capabilities
+                .ensure_supported(expected)
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+    });
+    let diagnostic_only_rejections = [UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::AlphaMaskSourceExecution,
+    )];
+    let diagnostic_only_rejections_are_exact =
+        diagnostic_only_rejections.into_iter().all(|expected| {
+            capabilities
+                .ensure_supported(expected)
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+        });
+    let affected_sources = [
+        include_str!("capability.rs"),
+        include_str!("error.rs"),
+        include_str!("image.rs"),
+        include_str!("layer.rs"),
+        include_str!("lib.rs"),
+        include_str!("command.rs"),
+        include_str!("renderer.rs"),
+        include_str!("pass.rs"),
+        include_str!("resource.rs"),
+        include_str!("backend.rs"),
+    ];
+    let stale_identities = [
+        ["MaterializedAlphaMask", "Execution"].concat(),
+        ["supports_materialized_alpha_mask", "_execution"].concat(),
+        ["try_resolved_alpha", "_mask"].concat(),
+        ["for_resolved", "_mask"].concat(),
+        ["TransitionalTextureRole::", "ResolvedMask"].concat(),
+        ["materialize_resolved_layer", "_mask"].concat(),
+        ["pub struct ResolvedAlphaMask", "Execution"].concat(),
+    ];
+    let stale_contract_is_absent = stale_identities.iter().all(|identity| {
+        affected_sources
+            .iter()
+            .all(|source| !source.contains(identity))
+    });
+
+    assert!(
+        supported_are_exact
+            && rejected_are_exact
+            && diagnostic_only_rejections_are_exact
+            && stale_contract_is_absent,
+        "C09 capability surface is stale or overclaims broad support"
+    );
+}
+
+#[test]
+fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback() {
+    let (scene, size, expected, mask_key) = c09_reuse_scene_and_oracle_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(512 * 1024 * 1024)),
+    ))
+    .unwrap_or_else(|error| panic!("repeated C09 reuse coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    renderer.select_exact_graph_working_format_for_test(working_format);
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("repeated C09 reuse coverage requires a headless surface: {error}")
+    });
+
+    for _ in 0..2 {
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+            .unwrap_or_else(|error| panic!("C09 reuse warm-up frames must succeed: {error}"));
+    }
+    let warmed_output = pollster::block_on(renderer.read_headless(&surface))
+        .unwrap_or_else(|error| panic!("the warmed C09 publication must be readable: {error}"));
+    let warmed = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the warmed C09 device must remain ready"));
+    let warmed_resources = warmed.internal_resource_manager_observation_for_test();
+    let warmed_cache = warmed.device_pass_cache_counts_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let mut resource_observations = Vec::new();
+    let mut cache_observations = Vec::new();
+    let mut stats = Vec::new();
+    for _ in 0..3 {
+        let frame =
+            pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+                .unwrap_or_else(|error| panic!("repeated exact C09 frames must succeed: {error}"));
+        stats.push(C08PublicStatsForTest::from(frame));
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .unwrap_or_else(|| panic!("repeated C09 frames must retain the ready device"));
+        resource_observations.push(ready.internal_resource_manager_observation_for_test());
+        cache_observations.push(ready.device_pass_cache_counts_for_test());
+    }
+    let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
+    let retention_history = graph_submission.resource_retention_history_for_test();
+    let stable_resource_set = resource_observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.active_frame_count == 0
+            && observation.resolved_lease_count == 0
+            && observation.next_resource == warmed_resources.next_resource
+            && observation.entry_count == warmed_resources.entry_count
+            && observation.retained_bytes == warmed_resources.retained_bytes
+            && observation.payload_creation_attempts == warmed_resources.payload_creation_attempts
+            && observation.entry_identities_for_test()
+                == warmed_resources.entry_identities_for_test()
+            && observation.effect_texture_count_for_test()
+                == warmed_resources.effect_texture_count_for_test()
+            && observation.resolved_mask_upload_keys_for_test()
+                == warmed_resources.resolved_mask_upload_keys_for_test()
+            && observation.gaussian_kernel_count_for_test() == 0
+    });
+    let exact_mask_key_is_retained = warmed_resources.resolved_mask_upload_keys_for_test()
+        == [mask_key]
+        && mask_key.physical_size() == PhysicalSize::new(2, 2)
+        && mask_key.quality() == ImageQuality::High
+        && mask_key.extend() == Extend::Reflect;
+    let stable_prepared_identities = prepared_history.len() == 3
+        && prepared_history.first().is_some_and(|first| {
+            !first.is_empty() && prepared_history.iter().all(|ids| ids == first)
+        });
+    let stable_retention =
+        retention_history == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3];
+    let stable_cache = warmed_cache.has_render_pipelines()
+        && cache_observations
+            .iter()
+            .all(|observation| *observation == warmed_cache);
+    let stable_stats = stats
+        .first()
+        .is_some_and(|first| stats.iter().all(|actual| actual == first));
+    let one_submission_without_readback = submission.queue_submission_count_for_test() == 3
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 3
+        && graph_submission.capture_lease_count_for_test() >= 2
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let actual = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+        panic!("the repeated C09 publication must remain readable: {error}")
+    });
+
+    assert!(
+        stable_resource_set
+            && exact_mask_key_is_retained
+            && warmed_resources.effect_texture_count_for_test() > 0
+            && stable_prepared_identities
+            && stable_retention
+            && stable_cache
+            && stable_stats
+            && one_submission_without_readback
+            && warmed_output.rgba() == actual.rgba()
+            && c09_pixels_match_for_test(actual.rgba(), &expected, working_format, 3),
+        "C09 resources grow or enter readback"
+    );
+}
+
+#[test]
+fn budget_zero_releases_composition_resources_without_changing_pixels() {
+    let (scene, size, expected, _) = c09_reuse_scene_and_oracle_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .unwrap_or_else(|error| panic!("zero-retention C09 coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    renderer.select_exact_graph_working_format_for_test(working_format);
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("zero-retention C09 coverage requires a headless surface: {error}")
+    });
+    let first = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .unwrap_or_else(|error| panic!("the first zero-retention C09 frame must succeed: {error}"));
+    let first_output =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the first zero-retention C09 publication must be readable: {error}")
+        });
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the zero-retention C09 device must remain ready"))
+        .device_pass_cache_counts_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let second = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .unwrap_or_else(|error| {
+            panic!("the repeated zero-retention C09 frame must succeed: {error}")
+        });
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the repeated zero-retention C09 device must remain ready"));
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let retention_history = graph_submission.resource_retention_history_for_test();
+    let all_idle_resources_are_released = resources.leased_count == 0
+        && resources.idle_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
+        && resources.effect_texture_count_for_test() == 0
+        && resources.resolved_mask_upload_keys_for_test().is_empty()
+        && resources.gaussian_kernel_count_for_test() == 0
+        && retention_history == [C08GraphResourceRetentionForTest::ReleasedAllIdle];
+    let one_submission_without_readback = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.capture_lease_count_for_test() >= 2
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let second_output =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the repeated zero-retention C09 publication must be readable: {error}")
+        });
+
+    assert!(
+        all_idle_resources_are_released
+            && one_submission_without_readback
+            && cache_before == cache_after
+            && cache_after.has_render_pipelines()
+            && C08PublicStatsForTest::from(first) == C08PublicStatsForTest::from(second)
+            && first_output.rgba() == second_output.rgba()
+            && c09_pixels_match_for_test(second_output.rgba(), &expected, working_format, 3),
+        "zero retention changed composition pixels or kept idle resources"
+    );
+}
+
+#[test]
+fn renderer_dispatch_routes_c08_and_c09_to_gpu_but_future_passes_to_typed_diagnostics() {
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("C09 dispatch coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    renderer.select_exact_graph_working_format_for_test(working_format);
+
+    let mut direct_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .unwrap_or_else(|error| panic!("direct dispatch coverage requires a surface: {error}"));
+    let mut direct_scene = Scene::new();
+    direct_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    let direct = pollster::block_on(renderer.render(
+        &mut direct_surface,
+        &direct_scene,
+        Parameters::default(),
+    ));
+
+    let mut c08_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .unwrap_or_else(|error| panic!("C08 dispatch coverage requires a surface: {error}"));
+    let c08 = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut c08_surface,
+        &direct_scene,
+        Parameters::default(),
+        working_format,
+    ));
+
+    let (c09_scene, _, _, _) = c09_reuse_scene_and_oracle_for_test();
+    let mut c09_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .unwrap_or_else(|error| panic!("C09 dispatch coverage requires a surface: {error}"));
+    let c09 =
+        pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
+
+    let blur = Filter::try_blur(1.0)
+        .unwrap_or_else(|error| panic!("the future blur fixture must be valid: {error}"));
+    let blur_layer = Layer::new()
+        .try_filter(blur)
+        .unwrap_or_else(|error| panic!("the future blur layer must be valid: {error}"));
+    let mut blur_scene = Scene::new();
+    blur_scene.layer(blur_layer, |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            c09_color_for_test([255, 255, 255, 255]),
+        );
+    });
+    let mut blur_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .unwrap_or_else(|error| panic!("future blur coverage requires a surface: {error}"));
+
+    let backdrop_filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25)
+            .unwrap_or_else(|error| panic!("the future color amount must be valid: {error}")),
+    )])
+    .unwrap_or_else(|error| panic!("the future filter list must be valid: {error}"));
+    let backdrop_bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0))
+        .unwrap_or_else(|error| panic!("the future backdrop bounds must be valid: {error}"));
+    let backdrop_input = BackdropFilterInput::try_new(backdrop_filters, backdrop_bounds, None)
+        .unwrap_or_else(|error| panic!("the future backdrop input must be valid: {error}"));
+    let backdrop_layer = Layer::new()
+        .try_backdrop_filter(backdrop_input)
+        .unwrap_or_else(|error| panic!("the future backdrop layer must be valid: {error}"));
+    let mut backdrop_scene = Scene::new();
+    backdrop_scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(backdrop_layer, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                c09_color_for_test([255, 255, 255, 255]),
+            );
+        });
+    let mut backdrop_surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+            .unwrap_or_else(|error| panic!("future backdrop coverage requires a surface: {error}"));
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("future dispatch coverage requires the ready device"))
+        .internal_resource_manager_observation_for_test();
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("future dispatch coverage requires the ready cache"))
+        .device_pass_cache_counts_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let blur_result =
+        pollster::block_on(renderer.render(&mut blur_surface, &blur_scene, Parameters::default()));
+    let backdrop_result = pollster::block_on(renderer.render(
+        &mut backdrop_surface,
+        &backdrop_scene,
+        Parameters::default(),
+    ));
+    let no_future_gpu_work = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0;
+    drop(submission_scope);
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("future rejection must retain the ready device"))
+        .internal_resource_manager_observation_for_test();
+    let cache_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("future rejection must retain the ready cache"))
+        .device_pass_cache_counts_for_test();
+    let exact_future_diagnostics = blur_result.as_ref().is_err_and(|error| {
+        error.unsupported_primitive()
+            == Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::Filters,
+                PrimitiveOperation::LayerFilter,
+            ))
+    }) && backdrop_result.as_ref().is_err_and(|error| {
+        error.unsupported_primitive()
+            == Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::OffscreenPipeline,
+                PrimitiveOperation::BoundedBackdropFilterExecution,
+            ))
+    });
+    let renderer_source = include_str!("renderer.rs");
+    let pass_source = include_str!("pass.rs");
+    let old_dispatch_names_are_absent = !renderer_source
+        .contains(&["transitional_graph", "_routes"].concat())
+        && !renderer_source.contains(&["LaterCycle", "Transitional"].concat())
+        && !pass_source.contains(&["LaterCycle", "Transitional"].concat());
+    let dispatch = renderer.dispatch_observation_for_test();
+
+    assert!(
+        direct.is_ok()
+            && c08.is_ok()
+            && c09.is_ok()
+            && graph_submission.queue_submission_count_for_test() == 2
+            && dispatch.boundary_invocations == 4
+            && dispatch.direct_vello_routes == 1
+            && dispatch.exact_c08_graph_routes == 1
+            && dispatch.exact_c09_graph_routes == 1
+            && dispatch.future_pass_rejections == 1
+            && exact_future_diagnostics
+            && no_future_gpu_work
+            && resources_after == resources_before
+            && cache_after == cache_before
+            && blur_surface.headless_publication_count_for_test() == 0
+            && backdrop_surface.headless_publication_count_for_test() == 0
+            && old_dispatch_names_are_absent,
+        "dispatch has no exact C09 boundary"
+    );
+}
+
+#[test]
 fn repeated_frames_reuse_resources_without_growth_or_readback() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -30232,12 +30862,10 @@ fn renderer_dispatch_routes_closed_c08_and_c09_graph_subsets_to_gpu_executor() {
             && dispatch.boundary_invocations == 3
             && dispatch.direct_vello_routes == 1
             && dispatch.exact_c08_graph_routes == 1
-            && dispatch.transitional_graph_routes == 1
+            && dispatch.exact_c09_graph_routes == 1
+            && dispatch.future_pass_rejections == 0
             && graph_submission.queue_submission_count_for_test() == 2
-            && frame_gate.validated_plan_count == 1
-            && frame_gate
-                .plan_count_at_transitional_effect_execution
-                .is_none(),
+            && frame_gate.validated_plan_count == 1,
         "renderer has no closed C08/C09 graph dispatch boundary"
     );
 }
