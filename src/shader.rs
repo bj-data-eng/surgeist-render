@@ -59,17 +59,7 @@ pub(crate) struct ColorFilterOperationBytes {
 }
 
 impl ColorFilterOperationBytes {
-    pub(crate) fn try_from_runtime_operations(
-        operations: &[RuntimeColorOperation],
-        device_limits: &wgpu::Limits,
-    ) -> Result<Self> {
-        Self::try_from_runtime_operations_with_limits(
-            operations,
-            ColorFilterOperationBufferLimits::from_device_limits(device_limits),
-        )
-    }
-
-    fn try_from_runtime_operations_with_limits(
+    pub(crate) fn try_from_runtime_operations_with_limits(
         operations: &[RuntimeColorOperation],
         limits: ColorFilterOperationBufferLimits,
     ) -> Result<Self> {
@@ -1173,6 +1163,25 @@ impl ProvisionalDevicePassCacheUpdate {
         self.color_filter_pass_objects(cache, keys)
     }
 
+    pub(crate) fn color_filter_encoding_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalColorFilterPassObjects<'a>> {
+        self.color_filter_pass_objects(
+            cache,
+            ColorFilterPassKeyRefs {
+                samplers,
+                layout,
+                shader,
+                pipeline,
+            },
+        )
+    }
+
     fn color_filter_pass_objects<'a>(
         &'a self,
         cache: &'a DevicePassCache,
@@ -1603,6 +1612,18 @@ impl ProvisionalColorFilterPassObjects<'_> {
             self.pipeline,
         );
         Ok(())
+    }
+
+    pub(crate) const fn source_sampler(&self) -> &wgpu::Sampler {
+        self.source_sampler
+    }
+
+    pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        self.layout
+    }
+
+    pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline
     }
 }
 

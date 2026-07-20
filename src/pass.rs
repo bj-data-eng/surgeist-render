@@ -33,12 +33,13 @@ use super::{
         ResourceManager, WorkingFormat,
     },
     shader::{
-        BindGroupLayoutKey, ColorFilterOperationBytes, CompositeParameterBytes, DevicePassCache,
-        PassSpatialUniformBytes, ProvisionalC08PassObjects, ProvisionalCompositePassObjects,
-        ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
-        ShaderCompositeKey, ShaderCompositePathKey, ShaderDataBindingKey, ShaderMaskQualityKey,
-        ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey, ShaderSamplingEdgeKey,
-        ShaderSamplingFilterKey, ShaderTextureFormatKey,
+        BindGroupLayoutKey, ColorFilterOperationBufferLimits, ColorFilterOperationBytes,
+        CompositeParameterBytes, DevicePassCache, PassSpatialUniformBytes,
+        ProvisionalC08PassObjects, ProvisionalColorFilterPassObjects,
+        ProvisionalCompositePassObjects, ProvisionalDevicePassCacheUpdate, RenderPipelineKey,
+        SamplerKey, ShaderBindingRoleKey, ShaderCompositeKey, ShaderCompositePathKey,
+        ShaderDataBindingKey, ShaderMaskQualityKey, ShaderMaskSamplingKey, ShaderModuleKey,
+        ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
     style::ColorFilterOp,
     texture::EffectTextureDescriptor,
@@ -51,9 +52,6 @@ use super::{
 
 #[cfg(test)]
 use super::texture::EffectTextureRole;
-
-#[cfg(test)]
-use super::shader::ColorFilterOperationBufferLimits;
 
 #[cfg(test)]
 use super::resource::ResourceAccountingFault;
@@ -2544,6 +2542,11 @@ impl C10PreparableGraph {
                 .closed
                 .facts
                 .proves_exact_facts_for(&self.closed.lowered)
+    }
+
+    #[cfg(test)]
+    fn into_closed(self) -> ClosedExecutableGraph {
+        self.closed
     }
 
     #[cfg(test)]
@@ -5439,6 +5442,22 @@ impl RuntimeGraphPreparationPlan {
         capabilities: &DeviceCapabilities,
         device: &wgpu::Device,
     ) -> Result<Self> {
+        Self::try_derive_with_color_filter_limits(
+            lowered,
+            selected_working_format,
+            capabilities,
+            device,
+            ColorFilterOperationBufferLimits::from_device_limits(&device.limits()),
+        )
+    }
+
+    fn try_derive_with_color_filter_limits(
+        lowered: LoweredGraphPlan,
+        selected_working_format: WorkingFormat,
+        capabilities: &DeviceCapabilities,
+        device: &wgpu::Device,
+        color_filter_limits: ColorFilterOperationBufferLimits,
+    ) -> Result<Self> {
         capabilities.validate_supported_working_format(selected_working_format)?;
         if selected_working_format != lowered.working_format {
             return Err(preparation_error(
@@ -5753,10 +5772,11 @@ impl RuntimeGraphPreparationPlan {
                 )?;
                 let color_filter_operations = match &pass.kind {
                     RuntimePassKind::ColorFilter(Some(filter)) => {
-                        let bytes = ColorFilterOperationBytes::try_from_runtime_operations(
-                            filter.operations(),
-                            &device.limits(),
-                        )?;
+                        let bytes =
+                            ColorFilterOperationBytes::try_from_runtime_operations_with_limits(
+                                filter.operations(),
+                                color_filter_limits,
+                            )?;
                         if bytes.as_bytes().is_empty() {
                             return Err(preparation_error(
                                 "prepared color-filter operation bytes are empty",
@@ -5919,6 +5939,11 @@ struct PreparedResourceBinding {
 
 struct PreparedKernelBinding {
     lease: Option<ResourceLease>,
+}
+
+struct PreparedColorFilterOperationBinding {
+    bytes: ColorFilterOperationBytes,
+    buffer: Option<wgpu::Buffer>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6171,22 +6196,43 @@ fn dispatch_pass_semantics(kind: &RuntimePassKind) -> Option<DispatchPassSemanti
 enum GraphPreparationSource {
     C08(C08PreparableGraph),
     C09(ClosedExecutableGraph),
+    #[cfg(test)]
+    C10 {
+        preparable: C10PreparableGraph,
+        operation_limits: Option<ColorFilterOperationBufferLimits>,
+    },
 }
 
 impl GraphPreparationSource {
+    #[cfg(test)]
+    const fn color_filter_operation_limits(&self) -> Option<ColorFilterOperationBufferLimits> {
+        match self {
+            Self::C10 {
+                operation_limits, ..
+            } => *operation_limits,
+            Self::C08(_) | Self::C09(_) => None,
+        }
+    }
+
     fn into_parts(
         self,
     ) -> (
         LoweredGraphPlan,
         Option<C08ExecutionFacts>,
         Option<ClosedExecutableGraphFacts>,
+        Option<ClosedExecutableGraphFacts>,
     ) {
         match self {
             Self::C08(preparable) => {
                 let (lowered, execution) = preparable.into_parts();
-                (lowered, Some(execution), None)
+                (lowered, Some(execution), None, None)
             }
-            Self::C09(closed) => (closed.lowered, None, Some(closed.facts)),
+            Self::C09(closed) => (closed.lowered, None, Some(closed.facts), None),
+            #[cfg(test)]
+            Self::C10 { preparable, .. } => {
+                let closed = preparable.into_closed();
+                (closed.lowered, None, None, Some(closed.facts))
+            }
         }
     }
 }
@@ -6309,6 +6355,7 @@ enum C08ScheduledEncodingKind {
     ClearRoot,
     VelloCapture,
     CanonicalizeCapture,
+    ColorFilter,
     SpanSourceOver,
     LayerComposite,
     Present,
@@ -6344,6 +6391,13 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) destination_composites_avoid_read_write_alias: bool,
     pub(crate) layer_composites_bind_exact_resources_and_parameters: bool,
     pub(crate) layer_composites_preserve_signed_mapping: bool,
+    pub(crate) color_filter_count: usize,
+    pub(crate) color_filters_preserve_authored_order: bool,
+    pub(crate) color_filters_bind_exact_source_spatial_and_operations: bool,
+    pub(crate) color_filter_sources_and_results_are_distinct: bool,
+    pub(crate) color_filters_use_validated_viewport_and_scissor: bool,
+    pub(crate) color_filters_preserve_signed_texel_mapping: bool,
+    pub(crate) color_filter_operation_buffers_released: bool,
     pub(crate) advances_every_pass_once: bool,
     #[cfg(test)]
     pub(crate) capture_count: usize,
@@ -6372,8 +6426,22 @@ impl C08CustomSpineEncodingSummary {
             && self.preserves_signed_source_origin
             && self.keeps_cache_update_provisional
             && self.advances_every_pass_once;
-        let exact_c08 = self.layer_composite_count == 0;
+        let exact_layers = self
+            .normal_composite_count
+            .saturating_add(self.destination_composite_count)
+            == self.layer_composite_count
+            && (self.normal_composite_count == 0
+                || (self.normal_composites_use_fixed_premultiplied_blend
+                    && self.normal_composites_omit_parent_sample))
+            && (self.destination_composite_count == 0
+                || (self.destination_composites_copy_full_parent
+                    && self.destination_composites_avoid_read_write_alias))
+            && (self.layer_composite_count == 0
+                || (self.layer_composites_bind_exact_resources_and_parameters
+                    && self.layer_composites_preserve_signed_mapping));
+        let exact_c08 = self.layer_composite_count == 0 && self.color_filter_count == 0;
         let exact_c09 = self.layer_composite_count > 0
+            && self.color_filter_count == 0
             && self
                 .normal_composite_count
                 .saturating_add(self.destination_composite_count)
@@ -6386,7 +6454,15 @@ impl C08CustomSpineEncodingSummary {
                     && self.destination_composites_avoid_read_write_alias))
             && self.layer_composites_bind_exact_resources_and_parameters
             && self.layer_composites_preserve_signed_mapping;
-        common && (exact_c08 || exact_c09)
+        let exact_c10 = self.color_filter_count > 0
+            && self.color_filters_preserve_authored_order
+            && self.color_filters_bind_exact_source_spatial_and_operations
+            && self.color_filter_sources_and_results_are_distinct
+            && self.color_filters_use_validated_viewport_and_scissor
+            && self.color_filters_preserve_signed_texel_mapping
+            && self.color_filter_operation_buffers_released
+            && exact_layers;
+        common && (exact_c08 || exact_c09 || exact_c10)
     }
 }
 
@@ -6569,6 +6645,15 @@ struct C09LayerCompositeEncodingFacts {
     preserved_signed_mapping: bool,
     #[cfg(test)]
     encoder_identity: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct C10ColorFilterEncodingFacts {
+    exact_operation_bytes: bool,
+    exact_source_spatial_and_operations: bool,
+    source_and_result_are_distinct: bool,
+    validated_viewport_and_scissor: bool,
+    preserved_signed_texel_mapping: bool,
 }
 
 struct C08SampledRenderTarget<'target> {
@@ -6769,6 +6854,7 @@ fn c08_scheduled_encoding_order_is_exact(
                 RuntimePassKind::CanonicalizeCapture => {
                     C08ScheduledEncodingKind::CanonicalizeCapture
                 }
+                RuntimePassKind::ColorFilter(Some(_)) => C08ScheduledEncodingKind::ColorFilter,
                 RuntimePassKind::Composite(Some(RuntimeComposite {
                     kind: RuntimeCompositeKind::SpanSourceOver,
                     ..
@@ -6780,7 +6866,7 @@ fn c08_scheduled_encoding_order_is_exact(
                 RuntimePassKind::Present => C08ScheduledEncodingKind::Present,
                 RuntimePassKind::VelloCapture(None)
                 | RuntimePassKind::CopyBackdrop
-                | RuntimePassKind::ColorFilter(_)
+                | RuntimePassKind::ColorFilter(None)
                 | RuntimePassKind::BlurHorizontal(_)
                 | RuntimePassKind::BlurVertical(_)
                 | RuntimePassKind::DropShadowColorize(_)
@@ -6814,8 +6900,10 @@ pub(crate) struct PreparedGraph<'device> {
     plan: RuntimeGraphPreparationPlan,
     c08_execution: Option<C08ExecutionFacts>,
     c09_execution: Option<ClosedExecutableGraphFacts>,
+    c10_execution: Option<ClosedExecutableGraphFacts>,
     resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
+    color_filter_operation_bindings: BTreeMap<RuntimePassId, PreparedColorFilterOperationBinding>,
     pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
@@ -6958,9 +7046,38 @@ impl<'device> PreparedGraph<'device> {
                     pass_cache_phase,
                 )
             }
-            PrePreparationGraphClassification::ExactC10(_) => Err(preparation_error(
-                "a C10 color graph cannot enter C09 resource preparation",
-            )),
+            PrePreparationGraphClassification::ExactC10(preparable) => {
+                #[cfg(test)]
+                {
+                    let selected_working_format =
+                        capabilities.resolve_effect_working_format(policy)?;
+                    let prepared = Self::try_prepare_inner(
+                        GraphPreparationSource::C10 {
+                            preparable,
+                            operation_limits: None,
+                        },
+                        selected_working_format,
+                        capabilities,
+                        device,
+                        queue,
+                        resources,
+                        pass_cache_phase,
+                    )?;
+                    if prepared.c10_execution.is_none() {
+                        return Err(preparation_error(
+                            "C10 preparation lost its validated closed execution facts",
+                        ));
+                    }
+                    Ok(prepared)
+                }
+                #[cfg(not(test))]
+                {
+                    let _ = preparable;
+                    Err(preparation_error(
+                        "a C10 color graph cannot enter C09 resource preparation",
+                    ))
+                }
+            }
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
                 "a future GPU pass cannot enter C09 resource preparation",
             )),
@@ -6968,6 +7085,45 @@ impl<'device> PreparedGraph<'device> {
                 Err(ineligibility.into_error())
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_prepare_c10_with_operation_limits_for_test(
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_and_limits: (&'device DevicePassCache, ColorFilterOperationBufferLimits),
+    ) -> Result<Self> {
+        let (pass_cache, operation_limits) = pass_cache_and_limits;
+        let PrePreparationGraphClassification::ExactC10(preparable) =
+            PrePreparationGraphClassification::classify(lowered)
+        else {
+            return Err(preparation_error(
+                "the C10 limit fixture requires one exact closed color graph",
+            ));
+        };
+        let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C10 {
+                preparable,
+                operation_limits: Some(operation_limits),
+            },
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            (pass_cache, true),
+        )?;
+        if prepared.c10_execution.is_none() {
+            return Err(preparation_error(
+                "C10 limit preparation lost its validated closed execution facts",
+            ));
+        }
+        Ok(prepared)
     }
 
     fn try_prepare_inner(
@@ -6980,7 +7136,26 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         let (pass_cache, realize_checked_passes) = pass_cache_phase;
-        let (lowered, c08_execution, c09_execution) = source.into_parts();
+        #[cfg(test)]
+        let color_filter_operation_limits = source.color_filter_operation_limits();
+        let (lowered, c08_execution, c09_execution, c10_execution) = source.into_parts();
+        #[cfg(test)]
+        let plan = match color_filter_operation_limits {
+            Some(limits) => RuntimeGraphPreparationPlan::try_derive_with_color_filter_limits(
+                lowered,
+                selected_working_format,
+                capabilities,
+                device,
+                limits,
+            )?,
+            None => RuntimeGraphPreparationPlan::try_derive(
+                lowered,
+                selected_working_format,
+                capabilities,
+                device,
+            )?,
+        };
+        #[cfg(not(test))]
         let plan = RuntimeGraphPreparationPlan::try_derive(
             lowered,
             selected_working_format,
@@ -6991,7 +7166,7 @@ impl<'device> PreparedGraph<'device> {
 
         let mut frame_scope = resources.begin_frame()?;
         frame_scope.abort_provisional_on_drop();
-        if c08_execution.is_some() || c09_execution.is_some() {
+        if c08_execution.is_some() || c09_execution.is_some() || c10_execution.is_some() {
             frame_scope.discard_on_drop();
         }
         let mut resource_bindings = BTreeMap::new();
@@ -7024,6 +7199,44 @@ impl<'device> PreparedGraph<'device> {
             {
                 return Err(preparation_error(
                     "one Gaussian kernel acquired more than one concrete binding",
+                ));
+            }
+        }
+
+        let mut color_filter_operation_bindings = BTreeMap::new();
+        for request in &plan.passes {
+            let Some(bytes) = request.color_filter_operations.as_ref() else {
+                continue;
+            };
+            if !matches!(request.runtime.kind, RuntimePassKind::ColorFilter(Some(_)))
+                || bytes.as_bytes().is_empty()
+            {
+                return Err(preparation_error(
+                    "prepared color-filter bytes have no exact runtime pass",
+                ));
+            }
+            let size = u64::try_from(bytes.as_bytes().len()).map_err(|_| {
+                preparation_error("prepared color-filter buffer length does not fit u64")
+            })?;
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("Surgeist C10 ordered color-filter operations"),
+                size,
+                usage: wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST),
+                mapped_at_creation: false,
+            });
+            queue.write_buffer(&buffer, 0, bytes.as_bytes());
+            if color_filter_operation_bindings
+                .insert(
+                    request.runtime.id,
+                    PreparedColorFilterOperationBinding {
+                        bytes: bytes.clone(),
+                        buffer: Some(buffer),
+                    },
+                )
+                .is_some()
+            {
+                return Err(preparation_error(
+                    "one color-filter pass acquired more than one operation buffer",
                 ));
             }
         }
@@ -7097,15 +7310,18 @@ impl<'device> PreparedGraph<'device> {
         } else {
             None
         };
-        let c08_encoding_state = (c08_execution.is_some() || c09_execution.is_some())
-            .then_some(C08CustomSpineEncodingState::Ready);
+        let c08_encoding_state =
+            (c08_execution.is_some() || c09_execution.is_some() || c10_execution.is_some())
+                .then_some(C08CustomSpineEncodingState::Ready);
 
         Ok(Self {
             plan,
             c08_execution,
             c09_execution,
+            c10_execution,
             resource_bindings,
             kernel_bindings,
+            color_filter_operation_bindings,
             pass_cache_update,
             frame_scope: Some(frame_scope),
             next_pass: 0,
@@ -7220,6 +7436,12 @@ impl<'device> PreparedGraph<'device> {
                     execution.captures().len(),
                 )
             } else if let Some(execution) = self.c09_execution.as_ref() {
+                (
+                    execution.working_format,
+                    execution.output_format,
+                    execution.captures.len(),
+                )
+            } else if let Some(execution) = self.c10_execution.as_ref() {
                 (
                     execution.working_format,
                     execution.output_format,
@@ -7340,6 +7562,13 @@ impl<'device> PreparedGraph<'device> {
         let mut destination_avoids_alias = true;
         let mut layer_bindings_are_exact = true;
         let mut layer_signed_mapping_is_exact = true;
+        let mut color_filter_count = 0_usize;
+        let mut color_filters_preserve_authored_order = true;
+        let mut color_filter_bindings_are_exact = true;
+        let mut color_filter_sources_and_results_are_distinct = true;
+        let mut color_filter_regions_are_validated = true;
+        let mut color_filter_signed_texel_mapping_is_exact = true;
+        let mut color_filter_operation_buffers_released = true;
         #[cfg(test)]
         let mut capture_observations = Vec::with_capacity(expected_capture_count);
         #[cfg(test)]
@@ -7413,6 +7642,26 @@ impl<'device> PreparedGraph<'device> {
                     custom_completed = custom_completed.saturating_add(1);
                     completed_pass_count = completed_pass_count.saturating_add(1);
                 }
+                RuntimePassKind::ColorFilter(Some(_)) => {
+                    let facts = self.encode_c10_color_filter(encoder, &request)?;
+                    custom_encoded = custom_encoded.saturating_add(1);
+                    color_filter_count = color_filter_count.saturating_add(1);
+                    color_filters_preserve_authored_order &= facts.exact_operation_bytes;
+                    color_filter_bindings_are_exact &= facts.exact_source_spatial_and_operations;
+                    color_filter_sources_and_results_are_distinct &=
+                        facts.source_and_result_are_distinct;
+                    color_filter_regions_are_validated &= facts.validated_viewport_and_scissor;
+                    color_filter_signed_texel_mapping_is_exact &=
+                        facts.preserved_signed_texel_mapping;
+                    scheduled.push(C08ScheduledEncodingKind::ColorFilter);
+                    self.complete_c08_custom_pass(pass)?;
+                    color_filter_operation_buffers_released &= self
+                        .color_filter_operation_bindings
+                        .get(&pass)
+                        .is_some_and(|binding| binding.buffer.is_none());
+                    custom_completed = custom_completed.saturating_add(1);
+                    completed_pass_count = completed_pass_count.saturating_add(1);
+                }
                 RuntimePassKind::Composite(Some(composite))
                     if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
                 {
@@ -7474,7 +7723,7 @@ impl<'device> PreparedGraph<'device> {
                 }
                 RuntimePassKind::VelloCapture(None)
                 | RuntimePassKind::CopyBackdrop
-                | RuntimePassKind::ColorFilter(_)
+                | RuntimePassKind::ColorFilter(None)
                 | RuntimePassKind::BlurHorizontal(_)
                 | RuntimePassKind::BlurVertical(_)
                 | RuntimePassKind::DropShadowColorize(_)
@@ -7516,7 +7765,8 @@ impl<'device> PreparedGraph<'device> {
                     && composite_encoder_identities
                         .iter()
                         .all(|composite| *composite == identity)
-            });
+            })
+            && (color_filter_count == 0 || self.c10_execution.is_some());
         let total_composite_count = source_over_count.saturating_add(layer_composite_count);
         Ok(C08CustomSpineEncodingSummary {
             encodes_custom_passes_in_order,
@@ -7549,6 +7799,19 @@ impl<'device> PreparedGraph<'device> {
             destination_composites_avoid_read_write_alias: destination_avoids_alias,
             layer_composites_bind_exact_resources_and_parameters: layer_bindings_are_exact,
             layer_composites_preserve_signed_mapping: layer_signed_mapping_is_exact,
+            color_filter_count,
+            color_filters_preserve_authored_order: color_filter_count > 0
+                && color_filters_preserve_authored_order,
+            color_filters_bind_exact_source_spatial_and_operations: color_filter_count > 0
+                && color_filter_bindings_are_exact,
+            color_filter_sources_and_results_are_distinct: color_filter_count > 0
+                && color_filter_sources_and_results_are_distinct,
+            color_filters_use_validated_viewport_and_scissor: color_filter_count > 0
+                && color_filter_regions_are_validated,
+            color_filters_preserve_signed_texel_mapping: color_filter_count > 0
+                && color_filter_signed_texel_mapping_is_exact,
+            color_filter_operation_buffers_released: color_filter_count > 0
+                && color_filter_operation_buffers_released,
             advances_every_pass_once: completed_pass_count == self.plan.passes.len()
                 && self.next_pass == self.plan.passes.len(),
             #[cfg(test)]
@@ -7746,6 +8009,22 @@ impl<'device> PreparedGraph<'device> {
             )
     }
 
+    fn c10_color_filter_pass_objects<'prepared>(
+        &'prepared self,
+        keys: &RuntimePassCacheKeys,
+    ) -> Result<ProvisionalColorFilterPassObjects<'prepared>> {
+        self.pass_cache_update
+            .as_ref()
+            .ok_or_else(|| preparation_error("C10 provisional pass objects are unavailable"))?
+            .color_filter_encoding_objects(
+                self.pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )
+    }
+
     fn create_c08_spatial_uniform_buffer(&self, bytes: &PassSpatialUniformBytes) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Surgeist C08 pass spatial uniform"),
@@ -7792,6 +8071,13 @@ impl<'device> PreparedGraph<'device> {
                 })
                 .or_else(|| {
                     self.c09_execution.as_ref().and_then(|execution| {
+                        execution.captures.iter().find(|capture| {
+                            capture.pass() == request.id && capture.target() == target
+                        })
+                    })
+                })
+                .or_else(|| {
+                    self.c10_execution.as_ref().and_then(|execution| {
                         execution.captures.iter().find(|capture| {
                             capture.pass() == request.id && capture.target() == target
                         })
@@ -8031,6 +8317,198 @@ impl<'device> PreparedGraph<'device> {
             fixed_source_over_blend: fixed_blend,
             preserved_signed_source_origin,
             ..C08PassEncodingFacts::default()
+        })
+    }
+
+    fn encode_c10_color_filter(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C10ColorFilterEncodingFacts> {
+        let RuntimePassKind::ColorFilter(Some(filter)) = &request.kind else {
+            return Err(preparation_error(
+                "the C10 color pass changed its checked semantic payload",
+            ));
+        };
+        let source = exact_c08_read(request, RuntimeReadRole::FilterSource)?;
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error(
+                "the C10 color pass has no prepared working result",
+            ));
+        };
+        if request.reads.len() != 1 || filter.operations().is_empty() {
+            return Err(preparation_error(
+                "the C10 color pass must have one source and a nonempty ordered program",
+            ));
+        }
+
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        let source_and_result_are_distinct = source.resource() != target
+            && source_binding.allocation_resource() != target_binding.allocation_resource();
+        if !source_and_result_are_distinct
+            || source_spatial != target_spatial
+            || filter.spatial.source != source_spatial
+            || filter.spatial.result != target_spatial
+            || filter.edge != RuntimeSamplingEdge::ClampToExtent
+            || source.sampling_filter() != RuntimeSamplingFilter::Nearest
+            || source.sampling_edge() != RuntimeSamplingEdge::ClampToExtent
+            || self.resource_request(source.resource())?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || self.resource_request(target)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || !source_binding
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::TEXTURE_BINDING)
+            || !target_binding
+                .texture()
+                .usage()
+                .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
+        {
+            return Err(preparation_error(
+                "the C10 source and distinct working result bindings are inconsistent",
+            ));
+        }
+
+        let keys = request
+            .cache_keys
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C10 color pass has no provisional cache keys"))?;
+        if keys.samplers() != [source.sampler_key()] {
+            return Err(preparation_error(
+                "the C10 color pass changed its nearest ClampToExtent sampler",
+            ));
+        }
+        let spatial = request
+            .spatial_uniform
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C10 color pass has no prepared spatial bytes"))?;
+        let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
+            source_spatial,
+            target_spatial,
+        )?;
+        if spatial != &expected_spatial {
+            return Err(preparation_error(
+                "the C10 color spatial bytes changed after immutable preparation",
+            ));
+        }
+        let operation_bytes = request.color_filter_operations.as_ref().ok_or_else(|| {
+            preparation_error("the C10 color pass has no checked operation bytes")
+        })?;
+        let expected_operation_bytes =
+            ColorFilterOperationBytes::try_from_runtime_operations_with_limits(
+                filter.operations(),
+                ColorFilterOperationBufferLimits::from_device_limits(&self.device.limits()),
+            )?;
+        let operation_binding = self
+            .color_filter_operation_bindings
+            .get(&request.id)
+            .ok_or_else(|| preparation_error("the C10 operation buffer binding is missing"))?;
+        let operation_buffer = operation_binding.buffer.as_ref().ok_or_else(|| {
+            preparation_error("the C10 operation buffer is stale or already released")
+        })?;
+        let exact_operation_bytes = operation_bytes == &expected_operation_bytes
+            && &operation_binding.bytes == operation_bytes
+            && operation_buffer.size()
+                == u64::try_from(operation_bytes.as_bytes().len()).map_err(|_| {
+                    preparation_error("the C10 operation buffer size does not fit u64")
+                })?
+            && operation_buffer.usage()
+                == wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
+        if !exact_operation_bytes {
+            return Err(preparation_error(
+                "the C10 operation buffer differs from its exact checked bytes",
+            ));
+        }
+
+        let objects = self.c10_color_filter_pass_objects(keys)?;
+        objects.require_encoding_ready()?;
+        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?
+            .ok_or_else(|| preparation_error("the C10 color pass has an empty bounded region"))?;
+        let validated_viewport_and_scissor = region.scissor_x.saturating_add(region.scissor_width)
+            <= target_spatial.device_extent.width()
+            && region.scissor_y.saturating_add(region.scissor_height)
+                <= target_spatial.device_extent.height()
+            && region.viewport_width > 0.0
+            && region.viewport_height > 0.0;
+        let preserved_signed_texel_mapping =
+            c08_spatial_uniform_preserves_source_origin(spatial, source_spatial)
+                && close_f64(region.unclipped_x, 0.0)
+                && close_f64(region.unclipped_y, 0.0)
+                && source_spatial.texel_origin == target_spatial.texel_origin
+                && source_spatial.device_origin == target_spatial.device_origin;
+        if !validated_viewport_and_scissor || !preserved_signed_texel_mapping {
+            return Err(preparation_error(
+                "the C10 bounded viewport or signed texel mapping changed after validation",
+            ));
+        }
+
+        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C10 exact color-filter bindings"),
+            layout: objects.bind_group_layout(),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_binding.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: spatial_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: operation_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("Surgeist C10 bounded ordered color filter"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target_binding.view(),
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            depth_stencil_attachment: None,
+            occlusion_query_set: None,
+            timestamp_writes: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(objects.render_pipeline());
+        pass.set_bind_group(0, &bind_group, &[]);
+        pass.set_viewport(
+            region.viewport_x,
+            region.viewport_y,
+            region.viewport_width,
+            region.viewport_height,
+            0.0,
+            1.0,
+        );
+        pass.set_scissor_rect(
+            region.scissor_x,
+            region.scissor_y,
+            region.scissor_width,
+            region.scissor_height,
+        );
+        pass.draw(0..3, 0..1);
+
+        Ok(C10ColorFilterEncodingFacts {
+            exact_operation_bytes,
+            exact_source_spatial_and_operations: spatial == &expected_spatial,
+            source_and_result_are_distinct,
+            validated_viewport_and_scissor,
+            preserved_signed_texel_mapping,
         })
     }
 
@@ -8675,6 +9153,7 @@ impl<'device> PreparedGraph<'device> {
         let request = self.require_current_pass(pass)?;
         let resource_releases = request.runtime.releases.clone();
         let kernel_releases = request.kernel_releases.clone();
+        let releases_color_filter_operation = request.color_filter_operations.is_some();
 
         for resource in &resource_releases {
             let binding = self
@@ -8698,10 +9177,21 @@ impl<'device> PreparedGraph<'device> {
                 ));
             }
         }
+        if releases_color_filter_operation
+            && self
+                .color_filter_operation_bindings
+                .get(&pass)
+                .is_none_or(|binding| binding.buffer.is_none())
+        {
+            return Err(preparation_error(
+                "prepared color-filter operation release is stale or missing",
+            ));
+        }
 
         let Self {
             resource_bindings,
             kernel_bindings,
+            color_filter_operation_bindings,
             frame_scope,
             ..
         } = self;
@@ -8736,6 +9226,12 @@ impl<'device> PreparedGraph<'device> {
                 .and_then(|binding| binding.lease.take())
                 .expect("atomically resolved prepared kernel must remain bound");
         }
+        if releases_color_filter_operation {
+            let _ = color_filter_operation_bindings
+                .get_mut(&pass)
+                .and_then(|binding| binding.buffer.take())
+                .expect("validated color-filter operation buffer must remain bound");
+        }
         self.next_pass = self.next_pass.saturating_add(1);
         Ok(())
     }
@@ -8759,6 +9255,10 @@ impl<'device> PreparedGraph<'device> {
                 .kernel_bindings
                 .values()
                 .any(|binding| binding.lease.is_some())
+            || self
+                .color_filter_operation_bindings
+                .values()
+                .any(|binding| binding.buffer.is_some())
         {
             return Err(preparation_error(
                 "the C08 graph submission does not own one exact completed prepared frame",
@@ -8801,6 +9301,10 @@ impl<'device> PreparedGraph<'device> {
                 .kernel_bindings
                 .values()
                 .any(|binding| binding.lease.is_some())
+            || self
+                .color_filter_operation_bindings
+                .values()
+                .any(|binding| binding.buffer.is_some())
         {
             return Err(preparation_error(
                 "prepared graph cannot finish before every pass and last-use release",

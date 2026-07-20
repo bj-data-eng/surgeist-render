@@ -14,8 +14,10 @@ use super::resource::{
     ResourceManagerObservationForTest,
 };
 #[cfg(test)]
-use super::shader::DevicePassCacheCountsForTest;
+use super::shader::{ColorFilterOperationBufferLimits, DevicePassCacheCountsForTest};
 use super::surface::{HeadlessPublication, SurfaceBackend};
+#[cfg(test)]
+use super::surface::{HeadlessResources, RendererIdentity};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -331,6 +333,28 @@ pub(crate) struct C09OrderedGraphEncodingObservationForTest {
     pub(crate) composite_count: usize,
     pub(crate) one_graph_command_encoder: bool,
     pub(crate) transaction_committed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C10OrderedColorGraphEncodingObservationForTest {
+    pub(crate) fused_runs_preserve_authored_order: bool,
+    pub(crate) color_pass_count: usize,
+    pub(crate) binds_exact_source_spatial_and_operations: bool,
+    pub(crate) source_and_result_are_distinct: bool,
+    pub(crate) uses_validated_viewport_and_scissor: bool,
+    pub(crate) releases_every_resource_at_last_use: bool,
+    pub(crate) one_graph_command_encoder: bool,
+    pub(crate) transaction_committed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C10OversizedBufferPreservationObservationForTest {
+    pub(crate) returns_exact_limit_error: bool,
+    pub(crate) resources_are_unchanged: bool,
+    pub(crate) cache_is_unchanged: bool,
+    pub(crate) publication_is_unchanged: bool,
 }
 
 #[cfg(test)]
@@ -2477,6 +2501,54 @@ impl Backend {
         .map(|prepared| prepared.with_vello_engine(&ready.engine))
     }
 
+    #[cfg(test)]
+    fn prepare_c10_graph_resources_with_operation_limits_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        operation_limits: ColorFilterOperationBufferLimits,
+    ) -> Result<PreparedGraph<'_>> {
+        let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device slot is unavailable for C10 limit preparation",
+            )
+        })?;
+        if state.generation != identity.generation {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "GPU device generation changed before C10 limit preparation",
+            ));
+        }
+        if let Some(terminal) = state.terminal() {
+            return Err(terminal.error(RuntimeOperation::EffectRendering));
+        }
+        if !state.signal.has_active_operation() {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "C10 limit preparation requires one active GPU transaction",
+            ));
+        }
+        let capabilities = state.capabilities;
+        let ready = state.ready().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "ready GPU resources disappeared before C10 limit preparation",
+            )
+        })?;
+        PreparedGraph::try_prepare_c10_with_operation_limits_for_test(
+            lowered,
+            policy,
+            &capabilities,
+            &ready.device,
+            &ready.queue,
+            &ready.resources,
+            (&ready.pass_cache, operation_limits),
+        )
+        .map(|prepared| prepared.with_vello_engine(&ready.engine))
+    }
+
     fn prepare_exact_surface_graph_resources(
         &mut self,
         identity: DeviceSlotIdentity,
@@ -3349,6 +3421,224 @@ impl Backend {
             keeps_cache_update_provisional: summary.keeps_cache_update_provisional
                 && pass_cache_after == pass_cache_before,
             encodes_without_submission_or_sync: true,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c10_ordered_color_graph_encoding_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        filters: Vec<FilterList>,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C10OrderedColorGraphEncodingObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C10 graph encoding observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (device, queue) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C10 graph encoding observation lost its ready device",
+            )?;
+            (ready.device.clone(), ready.queue.clone())
+        };
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let (output_texture, output_view) =
+            create_headless_texture(&device, output_extent, Format::Rgba8)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C10 caller-owned graph observation encoder"),
+        });
+        let pending = match prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await
+        {
+            Ok(pending) => pending,
+            Err(encoding_error) => {
+                drop(encoder.finish());
+                drop(prepared);
+                return match transaction.finish(RuntimeOperation::EffectRendering).await {
+                    Ok(()) => Err(encoding_error),
+                    Err(scope_error) => Err(scope_error),
+                };
+            }
+        };
+        let summary = pending.summary_for_test();
+        let mut observed = C10OrderedColorGraphEncodingObservationForTest {
+            fused_runs_preserve_authored_order: summary.color_filters_preserve_authored_order
+                && summary.encodes_custom_passes_in_order,
+            color_pass_count: summary.color_filter_count,
+            binds_exact_source_spatial_and_operations: summary
+                .color_filters_bind_exact_source_spatial_and_operations
+                && summary.color_filters_preserve_signed_texel_mapping,
+            source_and_result_are_distinct: summary.color_filter_sources_and_results_are_distinct,
+            uses_validated_viewport_and_scissor: summary
+                .color_filters_use_validated_viewport_and_scissor,
+            releases_every_resource_at_last_use: summary.color_filter_operation_buffers_released
+                && summary.advances_every_pass_once,
+            one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
+            transaction_committed: false,
+        };
+        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        drop(output_view);
+        let payload = C08GraphSubmissionPayload::new(
+            encoder.finish(),
+            prepared_submission,
+            HeadlessPublication::new(output_texture),
+        );
+        let committed = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C10 graph encoding observation lost its pass cache before commit",
+            )?;
+            transaction
+                .submit_c08_graph(
+                    &device,
+                    &queue,
+                    &mut ready.pass_cache,
+                    payload,
+                    RuntimeOperation::EffectRendering,
+                )
+                .await?
+        };
+        let _ = committed.into_parts();
+        observed.transaction_committed = true;
+        Ok(observed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c10_oversized_buffer_preservation_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        filters: Vec<FilterList>,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C10OversizedBufferPreservationObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C10 limit observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C10 limit observation lost its ready device",
+            )?
+            .device
+            .clone();
+        let publication_extent = PhysicalSize::new(1, 1);
+        let (published_texture, published_view) =
+            create_headless_texture(&device, publication_extent, Format::Rgba8)?;
+        drop(published_view);
+        let mut published_surface = Surface::with_backend(
+            Attachment::Headless,
+            SurfaceOptions::default(),
+            SurfaceBackend::Headless {
+                device_identity: identity,
+                resources: HeadlessResources::Pending,
+                physical_size: publication_extent,
+            },
+            RendererIdentity::new(),
+        );
+        published_surface.commit_headless_publication(HeadlessPublication::new(published_texture));
+        let publication_count_before = published_surface.headless_publication_count_for_test();
+        let publication_state_before = published_surface.resource_state();
+        let (resources_before, cache_before) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C10 limit observation lost its preflight state",
+            )?;
+            (
+                ready.resources.observation_for_test(),
+                ready.pass_cache.counts_for_test(),
+            )
+        };
+
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let first_run_byte_len = 16_u64 + 3 * 32;
+        let rejection = match self.prepare_c10_graph_resources_with_operation_limits_for_test(
+            identity,
+            lowered,
+            policy,
+            ColorFilterOperationBufferLimits::for_test(first_run_byte_len - 1, u64::MAX),
+        ) {
+            Ok(prepared) => {
+                drop(prepared);
+                None
+            }
+            Err(error) => Some(error),
+        };
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+
+        let (resources_after, cache_after) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C10 limit observation lost its post-rejection state",
+            )?;
+            (
+                ready.resources.observation_for_test(),
+                ready.pass_cache.counts_for_test(),
+            )
+        };
+        let returns_exact_limit_error = rejection.is_some_and(|error| {
+            error.code() == ErrorCode::InvalidInput
+                && error.invalid_value_diagnostic().is_some_and(|invalid| {
+                    invalid.field() == "color filter operation buffer byte length"
+                })
+        });
+        Ok(C10OversizedBufferPreservationObservationForTest {
+            returns_exact_limit_error,
+            resources_are_unchanged: resources_after == resources_before,
+            cache_is_unchanged: cache_after == cache_before,
+            publication_is_unchanged: published_surface.headless_publication_count_for_test()
+                == publication_count_before
+                && published_surface.resource_state() == publication_state_before,
         })
     }
 

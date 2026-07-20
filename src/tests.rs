@@ -11351,6 +11351,128 @@ fn mixed_color_and_future_passes_preserve_the_next_unavailable_diagnostic() {
     );
 }
 
+fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap_or_panic_for_test("C10 ordered encoding requires backend selection")
+        .unwrap_or_panic_for_test("C10 ordered encoding requires a host adapter");
+    (backend, identity)
+}
+
+#[test]
+fn c10_graph_encodes_fused_color_filters_in_authored_order() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(
+        backend.c10_ordered_color_graph_encoding_observation_for_test(
+            identity,
+            c10_authored_color_runs_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C10 fixture must reach its shared GPU graph executor");
+
+    assert!(
+        observed.color_pass_count == 2
+            && observed.fused_runs_preserve_authored_order
+            && observed.binds_exact_source_spatial_and_operations
+            && observed.uses_validated_viewport_and_scissor
+            && observed.releases_every_resource_at_last_use,
+        "the C10 scheduler has no ordered GPU color pass"
+    );
+}
+
+#[test]
+fn color_filter_pass_uses_distinct_source_and_result_without_readback() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(
+        backend.c10_ordered_color_graph_encoding_observation_for_test(
+            identity,
+            c10_authored_color_runs_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C10 alias fixture must reach its shared GPU graph executor");
+    let no_cpu_visibility = [include_str!("pass.rs"), include_str!("shader.rs")]
+        .iter()
+        .all(|source| {
+            [
+                "queue.submit",
+                "map_async",
+                "Device::poll",
+                "MAP_READ",
+                "get_mapped_range",
+            ]
+            .iter()
+            .all(|forbidden| !source.contains(forbidden))
+        });
+
+    assert!(
+        observed.color_pass_count == 2
+            && observed.source_and_result_are_distinct
+            && observed.binds_exact_source_spatial_and_operations
+            && observed.releases_every_resource_at_last_use
+            && no_cpu_visibility,
+        "the C10 pass aliases source or reaches CPU visibility"
+    );
+}
+
+#[test]
+fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(
+        backend.c10_ordered_color_graph_encoding_observation_for_test(
+            identity,
+            c10_authored_color_runs_for_test(),
+            c09_composition_commands_for_test(),
+            c09_composition_frame_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C10 transaction fixture must reach one shared graph executor");
+    let submission = submission_scope.observation_for_test();
+
+    assert!(
+        observed.color_pass_count == 2
+            && observed.one_graph_command_encoder
+            && observed.transaction_committed
+            && submission.queue_submission_count_for_test() == 1
+            && submission.transaction_generation_for_test().is_some()
+            && submission.transaction_generation_for_test()
+                == submission.active_generation_for_test()
+            && submission.scopes_resolved_for_test()
+            && submission.prepared_frame_committed_for_test()
+            && submission.capture_resources_committed_for_test(),
+        "C10 split the frame transaction"
+    );
+}
+
+#[test]
+fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(
+        backend.c10_oversized_buffer_preservation_observation_for_test(
+            identity,
+            c10_authored_color_runs_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C10 limit fixture must reject through immutable preparation");
+    let submission = submission_scope.observation_for_test();
+
+    assert!(
+        observed.returns_exact_limit_error
+            && observed.resources_are_unchanged
+            && observed.cache_is_unchanged
+            && observed.publication_is_unchanged
+            && submission.queue_submission_count_for_test() == 0,
+        "C10 limit rejection changed GPU or published state"
+    );
+}
+
 fn bounded_offscreen_pass_plan_for_graph_probe() -> command::LayerPassPlan {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
