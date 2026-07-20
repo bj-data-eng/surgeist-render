@@ -9,7 +9,10 @@ use super::{
     backend::DeviceCapabilities,
     command::{RenderClip, RenderCommands},
     encode::{encode_vello_clip_coverage_scene, encode_vello_scene_with_initial_transform},
-    filter::{CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS, ColorClampBoundary},
+    filter::{
+        CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS, ColorClampBoundary, RuntimeFilterAmount,
+        RuntimeFilterAngle, RuntimeUnitFilterAmount,
+    },
     frame::{
         GpuRenderGraph, GraphLoweringBlur, GraphLoweringBlurInput, GraphLoweringClipCoverage,
         GraphLoweringColorFilter, GraphLoweringComposite, GraphLoweringCompositeKind,
@@ -81,6 +84,63 @@ pub(crate) struct C09ExecutableGraphObservationForTest {
     pub(crate) rejects_malformed_graph_facts: bool,
     pub(crate) rejects_unsupported_output_binding: bool,
     pub(crate) preserves_exact_c09_dispatch: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimeColorOperationTagForTest {
+    Brightness,
+    Contrast,
+    Grayscale,
+    HueRotate,
+    Invert,
+    Opacity,
+    Saturate,
+    Sepia,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeFilterAmountObservationForTest {
+    pub(crate) zero: bool,
+    pub(crate) mantissa: f32,
+    pub(crate) exponent: i32,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RuntimeColorScalarObservationForTest {
+    Unit(f32),
+    Amount(RuntimeFilterAmountObservationForTest),
+    Angle { sine: f32, cosine: f32 },
+}
+
+#[cfg(test)]
+impl RuntimeColorScalarObservationForTest {
+    pub(crate) fn is_finite_normalized(self) -> bool {
+        match self {
+            Self::Unit(value) => value.is_finite() && (0.0..=1.0).contains(&value),
+            Self::Amount(amount) if amount.zero => amount.mantissa == 0.0 && amount.exponent == 0,
+            Self::Amount(amount) => {
+                amount.mantissa.is_finite() && (0.5..1.0).contains(&amount.mantissa)
+            }
+            Self::Angle { sine, cosine } => sine.is_finite() && cosine.is_finite(),
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeColorOperationObservationForTest {
+    pub(crate) tag: RuntimeColorOperationTagForTest,
+    pub(crate) scalar: RuntimeColorScalarObservationForTest,
+    pub(crate) clamps_straight_rgba_then_premultiplies: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct RuntimeColorFilterObservationForTest {
+    pub(crate) operations: Vec<RuntimeColorOperationObservationForTest>,
 }
 
 #[cfg(test)]
@@ -177,6 +237,112 @@ pub(crate) fn c09_executable_graph_observation_for_test(
         capabilities,
     )
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn runtime_color_filter_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<RuntimeColorFilterObservationForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+        return Err(lowering_error(
+            "the color-filter lowering fixture did not produce a GPU graph",
+        ));
+    };
+    let plan = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let operations = plan
+        .passes
+        .iter()
+        .filter_map(|pass| match &pass.kind {
+            RuntimePassKind::ColorFilter(Some(filter)) => Some(&filter.operations),
+            RuntimePassKind::ClearRoot { .. }
+            | RuntimePassKind::VelloCapture(_)
+            | RuntimePassKind::CanonicalizeCapture
+            | RuntimePassKind::CopyBackdrop
+            | RuntimePassKind::ColorFilter(None)
+            | RuntimePassKind::BlurHorizontal(_)
+            | RuntimePassKind::BlurVertical(_)
+            | RuntimePassKind::DropShadowColorize(_)
+            | RuntimePassKind::Composite(_)
+            | RuntimePassKind::Present => None,
+        })
+        .flatten()
+        .map(runtime_color_operation_observation_for_test)
+        .collect::<Vec<_>>();
+    if operations.is_empty() {
+        return Err(lowering_error(
+            "the color-filter lowering fixture produced no runtime operations",
+        ));
+    }
+    Ok(RuntimeColorFilterObservationForTest { operations })
+}
+
+#[cfg(test)]
+fn runtime_color_operation_observation_for_test(
+    operation: &RuntimeColorOperation,
+) -> RuntimeColorOperationObservationForTest {
+    let (tag, scalar) = match operation.operation {
+        RuntimeColorOperationKind::Brightness(amount) => (
+            RuntimeColorOperationTagForTest::Brightness,
+            observe_runtime_filter_amount_for_test(amount),
+        ),
+        RuntimeColorOperationKind::Contrast(amount) => (
+            RuntimeColorOperationTagForTest::Contrast,
+            observe_runtime_filter_amount_for_test(amount),
+        ),
+        RuntimeColorOperationKind::Grayscale(amount) => (
+            RuntimeColorOperationTagForTest::Grayscale,
+            RuntimeColorScalarObservationForTest::Unit(amount.value()),
+        ),
+        RuntimeColorOperationKind::HueRotate(angle) => (
+            RuntimeColorOperationTagForTest::HueRotate,
+            RuntimeColorScalarObservationForTest::Angle {
+                sine: angle.sine(),
+                cosine: angle.cosine(),
+            },
+        ),
+        RuntimeColorOperationKind::Invert(amount) => (
+            RuntimeColorOperationTagForTest::Invert,
+            RuntimeColorScalarObservationForTest::Unit(amount.value()),
+        ),
+        RuntimeColorOperationKind::Opacity(amount) => (
+            RuntimeColorOperationTagForTest::Opacity,
+            RuntimeColorScalarObservationForTest::Unit(amount.value()),
+        ),
+        RuntimeColorOperationKind::Saturate(amount) => (
+            RuntimeColorOperationTagForTest::Saturate,
+            observe_runtime_filter_amount_for_test(amount),
+        ),
+        RuntimeColorOperationKind::Sepia(amount) => (
+            RuntimeColorOperationTagForTest::Sepia,
+            RuntimeColorScalarObservationForTest::Unit(amount.value()),
+        ),
+    };
+    RuntimeColorOperationObservationForTest {
+        tag,
+        scalar,
+        clamps_straight_rgba_then_premultiplies: matches!(
+            operation.clamp_boundary,
+            RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+        ),
+    }
+}
+
+#[cfg(test)]
+fn observe_runtime_filter_amount_for_test(
+    amount: RuntimeFilterAmount,
+) -> RuntimeColorScalarObservationForTest {
+    RuntimeColorScalarObservationForTest::Amount(RuntimeFilterAmountObservationForTest {
+        zero: amount.zero(),
+        mantissa: amount.mantissa(),
+        exponent: amount.exponent(),
+    })
 }
 
 #[cfg(test)]
@@ -1161,8 +1327,20 @@ pub(crate) enum RuntimeColorClampBoundary {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum RuntimeColorOperationKind {
+    Brightness(RuntimeFilterAmount),
+    Contrast(RuntimeFilterAmount),
+    Grayscale(RuntimeUnitFilterAmount),
+    HueRotate(RuntimeFilterAngle),
+    Invert(RuntimeUnitFilterAmount),
+    Opacity(RuntimeUnitFilterAmount),
+    Saturate(RuntimeFilterAmount),
+    Sepia(RuntimeUnitFilterAmount),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RuntimeColorOperation {
-    operation: ColorFilterOp,
+    operation: RuntimeColorOperationKind,
     clamp_boundary: RuntimeColorClampBoundary,
 }
 
@@ -8107,7 +8285,7 @@ fn runtime_pass_kind(
         GraphLoweringPassKind::CanonicalizeCapture => RuntimePassKind::CanonicalizeCapture,
         GraphLoweringPassKind::CopyBackdrop => RuntimePassKind::CopyBackdrop,
         GraphLoweringPassKind::ColorFilter(filter) => {
-            RuntimePassKind::ColorFilter(filter.map(runtime_color_filter))
+            RuntimePassKind::ColorFilter(filter.map(runtime_color_filter).transpose()?)
         }
         GraphLoweringPassKind::BlurHorizontal(blur) => RuntimePassKind::BlurHorizontal(
             blur.map(|blur| runtime_blur(blur, RuntimeBlurAxis::Horizontal, working_format)),
@@ -8183,24 +8361,57 @@ fn runtime_edge(edge: GraphLoweringEdgePolicy) -> RuntimeSamplingEdge {
     }
 }
 
-fn runtime_color_filter(filter: GraphLoweringColorFilter) -> RuntimeColorFilter {
-    RuntimeColorFilter {
+fn runtime_color_filter(filter: GraphLoweringColorFilter) -> Result<RuntimeColorFilter> {
+    Ok(RuntimeColorFilter {
         operations: filter
             .operations()
             .iter()
             .copied()
-            .map(|operation| RuntimeColorOperation {
-                operation: operation.operation(),
-                clamp_boundary: match operation.clamp_boundary() {
-                    ColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply => {
-                        RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
-                    }
-                },
-            })
-            .collect(),
+            .map(runtime_color_operation)
+            .collect::<Result<Vec<_>>>()?,
         spatial: runtime_filter_spatial(filter.spatial()),
         edge: runtime_edge(filter.edge()),
-    }
+    })
+}
+
+fn runtime_color_operation(
+    operation: super::frame::GraphLoweringColorOperation,
+) -> Result<RuntimeColorOperation> {
+    let runtime_operation = match operation.operation() {
+        ColorFilterOp::Brightness(amount) => {
+            RuntimeColorOperationKind::Brightness(RuntimeFilterAmount::try_from_algorithm(amount)?)
+        }
+        ColorFilterOp::Contrast(amount) => {
+            RuntimeColorOperationKind::Contrast(RuntimeFilterAmount::try_from_algorithm(amount)?)
+        }
+        ColorFilterOp::Grayscale(amount) => RuntimeColorOperationKind::Grayscale(
+            RuntimeUnitFilterAmount::try_from_algorithm(amount)?,
+        ),
+        ColorFilterOp::HueRotate(angle) => {
+            RuntimeColorOperationKind::HueRotate(RuntimeFilterAngle::try_from_algorithm(angle)?)
+        }
+        ColorFilterOp::Invert(amount) => {
+            RuntimeColorOperationKind::Invert(RuntimeUnitFilterAmount::try_from_algorithm(amount)?)
+        }
+        ColorFilterOp::Opacity(amount) => {
+            RuntimeColorOperationKind::Opacity(RuntimeUnitFilterAmount::try_from_algorithm(amount)?)
+        }
+        ColorFilterOp::Saturate(amount) => {
+            RuntimeColorOperationKind::Saturate(RuntimeFilterAmount::try_from_algorithm(amount)?)
+        }
+        ColorFilterOp::Sepia(amount) => {
+            RuntimeColorOperationKind::Sepia(RuntimeUnitFilterAmount::try_from_algorithm(amount)?)
+        }
+    };
+    let clamp_boundary = match operation.clamp_boundary() {
+        ColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply => {
+            RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+        }
+    };
+    Ok(RuntimeColorOperation {
+        operation: runtime_operation,
+        clamp_boundary,
+    })
 }
 
 fn runtime_blur(

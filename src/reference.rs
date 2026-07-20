@@ -7,9 +7,12 @@ use super::{
     style::{ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow},
 };
 
-const LUMA_RED: f64 = 0.213;
-const LUMA_GREEN: f64 = 0.715;
-const LUMA_BLUE: f64 = 0.072;
+const GRAYSCALE_LUMA_RED: f64 = 0.2126;
+const GRAYSCALE_LUMA_GREEN: f64 = 0.7152;
+const GRAYSCALE_LUMA_BLUE: f64 = 0.0722;
+const SATURATION_LUMA_RED: f64 = 0.213;
+const SATURATION_LUMA_GREEN: f64 = 0.715;
+const SATURATION_LUMA_BLUE: f64 = 0.072;
 
 /// CPU reference pixel stored as premultiplied RGBA8.
 ///
@@ -220,7 +223,7 @@ impl PremultipliedRgba8 {
                 rgb.map(|channel| (channel - 0.5) * amount.value() + 0.5)
             }),
             ColorFilterOp::Grayscale(amount) => self.apply_straight_color_filter(|rgb| {
-                let gray = rgb.luma();
+                let gray = rgb.grayscale_luma();
                 rgb.mix(StraightRgb::new(gray, gray, gray), amount.value())
             }),
             ColorFilterOp::HueRotate(angle) => self.apply_straight_color_filter(|rgb| {
@@ -244,7 +247,7 @@ impl PremultipliedRgba8 {
             }),
             ColorFilterOp::Opacity(amount) => self.apply_opacity_amount(amount.value()),
             ColorFilterOp::Saturate(amount) => self.apply_straight_color_filter(|rgb| {
-                let gray = rgb.luma();
+                let gray = rgb.saturation_luma();
                 StraightRgb::new(gray, gray, gray).mix(rgb, amount.value())
             }),
             ColorFilterOp::Sepia(amount) => self.apply_straight_color_filter(|rgb| {
@@ -332,8 +335,16 @@ impl StraightRgb {
         }
     }
 
-    fn luma(self) -> f64 {
-        self.red * LUMA_RED + self.green * LUMA_GREEN + self.blue * LUMA_BLUE
+    fn grayscale_luma(self) -> f64 {
+        self.red * GRAYSCALE_LUMA_RED
+            + self.green * GRAYSCALE_LUMA_GREEN
+            + self.blue * GRAYSCALE_LUMA_BLUE
+    }
+
+    fn saturation_luma(self) -> f64 {
+        self.red * SATURATION_LUMA_RED
+            + self.green * SATURATION_LUMA_GREEN
+            + self.blue * SATURATION_LUMA_BLUE
     }
 
     fn clamp_unit(self) -> Self {

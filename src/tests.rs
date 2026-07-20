@@ -5342,6 +5342,132 @@ fn reference_color_filter_identity_ops_preserve_pixels_byte_for_byte() {
 }
 
 #[test]
+fn color_filter_known_vectors_use_spec_constants_not_oracle_constants() {
+    let red_primary = PremultipliedRgba8::try_new(54, 0, 0, 54).unwrap();
+    let grayscale = color_filter_pipeline([ColorFilterOp::Grayscale(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )]);
+    assert_eq!(
+        red_primary.apply_color_filter_pipeline(&grayscale).unwrap(),
+        PremultipliedRgba8::try_new(11, 11, 11, 54).unwrap(),
+        "the grayscale primary vector differs from the literal S21 result"
+    );
+
+    let green_primary = PremultipliedRgba8::try_new(0, 79, 0, 79).unwrap();
+    assert_eq!(
+        green_primary
+            .apply_color_filter_pipeline(&grayscale)
+            .unwrap(),
+        PremultipliedRgba8::try_new(57, 57, 57, 79).unwrap(),
+        "the grayscale green primary differs from literal S21"
+    );
+    let blue_primary = PremultipliedRgba8::try_new(0, 0, 104, 104).unwrap();
+    assert_eq!(
+        blue_primary
+            .apply_color_filter_pipeline(&grayscale)
+            .unwrap(),
+        PremultipliedRgba8::try_new(8, 8, 8, 104).unwrap(),
+        "the grayscale blue primary differs from literal S21"
+    );
+
+    let saturation_zero =
+        color_filter_pipeline([ColorFilterOp::Saturate(FilterAmount::try_new(0.0).unwrap())]);
+    assert_eq!(
+        red_primary
+            .apply_color_filter_pipeline(&saturation_zero)
+            .unwrap(),
+        PremultipliedRgba8::try_new(12, 12, 12, 54).unwrap(),
+        "saturation reused the grayscale luma constants"
+    );
+
+    let identity_sample = PremultipliedRgba8::try_new(101, 67, 23, 127).unwrap();
+    for identity in [
+        color_filter_pipeline([ColorFilterOp::Saturate(FilterAmount::try_new(1.0).unwrap())]),
+        color_filter_pipeline([ColorFilterOp::HueRotate(
+            FilterAngle::try_radians(0.0).unwrap(),
+        )]),
+        color_filter_pipeline([ColorFilterOp::Sepia(
+            UnitFilterAmount::try_new(0.0).unwrap(),
+        )]),
+    ] {
+        assert_eq!(
+            identity_sample
+                .apply_color_filter_pipeline(&identity)
+                .unwrap(),
+            identity_sample,
+            "a literal S21 zero or identity vector changed the source"
+        );
+    }
+
+    let opaque_red = PremultipliedRgba8::try_new(255, 0, 0, 255).unwrap();
+    let hue_quarter_turn = color_filter_pipeline([ColorFilterOp::HueRotate(
+        FilterAngle::try_radians(std::f64::consts::FRAC_PI_2).unwrap(),
+    )]);
+    assert_eq!(
+        opaque_red
+            .apply_color_filter_pipeline(&hue_quarter_turn)
+            .unwrap(),
+        PremultipliedRgba8::try_new(0, 91, 0, 255).unwrap(),
+        "quarter-turn hue rotation differs from the literal S21 matrix"
+    );
+
+    let sepia = color_filter_pipeline([ColorFilterOp::Sepia(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )]);
+    assert_eq!(
+        opaque_red.apply_color_filter_pipeline(&sepia).unwrap(),
+        PremultipliedRgba8::try_new(100, 89, 69, 255).unwrap(),
+        "full sepia differs from the literal S21 matrix"
+    );
+
+    let brightness = color_filter_pipeline([ColorFilterOp::Brightness(
+        FilterAmount::try_new(2.0).unwrap(),
+    )]);
+    assert_eq!(
+        PremultipliedRgba8::try_new(192, 64, 1, 255)
+            .unwrap()
+            .apply_color_filter_pipeline(&brightness)
+            .unwrap(),
+        PremultipliedRgba8::try_new(255, 128, 2, 255).unwrap(),
+        "brightness did not clamp at its source-operation boundary"
+    );
+    let clamped_brightness_chain = color_filter_pipeline([
+        ColorFilterOp::Brightness(FilterAmount::try_new(2.0).unwrap()),
+        ColorFilterOp::Brightness(FilterAmount::try_new(0.5).unwrap()),
+    ]);
+    assert_eq!(
+        identity_sample
+            .apply_color_filter_pipeline(&clamped_brightness_chain)
+            .unwrap(),
+        PremultipliedRgba8::try_new(64, 64, 23, 127).unwrap(),
+        "the oracle omitted a source-operation clamp and premultiply boundary"
+    );
+
+    let contrast =
+        color_filter_pipeline([ColorFilterOp::Contrast(FilterAmount::try_new(2.0).unwrap())]);
+    assert_eq!(
+        PremultipliedRgba8::try_new(0, 128, 255, 255)
+            .unwrap()
+            .apply_color_filter_pipeline(&contrast)
+            .unwrap(),
+        PremultipliedRgba8::try_new(0, 129, 255, 255).unwrap(),
+        "contrast did not clamp at its source-operation boundary"
+    );
+
+    let near_gray_saturation = color_filter_pipeline([ColorFilterOp::Saturate(
+        FilterAmount::try_new(f64::MAX).unwrap(),
+    )]);
+    assert_eq!(
+        PremultipliedRgba8::try_new(128, 127, 128, 255)
+            .unwrap()
+            .apply_color_filter_pipeline(&near_gray_saturation)
+            .unwrap(),
+        PremultipliedRgba8::try_new(255, 0, 255, 255).unwrap(),
+        "near-gray saturation did not clamp finitely at its operation boundary"
+    );
+}
+
+#[test]
 fn reference_color_filter_partial_ops_match_deterministic_bytes() {
     let pixel = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
     let cases = [
@@ -10792,6 +10918,153 @@ fn color_filter_fusion_preserves_each_source_clamp() {
         observed.steps[0].edge,
         OrderedFilterEdgeObservation::NoSampling
     );
+}
+
+#[test]
+fn filter_scalar_lowering_handles_f32_f64_exponents_and_huge_angles_finitely() {
+    use super::pass::{
+        RuntimeColorOperationTagForTest as Tag, RuntimeColorScalarObservationForTest as Scalar,
+        RuntimeFilterAmountObservationForTest as Amount,
+    };
+
+    let mantissa_renormalization_boundary = f64::from_bits(1.0_f64.to_bits() - (1_u64 << 28));
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(0.0).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(f64::from_bits(1)).unwrap()),
+        FilterOp::grayscale(UnitFilterAmount::try_new(0.1).unwrap()),
+        FilterOp::hue_rotate(FilterAngle::try_radians(f64::MAX).unwrap()),
+        FilterOp::invert(UnitFilterAmount::try_new(0.25).unwrap()),
+        FilterOp::opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+        FilterOp::saturate(FilterAmount::try_new(f64::MAX).unwrap()),
+        FilterOp::sepia(UnitFilterAmount::try_new(1.0).unwrap()),
+        FilterOp::brightness(FilterAmount::try_new(f64::from(f32::MAX)).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(mantissa_renormalization_boundary).unwrap()),
+        FilterOp::hue_rotate(FilterAngle::try_radians(-f64::MAX).unwrap()),
+    ])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(0.5, 0.5, 0.5, 1.0).unwrap(),
+            );
+        });
+    let commands = scene.normalize(Capabilities::CURRENT).unwrap();
+    let context = super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::TRANSPARENT,
+    )
+    .unwrap();
+    let observed = super::pass::runtime_color_filter_observation_for_test(
+        commands,
+        context,
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .expect("the authored color list must reach the real private runtime lowering");
+
+    assert!(
+        observed.operations.len() == 11
+            && observed
+                .operations
+                .iter()
+                .all(|operation| operation.scalar.is_finite_normalized())
+            && observed
+                .operations
+                .iter()
+                .all(|operation| operation.clamps_straight_rgba_then_premultiplies),
+        "runtime color scalars are not finite normalized S21 values"
+    );
+
+    assert_eq!(
+        observed
+            .operations
+            .iter()
+            .map(|operation| operation.tag)
+            .collect::<Vec<_>>(),
+        vec![
+            Tag::Brightness,
+            Tag::Contrast,
+            Tag::Grayscale,
+            Tag::HueRotate,
+            Tag::Invert,
+            Tag::Opacity,
+            Tag::Saturate,
+            Tag::Sepia,
+            Tag::Brightness,
+            Tag::Contrast,
+            Tag::HueRotate,
+        ],
+        "runtime lowering changed authored operation tags or order"
+    );
+    assert_eq!(
+        observed.operations[0].scalar,
+        Scalar::Amount(Amount {
+            zero: true,
+            mantissa: 0.0,
+            exponent: 0,
+        })
+    );
+    assert_eq!(
+        observed.operations[1].scalar,
+        Scalar::Amount(Amount {
+            zero: false,
+            mantissa: 0.5,
+            exponent: -1073,
+        })
+    );
+    assert!(matches!(
+        observed.operations[2].scalar,
+        Scalar::Unit(value) if value.to_bits() == (0.1_f64 as f32).to_bits()
+    ));
+    assert_eq!(
+        observed.operations[6].scalar,
+        Scalar::Amount(Amount {
+            zero: false,
+            mantissa: 0.5,
+            exponent: 1025,
+        })
+    );
+    assert_eq!(
+        observed.operations[8].scalar,
+        Scalar::Amount(Amount {
+            zero: false,
+            mantissa: f32::from_bits(0x3f7f_ffff),
+            exponent: 128,
+        })
+    );
+    assert_eq!(
+        observed.operations[9].scalar,
+        Scalar::Amount(Amount {
+            zero: false,
+            mantissa: 0.5,
+            exponent: 1,
+        })
+    );
+
+    for (index, angle) in [(3, f64::MAX), (10, -f64::MAX)] {
+        let reduced = angle.rem_euclid(std::f64::consts::TAU) as f32;
+        let (expected_sine, expected_cosine) = reduced.sin_cos();
+        assert!(matches!(
+            observed.operations[index].scalar,
+            Scalar::Angle { sine, cosine }
+                if sine.to_bits() == expected_sine.to_bits()
+                    && cosine.to_bits() == expected_cosine.to_bits()
+        ));
+    }
 }
 
 fn bounded_offscreen_pass_plan_for_graph_probe() -> command::LayerPassPlan {

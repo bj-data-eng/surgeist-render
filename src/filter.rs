@@ -1,19 +1,28 @@
 use super::{
     Error, Rect, Result,
-    style::{ColorFilterOp, FilterBlur, FilterDropShadow, FilterList, FilterOpKind},
+    style::{
+        ColorFilterOp, FilterAmount, FilterAngle, FilterBlur, FilterDropShadow, FilterList,
+        FilterOpKind, UnitFilterAmount,
+    },
 };
 #[cfg(test)]
 use super::{
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
-    style::{ColorFilterPipeline, UnitFilterAmount},
+    style::ColorFilterPipeline,
 };
 
 #[cfg(test)]
-const LUMA_RED: f64 = 0.213;
+const GRAYSCALE_LUMA_RED: f64 = 0.2126;
 #[cfg(test)]
-const LUMA_GREEN: f64 = 0.715;
+const GRAYSCALE_LUMA_GREEN: f64 = 0.7152;
 #[cfg(test)]
-const LUMA_BLUE: f64 = 0.072;
+const GRAYSCALE_LUMA_BLUE: f64 = 0.0722;
+#[cfg(test)]
+const SATURATION_LUMA_RED: f64 = 0.213;
+#[cfg(test)]
+const SATURATION_LUMA_GREEN: f64 = 0.715;
+#[cfg(test)]
+const SATURATION_LUMA_BLUE: f64 = 0.072;
 pub(crate) const CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS: f64 = 2.5;
 #[cfg(test)]
 const DEFAULT_MAX_BLUR_RADIUS: f64 = 256.0;
@@ -740,6 +749,157 @@ pub(crate) enum ColorClampBoundary {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeUnitFilterAmount {
+    value: f32,
+}
+
+impl RuntimeUnitFilterAmount {
+    pub(crate) fn try_from_algorithm(amount: UnitFilterAmount) -> Result<Self> {
+        let value = checked_runtime_f32("runtime unit filter amount", amount.value())?;
+        if !(0.0..=1.0).contains(&value) {
+            return Err(Error::invalid_value(
+                "runtime unit filter amount",
+                value,
+                "must remain between 0 and 1 after f64-to-f32 narrowing",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn value(self) -> f32 {
+        self.value
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeFilterAmount {
+    zero: bool,
+    mantissa: f32,
+    exponent: i32,
+}
+
+impl RuntimeFilterAmount {
+    pub(crate) fn try_from_algorithm(amount: FilterAmount) -> Result<Self> {
+        let value = amount.value();
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::invalid_value(
+                "runtime filter amount",
+                value,
+                "must be finite and non-negative before runtime lowering",
+            ));
+        }
+        if value == 0.0 {
+            return Ok(Self {
+                zero: true,
+                mantissa: 0.0,
+                exponent: 0,
+            });
+        }
+
+        const FRACTION_BITS: u32 = 52;
+        const FRACTION_MASK: u64 = (1_u64 << FRACTION_BITS) - 1;
+        const IMPLICIT_BIT: u64 = 1_u64 << FRACTION_BITS;
+        const NORMALIZED_DIVISOR: f64 = (1_u64 << (FRACTION_BITS + 1)) as f64;
+
+        let bits = value.to_bits();
+        let encoded_exponent = ((bits >> FRACTION_BITS) & 0x7ff) as i32;
+        let fraction = bits & FRACTION_MASK;
+        let (significand, mut exponent) = if encoded_exponent == 0 {
+            let highest_fraction_bit = 63_i32 - fraction.leading_zeros() as i32;
+            let shift = FRACTION_BITS - highest_fraction_bit as u32;
+            (fraction << shift, highest_fraction_bit - 1073)
+        } else {
+            (IMPLICIT_BIT | fraction, encoded_exponent - 1022)
+        };
+        let normalized = significand as f64 / NORMALIZED_DIVISOR;
+        let mut mantissa = checked_runtime_f32("runtime filter amount mantissa", normalized)?;
+        if mantissa == 1.0 {
+            mantissa = 0.5;
+            exponent = exponent.checked_add(1).ok_or_else(|| {
+                Error::invalid_value(
+                    "runtime filter amount exponent",
+                    exponent,
+                    "must fit in i32 after mantissa renormalization",
+                )
+            })?;
+        }
+        if !(0.5..1.0).contains(&mantissa) {
+            return Err(Error::invalid_value(
+                "runtime filter amount mantissa",
+                mantissa,
+                "must be finite and normalized to [0.5, 1)",
+            ));
+        }
+
+        Ok(Self {
+            zero: false,
+            mantissa,
+            exponent,
+        })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn zero(self) -> bool {
+        self.zero
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn mantissa(self) -> f32 {
+        self.mantissa
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn exponent(self) -> i32 {
+        self.exponent
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RuntimeFilterAngle {
+    sine: f32,
+    cosine: f32,
+}
+
+impl RuntimeFilterAngle {
+    pub(crate) fn try_from_algorithm(angle: FilterAngle) -> Result<Self> {
+        let reduced = angle.radians().rem_euclid(std::f64::consts::TAU);
+        let reduced = checked_runtime_f32("runtime filter angle", reduced)?;
+        let (sine, cosine) = reduced.sin_cos();
+        if !sine.is_finite() || !cosine.is_finite() {
+            return Err(Error::invalid_value(
+                "runtime filter angle sine and cosine",
+                format!("{sine}, {cosine}"),
+                "must remain finite after angle reduction",
+            ));
+        }
+        Ok(Self { sine, cosine })
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn sine(self) -> f32 {
+        self.sine
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn cosine(self) -> f32 {
+        self.cosine
+    }
+}
+
+fn checked_runtime_f32(field: &'static str, value: f64) -> Result<f32> {
+    let narrowed = value as f32;
+    if !narrowed.is_finite() {
+        return Err(Error::invalid_value(
+            field,
+            value,
+            "must remain finite after f64-to-f32 narrowing",
+        ));
+    }
+    Ok(narrowed)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct ClampedColorFilterOperation {
     operation: ColorFilterOp,
     clamp_boundary: ColorClampBoundary,
@@ -1021,21 +1181,21 @@ impl StraightColorTransform {
         Self {
             matrix: [
                 [
-                    inverse + amount * LUMA_RED,
-                    amount * LUMA_GREEN,
-                    amount * LUMA_BLUE,
+                    inverse + amount * GRAYSCALE_LUMA_RED,
+                    amount * GRAYSCALE_LUMA_GREEN,
+                    amount * GRAYSCALE_LUMA_BLUE,
                     0.0,
                 ],
                 [
-                    amount * LUMA_RED,
-                    inverse + amount * LUMA_GREEN,
-                    amount * LUMA_BLUE,
+                    amount * GRAYSCALE_LUMA_RED,
+                    inverse + amount * GRAYSCALE_LUMA_GREEN,
+                    amount * GRAYSCALE_LUMA_BLUE,
                     0.0,
                 ],
                 [
-                    amount * LUMA_RED,
-                    amount * LUMA_GREEN,
-                    inverse + amount * LUMA_BLUE,
+                    amount * GRAYSCALE_LUMA_RED,
+                    amount * GRAYSCALE_LUMA_GREEN,
+                    inverse + amount * GRAYSCALE_LUMA_BLUE,
                     0.0,
                 ],
             ],
@@ -1084,21 +1244,21 @@ impl StraightColorTransform {
         Self {
             matrix: [
                 [
-                    amount + inverse * LUMA_RED,
-                    inverse * LUMA_GREEN,
-                    inverse * LUMA_BLUE,
+                    amount + inverse * SATURATION_LUMA_RED,
+                    inverse * SATURATION_LUMA_GREEN,
+                    inverse * SATURATION_LUMA_BLUE,
                     0.0,
                 ],
                 [
-                    inverse * LUMA_RED,
-                    amount + inverse * LUMA_GREEN,
-                    inverse * LUMA_BLUE,
+                    inverse * SATURATION_LUMA_RED,
+                    amount + inverse * SATURATION_LUMA_GREEN,
+                    inverse * SATURATION_LUMA_BLUE,
                     0.0,
                 ],
                 [
-                    inverse * LUMA_RED,
-                    inverse * LUMA_GREEN,
-                    amount + inverse * LUMA_BLUE,
+                    inverse * SATURATION_LUMA_RED,
+                    inverse * SATURATION_LUMA_GREEN,
+                    amount + inverse * SATURATION_LUMA_BLUE,
                     0.0,
                 ],
             ],
