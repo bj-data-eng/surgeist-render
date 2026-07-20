@@ -1769,7 +1769,6 @@ impl GpuOperationTransaction {
                     },
                 );
                 transaction.begin_present_phase(device, operation)?;
-                let output = clean.apply();
                 #[cfg(test)]
                 if let Some(control) = &control {
                     control.apply_present_failure(device);
@@ -1792,6 +1791,7 @@ impl GpuOperationTransaction {
                 }
                 result?;
                 let frame_cleanup = resources.commit(pass_cache)?;
+                let output = clean.apply();
                 (output, frame_cleanup)
             }
         };

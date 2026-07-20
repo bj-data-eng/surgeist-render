@@ -22997,9 +22997,9 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     let presented = presented_observation_for_test(&surface);
     assert_eq!(presented.acquire_attempt_count_for_test(), 1);
     assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 1);
-    assert_eq!(presented.discarded_count_for_test(), 0);
-    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
+    assert_eq!(presented.present_count_for_test(), 0);
+    assert_eq!(presented.discarded_count_for_test(), 1);
+    assert!(take_last_presented_texture_for_test(&mut surface).is_none());
     assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     assert!(graph_submission.scopes_resolved_for_test());
     assert!(graph_submission.presentation_scopes_resolved_for_test());
@@ -29535,6 +29535,117 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
         presented_atomically,
         "presented C09 composition did not commit atomically"
     );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn presented_c09_masked_blended_present_scope_failure_discards_without_publication() {
+    let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[160],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .blend(BlendMode::Multiply)
+            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
+        |scene| {
+            scene.fill(rect, c09_color_for_test([224, 64, 32, 192]));
+        },
+    );
+
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .unwrap_or_else(|error| {
+        panic!("presented C09 failure coverage requires a compatible renderer: {error}")
+    });
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    renderer.select_exact_graph_working_format_for_test(working_format);
+    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let parameters = Parameters {
+        base_color: c09_color_for_test([48, 160, 208, 255]),
+        debug: true,
+    };
+    let stats_before = renderer.stats();
+    let parameters_before = surface.last_parameters;
+    let surface_state_before = surface.state();
+    let resource_state_before = surface.resource_state();
+    let physical_size_before = surface.physical_size();
+    let lifecycle_before = presented_lifecycle_for_test(&surface);
+    let target_before = presented_target_identity_for_test(&surface);
+    let resource_before = presented_resource_id_for_test(&surface);
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the configured C09 surface must retain a ready device"))
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the configured C09 surface must retain a resource manager"))
+        .internal_resource_manager_observation_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let failure = ScopedC08GraphPostSubmitControlForTest::present_failing();
+    let error = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
+        .expect_err("the injected C09 present-scope failure must abort before presentation");
+
+    assert_eq!(error.code(), ErrorCode::PresentFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    let presented = presented_observation_for_test(&surface);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
+    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.present_count_for_test(), 0);
+    assert_eq!(presented.discarded_count_for_test(), 1);
+    assert!(take_last_presented_texture_for_test(&mut surface).is_none());
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
+    assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
+    assert!(graph_submission.scopes_resolved_for_test());
+    assert!(graph_submission.presentation_scopes_resolved_for_test());
+    assert!(!graph_submission.prepared_frame_committed_for_test());
+    assert!(!graph_submission.capture_resources_committed_for_test());
+    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(surface.state(), surface_state_before);
+    assert_eq!(surface.resource_state(), resource_state_before);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
+    assert_eq!(presented_target_identity_for_test(&surface), target_before);
+    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
+    assert_eq!(surface.headless_publication_count_for_test(), 0);
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .unwrap_or_else(|| panic!("the C09 failure must retain the ready device"))
+            .device_pass_cache_counts_for_test(),
+        cache_before
+    );
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the C09 failure must return every provisional resource"))
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after.leased_count, 0);
+    assert_eq!(resources_after.active_frame_count, 0);
+    assert_eq!(
+        resources_after.retained_count_for_test(),
+        resources_before.retained_count_for_test()
+    );
+    assert_eq!(
+        resources_after.retained_byte_len_for_test(),
+        resources_before.retained_byte_len_for_test()
+    );
+    assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
 #[test]
