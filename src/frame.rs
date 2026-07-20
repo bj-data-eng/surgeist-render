@@ -364,6 +364,19 @@ pub(crate) fn forced_c08_graph_with_capture_mapping_for_test(
     )
 }
 
+/// Test-only authored-filter ingress for C10 graph closure. This starts with
+/// authored [`FilterList`] values and ordinary normalized capture input, then
+/// uses the production planner's source capture, filter lowering, composition,
+/// scheduling, and validation owners. It does not execute or encode the graph.
+#[cfg(test)]
+pub(crate) fn authored_c10_color_graph_for_test(
+    filters: Vec<FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+) -> Result<GpuRenderGraph> {
+    SemanticFrameGraphPlanner::build_authored_filter_fixture(filters, commands, context)
+}
+
 fn graph_selection_requirements(commands: &[RenderCommand]) -> Vec<GraphSelectionRequirement> {
     let mut requirements = Vec::new();
     collect_graph_selection_requirements(commands, &mut requirements);
@@ -3188,6 +3201,132 @@ impl SemanticFrameGraphPlanner {
         }
         let mut graph = graph_build(planner.builder.finish())?;
         graph.selection_requirements = planner.selection_requirements;
+        graph.vello_spans = planner.vello_spans;
+        graph.clip_coverages = planner.clip_coverages;
+        graph.composites = planner.composites;
+        graph.filter_steps = planner.filter_steps;
+        graph.backdrop_reads = planner.backdrop_reads;
+        graph.imports = planner.imports;
+        graph_build(validate_semantic_frame_graph(&graph))?;
+        Ok(graph)
+    }
+
+    #[cfg(test)]
+    fn build_authored_filter_fixture(
+        filters: Vec<FilterList>,
+        commands: RenderCommands,
+        context: FrameContext,
+    ) -> Result<GpuRenderGraph> {
+        if filters.is_empty() {
+            return Err(Error::invalid_value(
+                "C10 authored filter fixture",
+                0,
+                "must begin with at least one authored FilterList",
+            ));
+        }
+        let output_spatial = match context.output_spatial_plan()? {
+            FrameSpatialPlan::NonEmpty(spatial) => spatial,
+            FrameSpatialPlan::Empty(_) => {
+                return Err(Error::invalid_value(
+                    "C10 authored filter fixture output bounds",
+                    "empty",
+                    "must be non-empty before the private graph fixture is planned",
+                ));
+            }
+        };
+        let mut planner = Self {
+            context,
+            builder: graph_build(SemanticGraphBuilder::for_frame_plan())?,
+            selection_requirements: Vec::new(),
+            vello_spans: Vec::new(),
+            clip_coverages: Vec::new(),
+            composites: Vec::new(),
+            filter_steps: Vec::new(),
+            backdrop_reads: Vec::new(),
+            imports: Vec::new(),
+            resolved_mask_imports: Vec::new(),
+            capture_bounds_coordinate_space: CaptureBoundsCoordinateSpace::Local,
+        };
+        let root_id = graph_build(planner.builder.declare_resource(
+            SemanticResourceDescriptor::new(
+                SemanticResourceRole::RootWorkingImage,
+                output_spatial,
+                0,
+            ),
+        ))?;
+        let clear_root = graph_build(planner.builder.declare_pass(
+            SemanticPassIntent::ClearRoot {
+                initialization: WorkingImageInitialization::SurfaceBaseColor(context.base_color),
+            },
+            Vec::new(),
+            Vec::new(),
+            SemanticPassResult::Resource(root_id),
+        ))?;
+        let root = PlannedGraphResource {
+            id: root_id,
+            producer: Some(clear_root),
+            logical_bounds: output_spatial.logical_bounds,
+            spatial: output_spatial,
+        };
+        let parent = PlannedGraphParent {
+            current: root,
+            spatial: output_spatial,
+        };
+        let mut source = planner
+            .plan_layer_source(commands.commands, Transform::identity())?
+            .ok_or_else(|| {
+                Error::invalid_value(
+                    "C10 authored filter fixture capture",
+                    "empty",
+                    "must contain ordinary capture input",
+                )
+            })?;
+        for authored in &filters {
+            source = planner.apply_filter_list(
+                source,
+                authored,
+                FilterSourceRole::Ordinary,
+                Transform::identity(),
+            )?;
+        }
+        let parent = planner.composite_into_parent(
+            parent,
+            source,
+            &[],
+            SemanticCompositeKind::Layer {
+                transform: Transform::identity(),
+                destination_to_layer_local: DestinationToLayerLocalMapping {
+                    affine: Transform::identity(),
+                },
+                opacity: 1.0,
+                blend: super::layer::BlendMode::Normal,
+                clip: None,
+                outer_clips: Vec::new(),
+                clip_coverage: None,
+                alpha_mask: None,
+            },
+            true,
+        )?;
+        let present = graph_build(planner.builder.declare_pass(
+            SemanticPassIntent::Present,
+            dependencies_for(&[parent.current]),
+            vec![parent.current.id],
+            SemanticPassResult::Empty,
+        ))?;
+        debug_assert_eq!(planner.builder.final_present, Some(present));
+
+        graph_build(planner.builder.seal_recorded_read_counts())?;
+        graph_build(planner.builder.begin_scheduling())?;
+        let scheduled = planner
+            .builder
+            .passes
+            .iter()
+            .map(|pass| pass.id)
+            .collect::<Vec<_>>();
+        for pass in scheduled {
+            graph_build(planner.builder.schedule_pass(pass))?;
+        }
+        let mut graph = graph_build(planner.builder.finish())?;
         graph.vello_spans = planner.vello_spans;
         graph.clip_coverages = planner.clip_coverages;
         graph.composites = planner.composites;

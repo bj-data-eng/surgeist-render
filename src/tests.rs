@@ -11216,6 +11216,141 @@ fn c10_color_filter_layout_binds_exact_source_spatial_and_operations() {
     );
 }
 
+fn c10_authored_color_graph_commands_for_test() -> command::RenderCommands {
+    let mut scene = Scene::new();
+    scene.fill(
+        Rect::new(-2.25, 1.5, 4.0, 3.0),
+        Color::try_rgba(0.5, 0.25, 0.75, 0.625).unwrap(),
+    );
+    scene
+        .normalize(Capabilities::CURRENT)
+        .expect("ordinary C10 capture input must normalize")
+}
+
+fn c10_authored_color_runs_for_test() -> Vec<FilterList> {
+    vec![
+        FilterList::try_ops(vec![
+            FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
+            FilterOp::contrast(FilterAmount::try_new(0.75).unwrap()),
+            FilterOp::invert(UnitFilterAmount::try_new(0.25).unwrap()),
+        ])
+        .unwrap(),
+        FilterList::try_ops(vec![
+            FilterOp::hue_rotate(FilterAngle::try_radians(std::f64::consts::FRAC_PI_2).unwrap()),
+            FilterOp::opacity(UnitFilterAmount::try_new(0.625).unwrap()),
+            FilterOp::sepia(UnitFilterAmount::try_new(0.5).unwrap()),
+        ])
+        .unwrap(),
+    ]
+}
+
+fn c10_authored_color_graph_context_for_test() -> super::frame::FrameContext {
+    super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.25,
+        Antialiasing::Msaa8,
+        Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+    )
+    .unwrap()
+}
+
+fn c10_color_then_blur_filters_for_test() -> Vec<FilterList> {
+    vec![
+        c10_authored_color_runs_for_test()[0].clone(),
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap(),
+    ]
+}
+
+fn c10_color_then_drop_shadow_filters_for_test() -> Vec<FilterList> {
+    vec![
+        c10_authored_color_runs_for_test()[0].clone(),
+        FilterList::try_ops(vec![FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(0.5, -0.25),
+                FilterBlur::try_new(0.75).unwrap(),
+                Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+            )
+            .unwrap(),
+        )])
+        .unwrap(),
+    ]
+}
+
+#[test]
+fn c10_executor_accepts_only_spine_composition_and_ordered_color_filters() {
+    let observed = super::pass::c10_executable_graph_observation_for_test(
+        c10_authored_color_runs_for_test(),
+        c10_color_then_blur_filters_for_test(),
+        c10_color_then_drop_shadow_filters_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.accepts_spine_composition_and_color_for_all_formats
+            && observed.accepts_multiple_ordered_color_runs
+            && observed.rejects_empty_missing_and_malformed_color_facts
+            && observed.rejects_copy_blur_shadow_and_drop_shadow_composite
+            && observed.rejects_unsupported_output
+            && observed.preserves_public_c09_dispatch_boundary,
+        "C10 has no closed pre-allocation subset"
+    );
+}
+
+#[test]
+fn color_filter_graph_preserves_authored_order_clamps_and_exact_lifetimes() {
+    use super::pass::RuntimeColorOperationTagForTest as Tag;
+
+    let observed = super::pass::color_filter_graph_observation_for_test(
+        c10_authored_color_runs_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+    let expected_operations = vec![
+        vec![Tag::Brightness, Tag::Contrast, Tag::Invert],
+        vec![Tag::HueRotate, Tag::Opacity, Tag::Sepia],
+    ];
+    let expected_spatial = super::pass::C10ColorSpatialObservationForTest {
+        logical_bounds: [-2.25, 1.5, 4.0, 3.0],
+        device_origin: (-3, 1),
+        device_extent: PhysicalSize::new(6, 5),
+        texel_origin: Point::new(-2.4, 0.8),
+        raster_scale: 1.25,
+    };
+
+    assert!(
+        observed.operation_tags_by_run == expected_operations
+            && observed.first_source_spatial == Some(expected_spatial)
+            && observed.every_run_has_one_source_and_distinct_result
+            && observed.every_run_preserves_exact_spatial_descriptor
+            && observed.every_operation_retains_one_clamp
+            && observed.current_resource_advances_after_each_run
+            && observed.dependencies_and_last_use_are_exact
+            && observed.closed_color_facts_match_runtime_passes,
+        "the C10 graph changed operation order clamp or last use"
+    );
+}
+
+#[test]
+fn mixed_color_and_future_passes_preserve_the_next_unavailable_diagnostic() {
+    let observed = super::pass::mixed_color_future_diagnostic_observation_for_test(
+        c10_authored_color_runs_for_test(),
+        c10_color_then_blur_filters_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.pure_color_retains_gpu_color_diagnostic
+            && observed.color_then_blur_reports_gpu_blur_diagnostic
+            && observed.mixed_graph_stays_outside_c10_preparation,
+        "a C11 plus pass was admitted or color masked its diagnostic"
+    );
+}
+
 fn bounded_offscreen_pass_plan_for_graph_probe() -> command::LayerPassPlan {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();

@@ -184,6 +184,48 @@ pub(crate) struct C10ColorFilterLayoutObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C10ExecutableGraphObservationForTest {
+    pub(crate) accepts_spine_composition_and_color_for_all_formats: bool,
+    pub(crate) accepts_multiple_ordered_color_runs: bool,
+    pub(crate) rejects_empty_missing_and_malformed_color_facts: bool,
+    pub(crate) rejects_copy_blur_shadow_and_drop_shadow_composite: bool,
+    pub(crate) rejects_unsupported_output: bool,
+    pub(crate) preserves_public_c09_dispatch_boundary: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct C10ColorSpatialObservationForTest {
+    pub(crate) logical_bounds: [f64; 4],
+    pub(crate) device_origin: (i32, i32),
+    pub(crate) device_extent: PhysicalSize,
+    pub(crate) texel_origin: Point,
+    pub(crate) raster_scale: f64,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct ColorFilterGraphObservationForTest {
+    pub(crate) operation_tags_by_run: Vec<Vec<RuntimeColorOperationTagForTest>>,
+    pub(crate) first_source_spatial: Option<C10ColorSpatialObservationForTest>,
+    pub(crate) every_run_has_one_source_and_distinct_result: bool,
+    pub(crate) every_run_preserves_exact_spatial_descriptor: bool,
+    pub(crate) every_operation_retains_one_clamp: bool,
+    pub(crate) current_resource_advances_after_each_run: bool,
+    pub(crate) dependencies_and_last_use_are_exact: bool,
+    pub(crate) closed_color_facts_match_runtime_passes: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct MixedColorFutureDiagnosticObservationForTest {
+    pub(crate) pure_color_retains_gpu_color_diagnostic: bool,
+    pub(crate) color_then_blur_reports_gpu_blur_diagnostic: bool,
+    pub(crate) mixed_graph_stays_outside_c10_preparation: bool,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompositionOuterOperationObservationForTest {
     SourceMapping,
@@ -273,6 +315,54 @@ pub(crate) fn c09_executable_graph_observation_for_test(
         c08_commands,
         c09_commands,
         c10_commands,
+        context,
+        capabilities,
+    )
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c10_executable_graph_observation_for_test(
+    color_filters: Vec<super::FilterList>,
+    blur_filters: Vec<super::FilterList>,
+    shadow_filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C10ExecutableGraphObservationForTest {
+    c10_executable_graph_observation(
+        color_filters,
+        blur_filters,
+        shadow_filters,
+        commands,
+        context,
+        capabilities,
+    )
+    .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn color_filter_graph_observation_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> ColorFilterGraphObservationForTest {
+    color_filter_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn mixed_color_future_diagnostic_observation_for_test(
+    color_filters: Vec<super::FilterList>,
+    mixed_filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> MixedColorFutureDiagnosticObservationForTest {
+    mixed_color_future_diagnostic_observation(
+        color_filters,
+        mixed_filters,
+        commands,
         context,
         capabilities,
     )
@@ -2138,11 +2228,20 @@ struct ExecutableLayerCompositionFacts {
 }
 
 #[derive(Clone)]
+struct ExecutableColorFilterFacts {
+    pass: RuntimePassId,
+    source: RuntimeResourceId,
+    result: RuntimeResourceId,
+    filter: RuntimeColorFilter,
+}
+
+#[derive(Clone)]
 struct ClosedExecutableGraphFacts {
     working_format: WorkingFormat,
     output_format: Format,
     captures: Vec<ExecutableVelloCaptureFacts>,
     layer_compositions: Vec<ExecutableLayerCompositionFacts>,
+    color_filters: Vec<ExecutableColorFilterFacts>,
 }
 
 #[derive(Clone, Copy)]
@@ -2176,6 +2275,10 @@ impl ClosedExecutableGraph {
 
     fn has_layer_composition(&self) -> bool {
         !self.facts.layer_compositions.is_empty()
+    }
+
+    fn has_color_filters(&self) -> bool {
+        !self.facts.color_filters.is_empty()
     }
 }
 
@@ -2221,7 +2324,24 @@ impl ClosedExecutableGraphFacts {
                     .eq(expected_reads)
                 && pass.result == RuntimeResultBinding::Resource(layer.result)
         });
-        captures_are_exact && layers_are_exact
+        let color_filters_are_exact = self.color_filters.iter().all(|color| {
+            plan.passes.iter().any(|pass| {
+                pass.id == color.pass
+                    && matches!(
+                        &pass.kind,
+                        RuntimePassKind::ColorFilter(Some(filter)) if filter == &color.filter
+                    )
+                    && pass.reads.len() == 1
+                    && pass.reads[0].resource == color.source
+                    && pass.result == RuntimeResultBinding::Resource(color.result)
+            })
+        }) && self.color_filters.len()
+            == plan
+                .passes
+                .iter()
+                .filter(|pass| matches!(pass.kind, RuntimePassKind::ColorFilter(Some(_))))
+                .count();
+        captures_are_exact && layers_are_exact && color_filters_are_exact
     }
 }
 
@@ -2316,6 +2436,7 @@ impl C08PreparableGraph {
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
         if closed.has_layer_composition()
+            || closed.has_color_filters()
             || closed.facts.captures.is_empty()
             || closed.facts.captures.iter().any(|capture| {
                 capture
@@ -2380,8 +2501,13 @@ pub(crate) struct C09PreparableGraph {
 }
 
 impl C09PreparableGraph {
-    fn from_closed(closed: ClosedExecutableGraph) -> Self {
-        Self { closed }
+    fn try_from_closed(
+        closed: ClosedExecutableGraph,
+    ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
+        if !closed.has_layer_composition() || closed.has_color_filters() {
+            return Err(Box::new(closed));
+        }
+        Ok(Self { closed })
     }
 
     fn into_closed(self) -> ClosedExecutableGraph {
@@ -2394,6 +2520,35 @@ impl C09PreparableGraph {
 
     pub(crate) const fn output_format(&self) -> Format {
         self.closed.facts.output_format
+    }
+}
+
+#[must_use]
+struct C10PreparableGraph {
+    closed: ClosedExecutableGraph,
+}
+
+impl C10PreparableGraph {
+    fn try_from_closed(
+        closed: ClosedExecutableGraph,
+    ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
+        if !closed.has_color_filters() {
+            return Err(Box::new(closed));
+        }
+        Ok(Self { closed })
+    }
+
+    fn proves_closed_color_facts(&self) -> bool {
+        self.closed.has_color_filters()
+            && self
+                .closed
+                .facts
+                .proves_exact_facts_for(&self.closed.lowered)
+    }
+
+    #[cfg(test)]
+    fn color_filters(&self) -> &[ExecutableColorFilterFacts] {
+        &self.closed.facts.color_filters
     }
 }
 
@@ -2897,6 +3052,7 @@ impl LoweredGraphPlan {
         }];
         let mut captures = Vec::new();
         let mut layer_compositions = Vec::new();
+        let mut color_filters = Vec::new();
         let mut expected_resources = BTreeSet::from([root.id]);
         let mut cursor = 1usize;
         while cursor < self.passes.len() {
@@ -3065,6 +3221,27 @@ impl LoweredGraphPlan {
                     captures.push(facts);
                     cursor = cursor.checked_add(1)?;
                 }
+                RuntimePassKind::ColorFilter(Some(filter)) => {
+                    let context = *contexts.last()?;
+                    if !context.contains_captured_source {
+                        return None;
+                    }
+                    let source = resource_by_id.get(&context.current).copied()?;
+                    let color = validate_closed_color_filter(
+                        pass,
+                        context,
+                        source,
+                        filter,
+                        &resource_by_id,
+                        self.working_format,
+                    )?;
+                    let runtime_context = contexts.last_mut()?;
+                    runtime_context.current = color.result;
+                    runtime_context.producer = pass.id;
+                    expected_resources.insert(color.result);
+                    color_filters.push(color);
+                    cursor = cursor.checked_add(1)?;
+                }
                 RuntimePassKind::Composite(Some(composite))
                     if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
                 {
@@ -3169,6 +3346,7 @@ impl LoweredGraphPlan {
             output_format: self.output_format,
             captures,
             layer_compositions,
+            color_filters,
         })
     }
 
@@ -3533,6 +3711,100 @@ fn layer_has_exact_clip_coverage_capture(
     }
 }
 
+fn validate_closed_color_filter(
+    pass: &RuntimePass,
+    context: ExecutableCompositionContext,
+    source: &RuntimeResourceRequest,
+    filter: &RuntimeColorFilter,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+) -> Option<ExecutableColorFilterFacts> {
+    let RuntimeResourceProducer::Pass(source_producer) = source.producer else {
+        return None;
+    };
+    if source.id != context.current
+        || source_producer != context.producer
+        || pass.dependencies.as_slice() != [source_producer]
+        || pass.reads.len() != 1
+        || !runtime_read_has_exact_facts(
+            &pass.reads[0],
+            RuntimeReadRole::FilterSource,
+            source,
+            RuntimeSamplingFilter::Nearest,
+            RuntimeSamplingEdge::ClampToExtent,
+        )
+        || pass.releases.as_slice() != [source.id]
+        || pass.cache_keys.is_none()
+        || source.format != RuntimeResourceFormat::Working(working_format)
+        || !matches!(
+            source.role,
+            RuntimeResourceRole::FilterIntermediate | RuntimeResourceRole::CompositeResult
+        )
+        || source.expected_reads != 1
+        || source.last_use != pass.id
+        || filter.operations.is_empty()
+        || filter.edge != RuntimeSamplingEdge::ClampToExtent
+        || filter
+            .operations
+            .iter()
+            .any(|operation| !runtime_color_operation_is_closed(operation))
+    {
+        return None;
+    }
+    let RuntimeResultBinding::Resource(result) = pass.result else {
+        return None;
+    };
+    if result == source.id {
+        return None;
+    }
+    let result_resource = resources.get(&result).copied()?;
+    if !c08_resource_has_fixed_facts(
+        result_resource,
+        RuntimeResourceRole::FilterIntermediate,
+        RuntimeResourceFormat::Working(working_format),
+        RuntimeResourceProducer::Pass(pass.id),
+    ) || result_resource.expected_reads != 1
+        || source.spatial != result_resource.spatial
+        || filter.spatial.source != source.spatial
+        || filter.spatial.result != result_resource.spatial
+    {
+        return None;
+    }
+    Some(ExecutableColorFilterFacts {
+        pass: pass.id,
+        source: source.id,
+        result,
+        filter: filter.clone(),
+    })
+}
+
+fn runtime_color_operation_is_closed(operation: &RuntimeColorOperation) -> bool {
+    if operation.clamp_boundary != RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+    {
+        return false;
+    }
+    match operation.operation {
+        RuntimeColorOperationKind::Brightness(amount)
+        | RuntimeColorOperationKind::Contrast(amount)
+        | RuntimeColorOperationKind::Saturate(amount) => {
+            if amount.zero() {
+                amount.mantissa() == 0.0 && amount.exponent() == 0
+            } else {
+                amount.mantissa().is_finite() && (0.5..1.0).contains(&amount.mantissa())
+            }
+        }
+        RuntimeColorOperationKind::Grayscale(amount)
+        | RuntimeColorOperationKind::Invert(amount)
+        | RuntimeColorOperationKind::Opacity(amount)
+        | RuntimeColorOperationKind::Sepia(amount) => {
+            amount.value().is_finite() && (0.0..=1.0).contains(&amount.value())
+        }
+        RuntimeColorOperationKind::HueRotate(angle) => {
+            angle.sine().is_finite() && angle.cosine().is_finite()
+        }
+    }
+}
+
 fn validate_closed_composite(
     pass: &RuntimePass,
     parent: ExecutableCompositionContext,
@@ -3642,7 +3914,12 @@ fn validate_closed_composite(
                 })
                 || parameters.has_clip() != (clip.is_some() || !outer_clips.is_empty())
                 || parameters.has_clip() != clip_coverage.is_some()
-                || (requires_isolated_source && source.role != RuntimeResourceRole::CompositeResult)
+                || (requires_isolated_source
+                    && !matches!(
+                        source.role,
+                        RuntimeResourceRole::CompositeResult
+                            | RuntimeResourceRole::FilterIntermediate
+                    ))
                 || (!requires_isolated_source
                     && (source.role != RuntimeResourceRole::FilterIntermediate
                         || *transform != Transform::identity()
@@ -4078,6 +4355,340 @@ fn c09_executable_graph_observation(
         rejects_malformed_graph_facts,
         rejects_unsupported_output_binding,
         preserves_exact_c09_dispatch,
+    })
+}
+
+#[cfg(test)]
+fn lower_authored_c10_graph_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    working_format: WorkingFormat,
+    output_format: Format,
+    capabilities: &DeviceCapabilities,
+) -> Option<(GpuRenderGraph, LoweredGraphPlan)> {
+    let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context).ok()?;
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        output_format,
+        capabilities,
+    )
+    .ok()?;
+    Some((graph, lowered))
+}
+
+#[cfg(test)]
+fn c10_executable_graph_observation(
+    color_filters: Vec<super::FilterList>,
+    blur_filters: Vec<super::FilterList>,
+    shadow_filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<C10ExecutableGraphObservationForTest> {
+    let (color_graph, color_lowered) = lower_authored_c10_graph_for_test(
+        color_filters.clone(),
+        commands.clone(),
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let (_, blur_lowered) = lower_authored_c10_graph_for_test(
+        blur_filters,
+        commands.clone(),
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let (_, shadow_lowered) = lower_authored_c10_graph_for_test(
+        shadow_filters,
+        commands.clone(),
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let is_closed = |lowered| {
+        ClosedExecutableGraph::try_from_lowered(lowered)
+            .ok()
+            .is_some_and(|closed| C10PreparableGraph::try_from_closed(closed).is_ok())
+    };
+    let mut accepts_spine_composition_and_color_for_all_formats = true;
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        for output_format in [Format::Rgba8, Format::Bgra8] {
+            let (_, lowered) = lower_authored_c10_graph_for_test(
+                color_filters.clone(),
+                commands.clone(),
+                context,
+                working_format,
+                output_format,
+                &capabilities,
+            )?;
+            accepts_spine_composition_and_color_for_all_formats &= is_closed(lowered);
+        }
+    }
+
+    let color_pass_indices = color_lowered
+        .passes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, pass)| {
+            matches!(pass.kind, RuntimePassKind::ColorFilter(Some(_))).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let accepts_multiple_ordered_color_runs = color_pass_indices.len() == color_filters.len()
+        && color_pass_indices.len() > 1
+        && is_closed(color_lowered.clone());
+    let rejects = |invalid| !is_closed(invalid);
+
+    let mut malformed = Vec::new();
+    let first_color = *color_pass_indices.first()?;
+    let mut invalid = color_lowered.clone();
+    invalid.passes[first_color].kind = RuntimePassKind::ColorFilter(None);
+    malformed.push(invalid);
+    let mut invalid = color_lowered.clone();
+    let RuntimePassKind::ColorFilter(Some(filter)) = &mut invalid.passes[first_color].kind else {
+        return None;
+    };
+    filter.operations.clear();
+    malformed.push(invalid);
+    let mut invalid = color_lowered.clone();
+    invalid.passes[first_color].dependencies.clear();
+    malformed.push(invalid);
+    let mut invalid = color_lowered.clone();
+    invalid.passes[first_color].reads[0].sampling_filter = RuntimeSamplingFilter::Linear;
+    malformed.push(invalid);
+    let mut invalid = color_lowered.clone();
+    let source = invalid.passes[first_color].reads[0].resource;
+    invalid.passes[first_color].result = RuntimeResultBinding::Resource(source);
+    malformed.push(invalid);
+    let mut invalid = color_lowered.clone();
+    invalid.passes[first_color].releases.clear();
+    malformed.push(invalid);
+    let mut invalid = color_lowered.clone();
+    let RuntimeResultBinding::Resource(result) = invalid.passes[first_color].result else {
+        return None;
+    };
+    let result_index = invalid
+        .resources
+        .iter()
+        .position(|resource| resource.id == result)?;
+    invalid.resources[result_index].spatial.device_origin.0 = invalid.resources[result_index]
+        .spatial
+        .device_origin
+        .0
+        .checked_add(1)?;
+    malformed.push(invalid);
+    if color_pass_indices.len() > 1 {
+        let mut invalid = color_lowered.clone();
+        invalid
+            .passes
+            .swap(color_pass_indices[0], color_pass_indices[1]);
+        malformed.push(invalid);
+    }
+    let rejects_empty_missing_and_malformed_color_facts = malformed.into_iter().all(rejects);
+
+    let mut copy = color_lowered.clone();
+    copy.passes[first_color].kind = RuntimePassKind::CopyBackdrop;
+    let rejects_copy_blur_shadow_and_drop_shadow_composite =
+        rejects(copy) && rejects(blur_lowered) && rejects(shadow_lowered);
+
+    let mut unsupported_output = color_lowered;
+    unsupported_output.output_format = Format::Bgra8;
+    let rejects_unsupported_output = rejects(unsupported_output);
+    let preserves_public_c09_dispatch_boundary = matches!(
+        ExecutableGraphDispatchEligibility::try_classify(
+            &color_graph,
+            Format::Rgba8,
+            ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
+            &capabilities,
+        ),
+        Ok(ExecutableGraphDispatchEligibility::FuturePasses)
+    );
+
+    Some(C10ExecutableGraphObservationForTest {
+        accepts_spine_composition_and_color_for_all_formats,
+        accepts_multiple_ordered_color_runs,
+        rejects_empty_missing_and_malformed_color_facts,
+        rejects_copy_blur_shadow_and_drop_shadow_composite,
+        rejects_unsupported_output,
+        preserves_public_c09_dispatch_boundary,
+    })
+}
+
+#[cfg(test)]
+fn c10_spatial_observation(spatial: RuntimeSpatialDescriptor) -> C10ColorSpatialObservationForTest {
+    C10ColorSpatialObservationForTest {
+        logical_bounds: [
+            spatial.logical_bounds.x(),
+            spatial.logical_bounds.y(),
+            spatial.logical_bounds.width(),
+            spatial.logical_bounds.height(),
+        ],
+        device_origin: spatial.device_origin,
+        device_extent: spatial.device_extent,
+        texel_origin: spatial.texel_origin,
+        raster_scale: spatial.raster_scale,
+    }
+}
+
+#[cfg(test)]
+fn color_filter_graph_observation(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<ColorFilterGraphObservationForTest> {
+    let (_, lowered) = lower_authored_c10_graph_for_test(
+        filters,
+        commands,
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let preparable =
+        C10PreparableGraph::try_from_closed(ClosedExecutableGraph::try_from_lowered(lowered).ok()?)
+            .ok()?;
+    let closed = &preparable.closed;
+    let resources = closed
+        .lowered
+        .resources
+        .iter()
+        .map(|resource| (resource.id, resource))
+        .collect::<BTreeMap<_, _>>();
+    let color_passes = closed
+        .lowered
+        .passes
+        .iter()
+        .filter(|pass| matches!(pass.kind, RuntimePassKind::ColorFilter(Some(_))))
+        .collect::<Vec<_>>();
+    let mut operation_tags_by_run = Vec::with_capacity(color_passes.len());
+    let mut first_source_spatial = None;
+    let mut every_run_has_one_source_and_distinct_result = !color_passes.is_empty();
+    let mut every_run_preserves_exact_spatial_descriptor = !color_passes.is_empty();
+    let mut every_operation_retains_one_clamp = !color_passes.is_empty();
+    let mut current_resource_advances_after_each_run = !color_passes.is_empty();
+    let mut dependencies_and_last_use_are_exact = !color_passes.is_empty();
+    let mut previous_result = None;
+
+    for pass in &color_passes {
+        let RuntimePassKind::ColorFilter(Some(filter)) = &pass.kind else {
+            return None;
+        };
+        let read = pass.reads.first()?;
+        let RuntimeResultBinding::Resource(result) = pass.result else {
+            return None;
+        };
+        let source = resources.get(&read.resource).copied()?;
+        let result_resource = resources.get(&result).copied()?;
+        first_source_spatial.get_or_insert_with(|| c10_spatial_observation(source.spatial));
+        every_run_has_one_source_and_distinct_result &= pass.reads.len() == 1
+            && read.resource != result
+            && read.role == RuntimeReadRole::FilterSource
+            && read.sampling_filter == RuntimeSamplingFilter::Nearest
+            && read.sampling_edge == RuntimeSamplingEdge::ClampToExtent;
+        every_run_preserves_exact_spatial_descriptor &= source.spatial == result_resource.spatial
+            && filter.spatial.source == source.spatial
+            && filter.spatial.result == result_resource.spatial;
+        every_operation_retains_one_clamp &= !filter.operations.is_empty()
+            && filter.operations.iter().all(|operation| {
+                operation.clamp_boundary
+                    == RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+            });
+        if let Some(previous_result) = previous_result {
+            current_resource_advances_after_each_run &= read.resource == previous_result;
+        }
+        previous_result = Some(result);
+        dependencies_and_last_use_are_exact &= matches!(
+            source.producer,
+            RuntimeResourceProducer::Pass(producer)
+                if pass.dependencies.as_slice() == [producer]
+        ) && source.expected_reads == 1
+            && source.last_use == pass.id
+            && pass.releases.as_slice() == [read.resource];
+        operation_tags_by_run.push(
+            filter
+                .operations
+                .iter()
+                .map(|operation| runtime_color_operation_observation_for_test(operation).tag)
+                .collect(),
+        );
+    }
+
+    Some(ColorFilterGraphObservationForTest {
+        operation_tags_by_run,
+        first_source_spatial,
+        every_run_has_one_source_and_distinct_result,
+        every_run_preserves_exact_spatial_descriptor,
+        every_operation_retains_one_clamp,
+        current_resource_advances_after_each_run,
+        dependencies_and_last_use_are_exact,
+        closed_color_facts_match_runtime_passes: preparable.color_filters().len()
+            == color_passes.len()
+            && !color_passes.is_empty()
+            && closed.facts.proves_exact_facts_for(&closed.lowered),
+    })
+}
+
+#[cfg(test)]
+fn mixed_color_future_diagnostic_observation(
+    color_filters: Vec<super::FilterList>,
+    mixed_filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<MixedColorFutureDiagnosticObservationForTest> {
+    let (color_graph, _) = lower_authored_c10_graph_for_test(
+        color_filters,
+        commands.clone(),
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let (mixed_graph, mixed_lowered) = lower_authored_c10_graph_for_test(
+        mixed_filters,
+        commands,
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let color_diagnostic = super::renderer::future_graph_diagnostic_for_test(
+        &color_graph,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok()??;
+    let mixed_diagnostic = super::renderer::future_graph_diagnostic_for_test(
+        &mixed_graph,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok()??;
+    Some(MixedColorFutureDiagnosticObservationForTest {
+        pure_color_retains_gpu_color_diagnostic: color_diagnostic
+            == super::UnsupportedPrimitive::new(
+                super::PrimitiveFamily::Filters,
+                super::PrimitiveOperation::GpuColorFilterExecution,
+            ),
+        color_then_blur_reports_gpu_blur_diagnostic: mixed_diagnostic
+            == super::UnsupportedPrimitive::new(
+                super::PrimitiveFamily::Filters,
+                super::PrimitiveOperation::GpuBlurFilterExecution,
+            ),
+        mixed_graph_stays_outside_c10_preparation: ClosedExecutableGraph::try_from_lowered(
+            mixed_lowered,
+        )
+        .ok()
+        .is_none_or(|closed| C10PreparableGraph::try_from_closed(closed).is_err()),
     })
 }
 
@@ -5334,6 +5945,7 @@ impl GraphPreparationIneligibility {
 enum PrePreparationGraphClassification {
     ExactC08(C08PreparableGraph),
     ExactC09(ClosedExecutableGraph),
+    ExactC10(C10PreparableGraph),
     FuturePasses,
     Ineligible(GraphPreparationIneligibility),
 }
@@ -5380,6 +5992,14 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
+            PrePreparationGraphClassification::ExactC10(preparable) => {
+                if !preparable.proves_closed_color_facts() {
+                    return Err(preparation_error(
+                        "C10 classification lost its closed pre-allocation facts",
+                    ));
+                }
+                Ok(Self::FuturePasses)
+            }
             PrePreparationGraphClassification::ExactC09(_) => {
                 let working_format = working_format.resolve(capabilities)?;
                 let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -5390,9 +6010,16 @@ impl ExecutableGraphDispatchEligibility {
                 )?;
                 match PrePreparationGraphClassification::classify(lowered) {
                     PrePreparationGraphClassification::ExactC09(closed) => {
-                        Ok(Self::ExactC09(C09PreparableGraph::from_closed(closed)))
+                        C09PreparableGraph::try_from_closed(closed)
+                            .map(Self::ExactC09)
+                            .map_err(|_| {
+                                preparation_error(
+                                    "checked C09 dispatch lowering lost its C09-only facts",
+                                )
+                            })
                     }
                     PrePreparationGraphClassification::ExactC08(_)
+                    | PrePreparationGraphClassification::ExactC10(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C09 dispatch lowering changed its closed eligibility result",
@@ -5416,6 +6043,7 @@ impl ExecutableGraphDispatchEligibility {
                         Ok(Self::ExactC08(preparable))
                     }
                     PrePreparationGraphClassification::ExactC09(_)
+                    | PrePreparationGraphClassification::ExactC10(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C08 dispatch lowering changed its closed eligibility result",
@@ -5454,8 +6082,15 @@ impl PrePreparationGraphClassification {
         };
         match C08PreparableGraph::try_from_closed(closed) {
             Ok(preparable) => Self::ExactC08(preparable),
-            Err(closed) if closed.has_layer_composition() => Self::ExactC09(*closed),
-            Err(_) => Self::Ineligible(GraphPreparationIneligibility::OutsideClosedExecutableGraph),
+            Err(closed) => match C10PreparableGraph::try_from_closed(*closed) {
+                Ok(preparable) => Self::ExactC10(preparable),
+                Err(closed) => match C09PreparableGraph::try_from_closed(*closed) {
+                    Ok(preparable) => Self::ExactC09(preparable.into_closed()),
+                    Err(_) => Self::Ineligible(
+                        GraphPreparationIneligibility::OutsideClosedExecutableGraph,
+                    ),
+                },
+            },
         }
     }
 }
@@ -6323,6 +6958,9 @@ impl<'device> PreparedGraph<'device> {
                     pass_cache_phase,
                 )
             }
+            PrePreparationGraphClassification::ExactC10(_) => Err(preparation_error(
+                "a C10 color graph cannot enter C09 resource preparation",
+            )),
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
                 "a future GPU pass cannot enter C09 resource preparation",
             )),

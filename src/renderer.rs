@@ -2252,15 +2252,15 @@ fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<(
             PrimitiveFamily::Filters,
             PrimitiveOperation::GpuDropShadowFilterExecution,
         ))
-    } else if has_color_filter {
-        Some((
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuColorFilterExecution,
-        ))
     } else if has_blur {
         Some((
             PrimitiveFamily::Filters,
             PrimitiveOperation::GpuBlurFilterExecution,
+        ))
+    } else if has_color_filter {
+        Some((
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
         ))
     } else {
         None
@@ -2274,6 +2274,28 @@ fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<(
         BackendErrorCode::RenderFailed,
         "a future GPU graph had no unavailable execution pass",
     ))
+}
+
+#[cfg(test)]
+pub(crate) fn future_graph_diagnostic_for_test(
+    graph: &GpuRenderGraph,
+    output_format: Format,
+    capabilities: &DeviceCapabilities,
+) -> Result<Option<UnsupportedPrimitive>> {
+    match ExecutableGraphDispatchEligibility::try_classify(
+        graph,
+        output_format,
+        ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
+        capabilities,
+    )? {
+        ExecutableGraphDispatchEligibility::FuturePasses => {
+            let error = reject_future_graph_with_typed_diagnostic(graph)
+                .expect_err("a future graph diagnostic probe must reject before execution");
+            Ok(error.unsupported_primitive())
+        }
+        ExecutableGraphDispatchEligibility::ExactC08(_)
+        | ExecutableGraphDispatchEligibility::ExactC09(_) => Ok(None),
+    }
 }
 
 /// Renderer configuration that is fixed when a [`Renderer`] is created.
