@@ -1,7 +1,7 @@
 # GPU Render Pipeline C10 Ordered Color Filter Execution
 
 ## Header
-- Cycle: `C10`; owner: `surgeist-render`; status: `reviewed`.
+- Cycle: `C10`; owner: `surgeist-render`; status: `in_progress`.
 - Cycle base and published prerequisite: `1c4ae3b2547fbe3c42d5519caee902303269ccd1` (C09).
 - Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S16, S18, S20-S21, S27-S28, C10-applicable S30-S34, and per-cycle S36-S37 evidence.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at `562478db06184de64d6d5fad7ed134d99e2ab0f9`, normalized SHA-256 `9fb83aeebf2bcd2a581241e97c7cdde58942c8001f54c195b5a54a090908f1ba`, entry `C10 Ordered Color Filter Execution`.
