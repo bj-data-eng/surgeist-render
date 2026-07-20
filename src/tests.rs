@@ -25210,6 +25210,104 @@ fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
 }
 
 #[test]
+fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("direct format-independence coverage requires a real selected WGPU device");
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("direct format-independence coverage requires a real headless surface");
+    let mut baseline = Scene::new();
+    baseline.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &baseline, Parameters::default()))
+        .expect("the direct baseline must establish a readable publication");
+    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the direct baseline publication must be readable");
+    let publication_before = surface.headless_publication_count_for_test();
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the direct baseline must retain its ready device")
+        .internal_resource_manager_observation_for_test();
+    assert!(
+        renderer.override_default_device_effect_precision_facts_for_test(
+            EffectPrecisionCapabilities::new(false, false),
+        ),
+        "the real renderer must accept the scoped no-effect-format capability facts"
+    );
+
+    let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let mut replacement = Scene::new();
+    replacement.fill(
+        Rect::new(0.0, 0.0, 2.0, 2.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    let result =
+        pollster::block_on(renderer.render(&mut surface, &replacement, Parameters::default()));
+    if let Err(error) = &result {
+        let expected = RuntimeCapabilityUnavailable::try_new(
+            RuntimeOperation::EffectRendering,
+            RuntimeCapabilityUnavailableReason::EffectFormatUnavailable {
+                policy: EffectQualityPolicy::RequireHighPrecision,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            error.runtime_capability_unavailable_diagnostic(),
+            Some(&expected),
+            "the direct regression must fail only at the premature effect-format gate"
+        );
+    }
+    let stats = result.expect("direct Vello must not require an effect working format");
+    let dispatch_after = renderer.dispatch_observation_for_test();
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the direct replacement must retain its ready device")
+        .internal_resource_manager_observation_for_test();
+    let no_effect_resources = offscreen_scope.acquire_count_for_test() == 0
+        && resources_before.effect_texture_count_for_test() == 0
+        && resources_after.effect_texture_count_for_test() == 0
+        && resources_before
+            .resolved_mask_upload_keys_for_test()
+            .is_empty()
+        && resources_after
+            .resolved_mask_upload_keys_for_test()
+            .is_empty()
+        && resources_before.gaussian_kernel_count_for_test() == 0
+        && resources_after.gaussian_kernel_count_for_test() == 0;
+    let selected_direct_vello = dispatch_after.boundary_invocations
+        == dispatch_before.boundary_invocations.saturating_add(1)
+        && dispatch_after.direct_vello_routes
+            == dispatch_before.direct_vello_routes.saturating_add(1)
+        && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
+        && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes
+        && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections
+        && direct_submission.queue_submission_count_for_test() == 1
+        && graph_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(offscreen_scope);
+    let replacement_pixels = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the successful direct replacement publication must be readable");
+
+    assert!(
+        selected_direct_vello
+            && no_effect_resources
+            && surface.headless_publication_count_for_test()
+                == publication_before.saturating_add(1)
+            && renderer.stats() == stats
+            && replacement_pixels != baseline_pixels
+            && replacement_pixels
+                .rgba()
+                .chunks_exact(4)
+                .all(|pixel| pixel == [255, 255, 255, 255]),
+        "direct Vello used graph resources, selected the wrong route, or corrupted publication"
+    );
+}
+
+#[test]
 fn repeated_direct_renders_keep_internal_vello_retention_bounded() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("retention coverage requires a real selected WGPU device");
@@ -30050,6 +30148,121 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
             && cache_after == cache_before
             && resources_after == resources_before,
         "a future graph entered CPU execution or changed publication"
+    );
+}
+
+#[test]
+fn c10_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("future diagnostic ordering requires a real selected WGPU device");
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("future diagnostic ordering requires a real headless surface");
+    let mut baseline = Scene::new();
+    baseline.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    pollster::block_on(renderer.render(&mut surface, &baseline, Parameters::default()))
+        .expect("future diagnostic ordering requires a published direct baseline");
+    let pixels_before = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the future diagnostic baseline must be readable");
+    let stats_before = renderer.stats();
+    let publication_before = surface.headless_publication_count_for_test();
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the future diagnostic baseline must retain its ready cache")
+        .device_pass_cache_counts_for_test();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the future diagnostic baseline must retain its ready resources")
+        .internal_resource_manager_observation_for_test();
+    assert!(
+        renderer.override_default_device_effect_precision_facts_for_test(
+            EffectPrecisionCapabilities::new(false, false),
+        ),
+        "the real renderer must accept the scoped no-effect-format capability facts"
+    );
+
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25).unwrap(),
+    )])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut future = Scene::new();
+    future
+        .fill(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+        )
+        .layer(backdrop, |scene| {
+            scene.fill(Rect::new(1.0, 1.0, 2.0, 2.0), Color::BLACK);
+        });
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let error = pollster::block_on(renderer.render(&mut surface, &future, Parameters::default()))
+        .expect_err("a C10+ graph must retain its typed unavailable-pass diagnostic");
+    let expected = UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
+    );
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(expected),
+        "the C10+ graph diagnostic must precede effect-format resolution: {error:?}"
+    );
+    assert_eq!(
+        error.runtime_capability_unavailable_diagnostic(),
+        None,
+        "effect-format unavailability preempted the exact future-pass diagnostic"
+    );
+    let no_gpu_work = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 0
+        && direct_submission.queue_submission_count_for_test() == 0
+        && offscreen_scope.acquire_count_for_test() == 0;
+    drop(offscreen_scope);
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let pixels_after = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the rejected C10+ graph must retain its prior publication");
+    let cache_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the future rejection must retain its ready cache")
+        .device_pass_cache_counts_for_test();
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the future rejection must retain its ready resources")
+        .internal_resource_manager_observation_for_test();
+    let dispatch_after = renderer.dispatch_observation_for_test();
+
+    assert!(
+        no_gpu_work
+            && dispatch_after.boundary_invocations
+                == dispatch_before.boundary_invocations.saturating_add(1)
+            && dispatch_after.future_pass_rejections
+                == dispatch_before.future_pass_rejections.saturating_add(1)
+            && dispatch_after.direct_vello_routes == dispatch_before.direct_vello_routes
+            && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
+            && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes
+            && renderer.stats() == stats_before
+            && surface.headless_publication_count_for_test() == publication_before
+            && pixels_after == pixels_before
+            && cache_after == cache_before
+            && resources_after == resources_before,
+        "future-pass rejection allocated, submitted, or changed publication"
     );
 }
 

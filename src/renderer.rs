@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::resource::WorkingFormat;
 #[cfg(any(
     feature = "render-window",
@@ -652,7 +653,6 @@ impl Renderer {
         plan: FramePlan,
         output_format: Format,
         working_format: ExecutableGraphWorkingFormatRequest,
-        selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
     ) -> Result<RendererFrameDispatch> {
         #[cfg(test)]
@@ -691,7 +691,7 @@ impl Renderer {
                         preparable,
                     )))
                 }
-                ExecutableGraphDispatchEligibility::ExactC09 => {
+                ExecutableGraphDispatchEligibility::ExactC09(preparable) => {
                     #[cfg(test)]
                     {
                         self.dispatch_observation.exact_c09_graph_routes = self
@@ -699,14 +699,9 @@ impl Renderer {
                             .exact_c09_graph_routes
                             .saturating_add(1);
                     }
-                    Ok(RendererFrameDispatch::ExactGraph(
-                        ExactSurfaceGraph::try_c09(
-                            &graph,
-                            selected_working_format,
-                            output_format,
-                            capabilities,
-                        )?,
-                    ))
+                    Ok(RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(
+                        preparable,
+                    )))
                 }
                 ExecutableGraphDispatchEligibility::FuturePasses => {
                     #[cfg(test)]
@@ -796,35 +791,20 @@ impl Renderer {
                 )
             })?;
         #[cfg(test)]
-        let (working_format, selected_working_format) = match self.exact_graph_working_format {
-            Some(working_format) => {
-                capabilities.validate_supported_working_format(working_format)?;
-                (
-                    ExecutableGraphWorkingFormatRequest::Exact(working_format),
-                    working_format,
-                )
-            }
-            None => {
-                let policy = self.options.effect_quality_policy();
-                (
-                    ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(policy),
-                    capabilities.resolve_effect_working_format(policy)?,
-                )
-            }
+        let working_format = match self.exact_graph_working_format {
+            Some(working_format) => ExecutableGraphWorkingFormatRequest::Exact(working_format),
+            None => ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
+                self.options.effect_quality_policy(),
+            ),
         };
         #[cfg(not(test))]
-        let (working_format, selected_working_format) = {
-            let policy = self.options.effect_quality_policy();
-            (
-                ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(policy),
-                capabilities.resolve_effect_working_format(policy)?,
-            )
-        };
+        let working_format = ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
+            self.options.effect_quality_policy(),
+        );
         let dispatch = self.classify_frame_dispatch(
             frame_plan,
             runtime_surface_format(surface),
             working_format,
-            selected_working_format,
             &capabilities,
         )?;
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
@@ -1036,12 +1016,11 @@ impl Renderer {
             FramePlan::GpuGraph(graph),
             output_format,
             ExecutableGraphWorkingFormatRequest::Exact(working_format),
-            working_format,
             &capabilities,
         )? {
             RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(preparable)) => preparable,
             RendererFrameDispatch::DirectVello(_)
-            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09 { .. }) => {
+            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(_)) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
                     "the private forced graph is outside the exact executable C08 subset",
@@ -2044,6 +2023,20 @@ impl Renderer {
             .and_then(|backend| backend.device_capabilities(device_identity))
             .expect("test requires a ready default device")
             .runtime_report(Format::Rgba8)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn override_default_device_effect_precision_facts_for_test(
+        &mut self,
+        effect_precisions: EffectPrecisionCapabilities,
+    ) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return false;
+        };
+        self.backend.as_mut().is_some_and(|backend| {
+            backend
+                .override_device_effect_precision_facts_for_test(device_identity, effect_precisions)
+        })
     }
 
     #[cfg(test)]

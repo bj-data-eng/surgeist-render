@@ -1832,6 +1832,29 @@ impl C08PreparableGraph {
     }
 }
 
+#[must_use]
+pub(crate) struct C09PreparableGraph {
+    closed: ClosedExecutableGraph,
+}
+
+impl C09PreparableGraph {
+    fn from_closed(closed: ClosedExecutableGraph) -> Self {
+        Self { closed }
+    }
+
+    fn into_closed(self) -> ClosedExecutableGraph {
+        self.closed
+    }
+
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.closed.facts.working_format
+    }
+
+    pub(crate) const fn output_format(&self) -> Format {
+        self.closed.facts.output_format
+    }
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct C08CaptureGridForTest {
@@ -3502,7 +3525,7 @@ fn c09_executable_graph_observation(
             ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
             &capabilities,
         ),
-        Ok(ExecutableGraphDispatchEligibility::ExactC09)
+        Ok(ExecutableGraphDispatchEligibility::ExactC09(_))
     );
 
     Some(C09ExecutableGraphObservationForTest {
@@ -4779,7 +4802,7 @@ impl ExecutableGraphWorkingFormatRequest {
 #[must_use = "the closed graph dispatch result must select exactly one renderer route"]
 pub(crate) enum ExecutableGraphDispatchEligibility {
     ExactC08(C08PreparableGraph),
-    ExactC09,
+    ExactC09(C09PreparableGraph),
     FuturePasses,
 }
 
@@ -4798,7 +4821,25 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
-            PrePreparationGraphClassification::ExactC09(_) => Ok(Self::ExactC09),
+            PrePreparationGraphClassification::ExactC09(_) => {
+                let working_format = working_format.resolve(capabilities)?;
+                let lowered = LoweredGraphPlan::try_lower_validated_graph(
+                    graph,
+                    working_format,
+                    output_format,
+                    capabilities,
+                )?;
+                match PrePreparationGraphClassification::classify(lowered) {
+                    PrePreparationGraphClassification::ExactC09(closed) => {
+                        Ok(Self::ExactC09(C09PreparableGraph::from_closed(closed)))
+                    }
+                    PrePreparationGraphClassification::ExactC08(_)
+                    | PrePreparationGraphClassification::FuturePasses
+                    | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
+                        "checked C09 dispatch lowering changed its closed eligibility result",
+                    )),
+                }
+            }
             PrePreparationGraphClassification::FuturePasses => Ok(Self::FuturePasses),
             PrePreparationGraphClassification::Ineligible(ineligibility) => {
                 Err(ineligibility.into_error())
@@ -5641,6 +5682,32 @@ impl<'device> PreparedGraph<'device> {
         if prepared.c08_execution_facts().is_none() {
             return Err(preparation_error(
                 "C08 preparation lost its validated execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) fn try_prepare_c09(
+        preparable: C09PreparableGraph,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_phase: (&'device DevicePassCache, bool),
+    ) -> Result<Self> {
+        let selected_working_format = preparable.working_format();
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C09(preparable.into_closed()),
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache_phase,
+        )?;
+        if prepared.c09_execution.is_none() {
+            return Err(preparation_error(
+                "C09 preparation lost its validated closed execution facts",
             ));
         }
         Ok(prepared)

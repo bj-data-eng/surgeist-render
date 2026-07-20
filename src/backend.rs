@@ -1,9 +1,10 @@
-use super::frame::GpuRenderGraph;
 #[cfg(test)]
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
-use super::pass::{C08ExternalOutputView, C08PreparableGraph, LoweredGraphPlan, PreparedGraph};
+use super::pass::{
+    C08ExternalOutputView, C08PreparableGraph, C09PreparableGraph, LoweredGraphPlan, PreparedGraph,
+};
 #[cfg(test)]
 use super::pass::{C08PassCacheRequestsForTest, C09CompositeCacheRequestsForTest};
 use super::resource::{FrameCleanup, ResourceManager, WorkingFormat};
@@ -212,51 +213,28 @@ pub(crate) struct Backend {
 #[must_use = "an exact surface graph must enter its GPU transaction"]
 pub(crate) enum ExactSurfaceGraph {
     C08(C08PreparableGraph),
-    C09 {
-        lowered: LoweredGraphPlan,
-        working_format: WorkingFormat,
-        output_format: Format,
-    },
+    C09(C09PreparableGraph),
 }
 
 impl ExactSurfaceGraph {
-    pub(crate) fn try_c09(
-        graph: &GpuRenderGraph,
-        working_format: WorkingFormat,
-        output_format: Format,
-        capabilities: &DeviceCapabilities,
-    ) -> Result<Self> {
-        let lowered = LoweredGraphPlan::try_lower_validated_graph(
-            graph,
-            working_format,
-            output_format,
-            capabilities,
-        )?;
-        Ok(Self::C09 {
-            lowered,
-            working_format,
-            output_format,
-        })
-    }
-
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         match self {
             Self::C08(preparable) => preparable.working_format(),
-            Self::C09 { working_format, .. } => *working_format,
+            Self::C09(preparable) => preparable.working_format(),
         }
     }
 
     pub(crate) const fn output_format(&self) -> Format {
         match self {
             Self::C08(preparable) => preparable.output_format(),
-            Self::C09 { output_format, .. } => *output_format,
+            Self::C09(preparable) => preparable.output_format(),
         }
     }
 
     fn known_output_extent(&self) -> Result<Option<PhysicalSize>> {
         match self {
             Self::C08(preparable) => preparable.output_extent().map(Some),
-            Self::C09 { .. } => Ok(None),
+            Self::C09(_) => Ok(None),
         }
     }
 }
@@ -2547,9 +2525,8 @@ impl Backend {
                     (&ready.pass_cache, true),
                 )
             }
-            ExactSurfaceGraph::C09 { lowered, .. } => PreparedGraph::try_prepare(
-                lowered,
-                EffectQualityPolicy::AllowReducedPrecision,
+            ExactSurfaceGraph::C09(preparable) => PreparedGraph::try_prepare_c09(
+                preparable,
                 &capabilities,
                 &ready.device,
                 &ready.queue,
@@ -2570,6 +2547,30 @@ impl Backend {
         }
         state.observe_terminal();
         state.terminal().is_none().then_some(state.capabilities)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn override_device_effect_precision_facts_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        effect_precisions: EffectPrecisionCapabilities,
+    ) -> bool {
+        let Some(state) = self.device_states.get_mut(identity.slot()) else {
+            return false;
+        };
+        if state.generation != identity.generation {
+            return false;
+        }
+        state.observe_terminal();
+        if state.terminal().is_some() {
+            return false;
+        }
+        state.capabilities = DeviceCapabilities::from_test_facts(
+            effect_precisions.supports_high_precision(),
+            effect_precisions.supports_reduced_precision(),
+            state.capabilities.max_effect_texture_dimension_2d,
+        );
+        true
     }
 
     #[cfg(test)]
