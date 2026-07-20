@@ -3,8 +3,8 @@
 ## Header
 - Cycle: `C09`; owner: `surgeist-render`; status: `in_progress`.
 - Cycle base and published prerequisite: `44fd908f60a4b0d1b073c7f9a11ebab8c1472ee6` (C08).
-- Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S09, S16, S18-S19, S23, S25, S27-S30, and C09-applicable S31-S34 evidence.
-- Sequence: `plans/sequences/gpu-render-pipeline.md` at `c1a203393b2549603c0a0d5698099f55018abe2e`, normalized SHA-256 `70b345be31ac5bf4fcae72e2d3c5901c8e04ad0b2c26080851bd2c50d7150cde`, entry `C09 Composition Clip Mask And Blend Passes`.
+- Specification: `plans/specs/gpu-render-pipeline.md` at `fdbee86d599da8a4fba656a260ca1c910e53ac3d`, normalized SHA-256 `ca32ba5edc2e66b901934e9838facda9c54fdc5106d7f5e355677d61737a1f97`: S09, C09-applicable S11, S16, S18-S19, S23, S25, S27-S30, C09-applicable S31-S34, and per-cycle S36-S37 evidence.
+- Sequence: `plans/sequences/gpu-render-pipeline.md` at `562478db06184de64d6d5fad7ed134d99e2ab0f9`, normalized SHA-256 `9fb83aeebf2bcd2a581241e97c7cdde58942c8001f54c195b5a54a090908f1ba`, entry `C09 Composition Clip Mask And Blend Passes`.
 - Outcome: extend the published source-to-output GPU graph with Vello-generated outer-clip coverage and an exact WGPU composition pass for resolved alpha masks, opacity, isolation, normal source-over, and every currently supported blend mode.
 
 ## Boundary
@@ -17,7 +17,7 @@
 - Add only `src/shaders/layer_composite.wgsl`. Its entry points expose exact normal versus destination-sampling and optional clip/mask binding sets, so no dummy texture, sampler, or parameter binding is needed. Blend choice and mask quality/extend are validated typed parameters; upload identity never enters a shader/pipeline key. Uniform bytes use explicit checked little-endian serialization with WGSL alignment and no pointer cast or owned POD implementation.
 - C09 reuses one caller-owned graph encoder, checked GPU scope, aggregate Vello/effect leases, provisional pass cache, submission, and headless/presented host effect from C08. Only `GpuOperationTransaction` submits. Failure, cancellation, surface transition, or device terminality publishes no draft/cache/lease state and preserves the prior successful surface state. Production composition contains no map, poll, CPU pixel execution, re-upload, atlas re-entry, or inter-pass wait.
 - High and reduced working formats use the same graph, shader semantics, and ordering. GPU comparisons first require exact extent/origin and premultiplied invariants, then apply S34: normal composition at most 2 levels per channel and supported blends at most 3, with reduced comparisons using alpha and `premul8`. After T7, all CPU pixel/filter implementations and `reference` compile only under `cfg(test)`.
-- C09 performs the S29 capability changes whose behavior becomes real here: resolved alpha-mask execution, image-pass execution, composite-pass execution, and nested opacity composition use their final semantic names and exact operations. Broad layer masks, mask execution/composite modes, layer filters, offscreen layers, broad backdrops, and backdrop isolation remain false diagnostics. Final inventory totals/routes/statistics remain C13 work.
+- C09 performs only the S11/S29 capability changes whose behavior becomes real here: resolved alpha-mask execution, image-pass execution, composite-pass execution, and nested opacity composition use their final semantic names and exact operations. Broad layer masks, mask execution/composite modes, layer filters, offscreen layers, broad backdrops, and backdrop isolation remain false diagnostics. Final remaining inventory totals/routes/statistics and capability reconciliation remain C13 work.
 
 The staged capability and dispatch transition is exact:
 
