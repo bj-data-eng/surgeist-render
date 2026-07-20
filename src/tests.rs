@@ -29940,22 +29940,52 @@ fn c10_frame_has_exact_extent_origin_and_submission_for_test(
         && rendered.stats.commands > 0
 }
 
-fn c10_output_preserves_premultiplied_invariants_for_test(bytes: &[u8]) -> bool {
+fn terminal_straight_rgba8_is_canonical_for_test(bytes: &[u8]) -> bool {
     bytes.len().is_multiple_of(4)
-        && bytes.chunks_exact(4).all(|pixel| {
-            (0..3).all(|channel| c08_premul8_for_test(pixel[channel], pixel[3]) <= pixel[3])
-        })
+        && bytes
+            .chunks_exact(4)
+            .all(|pixel| pixel[3] != 0 || pixel[..3] == [0, 0, 0])
 }
 
-fn c10_high_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
-    (actual.len() == expected.len()).then(|| {
-        actual
-            .iter()
-            .copied()
-            .zip(expected.iter().copied())
-            .map(|(actual, expected)| actual.abs_diff(expected))
-            .max()
-            .unwrap_or(0)
+#[test]
+fn terminal_straight_rgba8_rejects_rgb_leakage_at_zero_alpha() {
+    let accepted = [
+        0, 0, 0, 0, 255, 0, 128, 1, 17, 31, 47, 127, 255, 255, 255, 255,
+    ];
+
+    assert!(
+        terminal_straight_rgba8_is_canonical_for_test(&accepted),
+        "terminal straight RGBA8 rejected canonical transparent black or a nonzero-alpha pixel"
+    );
+    assert!(
+        !terminal_straight_rgba8_is_canonical_for_test(&[0, 0, 0]),
+        "terminal straight RGBA8 accepted a byte-misaligned sample"
+    );
+    assert!(
+        !terminal_straight_rgba8_is_canonical_for_test(&[128, 0, 0, 0]),
+        "terminal straight RGBA8 accepted RGB leakage at zero alpha"
+    );
+}
+
+fn c10_high_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
+    (actual.len() == expected.len() && actual.len().is_multiple_of(4)).then(|| {
+        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
+            0,
+            |maximum, (actual, expected)| {
+                // The caller first proves canonical terminal bytes. Once target
+                // alpha quantizes to zero, straight RGB has only the black form.
+                let expected_rgb = if actual[3] == 0 {
+                    [0, 0, 0]
+                } else {
+                    [expected[0], expected[1], expected[2]]
+                };
+                maximum
+                    .max(actual[0].abs_diff(expected_rgb[0]))
+                    .max(actual[1].abs_diff(expected_rgb[1]))
+                    .max(actual[2].abs_diff(expected_rgb[2]))
+                    .max(actual[3].abs_diff(expected[3]))
+            },
+        )
     })
 }
 
@@ -30028,16 +30058,18 @@ fn high_precision_color_functions_match_cpu_oracle_for_boundary_pixels() {
             Parameters::default(),
             WorkingFormat::HighPrecision,
         );
-        let error = c10_high_error_for_test(rendered.output.rgba(), &expected).unwrap_or(u8::MAX);
-        maximum_error = maximum_error.max(error);
         let exact_grid =
             c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width);
-        let premultiplied =
-            c10_output_preserves_premultiplied_invariants_for_test(rendered.output.rgba());
-        exact_execution &=
-            rendered.working_format == WorkingFormat::HighPrecision && exact_grid && premultiplied;
+        let terminal_canonical =
+            terminal_straight_rgba8_is_canonical_for_test(rendered.output.rgba());
+        exact_execution &= rendered.working_format == WorkingFormat::HighPrecision
+            && exact_grid
+            && terminal_canonical;
+        let error =
+            c10_high_terminal_error_for_test(rendered.output.rgba(), &expected).unwrap_or(u8::MAX);
+        maximum_error = maximum_error.max(error);
         eprintln!(
-            "C10 high operation={name} max_straight_rgba8_error={error} exact_grid={exact_grid} premultiplied={premultiplied} output_extent={:?} source_origin={:?} source_extent={:?} source_texel_origin={:?} source_raster_scale={:?} submissions={}/{}/{} publication_count={}",
+            "C10 high operation={name} max_terminal_straight_rgba8_error={error} exact_grid={exact_grid} terminal_canonical={terminal_canonical} output_extent={:?} source_origin={:?} source_extent={:?} source_texel_origin={:?} source_raster_scale={:?} submissions={}/{}/{} publication_count={}",
             rendered.output_extent,
             rendered.source_origin,
             rendered.source_extent,
@@ -30081,16 +30113,18 @@ fn reduced_precision_color_functions_match_cpu_oracle_with_declared_tolerance() 
             Parameters::default(),
             WorkingFormat::ReducedPrecision,
         );
+        let terminal_canonical =
+            terminal_straight_rgba8_is_canonical_for_test(rendered.output.rgba());
+        exact_execution &= rendered.working_format == WorkingFormat::ReducedPrecision
+            && c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
+            && terminal_canonical;
         let (alpha_error, premul_error) =
             c10_reduced_error_for_test(rendered.output.rgba(), &expected)
                 .unwrap_or((u8::MAX, u8::MAX));
         maximum_alpha_error = maximum_alpha_error.max(alpha_error);
         maximum_premul_error = maximum_premul_error.max(premul_error);
-        exact_execution &= rendered.working_format == WorkingFormat::ReducedPrecision
-            && c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
-            && c10_output_preserves_premultiplied_invariants_for_test(rendered.output.rgba());
         eprintln!(
-            "C10 reduced operation={name} max_alpha_error={alpha_error} max_premul8_error={premul_error}"
+            "C10 reduced operation={name} max_alpha_error={alpha_error} max_premul8_error={premul_error} terminal_canonical={terminal_canonical}"
         );
     }
 
@@ -30163,9 +30197,21 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
                 Parameters::default(),
                 working_format,
             );
+            let first_terminal_canonical =
+                terminal_straight_rgba8_is_canonical_for_test(first_rendered.output.rgba());
+            let second_terminal_canonical =
+                terminal_straight_rgba8_is_canonical_for_test(second_rendered.output.rgba());
+            let exact_frames =
+                c10_frame_has_exact_extent_origin_and_submission_for_test(&first_rendered, width)
+                    && c10_frame_has_exact_extent_origin_and_submission_for_test(
+                        &second_rendered,
+                        width,
+                    )
+                    && first_terminal_canonical
+                    && second_terminal_canonical;
             let first_matches = match working_format {
                 WorkingFormat::HighPrecision => {
-                    c10_high_error_for_test(first_rendered.output.rgba(), &first_expected)
+                    c10_high_terminal_error_for_test(first_rendered.output.rgba(), &first_expected)
                         .is_some_and(|error| error <= 2)
                 }
                 WorkingFormat::ReducedPrecision => {
@@ -30174,33 +30220,24 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
                 }
             };
             let second_matches = match working_format {
-                WorkingFormat::HighPrecision => {
-                    c10_high_error_for_test(second_rendered.output.rgba(), &second_expected)
-                        .is_some_and(|error| error <= 2)
-                }
+                WorkingFormat::HighPrecision => c10_high_terminal_error_for_test(
+                    second_rendered.output.rgba(),
+                    &second_expected,
+                )
+                .is_some_and(|error| error <= 2),
                 WorkingFormat::ReducedPrecision => {
                     c10_reduced_error_for_test(second_rendered.output.rgba(), &second_expected)
                         .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
                 }
             };
-            let exact_frames =
-                c10_frame_has_exact_extent_origin_and_submission_for_test(&first_rendered, width)
-                    && c10_frame_has_exact_extent_origin_and_submission_for_test(
-                        &second_rendered,
-                        width,
-                    )
-                    && c10_output_preserves_premultiplied_invariants_for_test(
-                        first_rendered.output.rgba(),
-                    )
-                    && c10_output_preserves_premultiplied_invariants_for_test(
-                        second_rendered.output.rgba(),
-                    );
             ordered_results_are_exact &= first_expected != second_expected
                 && first_rendered.output.rgba() != second_rendered.output.rgba()
                 && first_matches
                 && second_matches
                 && exact_frames;
-            eprintln!("C10 ordered chain={name} working_format={working_format:?}");
+            eprintln!(
+                "C10 ordered chain={name} working_format={working_format:?} first_terminal_canonical={first_terminal_canonical} second_terminal_canonical={second_terminal_canonical}"
+            );
         }
     }
 

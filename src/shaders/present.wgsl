@@ -45,7 +45,8 @@ fn fragment_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
         vec4<f32>(0.0),
         vec4<f32>(1.0),
     );
-    if (premultiplied.a == 0.0) {
+    let quantized_alpha = floor(premultiplied.a * 255.0 + 0.5) / 255.0;
+    if (quantized_alpha == 0.0) {
         return vec4<f32>(0.0);
     }
     let straight_rgb = clamp(
@@ -53,5 +54,5 @@ fn fragment_main(@builtin(position) position: vec4<f32>) -> @location(0) vec4<f3
         vec3<f32>(0.0),
         vec3<f32>(1.0),
     );
-    return vec4<f32>(straight_rgb, premultiplied.a);
+    return vec4<f32>(straight_rgb, quantized_alpha);
 }
