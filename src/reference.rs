@@ -352,6 +352,123 @@ impl StraightRgb {
     }
 }
 
+/// Applies the independent S21 oracle without premultiplied-RGBA8 source
+/// quantization. This is the high-working-format comparison owner; reduced
+/// comparisons intentionally continue through [`PremultipliedRgba8`].
+pub(crate) fn apply_color_filter_pipeline_to_straight_rgba8(
+    pixels: &[[u8; 4]],
+    pipeline: &ColorFilterPipeline,
+) -> Vec<u8> {
+    pixels
+        .iter()
+        .copied()
+        .flat_map(|pixel| {
+            let mut color = ReferenceStraightRgba::from_rgba8(pixel);
+            for operation in pipeline.ops() {
+                color = color.apply(*operation);
+            }
+            color.into_rgba8()
+        })
+        .collect()
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReferenceStraightRgba {
+    rgb: StraightRgb,
+    alpha: f64,
+}
+
+impl ReferenceStraightRgba {
+    fn from_rgba8(pixel: [u8; 4]) -> Self {
+        if pixel[3] == 0 {
+            return Self {
+                rgb: StraightRgb::new(0.0, 0.0, 0.0),
+                alpha: 0.0,
+            };
+        }
+        Self {
+            rgb: StraightRgb::new(
+                f64::from(pixel[0]) / 255.0,
+                f64::from(pixel[1]) / 255.0,
+                f64::from(pixel[2]) / 255.0,
+            ),
+            alpha: f64::from(pixel[3]) / 255.0,
+        }
+    }
+
+    fn apply(mut self, operation: ColorFilterOp) -> Self {
+        match operation {
+            ColorFilterOp::Brightness(amount) => {
+                self.rgb = self.rgb.map(|channel| channel * amount.value());
+            }
+            ColorFilterOp::Contrast(amount) => {
+                self.rgb = self
+                    .rgb
+                    .map(|channel| (channel - 0.5) * amount.value() + 0.5);
+            }
+            ColorFilterOp::Grayscale(amount) => {
+                let gray = self.rgb.grayscale_luma();
+                self.rgb = self
+                    .rgb
+                    .mix(StraightRgb::new(gray, gray, gray), amount.value());
+            }
+            ColorFilterOp::HueRotate(angle) => {
+                let (sin, cos) = angle.radians().sin_cos();
+                self.rgb = StraightRgb::new(
+                    (0.213 + cos * 0.787 - sin * 0.213) * self.rgb.red
+                        + (0.715 - cos * 0.715 - sin * 0.715) * self.rgb.green
+                        + (0.072 - cos * 0.072 + sin * 0.928) * self.rgb.blue,
+                    (0.213 - cos * 0.213 + sin * 0.143) * self.rgb.red
+                        + (0.715 + cos * 0.285 + sin * 0.140) * self.rgb.green
+                        + (0.072 - cos * 0.072 - sin * 0.283) * self.rgb.blue,
+                    (0.213 - cos * 0.213 - sin * 0.787) * self.rgb.red
+                        + (0.715 - cos * 0.715 + sin * 0.715) * self.rgb.green
+                        + (0.072 + cos * 0.928 + sin * 0.072) * self.rgb.blue,
+                );
+            }
+            ColorFilterOp::Invert(amount) => {
+                self.rgb = self.rgb.map(|channel| {
+                    channel * (1.0 - amount.value()) + (1.0 - channel) * amount.value()
+                });
+            }
+            ColorFilterOp::Opacity(amount) => {
+                self.alpha *= amount.value();
+            }
+            ColorFilterOp::Saturate(amount) => {
+                let gray = self.rgb.saturation_luma();
+                self.rgb = StraightRgb::new(gray, gray, gray).mix(self.rgb, amount.value());
+            }
+            ColorFilterOp::Sepia(amount) => {
+                let sepia = StraightRgb::new(
+                    self.rgb.red * 0.393 + self.rgb.green * 0.769 + self.rgb.blue * 0.189,
+                    self.rgb.red * 0.349 + self.rgb.green * 0.686 + self.rgb.blue * 0.168,
+                    self.rgb.red * 0.272 + self.rgb.green * 0.534 + self.rgb.blue * 0.131,
+                );
+                self.rgb = self.rgb.mix(sepia, amount.value());
+            }
+        }
+        self.rgb = self.rgb.clamp_unit();
+        self.alpha = self.alpha.clamp(0.0, 1.0);
+        self
+    }
+
+    fn into_rgba8(self) -> [u8; 4] {
+        if self.alpha == 0.0 {
+            return [0, 0, 0, 0];
+        }
+        [
+            unit_to_rgba8(self.rgb.red),
+            unit_to_rgba8(self.rgb.green),
+            unit_to_rgba8(self.rgb.blue),
+            unit_to_rgba8(self.alpha),
+        ]
+    }
+}
+
+fn unit_to_rgba8(value: f64) -> u8 {
+    (value.clamp(0.0, 1.0) * 255.0).round() as u8
+}
+
 /// CPU reference image buffer with premultiplied RGBA8 pixels.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ReferencePremultipliedRgba8Buffer {

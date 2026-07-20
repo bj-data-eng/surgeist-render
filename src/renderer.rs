@@ -116,6 +116,18 @@ pub(crate) struct C08ForcedGraphCaptureForTest {
     pub(crate) raster_scale: f64,
 }
 
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct C10ColorFilterRenderResultForTest {
+    pub(crate) stats: Stats,
+    pub(crate) working_format: WorkingFormat,
+    pub(crate) output_extent: PhysicalSize,
+    pub(crate) source_origin: (i32, i32),
+    pub(crate) source_extent: PhysicalSize,
+    pub(crate) source_texel_origin: Point,
+    pub(crate) source_raster_scale: f64,
+}
+
 struct RenderPublication {
     frame: SurfaceFrameCommit,
     stats: Stats,
@@ -1020,7 +1032,8 @@ impl Renderer {
         )? {
             RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(preparable)) => preparable,
             RendererFrameDispatch::DirectVello(_)
-            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(_)) => {
+            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(_))
+            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C10(_)) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
                     "the private forced graph is outside the exact executable C08 subset",
@@ -1141,6 +1154,161 @@ impl Renderer {
             working_format,
             output_extent,
             captures,
+        })
+    }
+
+    /// Private C10 authored-filter ingress into the shared exact graph executor.
+    #[cfg(test)]
+    pub(crate) async fn render_c10_color_filter_fixture_for_test(
+        &mut self,
+        surface: &mut Surface,
+        scene: &Scene,
+        filters: Vec<FilterList>,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C10ColorFilterRenderResultForTest> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_renderable()?;
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
+        let device_identity = surface.device_identity().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the private C10 fixture requires a device-backed surface",
+            )
+        })?;
+        let frame_start = Instant::now();
+        let encode_start = Instant::now();
+        let normalized = scene.normalize(self.capabilities())?;
+        let context = FrameContext::try_new(
+            surface.size(),
+            surface.scale(),
+            self.options.antialiasing(),
+            parameters.base_color,
+        )?;
+        let graph =
+            super::frame::authored_c10_color_graph_for_test(filters, normalized.clone(), context)?;
+        let capabilities = self
+            .backend
+            .as_mut()
+            .ok_or_else(|| {
+                Error::runtime_unavailable(
+                    RuntimeOperation::SurfaceRendering,
+                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                    "the private C10 fixture requires a renderer backend",
+                )
+            })?
+            .device_capabilities(device_identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C10 fixture lost immutable device capabilities",
+                )
+            })?;
+        let preparable = super::pass::c10_preparable_graph_for_test(
+            &graph,
+            runtime_surface_format(surface),
+            working_format,
+            &capabilities,
+        )?;
+        let output_extent = preparable.output_extent()?;
+        let source_spatial = preparable.first_color_spatial_for_test().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "the private C10 fixture lost its first exact color source",
+            )
+        })?;
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
+        let mut stats = Stats {
+            encode_time: encode_start.elapsed(),
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
+        if parameters.debug || self.options.debug() {
+            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
+        }
+        let frame = {
+            let backend = self
+                .backend
+                .as_mut()
+                .expect("C10 fixture preflight confirmed the renderer backend is available");
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            {
+                if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                    render_exact_presented_graph_surface(
+                        backend,
+                        surface,
+                        ExactSurfaceGraph::C10(preparable),
+                    )
+                    .await
+                } else {
+                    render_exact_headless_graph_surface(
+                        backend,
+                        surface,
+                        ExactSurfaceGraph::C10(preparable),
+                    )
+                    .await
+                }
+            }
+            #[cfg(not(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            )))]
+            {
+                render_exact_headless_graph_surface(
+                    backend,
+                    surface,
+                    ExactSurfaceGraph::C10(preparable),
+                )
+                .await
+            }
+        };
+        if frame.is_err()
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.observe_device_terminal(device_identity);
+        }
+        let frame = match frame {
+            Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
+                self.configure_presented_surface_if_needed(
+                    surface,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+            Ok(frame) => frame,
+        };
+        let stats = self.publish_clean_render_frame(
+            surface,
+            device_identity,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+            frame_start,
+        )?;
+        Ok(C10ColorFilterRenderResultForTest {
+            stats,
+            working_format,
+            output_extent,
+            source_origin: source_spatial.device_origin,
+            source_extent: source_spatial.device_extent,
+            source_texel_origin: source_spatial.texel_origin,
+            source_raster_scale: source_spatial.raster_scale,
         })
     }
 

@@ -29722,6 +29722,631 @@ fn high_precision_low_alpha_pixels_preserve_straight_rgb() {
     );
 }
 
+const C10_PIXEL_FIXTURE_SIGNED_X: i32 = -2;
+
+struct C10ProductionFrameForTest {
+    output: ImageBuffer,
+    stats: Stats,
+    working_format: WorkingFormat,
+    output_extent: PhysicalSize,
+    source_origin: Option<(i32, i32)>,
+    source_extent: Option<PhysicalSize>,
+    source_texel_origin: Option<Point>,
+    source_raster_scale: Option<f64>,
+    queue_submissions: usize,
+    graph_submissions: usize,
+    direct_submissions: usize,
+    publication_count: usize,
+}
+
+fn c10_boundary_pixels_for_test() -> Vec<[u8; 4]> {
+    c08_alpha_extreme_pixels_for_test()
+}
+
+fn c10_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
+    let hidden_prefix = [[17, 31, 47, 255], [233, 199, 151, 127]];
+    let bytes = hidden_prefix
+        .into_iter()
+        .chain(visible_pixels.iter().copied())
+        .flat_map(|pixel| pixel.into_iter())
+        .collect::<Vec<_>>();
+    let source_width = u32::try_from(visible_pixels.len() + hidden_prefix.len())
+        .expect("the C10 source-readable pixel vector must fit u32");
+    let image = Image::from_rgba(
+        Size::new(f64::from(source_width), 1.0),
+        Arc::<[u8]>::from(bytes),
+    )
+    .expect("the C10 source-readable pixel vector must form one valid image");
+    let mut scene = Scene::new();
+    scene.image(
+        image,
+        Rect::new(
+            f64::from(C10_PIXEL_FIXTURE_SIGNED_X),
+            0.0,
+            f64::from(source_width),
+            1.0,
+        ),
+        ImageFit::Stretch,
+    );
+    scene
+}
+
+fn c10_color_operation_matrix_for_test() -> [(&'static str, ColorFilterOp); 8] {
+    [
+        (
+            "brightness",
+            ColorFilterOp::Brightness(FilterAmount::try_new(2.0).unwrap()),
+        ),
+        (
+            "contrast",
+            ColorFilterOp::Contrast(FilterAmount::try_new(1.75).unwrap()),
+        ),
+        (
+            "grayscale",
+            ColorFilterOp::Grayscale(UnitFilterAmount::try_new(1.0).unwrap()),
+        ),
+        (
+            "hue-rotate",
+            ColorFilterOp::HueRotate(
+                FilterAngle::try_radians(std::f64::consts::FRAC_PI_2).unwrap(),
+            ),
+        ),
+        (
+            "invert",
+            ColorFilterOp::Invert(UnitFilterAmount::try_new(0.75).unwrap()),
+        ),
+        (
+            "opacity",
+            ColorFilterOp::Opacity(UnitFilterAmount::try_new(0.5).unwrap()),
+        ),
+        (
+            "saturate",
+            ColorFilterOp::Saturate(FilterAmount::try_new(2.0).unwrap()),
+        ),
+        (
+            "sepia",
+            ColorFilterOp::Sepia(UnitFilterAmount::try_new(1.0).unwrap()),
+        ),
+    ]
+}
+
+fn c10_reference_straight_pixels_for_test(
+    source_pixels: &[[u8; 4]],
+    operations: &[ColorFilterOp],
+    working_format: WorkingFormat,
+) -> Vec<u8> {
+    let size = PhysicalSize::new(
+        u32::try_from(source_pixels.len()).expect("the C10 oracle width must fit u32"),
+        1,
+    );
+    let premultiplied_source = ReferencePremultipliedRgba8Buffer::from_pixels(
+        size,
+        source_pixels
+            .iter()
+            .copied()
+            .map(c09_premultiplied_pixel_for_test)
+            .collect(),
+    )
+    .expect("the C10 source pixels must form one premultiplied oracle buffer");
+    let filter = FilterList::try_ops(
+        operations
+            .iter()
+            .copied()
+            .map(|operation| match operation {
+                ColorFilterOp::Brightness(amount) => FilterOp::brightness(amount),
+                ColorFilterOp::Contrast(amount) => FilterOp::contrast(amount),
+                ColorFilterOp::Grayscale(amount) => FilterOp::grayscale(amount),
+                ColorFilterOp::HueRotate(angle) => FilterOp::hue_rotate(angle),
+                ColorFilterOp::Invert(amount) => FilterOp::invert(amount),
+                ColorFilterOp::Opacity(amount) => FilterOp::opacity(amount),
+                ColorFilterOp::Saturate(amount) => FilterOp::saturate(amount),
+                ColorFilterOp::Sepia(amount) => FilterOp::sepia(amount),
+            })
+            .collect(),
+    )
+    .expect("the C10 oracle operations must form one authored filter");
+    let pipeline = filter
+        .color_filter_pipeline()
+        .expect("the C10 oracle fixture contains only color functions")
+        .expect("the C10 oracle fixture contains one nonempty color run");
+    match working_format {
+        WorkingFormat::HighPrecision => {
+            super::reference::apply_color_filter_pipeline_to_straight_rgba8(
+                source_pixels,
+                &pipeline,
+            )
+        }
+        WorkingFormat::ReducedPrecision => {
+            let filtered = premultiplied_source
+                .apply_color_filter_pipeline(&pipeline)
+                .expect("the C10 CPU oracle must evaluate every authored operation");
+            c09_reference_straight_bytes_for_test(&filtered)
+        }
+    }
+}
+
+fn render_c10_fixture_for_test(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+    scene: &Scene,
+    filters: Vec<FilterList>,
+    parameters: Parameters,
+    working_format: WorkingFormat,
+) -> C10ProductionFrameForTest {
+    let publication_before = surface.headless_publication_count_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let graph = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        surface,
+        scene,
+        filters,
+        parameters,
+        working_format,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("the C10 fixture must execute through the shared exact graph: {error}")
+    });
+    let queue_submissions = submission.queue_submission_count_for_test();
+    let graph_submissions = graph_submission.queue_submission_count_for_test();
+    let direct_submissions = direct_submission.queue_submission_count_for_test();
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let publication_count = surface
+        .headless_publication_count_for_test()
+        .saturating_sub(publication_before);
+    let output = pollster::block_on(renderer.read_headless(surface)).unwrap_or_else(|error| {
+        panic!("the already-published C10 RED fixture must be explicitly readable: {error}")
+    });
+    C10ProductionFrameForTest {
+        output,
+        stats: graph.stats,
+        working_format: graph.working_format,
+        output_extent: graph.output_extent,
+        source_origin: Some(graph.source_origin),
+        source_extent: Some(graph.source_extent),
+        source_texel_origin: Some(graph.source_texel_origin),
+        source_raster_scale: Some(graph.source_raster_scale),
+        queue_submissions,
+        graph_submissions,
+        direct_submissions,
+        publication_count,
+    }
+}
+
+fn c10_frame_has_exact_extent_origin_and_submission_for_test(
+    rendered: &C10ProductionFrameForTest,
+    visible_width: u32,
+) -> bool {
+    rendered.output.size() == PhysicalSize::new(visible_width, 1)
+        && rendered.output_extent == PhysicalSize::new(visible_width, 1)
+        && rendered.source_origin == Some((C10_PIXEL_FIXTURE_SIGNED_X, 0))
+        && rendered.source_extent
+            == Some(PhysicalSize::new(
+                visible_width + C10_PIXEL_FIXTURE_SIGNED_X.unsigned_abs(),
+                1,
+            ))
+        && rendered.source_texel_origin
+            == Some(Point::new(f64::from(C10_PIXEL_FIXTURE_SIGNED_X), 0.0))
+        && rendered.source_raster_scale == Some(1.0)
+        && rendered.queue_submissions == 1
+        && rendered.graph_submissions == 1
+        && rendered.direct_submissions == 0
+        && rendered.publication_count == 1
+        && rendered.stats.commands > 0
+}
+
+fn c10_output_preserves_premultiplied_invariants_for_test(bytes: &[u8]) -> bool {
+    bytes.len().is_multiple_of(4)
+        && bytes.chunks_exact(4).all(|pixel| {
+            (0..3).all(|channel| c08_premul8_for_test(pixel[channel], pixel[3]) <= pixel[3])
+        })
+}
+
+fn c10_high_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
+    (actual.len() == expected.len()).then(|| {
+        actual
+            .iter()
+            .copied()
+            .zip(expected.iter().copied())
+            .map(|(actual, expected)| actual.abs_diff(expected))
+            .max()
+            .unwrap_or(0)
+    })
+}
+
+fn c10_reduced_error_for_test(actual: &[u8], expected: &[u8]) -> Option<(u8, u8)> {
+    (actual.len() == expected.len()).then(|| {
+        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
+            (0, 0),
+            |(max_alpha, max_premul), (actual, expected)| {
+                let alpha = max_alpha.max(actual[3].abs_diff(expected[3]));
+                let premul = (0..3).fold(max_premul, |maximum, channel| {
+                    maximum.max(
+                        c08_premul8_for_test(actual[channel], actual[3])
+                            .abs_diff(c08_premul8_for_test(expected[channel], expected[3])),
+                    )
+                });
+                (alpha, premul)
+            },
+        )
+    })
+}
+
+fn c10_pixel_renderer_for_test(working_format: WorkingFormat, width: u32) -> (Renderer, Surface) {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("C10 pixel execution requires a real renderer: {error}"));
+    let supported = c08_supported_working_formats_for_test(&mut renderer);
+    assert!(
+        supported.contains(&working_format),
+        "C10 pixel execution requires the requested real working format"
+    );
+    let adapter = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("C10 pixel execution requires one ready real adapter")
+        .adapter_for_test()
+        .get_info();
+    eprintln!(
+        "C10 real adapter name={} backend={:?} device_type={:?} driver={} driver_info={}",
+        adapter.name, adapter.backend, adapter.device_type, adapter.driver, adapter.driver_info
+    );
+    let surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .unwrap_or_else(|error| {
+                panic!("C10 pixel execution requires a headless surface: {error}")
+            });
+    (renderer, surface)
+}
+
+#[test]
+fn high_precision_color_functions_match_cpu_oracle_for_boundary_pixels() {
+    let source = c10_boundary_pixels_for_test();
+    let width = u32::try_from(source.len()).expect("the C10 high matrix width must fit u32");
+    let scene = c10_signed_source_scene_for_test(&source);
+    let (mut renderer, mut surface) =
+        c10_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
+    let mut maximum_error = 0;
+    let mut exact_execution = true;
+
+    for (name, operation) in c10_color_operation_matrix_for_test() {
+        let expected = c10_reference_straight_pixels_for_test(
+            &source,
+            &[operation],
+            WorkingFormat::HighPrecision,
+        );
+        let rendered = render_c10_fixture_for_test(
+            &mut renderer,
+            &mut surface,
+            &scene,
+            vec![color_filter_list([operation])],
+            Parameters::default(),
+            WorkingFormat::HighPrecision,
+        );
+        let error = c10_high_error_for_test(rendered.output.rgba(), &expected).unwrap_or(u8::MAX);
+        maximum_error = maximum_error.max(error);
+        let exact_grid =
+            c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width);
+        let premultiplied =
+            c10_output_preserves_premultiplied_invariants_for_test(rendered.output.rgba());
+        exact_execution &=
+            rendered.working_format == WorkingFormat::HighPrecision && exact_grid && premultiplied;
+        eprintln!(
+            "C10 high operation={name} max_straight_rgba8_error={error} exact_grid={exact_grid} premultiplied={premultiplied} output_extent={:?} source_origin={:?} source_extent={:?} source_texel_origin={:?} source_raster_scale={:?} submissions={}/{}/{} publication_count={}",
+            rendered.output_extent,
+            rendered.source_origin,
+            rendered.source_extent,
+            rendered.source_texel_origin,
+            rendered.source_raster_scale,
+            rendered.queue_submissions,
+            rendered.graph_submissions,
+            rendered.direct_submissions,
+            rendered.publication_count,
+        );
+    }
+
+    assert!(
+        exact_execution && maximum_error <= 2,
+        "high precision C10 pixels exceed the S34 color tolerance"
+    );
+}
+
+#[test]
+fn reduced_precision_color_functions_match_cpu_oracle_with_declared_tolerance() {
+    let source = c10_boundary_pixels_for_test();
+    let width = u32::try_from(source.len()).expect("the C10 reduced matrix width must fit u32");
+    let scene = c10_signed_source_scene_for_test(&source);
+    let (mut renderer, mut surface) =
+        c10_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, width);
+    let mut maximum_alpha_error = 0;
+    let mut maximum_premul_error = 0;
+    let mut exact_execution = true;
+
+    for (name, operation) in c10_color_operation_matrix_for_test() {
+        let expected = c10_reference_straight_pixels_for_test(
+            &source,
+            &[operation],
+            WorkingFormat::ReducedPrecision,
+        );
+        let rendered = render_c10_fixture_for_test(
+            &mut renderer,
+            &mut surface,
+            &scene,
+            vec![color_filter_list([operation])],
+            Parameters::default(),
+            WorkingFormat::ReducedPrecision,
+        );
+        let (alpha_error, premul_error) =
+            c10_reduced_error_for_test(rendered.output.rgba(), &expected)
+                .unwrap_or((u8::MAX, u8::MAX));
+        maximum_alpha_error = maximum_alpha_error.max(alpha_error);
+        maximum_premul_error = maximum_premul_error.max(premul_error);
+        exact_execution &= rendered.working_format == WorkingFormat::ReducedPrecision
+            && c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
+            && c10_output_preserves_premultiplied_invariants_for_test(rendered.output.rgba());
+        eprintln!(
+            "C10 reduced operation={name} max_alpha_error={alpha_error} max_premul8_error={premul_error}"
+        );
+    }
+
+    assert!(
+        exact_execution && maximum_alpha_error <= 2 && maximum_premul_error <= 2,
+        "reduced C10 alpha or premul8 exceeds the S34 tolerance"
+    );
+}
+
+#[test]
+fn filter_function_order_changes_output_and_matches_ordered_oracle() {
+    let source = vec![
+        [255, 37, 173, 0],
+        [224, 72, 16, 127],
+        [192, 64, 46, 255],
+        [96, 32, 23, 127],
+        [17, 231, 93, 255],
+    ];
+    let width = u32::try_from(source.len()).expect("the C10 order width must fit u32");
+    let scene = c10_signed_source_scene_for_test(&source);
+    let chain_pairs = [
+        (
+            "noncommuting contrast/brightness",
+            [
+                ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
+                ColorFilterOp::Brightness(FilterAmount::try_new(0.7).unwrap()),
+            ],
+            [
+                ColorFilterOp::Brightness(FilterAmount::try_new(0.7).unwrap()),
+                ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
+            ],
+        ),
+        (
+            "source-clamp-sensitive brightness chain",
+            [
+                ColorFilterOp::Brightness(FilterAmount::try_new(2.0).unwrap()),
+                ColorFilterOp::Brightness(FilterAmount::try_new(0.5).unwrap()),
+            ],
+            [
+                ColorFilterOp::Brightness(FilterAmount::try_new(0.5).unwrap()),
+                ColorFilterOp::Brightness(FilterAmount::try_new(2.0).unwrap()),
+            ],
+        ),
+    ];
+    let mut ordered_results_are_exact = true;
+
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let (mut renderer, mut surface) = c10_pixel_renderer_for_test(working_format, width);
+        for (name, first, second) in chain_pairs {
+            let first_expected =
+                c10_reference_straight_pixels_for_test(&source, &first, working_format);
+            let second_expected =
+                c10_reference_straight_pixels_for_test(&source, &second, working_format);
+            let first_rendered = render_c10_fixture_for_test(
+                &mut renderer,
+                &mut surface,
+                &scene,
+                vec![color_filter_list(first)],
+                Parameters::default(),
+                working_format,
+            );
+            let second_rendered = render_c10_fixture_for_test(
+                &mut renderer,
+                &mut surface,
+                &scene,
+                vec![color_filter_list(second)],
+                Parameters::default(),
+                working_format,
+            );
+            let first_matches = match working_format {
+                WorkingFormat::HighPrecision => {
+                    c10_high_error_for_test(first_rendered.output.rgba(), &first_expected)
+                        .is_some_and(|error| error <= 2)
+                }
+                WorkingFormat::ReducedPrecision => {
+                    c10_reduced_error_for_test(first_rendered.output.rgba(), &first_expected)
+                        .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
+                }
+            };
+            let second_matches = match working_format {
+                WorkingFormat::HighPrecision => {
+                    c10_high_error_for_test(second_rendered.output.rgba(), &second_expected)
+                        .is_some_and(|error| error <= 2)
+                }
+                WorkingFormat::ReducedPrecision => {
+                    c10_reduced_error_for_test(second_rendered.output.rgba(), &second_expected)
+                        .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
+                }
+            };
+            let exact_frames =
+                c10_frame_has_exact_extent_origin_and_submission_for_test(&first_rendered, width)
+                    && c10_frame_has_exact_extent_origin_and_submission_for_test(
+                        &second_rendered,
+                        width,
+                    )
+                    && c10_output_preserves_premultiplied_invariants_for_test(
+                        first_rendered.output.rgba(),
+                    )
+                    && c10_output_preserves_premultiplied_invariants_for_test(
+                        second_rendered.output.rgba(),
+                    );
+            ordered_results_are_exact &= first_expected != second_expected
+                && first_rendered.output.rgba() != second_rendered.output.rgba()
+                && first_matches
+                && second_matches
+                && exact_frames;
+            eprintln!("C10 ordered chain={name} working_format={working_format:?}");
+        }
+    }
+
+    assert!(
+        ordered_results_are_exact,
+        "the GPU lost authored order or a source clamp"
+    );
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct C10ShaderFailureObservationForTest {
+    failure_is_reported: bool,
+    prior_pixels_are_preserved: bool,
+    prior_publication_is_preserved: bool,
+    public_state_is_preserved: bool,
+    pass_cache_is_preserved: bool,
+    draft_resources_are_aborted: bool,
+    performs_no_submission_or_cpu_retry: bool,
+}
+
+fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTest {
+    let source = vec![[17, 31, 47, 0], [224, 72, 16, 127], [192, 64, 46, 255]];
+    let width = u32::try_from(source.len()).expect("the C10 failure width must fit u32");
+    let scene = c10_signed_source_scene_for_test(&source);
+    let (mut renderer, mut surface) =
+        c10_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
+    assert!(
+        c08_supported_working_formats_for_test(&mut renderer)
+            .contains(&WorkingFormat::ReducedPrecision),
+        "C10 shader-failure coverage requires the real reduced working format"
+    );
+    let filters = vec![color_filter_list([
+        ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
+        ColorFilterOp::Brightness(FilterAmount::try_new(0.7).unwrap()),
+    ])];
+    let _baseline = render_c10_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        &scene,
+        filters.clone(),
+        Parameters::default(),
+        WorkingFormat::HighPrecision,
+    );
+    let published = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the C10 failure baseline must be readable");
+    let stats_before = renderer.stats();
+    let parameters_before = surface.last_parameters;
+    let uploaded_images_before = renderer.uploaded_images_for_test();
+    let publication_before = surface.headless_publication_count_for_test();
+    let (cache_before, resources_before) = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the C10 failure baseline must retain a ready device");
+        (
+            ready.device_pass_cache_counts_for_test(),
+            ready.internal_resource_manager_observation_for_test(),
+        )
+    };
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let shader_failure =
+        super::pass::ScopedC10ColorFilterShaderFailureForTest::after_checked_realization();
+    let failure = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        &mut surface,
+        &scene,
+        filters,
+        Parameters {
+            base_color: Color::TRANSPARENT,
+            debug: true,
+        },
+        WorkingFormat::ReducedPrecision,
+    ));
+    drop(shader_failure);
+    let queue_submissions = submission.queue_submission_count_for_test();
+    let graph_submissions = graph_submission.queue_submission_count_for_test();
+    let direct_submissions = direct_submission.queue_submission_count_for_test();
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+
+    let current = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the failed C10 attempt must leave the prior publication readable");
+    let (cache_after, resources_after) = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the failed C10 attempt must retain its ready device");
+        (
+            ready.device_pass_cache_counts_for_test(),
+            ready.internal_resource_manager_observation_for_test(),
+        )
+    };
+    let failure_is_reported = failure.is_err_and(|error| {
+        error.code() == ErrorCode::RenderFailed
+            && error
+                .message()
+                .contains("injected C10 color-filter shader failure")
+    });
+    C10ShaderFailureObservationForTest {
+        failure_is_reported,
+        prior_pixels_are_preserved: current.rgba() == published.rgba(),
+        prior_publication_is_preserved: surface.headless_publication_count_for_test()
+            == publication_before,
+        public_state_is_preserved: renderer.stats() == stats_before
+            && surface.last_parameters == parameters_before
+            && renderer.uploaded_images_for_test() == uploaded_images_before,
+        pass_cache_is_preserved: cache_after == cache_before,
+        draft_resources_are_aborted: resources_after.leased_count == 0
+            && resources_after.active_frame_count == 0
+            && resources_after.resolved_lease_count == 0
+            && resources_after.accounting_fault_for_test().is_none()
+            && resources_after
+                .entry_identities_for_test()
+                .iter()
+                .all(|identity| {
+                    resources_before
+                        .entry_identities_for_test()
+                        .contains(identity)
+                }),
+        performs_no_submission_or_cpu_retry: queue_submissions == 0
+            && graph_submissions == 0
+            && direct_submissions == 0,
+    }
+}
+
+#[test]
+fn color_filter_shader_failure_preserves_prior_publication_and_cache() {
+    let observed = c10_shader_failure_observation_for_test();
+    eprintln!("C10 shader failure observation={observed:?}");
+
+    assert!(
+        observed.failure_is_reported
+            && observed.prior_pixels_are_preserved
+            && observed.prior_publication_is_preserved
+            && observed.public_state_is_preserved
+            && observed.pass_cache_is_preserved
+            && observed.draft_resources_are_aborted
+            && observed.performs_no_submission_or_cpu_retry,
+        "failed C10 execution published draft state"
+    );
+}
+
 #[test]
 fn graph_render_path_submits_without_map_or_cpu_wait() {
     let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();

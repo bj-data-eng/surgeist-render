@@ -4,6 +4,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use super::{
     BackendErrorCode, Color, Error, Format, PhysicalSize, Point, Rect, Result, Transform,
     backend::DeviceCapabilities,
@@ -63,6 +66,43 @@ use super::frame::{FrameContext, FramePlan};
 use super::vello_engine::{
     prepared_vello_pass_observation_for_test, scene::VelloPathDrawObservationForTest,
 };
+
+#[cfg(test)]
+thread_local! {
+    static ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Private deterministic failure at the checked color-filter shader boundary.
+#[cfg(test)]
+pub(crate) struct ScopedC10ColorFilterShaderFailureForTest {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl ScopedC10ColorFilterShaderFailureForTest {
+    pub(crate) fn after_checked_realization() -> Self {
+        let previous =
+            ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.replace(true));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for ScopedC10ColorFilterShaderFailureForTest {
+    fn drop(&mut self) {
+        ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.set(self.previous));
+    }
+}
+
+#[cfg(test)]
+fn inject_c10_color_filter_shader_failure_for_test() -> Result<()> {
+    if ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(Cell::get) {
+        return Err(preparation_error(
+            "injected C10 color-filter shader failure after checked realization",
+        ));
+    }
+    Ok(())
+}
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2522,7 +2562,7 @@ impl C09PreparableGraph {
 }
 
 #[must_use]
-struct C10PreparableGraph {
+pub(crate) struct C10PreparableGraph {
     closed: ClosedExecutableGraph,
 }
 
@@ -2545,6 +2585,35 @@ impl C10PreparableGraph {
     }
 
     #[cfg(test)]
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.closed.facts.working_format
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn output_format(&self) -> Format {
+        self.closed.facts.output_format
+    }
+
+    #[cfg(test)]
+    pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
+        self.closed
+            .lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == self.closed.lowered.root_working_image)
+            .map(|resource| resource.spatial.device_extent)
+            .ok_or_else(|| preparation_error("the C10 root output resource is missing"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_color_spatial_for_test(&self) -> Option<C10ColorSpatialObservationForTest> {
+        self.closed
+            .facts
+            .color_filters
+            .first()
+            .map(|filter| c10_spatial_observation(filter.filter.spatial.source))
+    }
+
     fn into_closed(self) -> ClosedExecutableGraph {
         self.closed
     }
@@ -6079,6 +6148,36 @@ impl ExecutableGraphDispatchEligibility {
     }
 }
 
+#[cfg(test)]
+pub(crate) fn c10_preparable_graph_for_test(
+    graph: &GpuRenderGraph,
+    output_format: Format,
+    working_format: WorkingFormat,
+    capabilities: &DeviceCapabilities,
+) -> Result<C10PreparableGraph> {
+    capabilities.validate_supported_working_format(working_format)?;
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        graph,
+        working_format,
+        output_format,
+        capabilities,
+    )?;
+    match PrePreparationGraphClassification::classify(lowered) {
+        PrePreparationGraphClassification::ExactC10(preparable)
+            if preparable.proves_closed_color_facts() =>
+        {
+            Ok(preparable)
+        }
+        PrePreparationGraphClassification::ExactC08(_)
+        | PrePreparationGraphClassification::ExactC09(_)
+        | PrePreparationGraphClassification::ExactC10(_)
+        | PrePreparationGraphClassification::FuturePasses
+        | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
+            "the authored C10 fixture is outside the exact closed color graph",
+        )),
+    }
+}
+
 impl PrePreparationGraphClassification {
     fn classify(lowered: LoweredGraphPlan) -> Self {
         let closed = match ClosedExecutableGraph::try_from_lowered(lowered) {
@@ -6196,7 +6295,6 @@ fn dispatch_pass_semantics(kind: &RuntimePassKind) -> Option<DispatchPassSemanti
 enum GraphPreparationSource {
     C08(C08PreparableGraph),
     C09(ClosedExecutableGraph),
-    #[cfg(test)]
     C10 {
         preparable: C10PreparableGraph,
         operation_limits: Option<ColorFilterOperationBufferLimits>,
@@ -6204,7 +6302,6 @@ enum GraphPreparationSource {
 }
 
 impl GraphPreparationSource {
-    #[cfg(test)]
     const fn color_filter_operation_limits(&self) -> Option<ColorFilterOperationBufferLimits> {
         match self {
             Self::C10 {
@@ -6228,7 +6325,6 @@ impl GraphPreparationSource {
                 (lowered, Some(execution), None, None)
             }
             Self::C09(closed) => (closed.lowered, None, Some(closed.facts), None),
-            #[cfg(test)]
             Self::C10 { preparable, .. } => {
                 let closed = preparable.into_closed();
                 (closed.lowered, None, None, Some(closed.facts))
@@ -6997,6 +7093,36 @@ impl<'device> PreparedGraph<'device> {
         Ok(prepared)
     }
 
+    #[cfg(test)]
+    pub(crate) fn try_prepare_c10(
+        preparable: C10PreparableGraph,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_phase: (&'device DevicePassCache, bool),
+    ) -> Result<Self> {
+        let selected_working_format = preparable.working_format();
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C10 {
+                preparable,
+                operation_limits: None,
+            },
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache_phase,
+        )?;
+        if prepared.c10_execution.is_none() {
+            return Err(preparation_error(
+                "C10 preparation lost its validated closed execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+
     pub(crate) fn try_prepare(
         lowered: LoweredGraphPlan,
         policy: EffectQualityPolicy,
@@ -7047,36 +7173,25 @@ impl<'device> PreparedGraph<'device> {
                 )
             }
             PrePreparationGraphClassification::ExactC10(preparable) => {
-                #[cfg(test)]
-                {
-                    let selected_working_format =
-                        capabilities.resolve_effect_working_format(policy)?;
-                    let prepared = Self::try_prepare_inner(
-                        GraphPreparationSource::C10 {
-                            preparable,
-                            operation_limits: None,
-                        },
-                        selected_working_format,
-                        capabilities,
-                        device,
-                        queue,
-                        resources,
-                        pass_cache_phase,
-                    )?;
-                    if prepared.c10_execution.is_none() {
-                        return Err(preparation_error(
-                            "C10 preparation lost its validated closed execution facts",
-                        ));
-                    }
-                    Ok(prepared)
+                let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
+                let prepared = Self::try_prepare_inner(
+                    GraphPreparationSource::C10 {
+                        preparable,
+                        operation_limits: None,
+                    },
+                    selected_working_format,
+                    capabilities,
+                    device,
+                    queue,
+                    resources,
+                    pass_cache_phase,
+                )?;
+                if prepared.c10_execution.is_none() {
+                    return Err(preparation_error(
+                        "C10 preparation lost its validated closed execution facts",
+                    ));
                 }
-                #[cfg(not(test))]
-                {
-                    let _ = preparable;
-                    Err(preparation_error(
-                        "a C10 color graph cannot enter C09 resource preparation",
-                    ))
-                }
+                Ok(prepared)
             }
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
                 "a future GPU pass cannot enter C09 resource preparation",
@@ -7136,10 +7251,8 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         let (pass_cache, realize_checked_passes) = pass_cache_phase;
-        #[cfg(test)]
         let color_filter_operation_limits = source.color_filter_operation_limits();
         let (lowered, c08_execution, c09_execution, c10_execution) = source.into_parts();
-        #[cfg(test)]
         let plan = match color_filter_operation_limits {
             Some(limits) => RuntimeGraphPreparationPlan::try_derive_with_color_filter_limits(
                 lowered,
@@ -7155,13 +7268,6 @@ impl<'device> PreparedGraph<'device> {
                 device,
             )?,
         };
-        #[cfg(not(test))]
-        let plan = RuntimeGraphPreparationPlan::try_derive(
-            lowered,
-            selected_working_format,
-            capabilities,
-            device,
-        )?;
         resources.preflight_graph_acquisitions(&plan.allocation_preflights)?;
 
         let mut frame_scope = resources.begin_frame()?;
@@ -8426,6 +8532,8 @@ impl<'device> PreparedGraph<'device> {
 
         let objects = self.c10_color_filter_pass_objects(keys)?;
         objects.require_encoding_ready()?;
+        #[cfg(test)]
+        inject_c10_color_filter_shader_failure_for_test()?;
         let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?
             .ok_or_else(|| preparation_error("the C10 color pass has an empty bounded region"))?;
         let validated_viewport_and_scissor = region.scissor_x.saturating_add(region.scissor_width)

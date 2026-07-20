@@ -2,6 +2,8 @@
 use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
+#[cfg(test)]
+use super::pass::C10PreparableGraph;
 use super::pass::{
     C08ExternalOutputView, C08PreparableGraph, C09PreparableGraph, LoweredGraphPlan, PreparedGraph,
 };
@@ -211,11 +213,13 @@ pub(crate) struct Backend {
     resource_cache_budget: ResourceCacheBudget,
 }
 
-/// One validated C08 or C09 graph selected for atomic surface execution.
+/// One validated exact graph selected for atomic surface execution.
 #[must_use = "an exact surface graph must enter its GPU transaction"]
 pub(crate) enum ExactSurfaceGraph {
     C08(C08PreparableGraph),
     C09(C09PreparableGraph),
+    #[cfg(test)]
+    C10(C10PreparableGraph),
 }
 
 impl ExactSurfaceGraph {
@@ -223,6 +227,8 @@ impl ExactSurfaceGraph {
         match self {
             Self::C08(preparable) => preparable.working_format(),
             Self::C09(preparable) => preparable.working_format(),
+            #[cfg(test)]
+            Self::C10(preparable) => preparable.working_format(),
         }
     }
 
@@ -230,6 +236,8 @@ impl ExactSurfaceGraph {
         match self {
             Self::C08(preparable) => preparable.output_format(),
             Self::C09(preparable) => preparable.output_format(),
+            #[cfg(test)]
+            Self::C10(preparable) => preparable.output_format(),
         }
     }
 
@@ -237,6 +245,8 @@ impl ExactSurfaceGraph {
         match self {
             Self::C08(preparable) => preparable.output_extent().map(Some),
             Self::C09(_) => Ok(None),
+            #[cfg(test)]
+            Self::C10(_) => Ok(None),
         }
     }
 }
@@ -2598,6 +2608,15 @@ impl Backend {
                 )
             }
             ExactSurfaceGraph::C09(preparable) => PreparedGraph::try_prepare_c09(
+                preparable,
+                &capabilities,
+                &ready.device,
+                &ready.queue,
+                &ready.resources,
+                (&ready.pass_cache, true),
+            ),
+            #[cfg(test)]
+            ExactSurfaceGraph::C10(preparable) => PreparedGraph::try_prepare_c10(
                 preparable,
                 &capabilities,
                 &ready.device,
