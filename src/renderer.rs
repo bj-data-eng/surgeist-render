@@ -79,6 +79,7 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) direct_vello_routes: usize,
     pub(crate) exact_c08_graph_routes: usize,
     pub(crate) exact_c09_graph_routes: usize,
+    pub(crate) exact_c10_fixture_routes: usize,
     pub(crate) future_pass_rejections: usize,
 }
 
@@ -733,6 +734,33 @@ impl Renderer {
         }
     }
 
+    #[cfg(test)]
+    fn classify_c10_fixture_dispatch(
+        &mut self,
+        graph: &GpuRenderGraph,
+        output_format: Format,
+        working_format: WorkingFormat,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<RendererFrameDispatch> {
+        self.dispatch_observation.boundary_invocations = self
+            .dispatch_observation
+            .boundary_invocations
+            .saturating_add(1);
+        let preparable = super::pass::c10_preparable_graph_for_test(
+            graph,
+            output_format,
+            working_format,
+            capabilities,
+        )?;
+        self.dispatch_observation.exact_c10_fixture_routes = self
+            .dispatch_observation
+            .exact_c10_fixture_routes
+            .saturating_add(1);
+        Ok(RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C10(
+            preparable,
+        )))
+    }
+
     /// Submits one render operation for an available surface.
     ///
     /// Awaiting this future returns render statistics after scene validation and
@@ -1208,12 +1236,22 @@ impl Renderer {
                     "the private C10 fixture lost immutable device capabilities",
                 )
             })?;
-        let preparable = super::pass::c10_preparable_graph_for_test(
+        let preparable = match self.classify_c10_fixture_dispatch(
             &graph,
             runtime_surface_format(surface),
             working_format,
             &capabilities,
-        )?;
+        )? {
+            RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C10(preparable)) => preparable,
+            RendererFrameDispatch::DirectVello(_)
+            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(_))
+            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(_)) => {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C10 fixture left its exact renderer dispatch route",
+                ));
+            }
+        };
         let output_extent = preparable.output_extent()?;
         let source_spatial = preparable.first_color_spatial_for_test().ok_or_else(|| {
             Error::new(

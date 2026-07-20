@@ -1,14 +1,11 @@
+#[cfg(test)]
+use super::style::ColorFilterPipeline;
 use super::{
     Error, Rect, Result,
     style::{
         ColorFilterOp, FilterAmount, FilterAngle, FilterBlur, FilterDropShadow, FilterList,
         FilterOpKind, UnitFilterAmount,
     },
-};
-#[cfg(test)]
-use super::{
-    reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
-    style::ColorFilterPipeline,
 };
 
 #[cfg(test)]
@@ -1073,19 +1070,8 @@ impl CompiledColorFilterPipeline {
         &self.source_ops
     }
 
-    pub(crate) fn apply_to_pixel(&self, pixel: PremultipliedRgba8) -> Result<PremultipliedRgba8> {
-        let mut pixel = pixel;
-        for step in &self.steps {
-            pixel = step.apply_to_pixel(pixel)?;
-        }
-        Ok(pixel)
-    }
-
-    pub(crate) fn apply_to_buffer(
-        &self,
-        buffer: &ReferencePremultipliedRgba8Buffer,
-    ) -> Result<ReferencePremultipliedRgba8Buffer> {
-        buffer.map_pixels(|pixel| self.apply_to_pixel(pixel))
+    pub(crate) fn executable_steps(&self) -> &[CompiledColorFilterStep] {
+        &self.steps
     }
 
     #[cfg(test)]
@@ -1103,7 +1089,7 @@ impl CompiledColorFilterPipeline {
 /// those transforms would change CSS-visible order/rounding for some chains.
 #[cfg(test)]
 #[derive(Clone, Debug, PartialEq)]
-enum CompiledColorFilterStep {
+pub(crate) enum CompiledColorFilterStep {
     Identity,
     TransparentBlack,
     StraightColorRun(Vec<StraightColorTransform>),
@@ -1111,31 +1097,18 @@ enum CompiledColorFilterStep {
 }
 
 #[cfg(test)]
-impl CompiledColorFilterStep {
-    fn apply_to_pixel(&self, pixel: PremultipliedRgba8) -> Result<PremultipliedRgba8> {
-        match self {
-            Self::Identity => Ok(pixel),
-            Self::TransparentBlack => Ok(PremultipliedRgba8::TRANSPARENT),
-            Self::StraightColorRun(transforms) => {
-                let mut pixel = pixel;
-                for transform in transforms {
-                    pixel = transform.apply_to_pixel(pixel);
-                }
-                Ok(pixel)
-            }
-            Self::Opacity(amount) => Ok(pixel.apply_opacity_amount(amount.value())),
-        }
-    }
-}
-
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct StraightColorTransform {
+pub(crate) struct StraightColorTransform {
     matrix: [[f64; 4]; 3],
 }
 
 #[cfg(test)]
 impl StraightColorTransform {
+    pub(crate) const fn matrix(self) -> [[f64; 4]; 3] {
+        self.matrix
+    }
+
     fn from_op(op: ColorFilterOp) -> Option<Self> {
         match op {
             ColorFilterOp::Brightness(amount) => Some(Self::brightness(amount.value())),
@@ -1283,33 +1256,6 @@ impl StraightColorTransform {
                 ],
             ],
         }
-    }
-
-    fn apply_to_pixel(self, pixel: PremultipliedRgba8) -> PremultipliedRgba8 {
-        if pixel.alpha() == 0 {
-            return PremultipliedRgba8::TRANSPARENT;
-        }
-
-        let alpha = f64::from(pixel.alpha());
-        let red = f64::from(pixel.red()) / alpha;
-        let green = f64::from(pixel.green()) / alpha;
-        let blue = f64::from(pixel.blue()) / alpha;
-
-        PremultipliedRgba8::from_straight_color_channels(
-            self.matrix[0][0] * red
-                + self.matrix[0][1] * green
-                + self.matrix[0][2] * blue
-                + self.matrix[0][3],
-            self.matrix[1][0] * red
-                + self.matrix[1][1] * green
-                + self.matrix[1][2] * blue
-                + self.matrix[1][3],
-            self.matrix[2][0] * red
-                + self.matrix[2][1] * green
-                + self.matrix[2][2] * blue
-                + self.matrix[2][3],
-            pixel.alpha(),
-        )
     }
 }
 

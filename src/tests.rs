@@ -25425,9 +25425,38 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
 
 #[test]
 fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let width = u32::try_from(expected.len() / 4).expect("the loss fixture width must fit u32");
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .unwrap();
+    let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface =
-        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .unwrap();
+    let warmed = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        &mut surface,
+        &scene,
+        filters,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("device-loss coverage must first retain one C10 graph frame");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the warmed C10 device must remain ready before loss");
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache = ready.device_pass_cache_counts_for_test();
+    assert!(
+        warmed.output_extent == PhysicalSize::new(width, 1)
+            && resources.entry_count > 0
+            && resources.effect_texture_count_for_test() > 0
+            && cache.has_render_pipelines(),
+        "device-loss coverage did not first retain exact C10 resources"
+    );
 
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
@@ -25441,6 +25470,11 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
         DeviceLossReason::Destroyed,
     );
     assert!(renderer.default_device_renderer_released_for_test());
+    assert!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .is_none()
+    );
 }
 
 #[test]
@@ -30384,6 +30418,609 @@ fn color_filter_shader_failure_preserves_prior_publication_and_cache() {
     );
 }
 
+fn c10_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
+    let source = vec![
+        [0, 0, 0, 255],
+        [255, 255, 255, 255],
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+    ];
+    let expected = source
+        .iter()
+        .flat_map(|pixel| [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], pixel[3]])
+        .collect();
+    (
+        c10_signed_source_scene_for_test(&source),
+        vec![color_filter_list([ColorFilterOp::Invert(
+            UnitFilterAmount::try_new(1.0).unwrap(),
+        )])],
+        expected,
+    )
+}
+
+#[test]
+fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
+    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let width = u32::try_from(expected.len() / 4).expect("the C10 retention width must fit u32");
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .unwrap_or_else(|error| panic!("repeated C10 reuse coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .unwrap_or_else(|error| {
+                panic!("repeated C10 reuse coverage requires a headless surface: {error}")
+            });
+
+    for _ in 0..2 {
+        pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+            &mut surface,
+            &scene,
+            filters.clone(),
+            Parameters::default(),
+            working_format,
+        ))
+        .unwrap_or_else(|error| panic!("C10 reuse warm-up frames must succeed: {error}"));
+    }
+    let warmed_output = pollster::block_on(renderer.read_headless(&surface))
+        .unwrap_or_else(|error| panic!("the warmed C10 publication must be readable: {error}"));
+    let warmed = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the warmed C10 device must remain ready"));
+    let warmed_resources = warmed.internal_resource_manager_observation_for_test();
+    let warmed_cache = warmed.device_pass_cache_counts_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let mut resource_observations = Vec::new();
+    let mut cache_observations = Vec::new();
+    let mut stats = Vec::new();
+    for _ in 0..3 {
+        let frame = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+            &mut surface,
+            &scene,
+            filters.clone(),
+            Parameters::default(),
+            working_format,
+        ))
+        .unwrap_or_else(|error| panic!("repeated exact C10 frames must succeed: {error}"));
+        stats.push(C08PublicStatsForTest::from(frame.stats));
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .unwrap_or_else(|| panic!("repeated C10 frames must retain the ready device"));
+        resource_observations.push(ready.internal_resource_manager_observation_for_test());
+        cache_observations.push(ready.device_pass_cache_counts_for_test());
+    }
+    let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
+    let retention_history = graph_submission.resource_retention_history_for_test();
+    let stable_resource_set = resource_observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.active_frame_count == 0
+            && observation.resolved_lease_count == 0
+            && observation.next_resource == warmed_resources.next_resource
+            && observation.entry_count == warmed_resources.entry_count
+            && observation.retained_bytes == warmed_resources.retained_bytes
+            && observation.payload_creation_attempts == warmed_resources.payload_creation_attempts
+            && observation.entry_identities_for_test()
+                == warmed_resources.entry_identities_for_test()
+            && observation.committed_transient_buffer_count_for_test()
+                == warmed_resources.committed_transient_buffer_count_for_test()
+            && observation.committed_transient_image_count_for_test()
+                == warmed_resources.committed_transient_image_count_for_test()
+            && observation.effect_texture_count_for_test()
+                == warmed_resources.effect_texture_count_for_test()
+    });
+    let stable_prepared_identities = prepared_history.len() == 3
+        && prepared_history.first().is_some_and(|first| {
+            !first.is_empty()
+                && prepared_history
+                    .iter()
+                    .all(|identities| identities == first)
+        });
+    let stable_retention =
+        retention_history == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3];
+    let stable_cache = warmed_cache.has_render_pipelines()
+        && cache_observations
+            .iter()
+            .all(|observation| *observation == warmed_cache);
+    let stable_stats = stats
+        .first()
+        .is_some_and(|first| stats.iter().all(|actual| actual == first));
+    let one_submission_without_readback = submission.queue_submission_count_for_test() == 3
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 3
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let actual = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+        panic!("the repeated C10 publication must remain readable: {error}")
+    });
+    eprintln!(
+        "C10 retained cache={warmed_cache:?} resources={warmed_resources:?} prepared_identities={prepared_history:?}"
+    );
+
+    assert!(
+        stable_resource_set
+            && warmed_resources.committed_transient_buffer_count_for_test() > 0
+            && warmed_resources.committed_transient_image_count_for_test() > 0
+            && warmed_resources.effect_texture_count_for_test() > 0
+            && stable_prepared_identities
+            && stable_retention
+            && stable_cache
+            && stable_stats
+            && one_submission_without_readback
+            && warmed_output.rgba() == actual.rgba()
+            && actual.rgba() == expected,
+        "repeated C10 frames grew passes or resources or entered readback"
+    );
+}
+
+#[test]
+fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
+    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let width = u32::try_from(expected.len() / 4).expect("the C10 zero-budget width must fit u32");
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .unwrap_or_else(|error| panic!("zero-retention C10 coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .unwrap_or_else(|error| {
+                panic!("zero-retention C10 coverage requires a headless surface: {error}")
+            });
+
+    let first = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        &mut surface,
+        &scene,
+        filters.clone(),
+        Parameters::default(),
+        working_format,
+    ))
+    .unwrap_or_else(|error| panic!("the first zero-retention C10 frame must succeed: {error}"));
+    let first_output =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the first zero-retention C10 publication must be readable: {error}")
+        });
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the first zero-retention C10 frame must retain its device"))
+        .device_pass_cache_counts_for_test();
+
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let second = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        &mut surface,
+        &scene,
+        filters,
+        Parameters::default(),
+        working_format,
+    ))
+    .unwrap_or_else(|error| panic!("the repeated zero-retention C10 frame must succeed: {error}"));
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .unwrap_or_else(|| panic!("the repeated zero-retention C10 device must remain ready"));
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let retention_history = graph_submission.resource_retention_history_for_test();
+    let all_idle_resources_are_released = resources.leased_count == 0
+        && resources.idle_count == 0
+        && resources.active_frame_count == 0
+        && resources.resolved_lease_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
+        && resources.committed_transient_buffer_count_for_test() == 0
+        && resources.committed_transient_image_count_for_test() == 0
+        && resources.effect_texture_count_for_test() == 0
+        && retention_history == [C08GraphResourceRetentionForTest::ReleasedAllIdle];
+    let one_submission_without_readback = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let second_output =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the repeated zero-retention C10 publication must be readable: {error}")
+        });
+    eprintln!(
+        "C10 zero-budget cache_before={cache_before:?} cache_after={cache_after:?} resources={resources:?} retention={retention_history:?} submissions={}/{}/{} readback={} first_stats={:?} second_stats={:?} first={:?} second={:?} expected={expected:?}",
+        submission.queue_submission_count_for_test(),
+        graph_submission.queue_submission_count_for_test(),
+        direct_submission.queue_submission_count_for_test(),
+        submission.readback_queue_submission_count_for_test(),
+        C08PublicStatsForTest::from(first.stats),
+        C08PublicStatsForTest::from(second.stats),
+        first_output.rgba(),
+        second_output.rgba(),
+    );
+
+    assert!(
+        all_idle_resources_are_released
+            && one_submission_without_readback
+            && cache_before == cache_after
+            && cache_after.has_render_pipelines()
+            && first.stats.commands == second.stats.commands
+            && first.stats.images == second.stats.images
+            && first_output.rgba() == second_output.rgba()
+            && second_output.rgba() == expected,
+        "zero retention changed C10 pixels or kept idle frame resources"
+    );
+}
+
+fn c10_public_color_graph_diagnostic_for_test(
+    scene: &Scene,
+    filters: Vec<FilterList>,
+    size: Size,
+) -> Option<UnsupportedPrimitive> {
+    let commands = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the public C10 diagnostic fixture must normalize ordinary capture input");
+    let context =
+        super::frame::FrameContext::try_new(size, 1.0, Antialiasing::Area, Color::TRANSPARENT)
+            .expect("the public C10 diagnostic fixture must form a frame context");
+    let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)
+        .expect("the public diagnostic fixture must form the same authored C10 graph");
+    super::renderer::future_graph_diagnostic_for_test(
+        &graph,
+        Format::Rgba8,
+        &DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .expect("the retained public dispatch classifier must diagnose a C10 graph")
+}
+
+fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
+    let capabilities = Capabilities::CURRENT;
+    let unsupported = [
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+        ),
+        (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        (
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::FilteredImagePaint,
+        ),
+        (
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::LayerFilterExecution,
+        ),
+        (
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ),
+        (
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BroadBackdropExecution,
+        ),
+    ];
+    let unsupported_are_exact = unsupported.into_iter().all(|(family, operation)| {
+        let expected = UnsupportedPrimitive::new(family, operation);
+        capabilities
+            .ensure_supported(expected)
+            .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+    });
+    let reference = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#c10-reference");
+    let reference_error = Error::unresolved_resource(reference.clone());
+    unsupported_are_exact
+        && !capabilities.filters().supports_gpu_color_filter_execution()
+        && !capabilities.filters().supports_gpu_blur_filter_execution()
+        && !capabilities
+            .filters()
+            .supports_gpu_drop_shadow_filter_execution()
+        && !capabilities.filters().supports_layer_filters()
+        && !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+        && capabilities
+            .image_sampling()
+            .supports_color_filtered_image_paint()
+        && !capabilities
+            .offscreen_pipeline()
+            .supports_layer_filter_execution()
+        && !capabilities
+            .offscreen_pipeline()
+            .supports_bounded_backdrop_filter_execution()
+        && reference_error.code() == ErrorCode::UnresolvedResource
+        && reference_error.unresolved_resource_diagnostic() == Some(&reference)
+}
+
+#[test]
+fn c10_fixture_executes_while_public_color_capability_remains_diagnostic() {
+    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let width = u32::try_from(expected.len() / 4).expect("the C10 ingress width must fit u32");
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("C10 ingress coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .unwrap_or_else(|error| panic!("C10 ingress coverage requires a surface: {error}"));
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let rendered = render_c10_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        &scene,
+        filters.clone(),
+        Parameters::default(),
+        working_format,
+    );
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the executed C10 fixture must retain its ready device");
+    let resources_before_diagnostic = ready.internal_resource_manager_observation_for_test();
+    let cache_before_diagnostic = ready.device_pass_cache_counts_for_test();
+    let publication_before_diagnostic = surface.headless_publication_count_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let public_diagnostic = c10_public_color_graph_diagnostic_for_test(
+        &scene,
+        filters,
+        Size::new(f64::from(width), 1.0),
+    );
+    let no_public_gpu_work = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0;
+    drop(submission_scope);
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the public C10 rejection must retain its ready device");
+    let resources_after_diagnostic = ready.internal_resource_manager_observation_for_test();
+    let cache_after_diagnostic = ready.device_pass_cache_counts_for_test();
+    let dispatch_after = renderer.dispatch_observation_for_test();
+    let expected_diagnostic = UnsupportedPrimitive::new(
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    );
+
+    assert!(
+        c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
+            && rendered.output.rgba() == expected
+            && rendered.stats == renderer.stats()
+            && public_diagnostic == Some(expected_diagnostic)
+            && c10_retained_public_filter_diagnostics_are_exact_for_test()
+            && no_public_gpu_work
+            && resources_after_diagnostic == resources_before_diagnostic
+            && cache_after_diagnostic == cache_before_diagnostic
+            && surface.headless_publication_count_for_test() == publication_before_diagnostic
+            && dispatch_after.boundary_invocations
+                == dispatch_before.boundary_invocations.saturating_add(1)
+            && dispatch_after.exact_c10_fixture_routes
+                == dispatch_before.exact_c10_fixture_routes.saturating_add(1),
+        "C10 fixture did not execute through retained private ingress while public color capability remained diagnostic"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_graph() {
+    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let width = u32::try_from(expected.len() / 4).expect("the presented C10 width must fit u32");
+    let parameters = Parameters::default();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("presented C10 coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(f64::from(width), 1.0),
+            format: Format::Rgba8,
+            ..SurfaceOptions::default()
+        },
+    );
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .unwrap_or_else(|error| panic!("presented C10 coverage must configure: {error}"));
+    let presentation = presented_observation_handle_for_test(&surface);
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let rendered = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        &mut surface,
+        &scene,
+        filters,
+        parameters,
+        working_format,
+    ));
+    let one_production_submission = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.transaction_generation_for_test()
+            == graph_submission.active_generation_for_test()
+        && graph_submission.scopes_resolved_for_test()
+        && graph_submission.presentation_scopes_resolved_for_test()
+        && graph_submission.prepared_frame_committed_for_test()
+        && graph_submission.capture_resources_committed_for_test()
+        && graph_submission.presented_host_effect_applied_for_test()
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let presentation = presentation.snapshot_for_test();
+    let presented = take_last_presented_texture_for_test(&mut surface)
+        .and_then(|texture| {
+            pollster::block_on(
+                renderer.read_render_texture_for_test(&texture, PhysicalSize::new(width, 1)),
+            )
+            .ok()
+        })
+        .map(|image| image.into_rgba());
+    let dispatch_after = renderer.dispatch_observation_for_test();
+    let exact_graph = rendered.as_ref().is_ok_and(|rendered| {
+        rendered.working_format == working_format
+            && rendered.output_extent == PhysicalSize::new(width, 1)
+            && rendered.source_origin == (C10_PIXEL_FIXTURE_SIGNED_X, 0)
+            && rendered.source_extent
+                == PhysicalSize::new(width + C10_PIXEL_FIXTURE_SIGNED_X.unsigned_abs(), 1)
+            && rendered.source_texel_origin
+                == Point::new(f64::from(C10_PIXEL_FIXTURE_SIGNED_X), 0.0)
+            && rendered.source_raster_scale == 1.0
+            && rendered.stats == renderer.stats()
+    });
+
+    assert!(
+        exact_graph
+            && one_production_submission
+            && presentation.acquire_count_for_test() == 1
+            && presentation.present_count_for_test() == 1
+            && presentation.discarded_count_for_test() == 0
+            && surface.headless_publication_count_for_test() == 0
+            && surface.last_parameters == Some(parameters)
+            && presented.as_deref() == Some(expected.as_slice())
+            && dispatch_after.boundary_invocations
+                == dispatch_before.boundary_invocations.saturating_add(1)
+            && dispatch_after.exact_c10_fixture_routes
+                == dispatch_before.exact_c10_fixture_routes.saturating_add(1),
+        "presented C10 fixture did not use the production graph transaction and host effects"
+    );
+}
+
+#[test]
+fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor() {
+    let (c10_scene, c10_filters, c10_expected) = c10_retention_fixture_for_test();
+    let c10_width =
+        u32::try_from(c10_expected.len() / 4).expect("the C10 boundary width must fit u32");
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("C09/C10 boundary coverage requires a renderer: {error}"));
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    renderer.select_exact_graph_working_format_for_test(working_format);
+    let dispatch_before = renderer.dispatch_observation_for_test();
+
+    let mut c10_surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(c10_width), 1.0), 1.0))
+            .unwrap_or_else(|error| panic!("C10 boundary coverage requires a surface: {error}"));
+    let c10 = render_c10_fixture_for_test(
+        &mut renderer,
+        &mut c10_surface,
+        &c10_scene,
+        c10_filters.clone(),
+        Parameters::default(),
+        working_format,
+    );
+
+    let (c09_scene, c09_size, _, _) = c09_reuse_scene_and_oracle_for_test();
+    let mut c09_surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(c09_size.width()), f64::from(c09_size.height())),
+        1.0,
+    ))
+    .unwrap_or_else(|error| panic!("C09 boundary coverage requires a surface: {error}"));
+    let c09 =
+        pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
+
+    let backdrop_filters = color_filter_list([ColorFilterOp::Invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )]);
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                backdrop_filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut future_scene = Scene::new();
+    future_scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+            );
+        });
+    let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .unwrap_or_else(|error| panic!("future boundary coverage requires a surface: {error}"));
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("C09/C10 boundary coverage must retain its ready device");
+    let resources_before = ready.internal_resource_manager_observation_for_test();
+    let cache_before = ready.device_pass_cache_counts_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let future = pollster::block_on(renderer.render(
+        &mut future_surface,
+        &future_scene,
+        Parameters::default(),
+    ));
+    let color_diagnostic = c10_public_color_graph_diagnostic_for_test(
+        &c10_scene,
+        c10_filters,
+        Size::new(f64::from(c10_width), 1.0),
+    );
+    let no_rejected_work = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0;
+    drop(submission_scope);
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("retained public diagnostics must keep the ready device");
+    let resources_after = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let dispatch_after = renderer.dispatch_observation_for_test();
+    let expected_color = UnsupportedPrimitive::new(
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    );
+    let expected_backdrop = UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
+    );
+
+    assert!(
+        c10.output.rgba() == c10_expected
+            && c10_frame_has_exact_extent_origin_and_submission_for_test(&c10, c10_width)
+            && c09.is_ok()
+            && future
+                .as_ref()
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
+            && color_diagnostic == Some(expected_color)
+            && no_rejected_work
+            && resources_after == resources_before
+            && cache_after == cache_before
+            && future_surface.headless_publication_count_for_test() == 0
+            && dispatch_after.boundary_invocations
+                == dispatch_before.boundary_invocations.saturating_add(3)
+            && dispatch_after.exact_c09_graph_routes
+                == dispatch_before.exact_c09_graph_routes.saturating_add(1)
+            && dispatch_after.exact_c10_fixture_routes
+                == dispatch_before.exact_c10_fixture_routes.saturating_add(1)
+            && dispatch_after.future_pass_rejections
+                == dispatch_before.future_pass_rejections.saturating_add(1),
+        "public dispatch crossed the C09 boundary or the C10 fixture bypassed the shared executor"
+    );
+}
+
 #[test]
 fn graph_render_path_submits_without_map_or_cpu_wait() {
     let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -31613,21 +32250,24 @@ fn cpu_reference_algorithms_are_test_only_after_gpu_cutover() {
     let lib_source = include_str!("lib.rs");
     let filter_source = include_str!("filter.rs");
     let image_source = include_str!("image.rs");
+    let reference_source = include_str!("reference.rs");
     let renderer_source = include_str!("renderer.rs");
     let capability_source = include_str!("capability.rs");
     let error_source = include_str!("error.rs");
     let reference_module_is_test_only = lib_source.contains("#[cfg(test)]\nmod reference;");
-    let cpu_imports_are_test_only = filter_source.contains(
-        "#[cfg(test)]\nuse super::{\n    reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer}",
-    ) && image_source.contains("#[cfg(test)]\nuse super::{")
-        && image_source.contains(
-            "reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer}",
-        );
+    let cpu_imports_are_test_only = !filter_source.contains("reference::")
+        && !filter_source.contains("PremultipliedRgba8")
+        && reference_source.contains("CompiledColorFilterPipeline")
+        && image_source.contains("#[cfg(test)]\nuse super::{")
+        && image_source
+            .contains("reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer}");
     let cpu_execution_is_test_only = image_source.contains(
         "#[cfg(test)]\n#[derive(Debug)]\npub(crate) struct ResolvedMaterializedImageFilterExecution",
     ) && filter_source.contains(
         "#[cfg(test)]\n#[derive(Clone, Debug, PartialEq)]\npub struct CompiledColorFilterPipeline",
-    );
+    ) && reference_source.contains("fn apply_compiled_color_filter_pipeline_to_pixel(")
+        && !filter_source.contains("fn apply_to_pixel(")
+        && !filter_source.contains("fn apply_to_buffer(");
     let production_route_is_gpu_only = !renderer_source.contains("materialize_resolved_layer_mask")
         && !renderer_source.contains("materialize_resolved_backdrop")
         && !image_source.contains("StagedResolvedAlphaMaskExecution")

@@ -2,7 +2,10 @@
 
 use super::{
     Error, Extend, Image, ImageQuality, PhysicalSize, Rect, Result,
-    filter::{BlurPolicy, CompiledColorFilterPipeline, TransparentEdgeSamplingPolicy},
+    filter::{
+        BlurPolicy, CompiledColorFilterPipeline, CompiledColorFilterStep, StraightColorTransform,
+        TransparentEdgeSamplingPolicy,
+    },
     layer::BlendMode,
     style::{ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow},
 };
@@ -107,7 +110,7 @@ impl PremultipliedRgba8 {
         self,
         pipeline: &CompiledColorFilterPipeline,
     ) -> Result<Self> {
-        pipeline.apply_to_pixel(self)
+        apply_compiled_color_filter_pipeline_to_pixel(self, pipeline)
     }
 
     pub(crate) const fn source_over(self, destination: Self) -> Self {
@@ -293,6 +296,48 @@ impl PremultipliedRgba8 {
             alpha,
         }
     }
+}
+
+fn apply_compiled_color_filter_pipeline_to_pixel(
+    mut pixel: PremultipliedRgba8,
+    pipeline: &CompiledColorFilterPipeline,
+) -> Result<PremultipliedRgba8> {
+    for step in pipeline.executable_steps() {
+        pixel = match step {
+            CompiledColorFilterStep::Identity => pixel,
+            CompiledColorFilterStep::TransparentBlack => PremultipliedRgba8::TRANSPARENT,
+            CompiledColorFilterStep::StraightColorRun(transforms) => {
+                let mut filtered = pixel;
+                for transform in transforms {
+                    filtered = apply_compiled_straight_color_transform(filtered, *transform);
+                }
+                filtered
+            }
+            CompiledColorFilterStep::Opacity(amount) => pixel.apply_opacity_amount(amount.value()),
+        };
+    }
+    Ok(pixel)
+}
+
+fn apply_compiled_straight_color_transform(
+    pixel: PremultipliedRgba8,
+    transform: StraightColorTransform,
+) -> PremultipliedRgba8 {
+    if pixel.alpha() == 0 {
+        return PremultipliedRgba8::TRANSPARENT;
+    }
+
+    let matrix = transform.matrix();
+    let alpha = f64::from(pixel.alpha());
+    let red = f64::from(pixel.red()) / alpha;
+    let green = f64::from(pixel.green()) / alpha;
+    let blue = f64::from(pixel.blue()) / alpha;
+    PremultipliedRgba8::from_straight_color_channels(
+        matrix[0][0] * red + matrix[0][1] * green + matrix[0][2] * blue + matrix[0][3],
+        matrix[1][0] * red + matrix[1][1] * green + matrix[1][2] * blue + matrix[1][3],
+        matrix[2][0] * red + matrix[2][1] * green + matrix[2][2] * blue + matrix[2][3],
+        pixel.alpha(),
+    )
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -567,7 +612,7 @@ impl ReferencePremultipliedRgba8Buffer {
         &self,
         pipeline: &CompiledColorFilterPipeline,
     ) -> Result<Self> {
-        pipeline.apply_to_buffer(self)
+        self.map_pixels(|pixel| apply_compiled_color_filter_pipeline_to_pixel(pixel, pipeline))
     }
 
     pub(crate) fn apply_alpha_mask(&self, mask: &Self) -> Result<Self> {
