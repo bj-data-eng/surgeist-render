@@ -766,7 +766,6 @@ impl RuntimeUnitFilterAmount {
         Ok(Self { value })
     }
 
-    #[cfg(test)]
     pub(crate) const fn value(self) -> f32 {
         self.value
     }
@@ -839,17 +838,14 @@ impl RuntimeFilterAmount {
         })
     }
 
-    #[cfg(test)]
     pub(crate) const fn zero(self) -> bool {
         self.zero
     }
 
-    #[cfg(test)]
     pub(crate) const fn mantissa(self) -> f32 {
         self.mantissa
     }
 
-    #[cfg(test)]
     pub(crate) const fn exponent(self) -> i32 {
         self.exponent
     }
@@ -876,12 +872,10 @@ impl RuntimeFilterAngle {
         Ok(Self { sine, cosine })
     }
 
-    #[cfg(test)]
     pub(crate) const fn sine(self) -> f32 {
         self.sine
     }
 
-    #[cfg(test)]
     pub(crate) const fn cosine(self) -> f32 {
         self.cosine
     }

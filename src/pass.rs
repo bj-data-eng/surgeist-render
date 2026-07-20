@@ -33,8 +33,8 @@ use super::{
         ResourceManager, WorkingFormat,
     },
     shader::{
-        BindGroupLayoutKey, CompositeParameterBytes, DevicePassCache, PassSpatialUniformBytes,
-        ProvisionalC08PassObjects, ProvisionalCompositePassObjects,
+        BindGroupLayoutKey, ColorFilterOperationBytes, CompositeParameterBytes, DevicePassCache,
+        PassSpatialUniformBytes, ProvisionalC08PassObjects, ProvisionalCompositePassObjects,
         ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
         ShaderCompositeKey, ShaderCompositePathKey, ShaderDataBindingKey, ShaderMaskQualityKey,
         ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey, ShaderSamplingEdgeKey,
@@ -51,6 +51,9 @@ use super::{
 
 #[cfg(test)]
 use super::texture::EffectTextureRole;
+
+#[cfg(test)]
+use super::shader::ColorFilterOperationBufferLimits;
 
 #[cfg(test)]
 use super::resource::ResourceAccountingFault;
@@ -141,6 +144,43 @@ pub(crate) struct RuntimeColorOperationObservationForTest {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct RuntimeColorFilterObservationForTest {
     pub(crate) operations: Vec<RuntimeColorOperationObservationForTest>,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ColorFilterOperationBytesObservationForTest {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) preserves_one_clamp_per_record: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ColorFilterOperationBufferLimitObservationForTest {
+    pub(crate) count_overflow_is_exact: bool,
+    pub(crate) max_buffer_size_is_exact: bool,
+    pub(crate) max_storage_binding_size_is_exact: bool,
+    pub(crate) equality_at_both_limits_is_accepted: bool,
+    pub(crate) rejects_before_any_allocation_or_cache_action: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C10ColorFilterCacheRealizationObservationForTest {
+    pub(crate) realizes_high_precision: bool,
+    pub(crate) realizes_reduced_precision: bool,
+    pub(crate) checked_scope_is_clean: bool,
+    pub(crate) publishes_only_color_filter_entries: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C10ColorFilterLayoutObservationForTest {
+    pub(crate) realizes_both_working_formats: bool,
+    pub(crate) binds_exact_filter_source: bool,
+    pub(crate) binds_exact_nearest_sampler: bool,
+    pub(crate) binds_spatial_and_read_only_operations: bool,
+    pub(crate) targets_only_the_working_format: bool,
+    pub(crate) contains_no_dummy_binding: bool,
 }
 
 #[cfg(test)]
@@ -237,6 +277,196 @@ pub(crate) fn c09_executable_graph_observation_for_test(
         capabilities,
     )
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn color_filter_operation_bytes_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<ColorFilterOperationBytesObservationForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+        return Err(lowering_error(
+            "the C10 operation-byte fixture did not produce a GPU graph",
+        ));
+    };
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let filters = lowered
+        .passes
+        .iter()
+        .filter_map(|pass| match &pass.kind {
+            RuntimePassKind::ColorFilter(Some(filter)) => Some(filter),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [filter] = filters.as_slice() else {
+        return Err(lowering_error(
+            "the C10 operation-byte fixture must contain one color-filter run",
+        ));
+    };
+    let limits = ColorFilterOperationBufferLimits::for_test(u64::MAX, u64::MAX);
+    let bytes = ColorFilterOperationBytes::try_from_runtime_operations_for_test(
+        filter.operations(),
+        limits,
+    )?;
+    Ok(ColorFilterOperationBytesObservationForTest {
+        bytes: bytes.as_bytes().to_vec(),
+        preserves_one_clamp_per_record: filter.operations().iter().all(|operation| {
+            operation.clamp_boundary()
+                == RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+        }),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn color_filter_operation_buffer_limit_observation_for_test()
+-> ColorFilterOperationBufferLimitObservationForTest {
+    let resources = ResourceManager::new(super::ResourceCacheBudget::DISABLED);
+    let cache = DevicePassCache::new();
+    let resources_before = resources.observation_for_test();
+    let cache_before = cache.counts_for_test();
+    let exact_error = |result: Result<u64>, field: &'static str| {
+        result.is_err_and(|error| {
+            error.code() == super::ErrorCode::InvalidInput
+                && error
+                    .invalid_value_diagnostic()
+                    .is_some_and(|invalid| invalid.field() == field)
+        })
+    };
+    let exact_byte_len = 16 + 32;
+    let count_overflow_is_exact = exact_error(
+        super::shader::color_filter_operation_byte_len_for_test(
+            u64::from(u32::MAX) + 1,
+            ColorFilterOperationBufferLimits::for_test(u64::MAX, u64::MAX),
+        ),
+        "color filter operation count",
+    );
+    let max_buffer_size_is_exact = exact_error(
+        super::shader::color_filter_operation_byte_len_for_test(
+            1,
+            ColorFilterOperationBufferLimits::for_test(exact_byte_len - 1, exact_byte_len),
+        ),
+        "color filter operation buffer byte length",
+    );
+    let max_storage_binding_size_is_exact = exact_error(
+        super::shader::color_filter_operation_byte_len_for_test(
+            1,
+            ColorFilterOperationBufferLimits::for_test(exact_byte_len, exact_byte_len - 1),
+        ),
+        "color filter operation buffer byte length",
+    );
+    let equality_at_both_limits_is_accepted =
+        super::shader::color_filter_operation_byte_len_for_test(
+            1,
+            ColorFilterOperationBufferLimits::for_test(exact_byte_len, exact_byte_len),
+        )
+        .is_ok_and(|byte_len| byte_len == exact_byte_len);
+    let resources_after = resources.observation_for_test();
+    let cache_after = cache.counts_for_test();
+    ColorFilterOperationBufferLimitObservationForTest {
+        count_overflow_is_exact,
+        max_buffer_size_is_exact,
+        max_storage_binding_size_is_exact,
+        equality_at_both_limits_is_accepted,
+        rejects_before_any_allocation_or_cache_action: count_overflow_is_exact
+            && max_buffer_size_is_exact
+            && max_storage_binding_size_is_exact
+            && resources_after == resources_before
+            && cache_after == cache_before,
+    }
+}
+
+#[cfg(test)]
+pub(crate) async fn c10_color_filter_cache_realization_observation_for_test(
+    device: &wgpu::Device,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C10ColorFilterCacheRealizationObservationForTest> {
+    capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
+    capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
+    let high = c10_color_filter_cache_requests_for_test(
+        commands.clone(),
+        context,
+        capabilities,
+        WorkingFormat::HighPrecision,
+    )?;
+    let reduced = c10_color_filter_cache_requests_for_test(
+        commands,
+        context,
+        capabilities,
+        WorkingFormat::ReducedPrecision,
+    )?;
+    let mut cache = DevicePassCache::new();
+    let mut update = cache.provisional_update();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let realization = (|| -> Result<(bool, bool)> {
+        let mut high_count = 0_usize;
+        for keys in high.passes() {
+            let objects = update.realize_color_filter_pass(
+                device,
+                &cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?;
+            objects.require_encoding_ready()?;
+            high_count += 1;
+        }
+        let mut reduced_count = 0_usize;
+        for keys in reduced.passes() {
+            let objects = update.realize_color_filter_pass(
+                device,
+                &cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?;
+            objects.require_encoding_ready()?;
+            reduced_count += 1;
+        }
+        Ok((high_count == 1, reduced_count == 1))
+    })();
+    let scope_error = error_scope.pop().await;
+    let (realizes_high_precision, realizes_reduced_precision) = realization?;
+    if let Some(error) = scope_error {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            format!("C10 checked shader realization failed validation: {error}"),
+        ));
+    }
+    update.commit(&mut cache)?;
+    let all_requests_are_cached = high.passes().iter().chain(reduced.passes()).all(|keys| {
+        cache.contains_color_filter_pass_for_test(
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        )
+    });
+    Ok(C10ColorFilterCacheRealizationObservationForTest {
+        realizes_high_precision,
+        realizes_reduced_precision,
+        checked_scope_is_clean: true,
+        publishes_only_color_filter_entries: all_requests_are_cached
+            && cache.contains_only_two_color_filter_passes_for_test(),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn c10_color_filter_layout_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C10ColorFilterLayoutObservationForTest {
+    c10_color_filter_layout_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -422,6 +652,18 @@ impl C09CompositeCacheRequestsForTest {
 }
 
 #[cfg(test)]
+pub(crate) struct C10ColorFilterCacheRequestsForTest {
+    passes: Vec<RuntimePassCacheKeys>,
+}
+
+#[cfg(test)]
+impl C10ColorFilterCacheRequestsForTest {
+    pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
+        &self.passes
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn c09_composite_cache_requests_for_test(
     command_sets: &[RenderCommands],
     context: FrameContext,
@@ -513,6 +755,109 @@ pub(crate) fn c09_composite_cache_requests_for_test(
         ));
     }
     Ok(C09CompositeCacheRequestsForTest { passes })
+}
+
+#[cfg(test)]
+fn c10_color_filter_cache_requests_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> Result<C10ColorFilterCacheRequestsForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+        return Err(lowering_error(
+            "the C10 color-filter cache fixture did not produce a GPU graph",
+        ));
+    };
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let passes = lowered
+        .passes
+        .iter()
+        .filter_map(|pass| match &pass.kind {
+            RuntimePassKind::ColorFilter(Some(filter)) if !filter.operations().is_empty() => {
+                pass.cache_keys.clone()
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if passes.len() != 1 {
+        return Err(lowering_error(
+            "the C10 color-filter cache fixture must contain one checked program request",
+        ));
+    }
+    Ok(C10ColorFilterCacheRequestsForTest { passes })
+}
+
+#[cfg(test)]
+fn c10_color_filter_layout_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C10ColorFilterLayoutObservationForTest> {
+    let mut facts = Vec::with_capacity(2);
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let requests = c10_color_filter_cache_requests_for_test(
+            commands.clone(),
+            context,
+            capabilities,
+            working_format,
+        )?;
+        for keys in requests.passes() {
+            let Some(observed) = super::shader::c10_color_filter_pass_key_facts_for_test(
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            ) else {
+                return Ok(C10ColorFilterLayoutObservationForTest::default());
+            };
+            facts.push(observed);
+        }
+    }
+    let realizes_both_working_formats = facts.len() == 2
+        && [
+            ShaderTextureFormatKey::working(WorkingFormat::HighPrecision),
+            ShaderTextureFormatKey::working(WorkingFormat::ReducedPrecision),
+        ]
+        .into_iter()
+        .all(|working_format| {
+            facts
+                .iter()
+                .filter(|facts| facts.working_format == working_format)
+                .count()
+                == 1
+        });
+    let binds_exact_filter_source = facts.iter().all(|facts| {
+        facts.source_role == ShaderBindingRoleKey::FilterSource
+            && facts.source_format == facts.working_format
+    });
+    let binds_exact_nearest_sampler = facts
+        .iter()
+        .all(|facts| facts.has_only_nearest_source_sampler);
+    let binds_spatial_and_read_only_operations =
+        facts.iter().all(|facts| facts.has_exact_data_bindings);
+    let targets_only_the_working_format = facts
+        .iter()
+        .all(|facts| facts.target_format == facts.working_format);
+    Ok(C10ColorFilterLayoutObservationForTest {
+        realizes_both_working_formats,
+        binds_exact_filter_source,
+        binds_exact_nearest_sampler,
+        binds_spatial_and_read_only_operations,
+        targets_only_the_working_format,
+        contains_no_dummy_binding: facts.len() == 2
+            && binds_exact_filter_source
+            && binds_exact_nearest_sampler
+            && binds_spatial_and_read_only_operations,
+    })
 }
 
 #[cfg(test)]
@@ -1344,6 +1689,18 @@ pub(crate) struct RuntimeColorOperation {
     clamp_boundary: RuntimeColorClampBoundary,
 }
 
+impl RuntimeColorOperation {
+    #[must_use]
+    pub(crate) const fn operation(self) -> RuntimeColorOperationKind {
+        self.operation
+    }
+
+    #[must_use]
+    pub(crate) const fn clamp_boundary(self) -> RuntimeColorClampBoundary {
+        self.clamp_boundary
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum RuntimeSamplingEdge {
     ClampToExtent,
@@ -1362,6 +1719,13 @@ pub(crate) struct RuntimeColorFilter {
     operations: Vec<RuntimeColorOperation>,
     spatial: RuntimeFilterSpatialMapping,
     edge: RuntimeSamplingEdge,
+}
+
+impl RuntimeColorFilter {
+    #[must_use]
+    pub(crate) fn operations(&self) -> &[RuntimeColorOperation] {
+        &self.operations
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4437,6 +4801,7 @@ struct RuntimeKernelPreparationRequest {
 struct RuntimePassPreparationRequest {
     runtime: RuntimePass,
     spatial_uniform: Option<PassSpatialUniformBytes>,
+    color_filter_operations: Option<ColorFilterOperationBytes>,
     composite_parameters: Option<CompositeParameterBytes>,
     cache_keys: Option<RuntimePassCacheKeys>,
     kernel: Option<GaussianKernelKey>,
@@ -4775,6 +5140,21 @@ impl RuntimeGraphPreparationPlan {
                     &resource_by_id,
                     lowered.root_working_image,
                 )?;
+                let color_filter_operations = match &pass.kind {
+                    RuntimePassKind::ColorFilter(Some(filter)) => {
+                        let bytes = ColorFilterOperationBytes::try_from_runtime_operations(
+                            filter.operations(),
+                            &device.limits(),
+                        )?;
+                        if bytes.as_bytes().is_empty() {
+                            return Err(preparation_error(
+                                "prepared color-filter operation bytes are empty",
+                            ));
+                        }
+                        Some(bytes)
+                    }
+                    _ => None,
+                };
                 let composite_parameters = prepared_pass_composite_parameters(pass)?;
                 if spatial_uniform.is_some() != pass.cache_keys.is_some() {
                     return Err(preparation_error(
@@ -4784,6 +5164,7 @@ impl RuntimeGraphPreparationPlan {
                 Ok(RuntimePassPreparationRequest {
                     runtime: pass.clone(),
                     spatial_uniform,
+                    color_filter_operations,
                     composite_parameters,
                     cache_keys: pass.cache_keys.clone(),
                     kernel: kernel_by_pass.get(&pass.id).copied(),
@@ -5495,6 +5876,7 @@ struct C08PreparedPassEncodingRequest {
     reads: Vec<RuntimeReadBinding>,
     result: RuntimeResultBinding,
     spatial_uniform: Option<PassSpatialUniformBytes>,
+    color_filter_operations: Option<ColorFilterOperationBytes>,
     composite_parameters: Option<CompositeParameterBytes>,
     cache_keys: Option<RuntimePassCacheKeys>,
 }
@@ -5507,6 +5889,7 @@ impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
             reads: request.runtime.reads.clone(),
             result: request.runtime.result,
             spatial_uniform: request.spatial_uniform.clone(),
+            color_filter_operations: request.color_filter_operations.clone(),
             composite_parameters: request.composite_parameters.clone(),
             cache_keys: request.cache_keys.clone(),
         }
@@ -6015,6 +6398,16 @@ impl<'device> PreparedGraph<'device> {
                     continue;
                 };
                 match &request.runtime.kind {
+                    RuntimePassKind::ColorFilter(Some(_)) => update
+                        .realize_color_filter_pass(
+                            device,
+                            pass_cache,
+                            keys.samplers(),
+                            keys.layout(),
+                            keys.shader(),
+                            keys.pipeline(),
+                        )?
+                        .require_encoding_ready()?,
                     RuntimePassKind::Composite(Some(RuntimeComposite {
                         kind: RuntimeCompositeKind::Layer { .. },
                         ..
@@ -6046,7 +6439,7 @@ impl<'device> PreparedGraph<'device> {
                     RuntimePassKind::ClearRoot { .. }
                     | RuntimePassKind::VelloCapture(_)
                     | RuntimePassKind::CopyBackdrop
-                    | RuntimePassKind::ColorFilter(_)
+                    | RuntimePassKind::ColorFilter(None)
                     | RuntimePassKind::BlurHorizontal(_)
                     | RuntimePassKind::BlurVertical(_)
                     | RuntimePassKind::DropShadowColorize(_)
@@ -6822,6 +7215,7 @@ impl<'device> PreparedGraph<'device> {
         if !exact_initialization
             || !request.reads.is_empty()
             || request.spatial_uniform.is_some()
+            || request.color_filter_operations.is_some()
             || request.composite_parameters.is_some()
             || request.cache_keys.is_some()
         {

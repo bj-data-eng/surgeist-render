@@ -11067,6 +11067,155 @@ fn filter_scalar_lowering_handles_f32_f64_exponents_and_huge_angles_finitely() {
     }
 }
 
+fn c10_color_filter_commands_for_shader_test() -> command::RenderCommands {
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(0.0).unwrap()),
+        FilterOp::contrast(FilterAmount::try_new(f64::from_bits(1)).unwrap()),
+        FilterOp::grayscale(UnitFilterAmount::try_new(0.25).unwrap()),
+        FilterOp::hue_rotate(FilterAngle::try_radians(std::f64::consts::FRAC_PI_2).unwrap()),
+        FilterOp::invert(UnitFilterAmount::try_new(0.5).unwrap()),
+        FilterOp::opacity(UnitFilterAmount::try_new(0.75).unwrap()),
+        FilterOp::saturate(FilterAmount::try_new(f64::MAX).unwrap()),
+        FilterOp::sepia(UnitFilterAmount::try_new(1.0).unwrap()),
+    ])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(-2.0, 3.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 12.0, 10.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(-1.0, 4.0, 3.0, 2.0),
+                Color::try_rgba(0.5, 0.25, 0.75, 0.5).unwrap(),
+            );
+        });
+    scene.normalize(Capabilities::CURRENT).unwrap()
+}
+
+fn c10_color_filter_frame_context_for_shader_test() -> super::frame::FrameContext {
+    super::frame::FrameContext::try_new(
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::TRANSPARENT,
+    )
+    .unwrap()
+}
+
+fn c10_expected_color_filter_operation_bytes_for_test() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(16 + 8 * 32);
+    bytes.extend_from_slice(&8_u32.to_le_bytes());
+    bytes.extend_from_slice(&[0_u8; 12]);
+    let mut push_record = |tag: u32, zero: u32, exponent: i32, payload: [f32; 4]| {
+        bytes.extend_from_slice(&tag.to_le_bytes());
+        bytes.extend_from_slice(&zero.to_le_bytes());
+        bytes.extend_from_slice(&exponent.to_le_bytes());
+        bytes.extend_from_slice(&0_u32.to_le_bytes());
+        for value in payload {
+            bytes.extend_from_slice(&value.to_le_bytes());
+        }
+    };
+    push_record(0, 1, 0, [0.0, 0.0, 0.0, 0.0]);
+    push_record(1, 0, -1073, [0.5, 0.0, 0.0, 0.0]);
+    push_record(2, 0, 0, [0.25, 0.0, 0.0, 0.0]);
+    let reduced_angle = std::f64::consts::FRAC_PI_2.rem_euclid(std::f64::consts::TAU) as f32;
+    let (sine, cosine) = reduced_angle.sin_cos();
+    push_record(3, 0, 0, [sine, cosine, 0.0, 0.0]);
+    push_record(4, 0, 0, [0.5, 0.0, 0.0, 0.0]);
+    push_record(5, 0, 0, [0.75, 0.0, 0.0, 0.0]);
+    push_record(6, 0, 1025, [0.5, 0.0, 0.0, 0.0]);
+    push_record(7, 0, 0, [1.0, 0.0, 0.0, 0.0]);
+    bytes
+}
+
+#[test]
+fn color_filter_operation_bytes_preserve_tags_scalars_and_clamp_boundaries() {
+    let observed = super::pass::color_filter_operation_bytes_observation_for_test(
+        c10_color_filter_commands_for_shader_test(),
+        c10_color_filter_frame_context_for_shader_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .unwrap_or_panic_for_test("the C10 operation-byte fixture must lower without allocation");
+
+    assert!(
+        observed.bytes == c10_expected_color_filter_operation_bytes_for_test()
+            && observed.preserves_one_clamp_per_record,
+        "color operation bytes lost an authored finite scalar or clamp"
+    );
+}
+
+#[test]
+fn color_filter_operation_buffer_limits_return_exact_invalid_input_before_allocation() {
+    let observed = super::pass::color_filter_operation_buffer_limit_observation_for_test();
+
+    assert!(
+        observed.count_overflow_is_exact
+            && observed.max_buffer_size_is_exact
+            && observed.max_storage_binding_size_is_exact
+            && observed.equality_at_both_limits_is_accepted
+            && observed.rejects_before_any_allocation_or_cache_action,
+        "an oversized C10 buffer lacks its exact pre-allocation diagnostic"
+    );
+}
+
+#[test]
+fn c10_color_filter_cache_realizes_checked_high_and_reduced_programs() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap_or_panic_for_test("C10 checked shader realization requires backend selection")
+        .unwrap_or_panic_for_test("C10 checked shader realization requires a host adapter");
+    let ready = backend
+        .ready_device_state_borrow_for_test(identity)
+        .unwrap_or_panic_for_test("C10 checked shader realization requires a ready device");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let observed = pollster::block_on(
+        super::pass::c10_color_filter_cache_realization_observation_for_test(
+            ready.device_for_test(),
+            c10_color_filter_commands_for_shader_test(),
+            c10_color_filter_frame_context_for_shader_test(),
+            capabilities,
+        ),
+    )
+    .unwrap_or_panic_for_test("the C10 checked shader must reach real WGPU realization");
+
+    assert!(
+        observed.realizes_high_precision
+            && observed.realizes_reduced_precision
+            && observed.checked_scope_is_clean
+            && observed.publishes_only_color_filter_entries,
+        "the C10 checked shader program is unrealized"
+    );
+}
+
+#[test]
+fn c10_color_filter_layout_binds_exact_source_spatial_and_operations() {
+    let observed = super::pass::c10_color_filter_layout_observation_for_test(
+        c10_color_filter_commands_for_shader_test(),
+        c10_color_filter_frame_context_for_shader_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.realizes_both_working_formats
+            && observed.binds_exact_filter_source
+            && observed.binds_exact_nearest_sampler
+            && observed.binds_spatial_and_read_only_operations
+            && observed.targets_only_the_working_format
+            && observed.contains_no_dummy_binding,
+        "the C10 layout has a missing or dummy binding"
+    );
+}
+
 fn bounded_offscreen_pass_plan_for_graph_probe() -> command::LayerPassPlan {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
@@ -13747,6 +13896,7 @@ fn c07_contains_no_placeholder_custom_shader_program() {
     shader_files.sort();
     let expected_shader_files = [
         "canonicalize_capture.wgsl".to_owned(),
+        "color_filter.wgsl".to_owned(),
         "layer_composite.wgsl".to_owned(),
         "present.wgsl".to_owned(),
         "span_source_over.wgsl".to_owned(),

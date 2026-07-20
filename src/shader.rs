@@ -4,7 +4,10 @@ use super::{
     Error, Format, Result,
     image::{Extend, ImageQuality},
     layer::BlendMode,
-    pass::{RuntimeLayerCompositeParameters, RuntimeSpatialDescriptor},
+    pass::{
+        RuntimeColorClampBoundary, RuntimeColorOperation, RuntimeColorOperationKind,
+        RuntimeLayerCompositeParameters, RuntimeSpatialDescriptor,
+    },
     resource::WorkingFormat,
 };
 
@@ -12,6 +15,276 @@ const CANONICALIZE_CAPTURE_WGSL: &str = include_str!("shaders/canonicalize_captu
 const SPAN_SOURCE_OVER_WGSL: &str = include_str!("shaders/span_source_over.wgsl");
 const PRESENT_WGSL: &str = include_str!("shaders/present.wgsl");
 const LAYER_COMPOSITE_WGSL: &str = include_str!("shaders/layer_composite.wgsl");
+const COLOR_FILTER_WGSL: &str = include_str!("shaders/color_filter.wgsl");
+
+const COLOR_FILTER_OPERATION_HEADER_BYTE_LEN: u64 = 16;
+const COLOR_FILTER_OPERATION_RECORD_BYTE_LEN: u64 = 32;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct ColorFilterOperationBufferLimits {
+    max_buffer_size: u64,
+    max_storage_buffer_binding_size: u64,
+}
+
+impl ColorFilterOperationBufferLimits {
+    #[must_use]
+    pub(crate) fn from_device_limits(limits: &wgpu::Limits) -> Self {
+        Self {
+            max_buffer_size: limits.max_buffer_size,
+            max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn for_test(
+        max_buffer_size: u64,
+        max_storage_buffer_binding_size: u64,
+    ) -> Self {
+        Self {
+            max_buffer_size,
+            max_storage_buffer_binding_size,
+        }
+    }
+}
+
+/// Exact checked storage-buffer bytes for one ordered color-filter run.
+///
+/// Bytes `0..16` are the operation count followed by three zero `u32` pads.
+/// Every following 32-byte record stores tag, zero flag, exponent, one zero
+/// alignment word, a four-scalar finite payload, and no other state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct ColorFilterOperationBytes {
+    bytes: Vec<u8>,
+}
+
+impl ColorFilterOperationBytes {
+    pub(crate) fn try_from_runtime_operations(
+        operations: &[RuntimeColorOperation],
+        device_limits: &wgpu::Limits,
+    ) -> Result<Self> {
+        Self::try_from_runtime_operations_with_limits(
+            operations,
+            ColorFilterOperationBufferLimits::from_device_limits(device_limits),
+        )
+    }
+
+    fn try_from_runtime_operations_with_limits(
+        operations: &[RuntimeColorOperation],
+        limits: ColorFilterOperationBufferLimits,
+    ) -> Result<Self> {
+        let operation_count = u32::try_from(operations.len())
+            .map_err(|_| color_filter_operation_count_error(operations.len()))?;
+        let byte_len = checked_color_filter_operation_byte_len(operation_count, limits)?;
+        let byte_len = usize::try_from(byte_len).map_err(|_| {
+            color_filter_operation_byte_len_error(
+                byte_len,
+                "must fit the host address space after device-limit validation",
+            )
+        })?;
+
+        let mut bytes = Vec::new();
+        bytes.try_reserve_exact(byte_len).map_err(|_| {
+            color_filter_operation_byte_len_error(
+                byte_len,
+                "must fit available host serialization memory",
+            )
+        })?;
+        bytes.resize(byte_len, 0);
+        bytes[0..4].copy_from_slice(&operation_count.to_le_bytes());
+
+        for (index, operation) in operations.iter().copied().enumerate() {
+            let record = serialize_color_filter_operation(operation)?;
+            let offset = 16 + index * 32;
+            bytes[offset..offset + 32].copy_from_slice(&record);
+        }
+        Ok(Self { bytes })
+    }
+
+    #[must_use]
+    pub(crate) fn as_bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_from_runtime_operations_for_test(
+        operations: &[RuntimeColorOperation],
+        limits: ColorFilterOperationBufferLimits,
+    ) -> Result<Self> {
+        Self::try_from_runtime_operations_with_limits(operations, limits)
+    }
+}
+
+fn checked_color_filter_operation_byte_len(
+    operation_count: u32,
+    limits: ColorFilterOperationBufferLimits,
+) -> Result<u64> {
+    let records = COLOR_FILTER_OPERATION_RECORD_BYTE_LEN
+        .checked_mul(u64::from(operation_count))
+        .ok_or_else(|| {
+            color_filter_operation_byte_len_error(
+                operation_count,
+                "must produce a checked u64 record byte length",
+            )
+        })?;
+    let byte_len = COLOR_FILTER_OPERATION_HEADER_BYTE_LEN
+        .checked_add(records)
+        .ok_or_else(|| {
+            color_filter_operation_byte_len_error(
+                operation_count,
+                "must produce a checked u64 header-plus-record byte length",
+            )
+        })?;
+    if byte_len > limits.max_buffer_size || byte_len > limits.max_storage_buffer_binding_size {
+        return Err(color_filter_operation_byte_len_error(
+            byte_len,
+            "must not exceed max_buffer_size or max_storage_buffer_binding_size",
+        ));
+    }
+    Ok(byte_len)
+}
+
+fn serialize_color_filter_operation(operation: RuntimeColorOperation) -> Result<[u8; 32]> {
+    if operation.clamp_boundary()
+        != RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+    {
+        return Err(Error::invalid_value(
+            "color filter operation clamp boundary",
+            "unsupported runtime boundary",
+            "must clamp straight RGBA and premultiply after every operation",
+        ));
+    }
+
+    let (tag, zero, exponent, payload) = match operation.operation() {
+        RuntimeColorOperationKind::Brightness(amount) => {
+            let (zero, exponent, mantissa) = checked_runtime_amount_parts(amount)?;
+            (0_u32, zero, exponent, [mantissa, 0.0, 0.0, 0.0])
+        }
+        RuntimeColorOperationKind::Contrast(amount) => {
+            let (zero, exponent, mantissa) = checked_runtime_amount_parts(amount)?;
+            (1_u32, zero, exponent, [mantissa, 0.0, 0.0, 0.0])
+        }
+        RuntimeColorOperationKind::Grayscale(amount) => (
+            2_u32,
+            0,
+            0,
+            [checked_runtime_unit(amount.value())?, 0.0, 0.0, 0.0],
+        ),
+        RuntimeColorOperationKind::HueRotate(angle) => {
+            let sine = checked_color_filter_payload(angle.sine())?;
+            let cosine = checked_color_filter_payload(angle.cosine())?;
+            (3_u32, 0, 0, [sine, cosine, 0.0, 0.0])
+        }
+        RuntimeColorOperationKind::Invert(amount) => (
+            4_u32,
+            0,
+            0,
+            [checked_runtime_unit(amount.value())?, 0.0, 0.0, 0.0],
+        ),
+        RuntimeColorOperationKind::Opacity(amount) => (
+            5_u32,
+            0,
+            0,
+            [checked_runtime_unit(amount.value())?, 0.0, 0.0, 0.0],
+        ),
+        RuntimeColorOperationKind::Saturate(amount) => {
+            let (zero, exponent, mantissa) = checked_runtime_amount_parts(amount)?;
+            (6_u32, zero, exponent, [mantissa, 0.0, 0.0, 0.0])
+        }
+        RuntimeColorOperationKind::Sepia(amount) => (
+            7_u32,
+            0,
+            0,
+            [checked_runtime_unit(amount.value())?, 0.0, 0.0, 0.0],
+        ),
+    };
+
+    let mut bytes = [0_u8; 32];
+    bytes[0..4].copy_from_slice(&tag.to_le_bytes());
+    bytes[4..8].copy_from_slice(&zero.to_le_bytes());
+    bytes[8..12].copy_from_slice(&exponent.to_le_bytes());
+    for (index, value) in payload.into_iter().enumerate() {
+        let offset = 16 + index * 4;
+        bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+    }
+    Ok(bytes)
+}
+
+fn checked_runtime_amount_parts(
+    amount: super::filter::RuntimeFilterAmount,
+) -> Result<(u32, i32, f32)> {
+    if amount.zero() {
+        if amount.mantissa() != 0.0 || amount.exponent() != 0 {
+            return Err(color_filter_operation_scalar_error(
+                "zero amount must carry zero mantissa and exponent",
+            ));
+        }
+        return Ok((1, 0, 0.0));
+    }
+    let mantissa = checked_color_filter_payload(amount.mantissa())?;
+    if !(0.5..1.0).contains(&mantissa) {
+        return Err(color_filter_operation_scalar_error(
+            "nonzero amount mantissa must be normalized to [0.5, 1)",
+        ));
+    }
+    Ok((0, amount.exponent(), mantissa))
+}
+
+fn checked_runtime_unit(value: f32) -> Result<f32> {
+    let value = checked_color_filter_payload(value)?;
+    if !(0.0..=1.0).contains(&value) {
+        return Err(color_filter_operation_scalar_error(
+            "unit amount must remain in the inclusive unit interval",
+        ));
+    }
+    Ok(value)
+}
+
+fn checked_color_filter_payload(value: f32) -> Result<f32> {
+    if !value.is_finite() {
+        return Err(color_filter_operation_scalar_error(
+            "every scalar payload must be finite",
+        ));
+    }
+    Ok(value)
+}
+
+fn color_filter_operation_count_error(value: impl std::fmt::Display) -> Error {
+    Error::invalid_value(
+        "color filter operation count",
+        value,
+        "must fit in u32 before operation-buffer byte calculation",
+    )
+}
+
+fn color_filter_operation_byte_len_error(
+    value: impl std::fmt::Display,
+    invariant: &'static str,
+) -> Error {
+    Error::invalid_value(
+        "color filter operation buffer byte length",
+        value,
+        invariant,
+    )
+}
+
+fn color_filter_operation_scalar_error(invariant: &'static str) -> Error {
+    Error::invalid_value(
+        "color filter operation scalar payload",
+        "runtime operation",
+        invariant,
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn color_filter_operation_byte_len_for_test(
+    operation_count: u64,
+    limits: ColorFilterOperationBufferLimits,
+) -> Result<u64> {
+    let operation_count = u32::try_from(operation_count)
+        .map_err(|_| color_filter_operation_count_error(operation_count))?;
+    checked_color_filter_operation_byte_len(operation_count, limits)
+}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ShaderCompositePathKey {
@@ -347,6 +620,19 @@ struct CompositePassKeyRefs<'a> {
     pipeline: &'a RenderPipelineKey,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ColorFilterPassDescription {
+    working_format: ShaderTextureFormatKey,
+}
+
+#[derive(Clone, Copy)]
+struct ColorFilterPassKeyRefs<'a> {
+    samplers: &'a [SamplerKey],
+    layout: &'a BindGroupLayoutKey,
+    shader: &'a ShaderModuleKey,
+    pipeline: &'a RenderPipelineKey,
+}
+
 /// Non-clone handles created inside one checked GPU-operation scope. New entries
 /// remain private to this phase until the caller explicitly commits after the
 /// owning transaction resolves cleanly.
@@ -373,6 +659,16 @@ pub(crate) struct ProvisionalC08PassObjects<'a> {
 /// checked transaction resolves successfully.
 pub(crate) struct ProvisionalCompositePassObjects<'a> {
     description: CompositePassDescription,
+    source_sampler: &'a wgpu::Sampler,
+    layout: &'a wgpu::BindGroupLayout,
+    shader: &'a wgpu::ShaderModule,
+    pipeline: &'a wgpu::RenderPipeline,
+}
+
+/// Borrowed C10 color-filter objects that remain provisional until the owning
+/// checked GPU operation resolves successfully.
+pub(crate) struct ProvisionalColorFilterPassObjects<'a> {
+    description: ColorFilterPassDescription,
     source_sampler: &'a wgpu::Sampler,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
@@ -535,6 +831,53 @@ impl DevicePassCache {
             && self.layouts.contains_key(layout)
             && self.shaders.contains_key(shader)
             && self.pipelines.contains_key(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_color_filter_pass_for_test(
+        &self,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> bool {
+        validate_color_filter_pass_keys(ColorFilterPassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        })
+        .is_ok()
+            && samplers.iter().all(|key| self.samplers.contains_key(key))
+            && self.layouts.contains_key(layout)
+            && self.shaders.contains_key(shader)
+            && self.pipelines.contains_key(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_only_two_color_filter_passes_for_test(&self) -> bool {
+        self.samplers.len() == 2
+            && self.layouts.len() == 2
+            && self.shaders.len() == 2
+            && self.pipelines.len() == 2
+            && self.samplers.keys().all(|key| {
+                key.binding_role == ShaderBindingRoleKey::FilterSource
+                    && key.filter == ShaderSamplingFilterKey::Nearest
+                    && key.edge == ShaderSamplingEdgeKey::ClampToExtent
+                    && key.resolved_mask_sampling.is_none()
+            })
+            && self
+                .layouts
+                .keys()
+                .all(|key| key.program == ShaderProgramKey::ColorFilter)
+            && self
+                .shaders
+                .keys()
+                .all(|key| key.program == ShaderProgramKey::ColorFilter)
+            && self.pipelines.keys().all(|key| {
+                key.shader.program == ShaderProgramKey::ColorFilter
+                    && key.layout.program == ShaderProgramKey::ColorFilter
+            })
     }
 }
 
@@ -727,6 +1070,152 @@ impl ProvisionalDevicePassCacheUpdate {
                 pipeline,
             },
         )
+    }
+
+    pub(crate) fn realize_color_filter_pass<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalColorFilterPassObjects<'a>> {
+        if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
+            return Err(color_filter_cache_error(
+                "provisional color-filter objects belong to another device cache",
+            ));
+        }
+        let keys = ColorFilterPassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        };
+        let description = validate_color_filter_pass_keys(keys)?;
+        for sampler_key in keys.samplers {
+            if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
+            {
+                self.samplers.insert(
+                    *sampler_key,
+                    device.create_sampler(&sampler_descriptor(*sampler_key)),
+                );
+            }
+        }
+        if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
+            self.layouts.insert(
+                keys.layout.clone(),
+                create_color_filter_bind_group_layout(device),
+            );
+        }
+        if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
+            self.shaders.insert(
+                keys.shader.clone(),
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Surgeist C10 color-filter shader"),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COLOR_FILTER_WGSL)),
+                }),
+            );
+        }
+        if !cache.pipelines.contains_key(keys.pipeline)
+            && !self.pipelines.contains_key(keys.pipeline)
+        {
+            let layout_handle = self
+                .layouts
+                .get(keys.layout)
+                .or_else(|| cache.layouts.get(keys.layout))
+                .ok_or_else(|| {
+                    color_filter_cache_error("color-filter bind-group layout realization was lost")
+                })?;
+            let shader_handle = self
+                .shaders
+                .get(keys.shader)
+                .or_else(|| cache.shaders.get(keys.shader))
+                .ok_or_else(|| {
+                    color_filter_cache_error("color-filter shader-module realization was lost")
+                })?;
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Surgeist C10 color-filter pipeline layout"),
+                bind_group_layouts: &[Some(layout_handle)],
+                immediate_size: 0,
+            });
+            let target = wgpu::ColorTargetState {
+                format: texture_format(description.working_format)?,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            };
+            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Surgeist C10 color-filter pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader_handle,
+                    entry_point: Some("vertex_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: shader_handle,
+                    entry_point: Some("fragment_main"),
+                    targets: &[Some(target)],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.pipelines.insert(keys.pipeline.clone(), created);
+        }
+        self.color_filter_pass_objects(cache, keys)
+    }
+
+    fn color_filter_pass_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        keys: ColorFilterPassKeyRefs<'_>,
+    ) -> Result<ProvisionalColorFilterPassObjects<'a>> {
+        let [source_sampler_key] = keys.samplers else {
+            return Err(color_filter_cache_error(
+                "color-filter realization requires one source sampler",
+            ));
+        };
+        let source_sampler = self
+            .samplers
+            .get(source_sampler_key)
+            .or_else(|| cache.samplers.get(source_sampler_key))
+            .ok_or_else(|| color_filter_cache_error("color-filter sampler realization was lost"))?;
+        let layout = self
+            .layouts
+            .get(keys.layout)
+            .or_else(|| cache.layouts.get(keys.layout))
+            .ok_or_else(|| {
+                color_filter_cache_error("color-filter bind-group layout realization was lost")
+            })?;
+        let shader = self
+            .shaders
+            .get(keys.shader)
+            .or_else(|| cache.shaders.get(keys.shader))
+            .ok_or_else(|| {
+                color_filter_cache_error("color-filter shader-module realization was lost")
+            })?;
+        let pipeline = self
+            .pipelines
+            .get(keys.pipeline)
+            .or_else(|| cache.pipelines.get(keys.pipeline))
+            .ok_or_else(|| {
+                color_filter_cache_error("color-filter render-pipeline realization was lost")
+            })?;
+        Ok(ProvisionalColorFilterPassObjects {
+            description: validate_color_filter_pass_keys(keys)?,
+            source_sampler,
+            layout,
+            shader,
+            pipeline,
+        })
     }
 
     pub(crate) fn realize_composite_pass<'a>(
@@ -1104,6 +1593,19 @@ impl ProvisionalCompositePassObjects<'_> {
     }
 }
 
+impl ProvisionalColorFilterPassObjects<'_> {
+    pub(crate) fn require_encoding_ready(&self) -> Result<()> {
+        let _ = (
+            self.description,
+            self.source_sampler,
+            self.layout,
+            self.shader,
+            self.pipeline,
+        );
+        Ok(())
+    }
+}
+
 fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription> {
     let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
         return Err(c08_cache_error(
@@ -1230,6 +1732,54 @@ fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription
         program,
         target_format,
     })
+}
+
+fn validate_color_filter_pass_keys(
+    keys: ColorFilterPassKeyRefs<'_>,
+) -> Result<ColorFilterPassDescription> {
+    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
+        return Err(color_filter_cache_error(
+            "a color-filter layout must bind exactly one sampled texture",
+        ));
+    };
+    let [sampler] = keys.samplers else {
+        return Err(color_filter_cache_error(
+            "a color-filter pass must bind exactly one source sampler",
+        ));
+    };
+    let Some(working_format) = keys.shader.working_format else {
+        return Err(color_filter_cache_error(
+            "a color-filter shader key has no selected working format",
+        ));
+    };
+    if keys.layout.program != ShaderProgramKey::ColorFilter
+        || keys.layout.data_bindings.as_slice()
+            != [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::ColorFilterOperations,
+            ]
+        || keys.shader.program != ShaderProgramKey::ColorFilter
+        || &keys.shader.layout != keys.layout
+        || keys.shader.samplers.as_slice() != keys.samplers
+        || keys.shader.output_format.is_some()
+        || &keys.pipeline.shader != keys.shader
+        || &keys.pipeline.layout != keys.layout
+        || keys.pipeline.samplers.as_slice() != keys.samplers
+        || !is_working_format(working_format)
+        || keys.pipeline.target_format != working_format
+        || sampled_texture.binding_role != ShaderBindingRoleKey::FilterSource
+        || sampled_texture.source_format != working_format
+        || sampler.binding_role != ShaderBindingRoleKey::FilterSource
+        || sampler.source_format != working_format
+        || sampler.filter != ShaderSamplingFilterKey::Nearest
+        || sampler.edge != ShaderSamplingEdgeKey::ClampToExtent
+        || sampler.resolved_mask_sampling.is_some()
+    {
+        return Err(color_filter_cache_error(
+            "color-filter keys disagree across source, layout, shader, or working target",
+        ));
+    }
+    Ok(ColorFilterPassDescription { working_format })
 }
 
 fn validate_composite_pass_keys(
@@ -1458,6 +2008,51 @@ fn create_composite_bind_group_layout(
     })
 }
 
+fn create_color_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let entries = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(48),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(48),
+            },
+            count: None,
+        },
+    ];
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Surgeist C10 color-filter bindings"),
+        entries: &entries,
+    })
+}
+
 const fn composite_fragment_entry(description: CompositePassDescription) -> &'static str {
     match (
         description.path,
@@ -1544,6 +2139,10 @@ const fn texture_format(format: ShaderTextureFormatKey) -> Result<wgpu::TextureF
 }
 
 fn c08_cache_error(message: &'static str) -> Error {
+    Error::new(super::BackendErrorCode::RenderFailed, message)
+}
+
+fn color_filter_cache_error(message: &'static str) -> Error {
     Error::new(super::BackendErrorCode::RenderFailed, message)
 }
 
@@ -1672,6 +2271,57 @@ pub(crate) fn c09_composite_pass_key_facts_for_test(
         target_format: pipeline.target_format,
         uses_fixed_source_over_blend: description.path == ShaderCompositePathKey::Normal,
         uses_replace_blend: description.path == ShaderCompositePathKey::DestinationSampling,
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C10ColorFilterPassKeyFactsForTest {
+    pub(crate) source_role: ShaderBindingRoleKey,
+    pub(crate) source_format: ShaderTextureFormatKey,
+    pub(crate) working_format: ShaderTextureFormatKey,
+    pub(crate) target_format: ShaderTextureFormatKey,
+    pub(crate) has_only_nearest_source_sampler: bool,
+    pub(crate) has_exact_data_bindings: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c10_color_filter_pass_key_facts_for_test(
+    samplers: &[SamplerKey],
+    layout: &BindGroupLayoutKey,
+    shader: &ShaderModuleKey,
+    pipeline: &RenderPipelineKey,
+) -> Option<C10ColorFilterPassKeyFactsForTest> {
+    let [sampled_texture] = layout.sampled_textures.as_slice() else {
+        return None;
+    };
+    let description = validate_color_filter_pass_keys(ColorFilterPassKeyRefs {
+        samplers,
+        layout,
+        shader,
+        pipeline,
+    })
+    .ok()?;
+    Some(C10ColorFilterPassKeyFactsForTest {
+        source_role: sampled_texture.binding_role,
+        source_format: sampled_texture.source_format,
+        working_format: description.working_format,
+        target_format: pipeline.target_format,
+        has_only_nearest_source_sampler: matches!(
+            samplers,
+            [SamplerKey {
+                binding_role: ShaderBindingRoleKey::FilterSource,
+                filter: ShaderSamplingFilterKey::Nearest,
+                edge: ShaderSamplingEdgeKey::ClampToExtent,
+                resolved_mask_sampling: None,
+                ..
+            }]
+        ),
+        has_exact_data_bindings: layout.data_bindings.as_slice()
+            == [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::ColorFilterOperations,
+            ],
     })
 }
 
