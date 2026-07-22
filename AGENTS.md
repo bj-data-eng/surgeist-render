@@ -1,6 +1,7 @@
 # surgeist-render Repository Guide
 
-Use `$surgeist-agent` for every task in this repository.
+Use the installed `surgeist-agent` plugin for every task in this repository.
+Select the task-appropriate focused skill.
 
 ## Authority Split
 
@@ -9,14 +10,15 @@ mapping from mutable leaf facts to authoritative sources, the intended crate and
 architecture boundary, and the configured local command inventory. The sources
 named below own their current values.
 
-`$surgeist-agent` is the sole Surgeist workflow authority. It owns scope control,
-planning, debugging and TDD, worker/reviewer gates, external-software permission,
+The installed `surgeist-agent` plugin is the sole Surgeist workflow authority.
+Its selected skill owns scope control, planning, debugging and TDD,
+worker/reviewer gates, external-software permission,
 the absolute unsafe prohibition, Git landing and publication, and
 cross-repository handoffs. This file does not redefine those workflows or grant
 authority to mutate, install, commit, or publish.
 
 Resolve an apparent conflict by domain: use this file and the sources below for
-mutable repository facts; use `$surgeist-agent` for workflow.
+mutable repository facts; use the selected plugin skill for workflow.
 Higher-priority user and system instructions still apply. Do not import another
 general development workflow.
 
@@ -64,7 +66,7 @@ generator and all generated API audit artifacts. This leaf carries no copies.
 
 ## Command Inventory
 
-These commands describe local verification capability; `$surgeist-agent`
+These commands describe local verification capability; the selected plugin skill
 determines their exact gate, order, feature matrix, and whether already-present
 tooling can run without unauthorized acquisition.
 
