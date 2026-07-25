@@ -129,6 +129,17 @@ pub(crate) struct C10ColorFilterRenderResultForTest {
     pub(crate) source_raster_scale: f64,
 }
 
+#[cfg(test)]
+struct C10ColorFilterFixturePreparationForTest {
+    device_identity: DeviceSlotIdentity,
+    frame_start: Instant,
+    encode_start: Instant,
+    normalized: RenderCommands,
+    graph: ExactSurfaceGraph,
+    output_extent: PhysicalSize,
+    source_spatial: super::pass::C10ColorSpatialObservationForTest,
+}
+
 struct RenderPublication {
     frame: SurfaceFrameCommit,
     stats: Stats,
@@ -1195,6 +1206,102 @@ impl Renderer {
         parameters: Parameters,
         working_format: WorkingFormat,
     ) -> Result<C10ColorFilterRenderResultForTest> {
+        let prepared = self.prepare_c10_color_filter_fixture_for_test(
+            surface,
+            scene,
+            filters,
+            parameters,
+            working_format,
+        )?;
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
+        let mut stats = Stats {
+            encode_time: prepared.encode_start.elapsed(),
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(
+            &prepared.normalized.commands,
+            &mut stats,
+            &mut uploaded_images,
+        );
+        if parameters.debug || self.options.debug() {
+            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
+        }
+        let frame = {
+            let backend = self
+                .backend
+                .as_mut()
+                .expect("C10 fixture preflight confirmed the renderer backend is available");
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            {
+                if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                    render_exact_presented_graph_surface(backend, surface, prepared.graph).await
+                } else {
+                    render_exact_headless_graph_surface(backend, surface, prepared.graph).await
+                }
+            }
+            #[cfg(not(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            )))]
+            {
+                render_exact_headless_graph_surface(backend, surface, prepared.graph).await
+            }
+        };
+        if frame.is_err()
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.observe_device_terminal(prepared.device_identity);
+        }
+        let frame = match frame {
+            Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
+                self.configure_presented_surface_if_needed(
+                    surface,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await?;
+                return Err(error);
+            }
+            Err(error) => return Err(error),
+            Ok(frame) => frame,
+        };
+        let stats = self.publish_clean_render_frame(
+            surface,
+            prepared.device_identity,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+            prepared.frame_start,
+        )?;
+        Ok(C10ColorFilterRenderResultForTest {
+            stats,
+            working_format,
+            output_extent: prepared.output_extent,
+            source_origin: prepared.source_spatial.device_origin,
+            source_extent: prepared.source_spatial.device_extent,
+            source_texel_origin: prepared.source_spatial.texel_origin,
+            source_raster_scale: prepared.source_spatial.raster_scale,
+        })
+    }
+
+    #[cfg(test)]
+    fn prepare_c10_color_filter_fixture_for_test(
+        &mut self,
+        surface: &Surface,
+        scene: &Scene,
+        filters: Vec<FilterList>,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C10ColorFilterFixturePreparationForTest> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
@@ -1259,94 +1366,14 @@ impl Renderer {
                 "the private C10 fixture lost its first exact color source",
             )
         })?;
-        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
-            .await?;
-        let mut stats = Stats {
-            encode_time: encode_start.elapsed(),
-            render_time: Duration::ZERO,
-            present_time: Duration::ZERO,
-            ..Stats::default()
-        };
-        let mut uploaded_images = self.uploaded_images.clone();
-        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
-        if parameters.debug || self.options.debug() {
-            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
-        }
-        let frame = {
-            let backend = self
-                .backend
-                .as_mut()
-                .expect("C10 fixture preflight confirmed the renderer backend is available");
-            #[cfg(any(
-                feature = "render-window",
-                all(feature = "render-web", target_arch = "wasm32")
-            ))]
-            {
-                if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
-                    render_exact_presented_graph_surface(
-                        backend,
-                        surface,
-                        ExactSurfaceGraph::C10(preparable),
-                    )
-                    .await
-                } else {
-                    render_exact_headless_graph_surface(
-                        backend,
-                        surface,
-                        ExactSurfaceGraph::C10(preparable),
-                    )
-                    .await
-                }
-            }
-            #[cfg(not(any(
-                feature = "render-window",
-                all(feature = "render-web", target_arch = "wasm32")
-            )))]
-            {
-                render_exact_headless_graph_surface(
-                    backend,
-                    surface,
-                    ExactSurfaceGraph::C10(preparable),
-                )
-                .await
-            }
-        };
-        if frame.is_err()
-            && let Some(backend) = self.backend.as_mut()
-        {
-            backend.observe_device_terminal(device_identity);
-        }
-        let frame = match frame {
-            Err(error) if error.code() == ErrorCode::SurfaceOutdated => {
-                self.configure_presented_surface_if_needed(
-                    surface,
-                    RuntimeOperation::SurfaceRendering,
-                )
-                .await?;
-                return Err(error);
-            }
-            Err(error) => return Err(error),
-            Ok(frame) => frame,
-        };
-        let stats = self.publish_clean_render_frame(
-            surface,
+        Ok(C10ColorFilterFixturePreparationForTest {
             device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
             frame_start,
-        )?;
-        Ok(C10ColorFilterRenderResultForTest {
-            stats,
-            working_format,
+            encode_start,
+            normalized,
+            graph: ExactSurfaceGraph::C10(preparable),
             output_extent,
-            source_origin: source_spatial.device_origin,
-            source_extent: source_spatial.device_extent,
-            source_texel_origin: source_spatial.texel_origin,
-            source_raster_scale: source_spatial.raster_scale,
+            source_spatial,
         })
     }
 

@@ -30439,6 +30439,53 @@ fn c10_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
     )
 }
 
+fn c10_repeated_resource_observations_are_stable_for_test(
+    observations: &[super::resource::ResourceManagerObservationForTest],
+    warmed: &super::resource::ResourceManagerObservationForTest,
+) -> bool {
+    observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.active_frame_count == 0
+            && observation.resolved_lease_count == 0
+            && observation.next_resource == warmed.next_resource
+            && observation.entry_count == warmed.entry_count
+            && observation.retained_bytes == warmed.retained_bytes
+            && observation.payload_creation_attempts == warmed.payload_creation_attempts
+            && observation.entry_identities_for_test() == warmed.entry_identities_for_test()
+            && observation.committed_transient_buffer_count_for_test()
+                == warmed.committed_transient_buffer_count_for_test()
+            && observation.committed_transient_image_count_for_test()
+                == warmed.committed_transient_image_count_for_test()
+            && observation.effect_texture_count_for_test() == warmed.effect_texture_count_for_test()
+    })
+}
+
+fn warm_c10_retention_fixture_for_test(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+    scene: &Scene,
+    filters: &[FilterList],
+    working_format: WorkingFormat,
+) {
+    for _ in 0..2 {
+        pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+            surface,
+            scene,
+            filters.to_vec(),
+            Parameters::default(),
+            working_format,
+        ))
+        .unwrap_or_else(|error| panic!("C10 reuse warm-up frames must succeed: {error}"));
+    }
+}
+
+fn c10_prepared_resource_identities_are_stable_for_test(history: &[Vec<ResourceIdentity>]) -> bool {
+    history.len() == 3
+        && history.first().is_some_and(|first| {
+            !first.is_empty() && history.iter().all(|identities| identities == first)
+        })
+}
+
 #[test]
 fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let (scene, filters, expected) = c10_retention_fixture_for_test();
@@ -30456,16 +30503,13 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
                 panic!("repeated C10 reuse coverage requires a headless surface: {error}")
             });
 
-    for _ in 0..2 {
-        pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
-            &mut surface,
-            &scene,
-            filters.clone(),
-            Parameters::default(),
-            working_format,
-        ))
-        .unwrap_or_else(|error| panic!("C10 reuse warm-up frames must succeed: {error}"));
-    }
+    warm_c10_retention_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        &scene,
+        &filters,
+        working_format,
+    );
     let warmed_output = pollster::block_on(renderer.read_headless(&surface))
         .unwrap_or_else(|error| panic!("the warmed C10 publication must be readable: {error}"));
     let warmed = renderer
@@ -30501,30 +30545,12 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     }
     let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
     let retention_history = graph_submission.resource_retention_history_for_test();
-    let stable_resource_set = resource_observations.iter().all(|observation| {
-        observation.leased_count == 0
-            && observation.active_frame_count == 0
-            && observation.resolved_lease_count == 0
-            && observation.next_resource == warmed_resources.next_resource
-            && observation.entry_count == warmed_resources.entry_count
-            && observation.retained_bytes == warmed_resources.retained_bytes
-            && observation.payload_creation_attempts == warmed_resources.payload_creation_attempts
-            && observation.entry_identities_for_test()
-                == warmed_resources.entry_identities_for_test()
-            && observation.committed_transient_buffer_count_for_test()
-                == warmed_resources.committed_transient_buffer_count_for_test()
-            && observation.committed_transient_image_count_for_test()
-                == warmed_resources.committed_transient_image_count_for_test()
-            && observation.effect_texture_count_for_test()
-                == warmed_resources.effect_texture_count_for_test()
-    });
-    let stable_prepared_identities = prepared_history.len() == 3
-        && prepared_history.first().is_some_and(|first| {
-            !first.is_empty()
-                && prepared_history
-                    .iter()
-                    .all(|identities| identities == first)
-        });
+    let stable_resource_set = c10_repeated_resource_observations_are_stable_for_test(
+        &resource_observations,
+        &warmed_resources,
+    );
+    let stable_prepared_identities =
+        c10_prepared_resource_identities_are_stable_for_test(&prepared_history);
     let stable_retention =
         retention_history == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3];
     let stable_cache = warmed_cache.has_render_pipelines()
@@ -30749,6 +30775,32 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
         && reference_error.unresolved_resource_diagnostic() == Some(&reference)
 }
 
+fn c10_future_backdrop_scene_for_test() -> Scene {
+    let backdrop_filters = color_filter_list([ColorFilterOp::Invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )]);
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                backdrop_filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+            );
+        });
+    scene
+}
+
 #[test]
 fn c10_fixture_executes_while_public_color_capability_remains_diagnostic() {
     let (scene, filters, expected) = c10_retention_fixture_for_test();
@@ -30938,28 +30990,7 @@ fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor()
     let c09 =
         pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
 
-    let backdrop_filters = color_filter_list([ColorFilterOp::Invert(
-        UnitFilterAmount::try_new(1.0).unwrap(),
-    )]);
-    let backdrop = Layer::new()
-        .try_backdrop_filter(
-            BackdropFilterInput::try_new(
-                backdrop_filters,
-                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap(),
-                None,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    let mut future_scene = Scene::new();
-    future_scene
-        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
-        .layer(backdrop, |scene| {
-            scene.fill(
-                Rect::new(1.0, 1.0, 2.0, 2.0),
-                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
-            );
-        });
+    let future_scene = c10_future_backdrop_scene_for_test();
     let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .unwrap_or_else(|error| panic!("future boundary coverage requires a surface: {error}"));
     let ready = renderer
