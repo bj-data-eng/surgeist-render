@@ -225,7 +225,6 @@ pub(crate) enum ExactSurfaceGraph {
     C10(C10PreparableGraph),
     #[cfg(test)]
     C11(C11PreparableGraph),
-    #[cfg(test)]
     C12(super::pass::C12PreparableGraph),
 }
 
@@ -238,7 +237,6 @@ impl ExactSurfaceGraph {
             Self::C10(preparable) => preparable.working_format(),
             #[cfg(test)]
             Self::C11(preparable) => preparable.working_format(),
-            #[cfg(test)]
             Self::C12(preparable) => preparable.working_format(),
         }
     }
@@ -251,7 +249,6 @@ impl ExactSurfaceGraph {
             Self::C10(preparable) => preparable.output_format(),
             #[cfg(test)]
             Self::C11(preparable) => preparable.output_format(),
-            #[cfg(test)]
             Self::C12(preparable) => preparable.output_format(),
         }
     }
@@ -264,7 +261,6 @@ impl ExactSurfaceGraph {
             Self::C10(_) => Ok(None),
             #[cfg(test)]
             Self::C11(_) => Ok(None),
-            #[cfg(test)]
             Self::C12(preparable) => preparable.output_extent().map(Some),
         }
     }
@@ -3040,7 +3036,6 @@ impl Backend {
                 &ready.resources,
                 (&ready.pass_cache, true),
             ),
-            #[cfg(test)]
             ExactSurfaceGraph::C12(preparable) => PreparedGraph::try_prepare_c12(
                 preparable,
                 selected_working_format,

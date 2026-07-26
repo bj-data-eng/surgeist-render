@@ -4197,17 +4197,14 @@ impl C12PreparableGraph {
                 .proves_exact_facts_for(&self.closed.lowered)
     }
 
-    #[cfg(test)]
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         self.closed.facts.working_format
     }
 
-    #[cfg(test)]
     pub(crate) const fn output_format(&self) -> Format {
         self.closed.facts.output_format
     }
 
-    #[cfg(test)]
     pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
         self.closed
             .lowered
@@ -7951,7 +7948,7 @@ fn c11_filter_graph_observation(
 fn c12_executable_graph_observation(
     commands: RenderCommands,
     context: FrameContext,
-    _capabilities: DeviceCapabilities,
+    capabilities: DeviceCapabilities,
 ) -> Option<C12ExecutableGraphObservationForTest> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
         return None;
@@ -7980,15 +7977,14 @@ fn c12_executable_graph_observation(
     let cache = DevicePassCache::new();
     let resources_before = resources.observation_for_test();
     let cache_before = cache.counts_for_test();
-    let no_effect_format = DeviceCapabilities::from_test_facts(false, false, 4_096);
     accepts_bounded_top_level_backdrop &= matches!(
         ExecutableGraphDispatchEligibility::try_classify(
             &graph,
             Format::Rgba8,
             ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
-            &no_effect_format,
+            &capabilities,
         ),
-        Ok(ExecutableGraphDispatchEligibility::ExactC12)
+        Ok(ExecutableGraphDispatchEligibility::ExactC12(_))
     );
     let rejects_outside_bounded_subset = c12_malformed_plans(&lowered)?
         .into_iter()
@@ -10006,11 +10002,48 @@ impl ExecutableGraphWorkingFormatRequest {
 pub(crate) enum ExecutableGraphDispatchEligibility {
     ExactC08(C08PreparableGraph),
     ExactC09(C09PreparableGraph),
-    ExactC12,
+    ExactC12(C12PreparableGraph),
     FuturePasses,
 }
 
 impl ExecutableGraphDispatchEligibility {
+    fn try_classify_c12(
+        graph: &GpuRenderGraph,
+        output_format: Format,
+        working_format: ExecutableGraphWorkingFormatRequest,
+        capabilities: &DeviceCapabilities,
+        preparable: C12PreparableGraph,
+    ) -> Result<Self> {
+        if !preparable.proves_closed_backdrop_facts() {
+            return Err(preparation_error(
+                "C12 classification lost its closed pre-allocation facts",
+            ));
+        }
+        let working_format = working_format.resolve(capabilities)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            graph,
+            working_format,
+            output_format,
+            capabilities,
+        )?;
+        match PrePreparationGraphClassification::classify(lowered) {
+            PrePreparationGraphClassification::ExactC12(preparable)
+                if preparable.proves_closed_backdrop_facts() =>
+            {
+                Ok(Self::ExactC12(preparable))
+            }
+            PrePreparationGraphClassification::ExactC08(_)
+            | PrePreparationGraphClassification::ExactC09(_)
+            | PrePreparationGraphClassification::ExactC10(_)
+            | PrePreparationGraphClassification::ExactC11(_)
+            | PrePreparationGraphClassification::ExactC12(_)
+            | PrePreparationGraphClassification::FuturePasses
+            | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
+                "checked C12 dispatch lowering changed its closed eligibility result",
+            )),
+        }
+    }
+
     pub(crate) fn try_classify(
         graph: &GpuRenderGraph,
         output_format: Format,
@@ -10025,14 +10058,13 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
-            PrePreparationGraphClassification::ExactC12(preparable) => {
-                if !preparable.proves_closed_backdrop_facts() {
-                    return Err(preparation_error(
-                        "C12 classification lost its closed pre-allocation facts",
-                    ));
-                }
-                Ok(Self::ExactC12)
-            }
+            PrePreparationGraphClassification::ExactC12(preparable) => Self::try_classify_c12(
+                graph,
+                output_format,
+                working_format,
+                capabilities,
+                preparable,
+            ),
             PrePreparationGraphClassification::ExactC11(preparable) => {
                 if !preparable.proves_closed_filter_facts() {
                     return Err(preparation_error(

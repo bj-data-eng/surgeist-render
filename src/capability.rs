@@ -250,7 +250,7 @@ impl Capabilities {
             layer_filter_execution: false,
             broad_backdrop_execution: false,
             bounded_backdrop_capture: true,
-            bounded_backdrop_filter_execution: false,
+            bounded_backdrop_filter_execution: true,
             backdrop_isolation_composition: false,
         },
         surfaces: SurfaceCapabilities {

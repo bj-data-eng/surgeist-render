@@ -12179,6 +12179,514 @@ fn outer_clip_precedes_mask_and_opacity_but_follows_filter() {
     }
 }
 
+fn c12_integration_fixture_for_test() -> (
+    Scene,
+    PhysicalSize,
+    Parameters,
+    ReferencePremultipliedRgba8Buffer,
+) {
+    let size = PhysicalSize::new(8, 6);
+    let base = [32, 64, 96, 255];
+    let prior = [224, 48, 24, 255];
+    let foreground = [240, 224, 32, 255];
+    let later = [32, 224, 96, 160];
+    let invert = ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap());
+    let blur = FilterBlur::try_new(0.75).unwrap();
+    let filters = FilterList::try_ops(vec![
+        FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
+        FilterOp::blur(blur),
+    ])
+    .unwrap();
+    let layer = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 1.0, 3.0, 4.0), c09_color_for_test(prior))
+        .layer(layer, |scene| {
+            scene.fill(
+                Rect::new(3.0, 2.0, 2.0, 2.0),
+                c09_color_for_test(foreground),
+            );
+        })
+        .fill(Rect::new(5.0, 1.0, 2.0, 4.0), c09_color_for_test(later));
+    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = c12_reference_rect_for_test(size, (0, 1, 3, 4), prior)
+        .source_over(&parent)
+        .unwrap();
+    let filtered = parent
+        .apply_color_filter_pipeline(&color_filter_pipeline([invert]))
+        .and_then(|buffer| {
+            buffer.apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
+        })
+        .unwrap();
+    let group = c12_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
+        .source_over(&filtered)
+        .unwrap();
+    let completed = group.source_over(&parent).unwrap();
+    let expected = c12_reference_rect_for_test(size, (5, 1, 2, 4), later)
+        .source_over(&completed)
+        .unwrap();
+    (
+        scene,
+        size,
+        Parameters {
+            base_color: c09_color_for_test(base),
+            ..Parameters::default()
+        },
+        expected,
+    )
+}
+
+fn c12_broad_capabilities_remain_diagnostic_for_test() -> bool {
+    let capabilities = Capabilities::CURRENT;
+    let offscreen = capabilities.offscreen_pipeline();
+    let unsupported = [
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BroadBackdropExecution,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BackdropIsolationComposition,
+        ),
+        UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::LayerFilterExecution,
+        ),
+        UnsupportedPrimitive::new(
+            PrimitiveFamily::Compositing,
+            PrimitiveOperation::RootBackdropPolicy,
+        ),
+    ];
+    offscreen.supports_bounded_backdrop_filter_execution()
+        && !offscreen.supports_broad_backdrop_execution()
+        && !offscreen.supports_backdrop_isolation_composition()
+        && !offscreen.supports_layer_filter_execution()
+        && !capabilities.filters().supports_layer_filters()
+        && capabilities
+            .ensure_supported(UnsupportedPrimitive::new(
+                PrimitiveFamily::OffscreenPipeline,
+                PrimitiveOperation::BoundedBackdropFilterExecution,
+            ))
+            .is_ok()
+        && unsupported.into_iter().all(|expected| {
+            capabilities
+                .ensure_supported(expected)
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+        })
+}
+
+fn c12_repeated_resources_stabilize_for_test(
+    scene: &Scene,
+    size: PhysicalSize,
+    parameters: Parameters,
+    expected: &ReferencePremultipliedRgba8Buffer,
+) -> bool {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(512 * 1024 * 1024)),
+    ))
+    .expect("C12 retained-resource coverage requires a renderer");
+    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("C12 retained-resource coverage requires a surface");
+    for _ in 0..2 {
+        pollster::block_on(renderer.render(&mut surface, scene, parameters))
+            .expect("C12 retained-resource warm-up must succeed");
+    }
+    let warmed_output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the warmed C12 publication must be readable");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the warmed C12 device must remain ready");
+    let warmed_resources = ready.internal_resource_manager_observation_for_test();
+    let warmed_cache = ready.device_pass_cache_counts_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let mut resources = Vec::new();
+    let mut caches = Vec::new();
+    let mut stats = Vec::new();
+    for _ in 0..3 {
+        let frame = pollster::block_on(renderer.render(&mut surface, scene, parameters))
+            .expect("repeated public C12 frames must succeed");
+        stats.push(C08PublicStatsForTest::from(frame));
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("repeated public C12 frames must retain the ready device");
+        resources.push(ready.internal_resource_manager_observation_for_test());
+        caches.push(ready.device_pass_cache_counts_for_test());
+    }
+    let prepared = graph_submission.prepared_frame_resource_identity_history_for_test();
+    let retention = graph_submission.resource_retention_history_for_test();
+    let one_submission_per_frame = submission.queue_submission_count_for_test() == 3
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 3
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated C12 publication must remain readable");
+    let expected = c09_reference_straight_bytes_for_test(expected);
+    c10_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
+        && resources.iter().all(|actual| {
+            actual.gaussian_kernel_count_for_test()
+                == warmed_resources.gaussian_kernel_count_for_test()
+        })
+        && warmed_resources.gaussian_kernel_count_for_test() > 0
+        && warmed_resources.effect_texture_count_for_test() > 0
+        && c10_prepared_resource_identities_are_stable_for_test(&prepared)
+        && retention == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3]
+        && warmed_cache.has_render_pipelines()
+        && caches.iter().all(|actual| *actual == warmed_cache)
+        && stats
+            .first()
+            .is_some_and(|first| stats.iter().all(|actual| actual == first))
+        && one_submission_per_frame
+        && output.rgba() == warmed_output.rgba()
+        && c09_pixels_match_for_test(output.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
+}
+
+fn c12_zero_budget_releases_idle_resources_for_test(
+    scene: &Scene,
+    size: PhysicalSize,
+    parameters: Parameters,
+    expected: &ReferencePremultipliedRgba8Buffer,
+) -> bool {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("C12 zero-budget coverage requires a renderer");
+    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("C12 zero-budget coverage requires a surface");
+    pollster::block_on(renderer.render(&mut surface, scene, parameters))
+        .expect("the first C12 zero-budget frame must succeed");
+    let first = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the first C12 zero-budget publication must be readable");
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the first C12 zero-budget frame must retain its device")
+        .device_pass_cache_counts_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    pollster::block_on(renderer.render(&mut surface, scene, parameters))
+        .expect("the repeated C12 zero-budget frame must succeed");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the repeated C12 zero-budget frame must retain its device");
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let one_submission = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let second = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated C12 zero-budget publication must be readable");
+    let expected = c09_reference_straight_bytes_for_test(expected);
+
+    resources.leased_count == 0
+        && resources.idle_count == 0
+        && resources.active_frame_count == 0
+        && resources.resolved_lease_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
+        && resources.accounted_entry_bytes == Some(0)
+        && resources.effect_texture_count_for_test() == 0
+        && resources.gaussian_kernel_count_for_test() == 0
+        && graph_submission.resource_retention_history_for_test()
+            == [C08GraphResourceRetentionForTest::ReleasedAllIdle]
+        && cache_before == cache_after
+        && cache_after.has_render_pipelines()
+        && one_submission
+        && first.rgba() == second.rgba()
+        && c09_pixels_match_for_test(second.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
+}
+
+fn c12_diagnostic_backdrop_layer_for_test() -> Layer {
+    Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                c11_filter_list_for_test(FilterOp::blur(FilterBlur::try_new(0.5).unwrap()))[0]
+                    .clone(),
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap()
+}
+
+fn c12_production_has_no_cpu_or_replay_for_test() -> bool {
+    [
+        include_str!("command.rs"),
+        include_str!("pass.rs"),
+        include_str!("renderer.rs"),
+    ]
+    .iter()
+    .all(|source| {
+        !source.contains("reference::")
+            && !source.contains("materialize_resolved_backdrop")
+            && !source.contains("source_commands")
+            && !source.contains("replay_backdrop")
+    })
+}
+
+fn c12_broad_inputs_reject_before_allocation_for_test(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+) -> bool {
+    let mut nested = Scene::new();
+    nested.layer(Layer::new(), |scene| {
+        scene.layer(c12_diagnostic_backdrop_layer_for_test(), |_| {});
+    });
+    let mut transformed = Scene::new();
+    transformed.layer(
+        c12_diagnostic_backdrop_layer_for_test()
+            .try_transform(Transform::translation(1.0, 0.0).unwrap())
+            .unwrap(),
+        |_| {},
+    );
+    let mut repeated = Scene::new();
+    repeated
+        .layer(c12_diagnostic_backdrop_layer_for_test(), |_| {})
+        .layer(c12_diagnostic_backdrop_layer_for_test(), |_| {});
+    let mut layer_filter = Scene::new();
+    layer_filter.layer(
+        Layer::new()
+            .try_filter(Filter::try_blur(0.5).unwrap())
+            .unwrap(),
+        |_| {},
+    );
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("C12 broad diagnostic coverage requires a ready device");
+    let resources_before = ready.internal_resource_manager_observation_for_test();
+    let cache_before = ready.device_pass_cache_counts_for_test();
+    let publication_before = surface.headless_publication_count_for_test();
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let nested = pollster::block_on(renderer.render(surface, &nested, Parameters::default()));
+    let transformed =
+        pollster::block_on(renderer.render(surface, &transformed, Parameters::default()));
+    let repeated = pollster::block_on(renderer.render(surface, &repeated, Parameters::default()));
+    let layer_filter =
+        pollster::block_on(renderer.render(surface, &layer_filter, Parameters::default()));
+    let root = BackdropFilterInput::try_root_backdrop(
+        c11_filter_list_for_test(FilterOp::blur(FilterBlur::try_new(0.5).unwrap()))[0].clone(),
+        None,
+    );
+    let reference = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#c13-filter");
+    let reference_error = Error::unresolved_resource(reference.clone());
+    let no_gpu_work = submission.queue_submission_count_for_test() == 0
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 0
+        && offscreen_scope.acquire_count_for_test() == 0;
+    drop(offscreen_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("C12 broad rejections must preserve the ready device");
+    let resources_after = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let broad = UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BroadBackdropExecution,
+    );
+    let layer =
+        UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter);
+    let root_policy = UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::RootBackdropPolicy,
+    );
+    nested
+        .as_ref()
+        .is_err_and(|error| error.unsupported_primitive() == Some(broad))
+        && transformed
+            .as_ref()
+            .is_err_and(|error| error.unsupported_primitive() == Some(broad))
+        && repeated
+            .as_ref()
+            .is_err_and(|error| error.unsupported_primitive() == Some(broad))
+        && layer_filter
+            .as_ref()
+            .is_err_and(|error| error.unsupported_primitive() == Some(layer))
+        && root
+            .as_ref()
+            .is_err_and(|error| error.unsupported_primitive() == Some(root_policy))
+        && reference_error.unresolved_resource_diagnostic() == Some(&reference)
+        && c12_production_has_no_cpu_or_replay_for_test()
+        && no_gpu_work
+        && resources_after == resources_before
+        && cache_after == cache_before
+        && surface.headless_publication_count_for_test() == publication_before
+        && renderer.dispatch_observation_for_test() == dispatch_before
+}
+
+#[test]
+fn c12_fixture_executes_bounded_backdrop_while_broad_capabilities_remain_diagnostic() {
+    let (scene, size, parameters, expected) = c12_integration_fixture_for_test();
+    let frame =
+        render_c12_fixture_for_test(&scene, size, parameters, WorkingFormat::ReducedPrecision);
+
+    assert!(c12_frame_matches_for_test(
+        &frame,
+        &expected,
+        (0, 0),
+        size,
+        4
+    ));
+    assert!(c12_broad_capabilities_remain_diagnostic_for_test());
+    assert!(c12_repeated_resources_stabilize_for_test(
+        &scene, size, parameters, &expected,
+    ));
+    assert!(c12_zero_budget_releases_idle_resources_for_test(
+        &scene, size, parameters, &expected,
+    ));
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn render_window_smoke_executes_bounded_backdrop_fixture() {
+    let (scene, size, parameters, expected) = c12_integration_fixture_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("presented C12 coverage requires a renderer");
+    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
+    let mut surface = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(f64::from(size.width()), f64::from(size.height())),
+            format: Format::Rgba8,
+            ..SurfaceOptions::default()
+        },
+    );
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .expect("presented C12 coverage must configure");
+    let presentation = presented_observation_handle_for_test(&surface);
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let rendered = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
+    let submitted_once = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.presentation_scopes_resolved_for_test()
+        && graph_submission.presented_host_effect_applied_for_test()
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let presented = take_last_presented_texture_for_test(&mut surface)
+        .and_then(|texture| {
+            pollster::block_on(renderer.read_render_texture_for_test(&texture, size)).ok()
+        })
+        .map(|image| image.into_rgba());
+    let presentation = presentation.snapshot_for_test();
+    let expected = c09_reference_straight_bytes_for_test(&expected);
+
+    assert!(
+        rendered.is_ok()
+            && submitted_once
+            && presentation.acquire_count_for_test() == 1
+            && presentation.present_count_for_test() == 1
+            && presentation.discarded_count_for_test() == 0
+            && presented.as_deref().is_some_and(|actual| {
+                c09_pixels_match_for_test(actual, &expected, WorkingFormat::ReducedPrecision, 4)
+            }),
+        "presented C12 bounded backdrop did not execute atomically"
+    );
+}
+
+#[test]
+fn public_dispatch_enables_only_bounded_backdrop_execution() {
+    let (scene, size, parameters, expected) = c12_integration_fixture_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("public C12 dispatch coverage requires a renderer");
+    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("public C12 dispatch coverage requires a surface");
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let rendered = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
+    let one_submission = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let actual = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the public C12 publication must be readable");
+    let expected = c09_reference_straight_bytes_for_test(&expected);
+    let dispatch_after = renderer.dispatch_observation_for_test();
+
+    assert!(
+        rendered.is_ok()
+            && one_submission
+            && c09_pixels_match_for_test(
+                actual.rgba(),
+                &expected,
+                WorkingFormat::ReducedPrecision,
+                4,
+            )
+            && c12_broad_capabilities_remain_diagnostic_for_test()
+            && c12_broad_inputs_reject_before_allocation_for_test(&mut renderer, &mut surface)
+            && dispatch_after.boundary_invocations
+                == dispatch_before.boundary_invocations.saturating_add(1)
+            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
+        "public dispatch did not enable only the exact bounded C12 graph"
+    );
+}
+
 #[test]
 fn c12_executor_accepts_only_bounded_top_level_backdrop_graphs() {
     let observed = super::pass::c12_executable_graph_observation_for_test(
@@ -13711,7 +14219,7 @@ fn public_dispatch_retains_c09_boundary_while_c11_fixture_uses_shared_executor()
     let dispatch_after = renderer.dispatch_observation_for_test();
     let expected_backdrop = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BoundedBackdropFilterExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     );
 
     assert!(
@@ -13722,13 +14230,12 @@ fn public_dispatch_retains_c09_boundary_while_c11_fixture_uses_shared_executor()
                 .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
             && future_surface.headless_publication_count_for_test() == 0
             && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(3)
+                == dispatch_before.boundary_invocations.saturating_add(2)
             && dispatch_after.exact_c09_graph_routes
                 == dispatch_before.exact_c09_graph_routes.saturating_add(1)
             && dispatch_after.exact_c11_fixture_routes
                 == dispatch_before.exact_c11_fixture_routes.saturating_add(1)
-            && dispatch_after.future_pass_rejections
-                == dispatch_before.future_pass_rejections.saturating_add(1),
+            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
         "public dispatch crossed the C09 boundary or the C11 fixture bypassed the shared executor"
     );
 }
@@ -17840,20 +18347,13 @@ fn render_plans_before_future_effect_diagnostic() {
             scene.fill(Rect::new(1.0, 1.0, 4.0, 3.0), Color::BLACK);
         });
 
-    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .unwrap_err();
+    let result = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()));
     let observation = renderer.preexecution_frame_gate_observation_for_test();
 
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
-        ))
-    );
+    assert!(result.is_ok());
     assert!(
         observation.validated_plan_count == 1,
-        "renderer did not validate exactly one plan before the future-pass diagnostic"
+        "renderer did not validate exactly one plan before bounded backdrop execution"
     );
 }
 
@@ -18382,7 +18882,7 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
     ));
     let offscreen = Capabilities::CURRENT.offscreen_pipeline();
     assert!(offscreen.supports_bounded_backdrop_capture());
-    assert!(!offscreen.supports_bounded_backdrop_filter_execution());
+    assert!(offscreen.supports_bounded_backdrop_filter_execution());
     assert!(!offscreen.supports_broad_backdrop_execution());
 }
 
@@ -18418,7 +18918,7 @@ fn bounded_backdrop_capture_stays_future_before_filter_execution() {
     };
     assert!(layer.backdrop.is_some());
 
-    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(2.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&scene, Size::new(2.0, 1.0));
 }
 
 #[test]
@@ -18469,8 +18969,8 @@ fn authored_backdrop_filter_orders_stay_future_gpu_passes() {
             |_| {},
         );
 
-    assert_bounded_backdrop_filter_execution_is_future(&color_before_blur, Size::new(3.0, 1.0));
-    assert_bounded_backdrop_filter_execution_is_future(&blur_before_color, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&color_before_blur, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&blur_before_color, Size::new(3.0, 1.0));
 }
 
 #[test]
@@ -18496,7 +18996,7 @@ fn clipped_backdrop_filter_stays_a_future_gpu_pass() {
         )
         .layer(layer, |_| {});
 
-    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(5.0, 5.0));
+    assert_bounded_backdrop_filter_execution_is_public(&scene, Size::new(5.0, 5.0));
 }
 
 #[test]
@@ -18519,7 +19019,7 @@ fn backdrop_foreground_composition_stays_a_future_gpu_pass() {
             scene.fill(Rect::new(1.0, 0.0, 1.0, 1.0), Color::BLACK);
         });
 
-    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&scene, Size::new(3.0, 1.0));
 }
 
 #[test]
@@ -18778,7 +19278,7 @@ fn sequence13_bounded_backdrop_order_stays_planned_before_future_execution() {
         command::RenderCommand::Fill { .. }
     ));
 
-    assert_bounded_backdrop_filter_execution_is_future(&scene, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&scene, Size::new(3.0, 1.0));
 }
 
 #[test]
@@ -18828,8 +19328,8 @@ fn sequence13_backdrop_filter_chain_preserves_future_pass_inputs() {
             |_| {},
         );
 
-    assert_bounded_backdrop_filter_execution_is_future(&color_before_blur, Size::new(3.0, 1.0));
-    assert_bounded_backdrop_filter_execution_is_future(&blur_before_color, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&color_before_blur, Size::new(3.0, 1.0));
+    assert_bounded_backdrop_filter_execution_is_public(&blur_before_color, Size::new(3.0, 1.0));
 
     let clip = ClipInput::try_shape(Shape::rounded_rect(
         Rect::new(1.0, 1.0, 3.0, 3.0),
@@ -18857,7 +19357,7 @@ fn sequence13_backdrop_filter_chain_preserves_future_pass_inputs() {
             Color::try_rgba(1.0, 0.0, 0.0, 1.0).unwrap(),
         )
         .layer(clipped_layer, |_| {});
-    assert_bounded_backdrop_filter_execution_is_future(&clipped_scene, Size::new(5.0, 5.0));
+    assert_bounded_backdrop_filter_execution_is_public(&clipped_scene, Size::new(5.0, 5.0));
 }
 
 #[test]
@@ -19105,7 +19605,7 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
     assert!(offscreen.supports_direct_vello_opacity_isolation());
     assert!(offscreen.supports_direct_vello_blend_isolation());
     assert!(offscreen.supports_bounded_backdrop_capture());
-    assert!(!offscreen.supports_bounded_backdrop_filter_execution());
+    assert!(offscreen.supports_bounded_backdrop_filter_execution());
     assert!(!offscreen.supports_offscreen_layer_rendering());
     assert!(offscreen.supports_persistent_effect_resources());
     assert!(offscreen.supports_bounded_vello_capture());
@@ -19140,6 +19640,10 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
             PrimitiveOperation::BoundedBackdropCapture,
         ),
         UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ),
+        UnsupportedPrimitive::new(
             PrimitiveFamily::MasksAndClips,
             PrimitiveOperation::ResolvedAlphaMaskExecution,
         ),
@@ -19150,10 +19654,6 @@ fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contrac
     }
 
     for unsupported in [
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
-        ),
         UnsupportedPrimitive::new(
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::BroadBackdropExecution,
@@ -21887,7 +22387,7 @@ fn backdrop_capability_accessors_claim_only_narrow_materialized_execution() {
     let capabilities = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(capabilities.supports_bounded_backdrop_capture());
-    assert!(!capabilities.supports_bounded_backdrop_filter_execution());
+    assert!(capabilities.supports_bounded_backdrop_filter_execution());
     assert!(!capabilities.supports_backdrop_isolation_composition());
     assert!(!capabilities.supports_broad_backdrop_execution());
 }
@@ -22218,7 +22718,6 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         PrimitiveOperation::MaskExecution,
         PrimitiveOperation::LayerFilterExecution,
         PrimitiveOperation::BroadBackdropExecution,
-        PrimitiveOperation::BoundedBackdropFilterExecution,
         PrimitiveOperation::BackdropIsolationComposition,
     ] {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::OffscreenPipeline, operation);
@@ -22231,6 +22730,12 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
         assert!(error.message().contains("offscreen pipeline"));
         assert!(error.message().contains(unsupported.label()));
     }
+    Capabilities::CURRENT
+        .ensure_supported(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ))
+        .expect("bounded backdrop filter execution is the narrow implemented C12 subset");
 }
 
 #[test]
@@ -33461,10 +33966,6 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
         ),
         (
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
-        ),
-        (
-            PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::BroadBackdropExecution,
         ),
     ];
@@ -33492,7 +33993,7 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
         && !capabilities
             .offscreen_pipeline()
             .supports_layer_filter_execution()
-        && !capabilities
+        && capabilities
             .offscreen_pipeline()
             .supports_bounded_backdrop_filter_execution()
         && reference_error.code() == ErrorCode::UnresolvedResource
@@ -33504,6 +34005,8 @@ fn c10_future_backdrop_scene_for_test() -> Scene {
         UnitFilterAmount::try_new(1.0).unwrap(),
     )]);
     let backdrop = Layer::new()
+        .try_transform(Transform::translation(1.0, 0.0).unwrap())
+        .unwrap()
         .try_backdrop_filter(
             BackdropFilterInput::try_new(
                 backdrop_filters,
@@ -33749,7 +34252,7 @@ fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor()
     );
     let expected_backdrop = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BoundedBackdropFilterExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     );
 
     assert!(
@@ -33765,13 +34268,12 @@ fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor()
             && cache_after == cache_before
             && future_surface.headless_publication_count_for_test() == 0
             && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(3)
+                == dispatch_before.boundary_invocations.saturating_add(2)
             && dispatch_after.exact_c09_graph_routes
                 == dispatch_before.exact_c09_graph_routes.saturating_add(1)
             && dispatch_after.exact_c10_fixture_routes
                 == dispatch_before.exact_c10_fixture_routes.saturating_add(1)
-            && dispatch_after.future_pass_rejections
-                == dispatch_before.future_pass_rejections.saturating_add(1),
+            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
         "public dispatch crossed the C09 boundary or the C10 fixture bypassed the shared executor"
     );
 }
@@ -34762,39 +35264,6 @@ fn c09_presented_masked_blended_scene_for_test(rect: Rect) -> Scene {
     scene
 }
 
-fn c10_future_backdrop_scene(
-    size: Size,
-    inner_bounds: Rect,
-    outer_color: Color,
-    inner_color: Color,
-) -> Scene {
-    let filters = FilterList::try_ops(vec![FilterOp::brightness(
-        FilterAmount::try_new(1.25).unwrap(),
-    )])
-    .unwrap();
-    let backdrop = Layer::new()
-        .try_backdrop_filter(
-            BackdropFilterInput::try_new(
-                filters,
-                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, size.width(), size.height()))
-                    .unwrap(),
-                None,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    let mut scene = Scene::new();
-    scene
-        .fill(
-            Rect::new(0.0, 0.0, size.width(), size.height()),
-            outer_color,
-        )
-        .layer(backdrop, |scene| {
-            scene.fill(inner_bounds, inner_color);
-        });
-    scene
-}
-
 fn c13_future_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
     let filters = FilterList::try_ops(vec![FilterOp::brightness(
         FilterAmount::try_new(1.25).unwrap(),
@@ -34861,12 +35330,8 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
         .unwrap()
         .internal_resource_manager_observation_for_test();
 
-    let future = c10_future_backdrop_scene(
-        Size::new(8.0, 6.0),
-        Rect::new(2.0, 1.0, 3.0, 3.0),
-        c09_color_for_test([192, 64, 32, 255]),
-        c09_color_for_test([16, 224, 96, 192]),
-    );
+    let future =
+        c13_future_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -34888,7 +35353,7 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
         error.code() == ErrorCode::UnsupportedPrimitive
             && error.unsupported_primitive().is_some_and(|diagnostic| {
                 diagnostic.family() == PrimitiveFamily::OffscreenPipeline
-                    && diagnostic.operation().label() == "bounded backdrop filter execution"
+                    && diagnostic.operation().label() == "broad backdrop execution"
             })
     });
     let cache_after = renderer
@@ -35119,7 +35584,7 @@ fn c09_supported_capability_rows(
     filters: FilterCapabilities,
     masks: MaskClipCapabilities,
     offscreen: OffscreenPipelineCapabilities,
-) -> [CapabilityRowForTest; 9] {
+) -> [CapabilityRowForTest; 10] {
     [
         (
             masks.supports_resolved_alpha_mask_execution(),
@@ -35166,6 +35631,11 @@ fn c09_supported_capability_rows(
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::BoundedBackdropCapture,
         ),
+        (
+            offscreen.supports_bounded_backdrop_filter_execution(),
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ),
     ]
 }
 
@@ -35173,7 +35643,7 @@ fn c09_rejected_capability_rows(
     filters: FilterCapabilities,
     masks: MaskClipCapabilities,
     offscreen: OffscreenPipelineCapabilities,
-) -> [CapabilityRowForTest; 13] {
+) -> [CapabilityRowForTest; 12] {
     [
         (
             filters.supports_gpu_color_filter_execution(),
@@ -35189,11 +35659,6 @@ fn c09_rejected_capability_rows(
             filters.supports_gpu_drop_shadow_filter_execution(),
             PrimitiveFamily::Filters,
             PrimitiveOperation::GpuDropShadowFilterExecution,
-        ),
-        (
-            offscreen.supports_bounded_backdrop_filter_execution(),
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
         ),
         (
             offscreen.supports_layer_filter_execution(),
@@ -35521,7 +35986,7 @@ fn renderer_dispatch_routes_c08_and_c09_to_gpu_but_future_passes_to_typed_diagno
         error.unsupported_primitive()
             == Some(UnsupportedPrimitive::new(
                 PrimitiveFamily::OffscreenPipeline,
-                PrimitiveOperation::BoundedBackdropFilterExecution,
+                PrimitiveOperation::BroadBackdropExecution,
             ))
     });
     let old_dispatch_names_are_absent = old_graph_dispatch_names_are_absent();
@@ -35532,11 +35997,12 @@ fn renderer_dispatch_routes_c08_and_c09_to_gpu_but_future_passes_to_typed_diagno
             && c08.is_ok()
             && c09.is_ok()
             && graph_submission.queue_submission_count_for_test() == 2
-            && dispatch.boundary_invocations == 4
+            && dispatch.boundary_invocations == 3
             && dispatch.direct_vello_routes == 1
             && dispatch.exact_c08_graph_routes == 1
             && dispatch.exact_c09_graph_routes == 1
-            && dispatch.future_pass_rejections == 1
+            && dispatch.exact_c12_graph_routes == 0
+            && dispatch.future_pass_rejections == 0
             && exact_future_diagnostics
             && no_future_gpu_work
             && resources_after == resources_before
@@ -35579,6 +36045,8 @@ fn c09_future_dispatch_scenes_for_test() -> (Scene, Scene) {
     let input = BackdropFilterInput::try_new(filters, bounds, None)
         .unwrap_or_else(|error| panic!("the future backdrop input must be valid: {error}"));
     let layer = Layer::new()
+        .try_transform(Transform::translation(1.0, 0.0).unwrap())
+        .unwrap()
         .try_backdrop_filter(input)
         .unwrap_or_else(|error| panic!("the future backdrop layer must be valid: {error}"));
     let mut backdrop_scene = Scene::new();
@@ -38250,19 +38718,13 @@ fn render_scene_to_required_headless(scene: &Scene, size: Size) -> ImageBuffer {
         .expect("required headless scene readback must complete")
 }
 
-fn assert_bounded_backdrop_filter_execution_is_future(scene: &Scene, size: Size) {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+fn assert_bounded_backdrop_filter_execution_is_public(scene: &Scene, size: Size) {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
-    let stats_before = renderer.stats();
     let publication_before = surface.headless_publication_count_for_test();
-    let cache_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap()
-        .device_pass_cache_counts_for_test();
-    let resources_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap()
-        .internal_resource_manager_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -38270,34 +38732,17 @@ fn assert_bounded_backdrop_filter_execution_is_future(scene: &Scene, size: Size)
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
 
-    let error = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
-        .unwrap_err();
-    let cache_after = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap()
-        .device_pass_cache_counts_for_test();
-    let resources_after = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap()
-        .internal_resource_manager_observation_for_test();
-
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
-        ))
-    );
-    assert_eq!(submission.queue_submission_count_for_test(), 0);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 0);
+    let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
+        .expect("bounded backdrop execution must use the public C12 graph route");
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    assert_eq!(submission.readback_queue_submission_count_for_test(), 0);
+    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
-    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(renderer.stats(), stats);
     assert_eq!(
         surface.headless_publication_count_for_test(),
-        publication_before
+        publication_before.saturating_add(1)
     );
-    assert_eq!(cache_after, cache_before);
-    assert_eq!(resources_after, resources_before);
 }
 
 fn render_scene_pixel(renderer: &mut Renderer, scene: &Scene) -> [u8; 4] {

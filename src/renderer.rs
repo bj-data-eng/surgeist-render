@@ -81,6 +81,7 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) exact_c09_graph_routes: usize,
     pub(crate) exact_c10_fixture_routes: usize,
     pub(crate) exact_c11_fixture_routes: usize,
+    pub(crate) exact_c12_graph_routes: usize,
     pub(crate) exact_c12_fixture_routes: usize,
     pub(crate) future_pass_rejections: usize,
 }
@@ -899,15 +900,17 @@ impl Renderer {
                         ExactSurfaceGraph::C09(preparable),
                     )))
                 }
-                ExecutableGraphDispatchEligibility::ExactC12 => {
+                ExecutableGraphDispatchEligibility::ExactC12(preparable) => {
                     #[cfg(test)]
                     {
-                        self.dispatch_observation.future_pass_rejections = self
+                        self.dispatch_observation.exact_c12_graph_routes = self
                             .dispatch_observation
-                            .future_pass_rejections
+                            .exact_c12_graph_routes
                             .saturating_add(1);
                     }
-                    Err(bounded_backdrop_execution_unavailable())
+                    Ok(RendererFrameDispatch::ExactGraph(Box::new(
+                        ExactSurfaceGraph::C12(preparable),
+                    )))
                 }
                 ExecutableGraphDispatchEligibility::FuturePasses => {
                     #[cfg(test)]
@@ -3013,13 +3016,6 @@ fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<(
     ))
 }
 
-fn bounded_backdrop_execution_unavailable() -> Error {
-    Error::unsupported_render_primitive(UnsupportedPrimitive::new(
-        PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BoundedBackdropFilterExecution,
-    ))
-}
-
 #[cfg(test)]
 pub(crate) fn future_graph_diagnostic_for_test(
     graph: &GpuRenderGraph,
@@ -3039,10 +3035,7 @@ pub(crate) fn future_graph_diagnostic_for_test(
         }
         ExecutableGraphDispatchEligibility::ExactC08(_)
         | ExecutableGraphDispatchEligibility::ExactC09(_) => Ok(None),
-        ExecutableGraphDispatchEligibility::ExactC12 => Ok(Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
-        ))),
+        ExecutableGraphDispatchEligibility::ExactC12(_) => Ok(None),
     }
 }
 
