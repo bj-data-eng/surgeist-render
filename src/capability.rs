@@ -331,184 +331,237 @@ impl Capabilities {
 
     const fn supports(self, primitive: UnsupportedPrimitive) -> bool {
         match (primitive.family(), primitive.operation()) {
-            (
-                PrimitiveFamily::GeometryTargets,
-                PrimitiveOperation::InsideOutsidePathStrokeAlignment,
-            ) => self
-                .geometry_targets
-                .supports_arbitrary_path_inside_outside_stroke(),
-            (PrimitiveFamily::GeometryTargets, PrimitiveOperation::GeometryBooleanOperation) => {
-                self.geometry_targets.supports_geometry_booleans()
+            (PrimitiveFamily::GeometryTargets, operation) => {
+                self.supports_geometry_operation(operation)
             }
-            (PrimitiveFamily::GeometryTargets, PrimitiveOperation::GeometryOffsetOperation) => {
-                self.geometry_targets.supports_geometry_offsets()
+            (PrimitiveFamily::PaintSources, operation) => self.supports_paint_operation(operation),
+            (PrimitiveFamily::ImageSampling, operation) => self.supports_image_operation(operation),
+            (PrimitiveFamily::Shadows, operation) => self.supports_shadow_operation(operation),
+            (PrimitiveFamily::Filters, operation) => self.supports_filter_operation(operation),
+            (PrimitiveFamily::MasksAndClips, operation) => {
+                self.supports_mask_clip_operation(operation)
             }
-            (PrimitiveFamily::PaintSources, PrimitiveOperation::NonSolidShadowPaint) => {
-                self.paint_sources.supports_non_solid_shadow_paint()
+            (PrimitiveFamily::BoxDecorations, operation) => {
+                self.supports_box_decoration_operation(operation)
             }
-            (PrimitiveFamily::PaintSources, PrimitiveOperation::UnresolvedSymbolicColor) => {
-                self.paint_sources.supports_unresolved_symbolic_colors()
+            (PrimitiveFamily::Compositing, operation) => {
+                self.supports_compositing_operation(operation)
             }
-            (PrimitiveFamily::PaintSources, PrimitiveOperation::ColorMixFunction) => {
-                self.paint_sources.supports_color_mix()
+            (PrimitiveFamily::OffscreenPipeline, operation) => {
+                self.supports_offscreen_operation(operation)
             }
-            (PrimitiveFamily::PaintSources, PrimitiveOperation::UnsupportedColorSpace) => false,
-            (PrimitiveFamily::PaintSources, PrimitiveOperation::RepeatingGradient) => {
-                self.paint_sources.supports_repeating_gradients()
-            }
-            (PrimitiveFamily::ImageSampling, PrimitiveOperation::BackgroundRepeatRound) => {
-                self.image_sampling.supports_repeat_round()
-            }
-            (PrimitiveFamily::ImageSampling, PrimitiveOperation::BackgroundRepeatSpace) => {
-                self.image_sampling.supports_repeat_space()
-            }
-            (PrimitiveFamily::ImageSampling, PrimitiveOperation::FilteredImagePaint) => {
-                self.image_sampling.supports_filtered_image_paint()
-            }
-            (PrimitiveFamily::ImageSampling, PrimitiveOperation::ColorFilteredImagePaint) => {
-                self.image_sampling.supports_color_filtered_image_paint()
-            }
-            (PrimitiveFamily::ImageSampling, PrimitiveOperation::ImageOrientationConversion) => {
-                self.image_sampling.supports_image_orientation_conversion()
-            }
-            (PrimitiveFamily::ImageSampling, PrimitiveOperation::ImageColorProfileConversion) => {
-                self.image_sampling
-                    .supports_image_color_profile_conversion()
-            }
-            (PrimitiveFamily::Shadows, PrimitiveOperation::EllipsePathShadowShape) => {
-                self.shadows.supports_ellipse_path_shadows()
-            }
-            (PrimitiveFamily::Shadows, PrimitiveOperation::InsetBoxShadow) => {
-                self.shadows.supports_inset_box_shadows()
-            }
-            (PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow) => {
-                self.shadows.supports_text_shadows()
-            }
-            (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter) => {
-                self.filters.supports_layer_filters()
-            }
-            (PrimitiveFamily::Filters, PrimitiveOperation::OrderedFilterList) => {
-                self.filters.supports_ordered_filter_lists()
-            }
-            (PrimitiveFamily::Filters, PrimitiveOperation::GpuColorFilterExecution) => {
-                self.filters.supports_gpu_color_filter_execution()
-            }
-            (PrimitiveFamily::Filters, PrimitiveOperation::GpuBlurFilterExecution) => {
-                self.filters.supports_gpu_blur_filter_execution()
-            }
-            (PrimitiveFamily::Filters, PrimitiveOperation::GpuDropShadowFilterExecution) => {
-                self.filters.supports_gpu_drop_shadow_filter_execution()
-            }
-            (PrimitiveFamily::Filters, PrimitiveOperation::FilterRegionPlanning) => {
-                self.filters.supports_filter_region_planning()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ShapeClip) => {
-                self.masks_clips.supports_shape_clips()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ClipReferenceExecution) => {
-                self.masks_clips.supports_clip_reference_execution()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LayerMask) => {
-                self.masks_clips.supports_layer_masks()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::AlphaMaskSourceExecution) => false,
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::ResolvedAlphaMaskExecution) => {
-                self.masks_clips.supports_resolved_alpha_mask_execution()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::LuminanceMaskMode) => {
-                self.masks_clips.supports_luminance_mask_mode()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::MultiLayerMaskComposition) => {
-                self.masks_clips.supports_multi_layer_mask_composition()
-            }
-            (PrimitiveFamily::MasksAndClips, PrimitiveOperation::MaskCompositeMode) => {
-                self.masks_clips.supports_mask_composite_modes()
-            }
-            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderGrooveStyle) => {
-                self.box_decorations.supports_border_groove_style()
-            }
-            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderRidgeStyle) => {
-                self.box_decorations.supports_border_ridge_style()
-            }
-            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderInsetStyle) => {
-                self.box_decorations.supports_border_inset_style()
-            }
-            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::BorderOutsetStyle) => {
-                self.box_decorations.supports_border_outset_style()
-            }
-            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::OutlineDoubleStyle) => {
-                self.box_decorations.supports_outline_double_style()
-            }
-            (PrimitiveFamily::BoxDecorations, PrimitiveOperation::OutlineAutoStyle) => {
-                self.box_decorations.supports_outline_auto_style()
-            }
-            (PrimitiveFamily::Compositing, PrimitiveOperation::RootBackdropPolicy) => {
-                self.compositing.supports_root_backdrop_policy()
-            }
-            (PrimitiveFamily::Compositing, PrimitiveOperation::BackgroundBlendMode) => {
-                self.compositing.supports_background_blend_modes()
-            }
-            (PrimitiveFamily::Compositing, PrimitiveOperation::AdditionalMixBlendMode) => {
-                self.compositing.supports_additional_mix_blend_modes()
-            }
-            (PrimitiveFamily::Compositing, PrimitiveOperation::PorterDuffCompositeMode) => {
-                self.compositing.supports_porter_duff_composite_modes()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::OffscreenLayerRendering) => {
-                self.offscreen_pipeline.supports_offscreen_layer_rendering()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::PersistentEffectResources) => {
-                self.offscreen_pipeline
-                    .supports_persistent_effect_resources()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BoundedVelloCapture) => {
-                self.offscreen_pipeline.supports_bounded_vello_capture()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::ImagePassExecution) => {
-                self.offscreen_pipeline.supports_image_pass_execution()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::CompositePassExecution) => {
-                self.offscreen_pipeline.supports_composite_pass_execution()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::NestedOpacityComposition) => {
-                self.offscreen_pipeline
-                    .supports_nested_opacity_composition()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::MaskExecution) => {
-                self.offscreen_pipeline.supports_mask_execution()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::LayerFilterExecution) => {
-                self.offscreen_pipeline.supports_layer_filter_execution()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BroadBackdropExecution) => {
-                self.offscreen_pipeline.supports_broad_backdrop_execution()
-            }
-            (PrimitiveFamily::OffscreenPipeline, PrimitiveOperation::BoundedBackdropCapture) => {
-                self.offscreen_pipeline.supports_bounded_backdrop_capture()
-            }
-            (
-                PrimitiveFamily::OffscreenPipeline,
-                PrimitiveOperation::BoundedBackdropFilterExecution,
-            ) => self
-                .offscreen_pipeline
-                .supports_bounded_backdrop_filter_execution(),
-            (
-                PrimitiveFamily::OffscreenPipeline,
-                PrimitiveOperation::BackdropIsolationComposition,
-            ) => self
-                .offscreen_pipeline
-                .supports_backdrop_isolation_composition(),
             (PrimitiveFamily::Surfaces, PrimitiveOperation::WebCanvasSurface) => {
                 self.surfaces.supports_web_canvas_surfaces()
             }
-            (
-                PrimitiveFamily::TransformsAndCoordinateSpaces,
-                PrimitiveOperation::Matrix3dTransform
-                | PrimitiveOperation::PerspectiveTransform
-                | PrimitiveOperation::Rotate3dTransform
-                | PrimitiveOperation::TranslateZTransform
-                | PrimitiveOperation::ScaleZTransform,
-            ) => self.transform_coordinate_spaces.supports_transform_3d(),
+            (PrimitiveFamily::TransformsAndCoordinateSpaces, operation) => {
+                self.supports_transform_operation(operation)
+            }
+            _ => false,
+        }
+    }
+
+    const fn supports_geometry_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::InsideOutsidePathStrokeAlignment => self
+                .geometry_targets
+                .supports_arbitrary_path_inside_outside_stroke(),
+            PrimitiveOperation::GeometryBooleanOperation => {
+                self.geometry_targets.supports_geometry_booleans()
+            }
+            PrimitiveOperation::GeometryOffsetOperation => {
+                self.geometry_targets.supports_geometry_offsets()
+            }
+            _ => false,
+        }
+    }
+
+    const fn supports_paint_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::NonSolidShadowPaint => {
+                self.paint_sources.supports_non_solid_shadow_paint()
+            }
+            PrimitiveOperation::UnresolvedSymbolicColor => {
+                self.paint_sources.supports_unresolved_symbolic_colors()
+            }
+            PrimitiveOperation::ColorMixFunction => self.paint_sources.supports_color_mix(),
+            PrimitiveOperation::RepeatingGradient => {
+                self.paint_sources.supports_repeating_gradients()
+            }
+            PrimitiveOperation::UnsupportedColorSpace => false,
+            _ => false,
+        }
+    }
+
+    const fn supports_image_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::BackgroundRepeatRound => {
+                self.image_sampling.supports_repeat_round()
+            }
+            PrimitiveOperation::BackgroundRepeatSpace => {
+                self.image_sampling.supports_repeat_space()
+            }
+            PrimitiveOperation::FilteredImagePaint => {
+                self.image_sampling.supports_filtered_image_paint()
+            }
+            PrimitiveOperation::ColorFilteredImagePaint => {
+                self.image_sampling.supports_color_filtered_image_paint()
+            }
+            PrimitiveOperation::ImageOrientationConversion => {
+                self.image_sampling.supports_image_orientation_conversion()
+            }
+            PrimitiveOperation::ImageColorProfileConversion => self
+                .image_sampling
+                .supports_image_color_profile_conversion(),
+            _ => false,
+        }
+    }
+
+    const fn supports_shadow_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::EllipsePathShadowShape => {
+                self.shadows.supports_ellipse_path_shadows()
+            }
+            PrimitiveOperation::InsetBoxShadow => self.shadows.supports_inset_box_shadows(),
+            PrimitiveOperation::TextShadow => self.shadows.supports_text_shadows(),
+            _ => false,
+        }
+    }
+
+    const fn supports_filter_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::LayerFilter => self.filters.supports_layer_filters(),
+            PrimitiveOperation::OrderedFilterList => self.filters.supports_ordered_filter_lists(),
+            PrimitiveOperation::GpuColorFilterExecution => {
+                self.filters.supports_gpu_color_filter_execution()
+            }
+            PrimitiveOperation::GpuBlurFilterExecution => {
+                self.filters.supports_gpu_blur_filter_execution()
+            }
+            PrimitiveOperation::GpuDropShadowFilterExecution => {
+                self.filters.supports_gpu_drop_shadow_filter_execution()
+            }
+            PrimitiveOperation::FilterRegionPlanning => {
+                self.filters.supports_filter_region_planning()
+            }
+            _ => false,
+        }
+    }
+
+    const fn supports_mask_clip_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::ShapeClip => self.masks_clips.supports_shape_clips(),
+            PrimitiveOperation::ClipReferenceExecution => {
+                self.masks_clips.supports_clip_reference_execution()
+            }
+            PrimitiveOperation::LayerMask => self.masks_clips.supports_layer_masks(),
+            PrimitiveOperation::ResolvedAlphaMaskExecution => {
+                self.masks_clips.supports_resolved_alpha_mask_execution()
+            }
+            PrimitiveOperation::LuminanceMaskMode => {
+                self.masks_clips.supports_luminance_mask_mode()
+            }
+            PrimitiveOperation::MultiLayerMaskComposition => {
+                self.masks_clips.supports_multi_layer_mask_composition()
+            }
+            PrimitiveOperation::MaskCompositeMode => {
+                self.masks_clips.supports_mask_composite_modes()
+            }
+            PrimitiveOperation::AlphaMaskSourceExecution => false,
+            _ => false,
+        }
+    }
+
+    const fn supports_box_decoration_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::BorderGrooveStyle => {
+                self.box_decorations.supports_border_groove_style()
+            }
+            PrimitiveOperation::BorderRidgeStyle => {
+                self.box_decorations.supports_border_ridge_style()
+            }
+            PrimitiveOperation::BorderInsetStyle => {
+                self.box_decorations.supports_border_inset_style()
+            }
+            PrimitiveOperation::BorderOutsetStyle => {
+                self.box_decorations.supports_border_outset_style()
+            }
+            PrimitiveOperation::OutlineDoubleStyle => {
+                self.box_decorations.supports_outline_double_style()
+            }
+            PrimitiveOperation::OutlineAutoStyle => {
+                self.box_decorations.supports_outline_auto_style()
+            }
+            _ => false,
+        }
+    }
+
+    const fn supports_compositing_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::RootBackdropPolicy => {
+                self.compositing.supports_root_backdrop_policy()
+            }
+            PrimitiveOperation::BackgroundBlendMode => {
+                self.compositing.supports_background_blend_modes()
+            }
+            PrimitiveOperation::AdditionalMixBlendMode => {
+                self.compositing.supports_additional_mix_blend_modes()
+            }
+            PrimitiveOperation::PorterDuffCompositeMode => {
+                self.compositing.supports_porter_duff_composite_modes()
+            }
+            _ => false,
+        }
+    }
+
+    const fn supports_offscreen_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::OffscreenLayerRendering => {
+                self.offscreen_pipeline.supports_offscreen_layer_rendering()
+            }
+            PrimitiveOperation::PersistentEffectResources => self
+                .offscreen_pipeline
+                .supports_persistent_effect_resources(),
+            PrimitiveOperation::BoundedVelloCapture => {
+                self.offscreen_pipeline.supports_bounded_vello_capture()
+            }
+            PrimitiveOperation::ImagePassExecution => {
+                self.offscreen_pipeline.supports_image_pass_execution()
+            }
+            PrimitiveOperation::CompositePassExecution => {
+                self.offscreen_pipeline.supports_composite_pass_execution()
+            }
+            PrimitiveOperation::NestedOpacityComposition => self
+                .offscreen_pipeline
+                .supports_nested_opacity_composition(),
+            PrimitiveOperation::MaskExecution => self.offscreen_pipeline.supports_mask_execution(),
+            PrimitiveOperation::LayerFilterExecution => {
+                self.offscreen_pipeline.supports_layer_filter_execution()
+            }
+            PrimitiveOperation::BroadBackdropExecution => {
+                self.offscreen_pipeline.supports_broad_backdrop_execution()
+            }
+            PrimitiveOperation::BoundedBackdropCapture => {
+                self.offscreen_pipeline.supports_bounded_backdrop_capture()
+            }
+            PrimitiveOperation::BoundedBackdropFilterExecution => self
+                .offscreen_pipeline
+                .supports_bounded_backdrop_filter_execution(),
+            PrimitiveOperation::BackdropIsolationComposition => self
+                .offscreen_pipeline
+                .supports_backdrop_isolation_composition(),
+            _ => false,
+        }
+    }
+
+    const fn supports_transform_operation(self, operation: PrimitiveOperation) -> bool {
+        match operation {
+            PrimitiveOperation::Matrix3dTransform
+            | PrimitiveOperation::PerspectiveTransform
+            | PrimitiveOperation::Rotate3dTransform
+            | PrimitiveOperation::TranslateZTransform
+            | PrimitiveOperation::ScaleZTransform => {
+                self.transform_coordinate_spaces.supports_transform_3d()
+            }
             _ => false,
         }
     }

@@ -25,7 +25,7 @@ use super::surface::{
     DisplayFreePresentedSurfaceObservationHandleForTest, PresentedAcquireOutcomeForTest,
 };
 use super::vello_engine::{
-    ActiveVelloEncodingScope, PreparedVelloPassObservation, RasterParameters,
+    ActiveVelloEncodingScope, PreparedVelloPass, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
     VelloPassBindingForTest, VelloPassBufferRoleForTest, VelloPassImageRoleForTest,
     VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
@@ -126,6 +126,14 @@ where
 
 #[test]
 fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and_adaptations() {
+    assert_internal_vello_dependency_roles();
+    assert_internal_vello_dependency_source_uses();
+    assert_internal_vello_imported_provenance();
+    assert_internal_vello_omissions_and_licenses();
+    assert_internal_vello_source_headers();
+}
+
+fn assert_internal_vello_dependency_roles() {
     let manifest_dependencies = manifest_dependency_records(include_str!("../Cargo.toml"));
     let normal_dependencies = &manifest_dependencies.normal;
     let expected_normal_dependencies = std::collections::BTreeMap::from([
@@ -196,7 +204,9 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
         ),
         "vello_shaders must have no default or CPU route"
     );
+}
 
+fn assert_internal_vello_dependency_source_uses() {
     let tests_source = include_str!("tests.rs");
     let provenance_checker_start_marker = [
         "#[test]\n",
@@ -287,7 +297,9 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
         !tests_source.contains(&["getrandom", "::"].concat()),
         "getrandom must remain the exact no-direct-source-import wasm test-entropy exception"
     );
+}
 
+fn assert_internal_vello_imported_provenance() {
     let notice = include_str!("../NOTICE-VELLO.md");
     assert!(notice.contains("- Package: `vello` 0.9.0."));
     assert!(notice.contains(
@@ -377,7 +389,10 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
             "{local} must name its material adaptations"
         );
     }
+}
 
+fn assert_internal_vello_omissions_and_licenses() {
+    let notice = include_str!("../NOTICE-VELLO.md");
     let omitted_rows = provenance_rows(notice, "## Omitted upstream main-crate sources", 2);
     assert_eq!(
         omitted_rows.len(),
@@ -412,7 +427,9 @@ fn internal_vello_provenance_names_exact_package_checksum_source_file_hashes_and
     assert!(notice.contains("[Apache-2.0 license](LICENSES/Vello-0.9.0-APACHE-2.0.txt)"));
     assert!(notice.contains("[MIT license](LICENSES/Vello-0.9.0-MIT.txt)"));
     assert_pinned_vello_license_artifacts();
+}
 
+fn assert_internal_vello_source_headers() {
     let header_2022 =
         "// Copyright 2022 the Vello Authors\n// SPDX-License-Identifier: Apache-2.0 OR MIT";
     let header_2023 =
@@ -507,7 +524,7 @@ struct ManifestDependencyRecords {
     wasm_test_entropy: Option<std::collections::BTreeMap<String, String>>,
 }
 
-fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
+fn parse_manifest_dependency_tables(manifest: &str) -> Vec<ManifestDependencyTable> {
     let mut tables = Vec::new();
     let mut active_table = None;
     let mut active_path = Vec::new();
@@ -573,7 +590,12 @@ fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
             panic!("unapproved dependency-bearing Cargo assignment: {lhs}");
         }
     }
+    tables
+}
 
+fn validate_manifest_dependency_tables(
+    tables: Vec<ManifestDependencyTable>,
+) -> ManifestDependencyRecords {
     let mut normal = None;
     let mut dev = None;
     let mut wasm_test_entropy = None;
@@ -622,6 +644,10 @@ fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
         dev,
         wasm_test_entropy,
     }
+}
+
+fn manifest_dependency_records(manifest: &str) -> ManifestDependencyRecords {
+    validate_manifest_dependency_tables(parse_manifest_dependency_tables(manifest))
 }
 
 fn manifest_table_header(line: &str) -> Option<(&str, bool)> {
@@ -874,19 +900,13 @@ fn is_dependency_role(component: &str) -> bool {
 #[test]
 fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
     let manifest = include_str!("../Cargo.toml");
+    assert_manifest_hidden_dependency_roles_rejected(manifest);
+    assert_manifest_duplicate_dependency_records_rejected(manifest);
+}
+
+fn assert_manifest_hidden_dependency_roles_rejected(manifest: &str) {
+    assert_manifest_target_dotted_dependency_roles_rejected(manifest);
     for mutation in [
-        ManifestDependencyMutation::append(
-            "target dotted normal dependency",
-            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndependencies.hidden-target-dependency = \"=1.0.0\"\n",
-        ),
-        ManifestDependencyMutation::append(
-            "target dotted development dependency",
-            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndev-dependencies.hidden-target-dev-dependency = \"=1.0.0\"\n",
-        ),
-        ManifestDependencyMutation::append(
-            "target dotted build dependency",
-            "\n[target.'cfg(all(unix, target_os = \"macos\"))']\nbuild-dependencies.hidden-target-build-dependency = \"=1.0.0\"\n",
-        ),
         ManifestDependencyMutation::prepend_root(
             "root dotted normal dependency",
             "\ndependencies.hidden-root-dependency = \"=1.0.0\"\n",
@@ -983,7 +1003,39 @@ fn manifest_dependency_roles_reject_hidden_tables_and_duplicate_names() {
         let mutated_manifest = mutation.apply(manifest);
         assert_manifest_dependency_roles_rejected(mutated_manifest, mutation.case);
     }
+}
 
+fn assert_manifest_target_dotted_dependency_roles_rejected(manifest: &str) {
+    assert_manifest_dependency_mutations_rejected(
+        manifest,
+        [
+            ManifestDependencyMutation::append(
+                "target dotted normal dependency",
+                "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndependencies.hidden-target-dependency = \"=1.0.0\"\n",
+            ),
+            ManifestDependencyMutation::append(
+                "target dotted development dependency",
+                "\n[target.'cfg(all(unix, target_os = \"macos\"))']\ndev-dependencies.hidden-target-dev-dependency = \"=1.0.0\"\n",
+            ),
+            ManifestDependencyMutation::append(
+                "target dotted build dependency",
+                "\n[target.'cfg(all(unix, target_os = \"macos\"))']\nbuild-dependencies.hidden-target-build-dependency = \"=1.0.0\"\n",
+            ),
+        ],
+    );
+}
+
+fn assert_manifest_dependency_mutations_rejected<const N: usize>(
+    manifest: &str,
+    mutations: [ManifestDependencyMutation; N],
+) {
+    for mutation in mutations {
+        let mutated_manifest = mutation.apply(manifest);
+        assert_manifest_dependency_roles_rejected(mutated_manifest, mutation.case);
+    }
+}
+
+fn assert_manifest_duplicate_dependency_records_rejected(manifest: &str) {
     let duplicate_cross_role = manifest.replacen(
         "[dependencies]\n",
         "[dependencies]\npollster = \"=0.4.0\"\n",
@@ -1516,6 +1568,20 @@ fn expected_vello_schedule(
         ]),
         None,
     )];
+    append_vello_path_scan_schedule(&mut expected, scenario);
+    append_vello_draw_setup_schedule(&mut expected);
+    append_vello_clip_schedule(&mut expected, scenario);
+    append_vello_raster_schedule(&mut expected);
+    append_vello_fine_schedule(&mut expected, antialiasing);
+    expected
+}
+
+fn append_vello_path_scan_schedule(
+    expected: &mut Vec<ExpectedVelloScheduleEntry>,
+    scenario: VelloRasterScenario,
+) {
+    use VelloPassBufferRoleForTest as BufferRole;
+
     if matches!(
         scenario,
         VelloRasterScenario::LargePath | VelloRasterScenario::LargePathAndClip
@@ -1562,6 +1628,11 @@ fn expected_vello_schedule(
             None,
         ));
     }
+}
+
+fn append_vello_draw_setup_schedule(expected: &mut Vec<ExpectedVelloScheduleEntry>) {
+    use VelloPassBufferRoleForTest as BufferRole;
+
     expected.extend([
         (
             VelloPassPhaseForTest::Coarse,
@@ -1607,6 +1678,14 @@ fn expected_vello_schedule(
             None,
         ),
     ]);
+}
+
+fn append_vello_clip_schedule(
+    expected: &mut Vec<ExpectedVelloScheduleEntry>,
+    scenario: VelloRasterScenario,
+) {
+    use VelloPassBufferRoleForTest as BufferRole;
+
     if matches!(
         scenario,
         VelloRasterScenario::Clip | VelloRasterScenario::LargePathAndClip
@@ -1639,6 +1718,11 @@ fn expected_vello_schedule(
             ),
         ]);
     }
+}
+
+fn append_vello_raster_schedule(expected: &mut Vec<ExpectedVelloScheduleEntry>) {
+    use VelloPassBufferRoleForTest as BufferRole;
+
     expected.extend([
         (
             VelloPassPhaseForTest::Coarse,
@@ -1738,6 +1822,14 @@ fn expected_vello_schedule(
             Some((BufferRole::IndirectCount, 0)),
         ),
     ]);
+}
+
+fn append_vello_fine_schedule(
+    expected: &mut Vec<ExpectedVelloScheduleEntry>,
+    antialiasing: Antialiasing,
+) {
+    use VelloPassBufferRoleForTest as BufferRole;
+
     let (operation, mut bindings) = match antialiasing {
         Antialiasing::Area => (
             VelloPassOperationForTest::FineArea,
@@ -1779,7 +1871,6 @@ fn expected_vello_schedule(
         bindings.push(VelloPassBindingForTest::Buffer(BufferRole::MaskLut));
     }
     expected.push((VelloPassPhaseForTest::Fine, operation, bindings, None));
-    expected
 }
 
 fn buffer_bindings(roles: &[VelloPassBufferRoleForTest]) -> Vec<VelloPassBindingForTest> {
@@ -2040,6 +2131,13 @@ fn selected_glyph_preflight_validates_exact_outline_draw_settings() {
 
 #[test]
 fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
+    assert_colr_glyph_preflight_cases();
+    assert_png_bitmap_glyph_preflight_cases();
+    assert_malformed_sbix_glyph_preflight_cases();
+    assert_malformed_head_glyph_preflight_cases();
+}
+
+fn assert_colr_glyph_preflight_cases() {
     let color_font = FontData::try_from_bytes(ahem_color_font(valid_cpal()), 0).unwrap();
     let color_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let color_run = text_run_for(color_font, 16.0, Transform::identity(), &color_glyphs);
@@ -2060,7 +2158,9 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
         .expect_err("a COLRv1 table with a V0-only selected root must reach COLR omission");
     assert_render_failed_without_font_diagnostic(&color_v1_error);
     assert_no_glyph_encoding(&color_v1_scene);
+}
 
+fn assert_png_bitmap_glyph_preflight_cases() {
     let bitmap_font = FontData::try_from_bytes(ahem_sbix_font(rgba_png()), 0).unwrap();
     let bitmap_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let bitmap_run = text_run_for(bitmap_font, 16.0, Transform::identity(), &bitmap_glyphs);
@@ -2080,6 +2180,7 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
 
     let invalid_palette_font =
         FontData::try_from_bytes(ahem_color_font(invalid_cpal()), 0).unwrap();
+    let color_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let invalid_palette_run = text_run_for(
         invalid_palette_font,
         16.0,
@@ -2127,7 +2228,10 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
         font_data_value(&short_header_run).as_str(),
     );
     assert_no_glyph_encoding(&short_header_scene);
+}
 
+fn assert_malformed_sbix_glyph_preflight_cases() {
+    let bitmap_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let malformed_sbix_font = FontData::try_from_bytes(
         font_with_tables(
             ahem_sbix_font(rgba_png()).as_slice(),
@@ -2184,7 +2288,10 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
     let no_bitmap_observation = no_bitmap_scene.observation_for_test();
     assert_eq!(no_bitmap_observation.glyph_run_count_for_test(), 1);
     assert_eq!(no_bitmap_observation.glyph_count_for_test(), 1);
+}
 
+fn assert_malformed_head_glyph_preflight_cases() {
+    let color_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let malformed_colr_head_bytes = ahem_color_font(valid_cpal());
     let malformed_colr_head_font = FontData::try_from_bytes(
         font_with_tables(
@@ -2211,6 +2318,7 @@ fn selected_glyph_preflight_validates_colr_palette_bitmap_and_png_inputs() {
     assert_no_glyph_encoding(&malformed_colr_head_scene);
 
     let malformed_bitmap_head_bytes = ahem_sbix_font(rgba_png());
+    let bitmap_glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
     let malformed_bitmap_head_font = FontData::try_from_bytes(
         font_with_tables(
             malformed_bitmap_head_bytes.as_slice(),
@@ -2496,65 +2604,7 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
             glyphs,
         );
 
-        for index_format in [BdtIndexFormat::Format4, BdtIndexFormat::Format5] {
-            for glyph in [
-                BdtGlyphFixture::SparseDuplicate,
-                BdtGlyphFixture::SparseUnsorted,
-            ] {
-                assert_bdt_sparse_invalid(
-                    kind,
-                    &[BdtStrikeFixture::new(16, index_format, glyph)],
-                    glyphs,
-                );
-            }
-            assert_bdt_selected_bitmap(
-                kind,
-                &[BdtStrikeFixture::new(
-                    16,
-                    index_format,
-                    BdtGlyphFixture::SparseUnrelatedDisorder,
-                )],
-                16.0,
-                16,
-                glyphs,
-            );
-        }
-
-        assert_bdt_sparse_invalid(
-            kind,
-            &[BdtStrikeFixture::new(
-                16,
-                BdtIndexFormat::Format4,
-                BdtGlyphFixture::SparseMalformedSentinel,
-            )],
-            glyphs,
-        );
-        assert_bdt_selected_bitmap(
-            kind,
-            &[BdtStrikeFixture::new(
-                16,
-                BdtIndexFormat::Format4,
-                BdtGlyphFixture::SparseUnselectedMalformedSentinel,
-            )],
-            16.0,
-            16,
-            glyphs,
-        );
-
-        assert_bdt_selected_bitmap(
-            kind,
-            &[
-                BdtStrikeFixture::new(
-                    16,
-                    BdtIndexFormat::Format4,
-                    BdtGlyphFixture::UnselectedSparseUnsorted,
-                ),
-                BdtStrikeFixture::new(16, BdtIndexFormat::Format1, BdtGlyphFixture::Present),
-            ],
-            16.0,
-            16,
-            glyphs,
-        );
+        assert_bdt_sparse_preflight_cases(kind, glyphs);
     }
 
     for kind in BdtKind::ALL {
@@ -2571,6 +2621,68 @@ fn assert_bdt_glyph_preflight_cases(glyphs: &[TextGlyph]) {
     }
 
     assert_cbdt_precedes_ebdt(glyphs);
+}
+
+fn assert_bdt_sparse_preflight_cases(kind: BdtKind, glyphs: &[TextGlyph]) {
+    for index_format in [BdtIndexFormat::Format4, BdtIndexFormat::Format5] {
+        for glyph in [
+            BdtGlyphFixture::SparseDuplicate,
+            BdtGlyphFixture::SparseUnsorted,
+        ] {
+            assert_bdt_sparse_invalid(
+                kind,
+                &[BdtStrikeFixture::new(16, index_format, glyph)],
+                glyphs,
+            );
+        }
+        assert_bdt_selected_bitmap(
+            kind,
+            &[BdtStrikeFixture::new(
+                16,
+                index_format,
+                BdtGlyphFixture::SparseUnrelatedDisorder,
+            )],
+            16.0,
+            16,
+            glyphs,
+        );
+    }
+
+    assert_bdt_sparse_invalid(
+        kind,
+        &[BdtStrikeFixture::new(
+            16,
+            BdtIndexFormat::Format4,
+            BdtGlyphFixture::SparseMalformedSentinel,
+        )],
+        glyphs,
+    );
+    assert_bdt_selected_bitmap(
+        kind,
+        &[BdtStrikeFixture::new(
+            16,
+            BdtIndexFormat::Format4,
+            BdtGlyphFixture::SparseUnselectedMalformedSentinel,
+        )],
+        16.0,
+        16,
+        glyphs,
+    );
+
+    assert_bdt_selected_bitmap(
+        kind,
+        &[
+            BdtStrikeFixture::new(
+                16,
+                BdtIndexFormat::Format4,
+                BdtGlyphFixture::UnselectedSparseUnsorted,
+            ),
+            BdtStrikeFixture::new(16, BdtIndexFormat::Format1, BdtGlyphFixture::Present),
+        ],
+        16.0,
+        16,
+        glyphs,
+    );
 }
 
 fn assert_bdt_selected_bitmap(
@@ -3559,6 +3671,11 @@ fn runtime_capability_report_keeps_precision_flags_independent() {
 
 #[test]
 fn precision_resolver_covers_both_high_only_reduced_only_and_neither() {
+    assert_working_format_contracts();
+    assert_precision_resolution_matrix();
+}
+
+fn assert_working_format_contracts() {
     let required_usages = wgpu::TextureUsages::RENDER_ATTACHMENT
         .union(wgpu::TextureUsages::TEXTURE_BINDING)
         .union(wgpu::TextureUsages::COPY_SRC)
@@ -3604,7 +3721,9 @@ fn precision_resolver_covers_both_high_only_reduced_only_and_neither() {
             ..complete_features
         }));
     }
+}
 
+fn assert_precision_resolution_matrix() {
     let cases = [
         (
             true,
@@ -5343,6 +5462,12 @@ fn reference_color_filter_identity_ops_preserve_pixels_byte_for_byte() {
 
 #[test]
 fn color_filter_known_vectors_use_spec_constants_not_oracle_constants() {
+    assert_literal_color_filter_primary_vectors();
+    assert_literal_color_filter_identity_and_matrix_vectors();
+    assert_literal_color_filter_scalar_and_clamp_vectors();
+}
+
+fn assert_literal_color_filter_primary_vectors() {
     let red_primary = PremultipliedRgba8::try_new(54, 0, 0, 54).unwrap();
     let grayscale = color_filter_pipeline([ColorFilterOp::Grayscale(
         UnitFilterAmount::try_new(1.0).unwrap(),
@@ -5379,7 +5504,9 @@ fn color_filter_known_vectors_use_spec_constants_not_oracle_constants() {
         PremultipliedRgba8::try_new(12, 12, 12, 54).unwrap(),
         "saturation reused the grayscale luma constants"
     );
+}
 
+fn assert_literal_color_filter_identity_and_matrix_vectors() {
     let identity_sample = PremultipliedRgba8::try_new(101, 67, 23, 127).unwrap();
     for identity in [
         color_filter_pipeline([ColorFilterOp::Saturate(FilterAmount::try_new(1.0).unwrap())]),
@@ -5419,7 +5546,10 @@ fn color_filter_known_vectors_use_spec_constants_not_oracle_constants() {
         PremultipliedRgba8::try_new(100, 89, 69, 255).unwrap(),
         "full sepia differs from the literal S21 matrix"
     );
+}
 
+fn assert_literal_color_filter_scalar_and_clamp_vectors() {
+    let identity_sample = PremultipliedRgba8::try_new(101, 67, 23, 127).unwrap();
     let brightness = color_filter_pipeline([ColorFilterOp::Brightness(
         FilterAmount::try_new(2.0).unwrap(),
     )]);
@@ -6458,6 +6588,12 @@ fn sequence11_filtered_image_executes_nonzero_blur_then_drop_shadow_with_materia
 
 #[test]
 fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
+    assert_sequence11_filter_region_rows();
+    assert_sequence11_filter_order_row();
+    assert_sequence11_shadow_diagnostic_rows();
+}
+
+fn assert_sequence11_filter_region_rows() {
     let blur = FilterBlur::try_new(2.0).unwrap();
     let source = FilterSourceBounds::try_new(Rect::new(10.0, 10.0, 4.0, 4.0)).unwrap();
     let clip = FilterClipBounds::try_new(Rect::new(8.0, 8.0, 12.0, 12.0)).unwrap();
@@ -6483,7 +6619,9 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
     assert_eq!(shadow_outset.top(), 11.0);
     assert_eq!(shadow_outset.right(), 12.0);
     assert_eq!(shadow_outset.bottom(), 9.0);
+}
 
+fn assert_sequence11_filter_order_row() {
     let image_buffer =
         ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let color_before_pixel = FilterList::try_ops(vec![
@@ -6521,7 +6659,9 @@ fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
         pixel_before.rgba(),
         "mixed color and pixel-moving filters must preserve authored order"
     );
+}
 
+fn assert_sequence11_shadow_diagnostic_rows() {
     let mut scene = Scene::new();
     scene.shadows(
         Rect::new(1.0, 1.0, 6.0, 6.0),
@@ -7417,14 +7557,20 @@ fn per_lease_discard_after_accounting_fault_removes_exact_lease_without_panickin
 
 #[test]
 fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
-    let assert_bounded_fault = |error: &Error| {
-        assert_eq!(error.code(), ErrorCode::RenderFailed);
-        assert_eq!(
-            error.message(),
-            "resource manager is unavailable after a retained-byte accounting invariant failure"
-        );
-    };
+    assert_per_lease_mismatch_fault();
+    assert_per_lease_underflow_fault();
+    assert_per_lease_overflow_fault();
+}
 
+fn assert_bounded_resource_accounting_fault(error: &Error) {
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        error.message(),
+        "resource manager is unavailable after a retained-byte accounting invariant failure"
+    );
+}
+
+fn assert_per_lease_mismatch_fault() {
     let mismatch_manager = ResourceManager::default();
     let mut mismatch_frame = mismatch_manager.begin_frame().unwrap();
     let mismatch_survivor = mismatch_frame
@@ -7440,7 +7586,7 @@ fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
     let mismatch_error = mismatch_frame
         .discard(mismatch_discarded)
         .expect_err("per-lease discard silently accepted a retained-byte mismatch");
-    assert_bounded_fault(&mismatch_error);
+    assert_bounded_resource_accounting_fault(&mismatch_error);
     let mismatch_fault = ResourceAccountingFault::RetainedByteMismatch {
         retained_bytes: 7,
         registered_entry_bytes: 8,
@@ -7479,7 +7625,9 @@ fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
             fault: mismatch_fault,
         }
     );
+}
 
+fn assert_per_lease_underflow_fault() {
     let underflow_manager = ResourceManager::default();
     let mut underflow_frame = underflow_manager.begin_frame().unwrap();
     let underflow_discarded = underflow_frame
@@ -7498,7 +7646,7 @@ fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
     let underflow_error = underflow_result
         .unwrap()
         .expect_err("per-lease discard silently accepted retained-byte underflow");
-    assert_bounded_fault(&underflow_error);
+    assert_bounded_resource_accounting_fault(&underflow_error);
     let underflow_fault = ResourceAccountingFault::RetainedByteUnderflow {
         retained_bytes: 0,
         discarded_entry_bytes: 8,
@@ -7530,7 +7678,9 @@ fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
             fault: underflow_fault,
         }
     );
+}
 
+fn assert_per_lease_overflow_fault() {
     let overflow_manager = ResourceManager::default();
     let mut overflow_frame = overflow_manager.begin_frame().unwrap();
     let first_overflow_survivor = overflow_frame
@@ -7551,7 +7701,7 @@ fn per_lease_discard_detects_accounting_fault_and_returns_bounded_error() {
     let overflow_error = overflow_frame
         .discard(overflow_discarded)
         .expect_err("per-lease discard silently accepted a surviving-entry total overflow");
-    assert_bounded_fault(&overflow_error);
+    assert_bounded_resource_accounting_fault(&overflow_error);
     let overflow_fault = ResourceAccountingFault::SurvivingEntryByteTotalOverflow;
     let overflow_observation = overflow_manager.observation_for_test();
     assert_eq!(overflow_observation.retained_bytes, 2);
@@ -7701,14 +7851,12 @@ fn replace_rejects_existing_accounting_fault_before_mutation() {
 
 #[test]
 fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
-    let assert_bounded_fault = |error: &Error| {
-        assert_eq!(error.code(), ErrorCode::RenderFailed);
-        assert_eq!(
-            error.message(),
-            "resource manager is unavailable after a retained-byte accounting invariant failure"
-        );
-    };
+    assert_replace_mismatch_fault();
+    assert_replace_underflow_fault();
+    assert_replace_overflow_fault();
+}
 
+fn assert_replace_mismatch_fault() {
     let mismatch_manager = ResourceManager::default();
     let mut mismatch_frame = mismatch_manager.begin_frame().unwrap();
     let mismatch_survivor = mismatch_frame
@@ -7726,7 +7874,7 @@ fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
     let mismatch_error = mismatch_result
         .unwrap()
         .expect_err("replace silently accepted mismatched retained accounting");
-    assert_bounded_fault(&mismatch_error);
+    assert_bounded_resource_accounting_fault(&mismatch_error);
     let mismatch_fault = ResourceAccountingFault::RetainedByteMismatch {
         retained_bytes: 23,
         registered_entry_bytes: 24,
@@ -7745,7 +7893,9 @@ fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
     );
     mismatch_frame.release(mismatch_survivor).unwrap();
     assert!(catch_unwind(AssertUnwindSafe(|| drop(mismatch_frame))).is_ok());
+}
 
+fn assert_replace_underflow_fault() {
     let underflow_manager = ResourceManager::default();
     let mut underflow_frame = underflow_manager.begin_frame().unwrap();
     let underflow_replaced = underflow_frame
@@ -7760,7 +7910,7 @@ fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
     let underflow_error = underflow_result
         .unwrap()
         .expect_err("replace silently accepted retained-byte underflow");
-    assert_bounded_fault(&underflow_error);
+    assert_bounded_resource_accounting_fault(&underflow_error);
     let underflow_fault = ResourceAccountingFault::RetainedByteUnderflow {
         retained_bytes: 0,
         discarded_entry_bytes: 8,
@@ -7777,7 +7927,9 @@ fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
             .contains(&underflow_identity)
     );
     assert!(catch_unwind(AssertUnwindSafe(|| drop(underflow_frame))).is_ok());
+}
 
+fn assert_replace_overflow_fault() {
     let overflow_manager = ResourceManager::default();
     let mut overflow_frame = overflow_manager.begin_frame().unwrap();
     let overflow_survivor = overflow_frame
@@ -7798,7 +7950,7 @@ fn replace_records_mismatch_underflow_and_overflow_without_panicking() {
     let overflow_error = overflow_result
         .unwrap()
         .expect_err("replace overflow must fault accounting instead of mutating");
-    assert_bounded_fault(&overflow_error);
+    assert_bounded_resource_accounting_fault(&overflow_error);
     let overflow_observation = overflow_manager.observation_for_test();
     assert_eq!(
         overflow_observation.accounting_fault_for_test(),
@@ -7974,6 +8126,11 @@ fn resource_role_keys_keep_allocation_namespaces_distinct() {
 
 #[test]
 fn effect_texture_keys_separate_format_extent_usage_and_role() {
+    assert_effect_texture_cache_keys_are_distinct();
+    assert_effect_texture_allocation_reuse_and_rejection();
+}
+
+fn assert_effect_texture_cache_keys_are_distinct() {
     let baseline = EffectTextureDescriptor::try_capture(
         PhysicalSize::new(8, 4),
         wgpu::TextureUsages::TEXTURE_BINDING,
@@ -8038,7 +8195,9 @@ fn effect_texture_keys_separate_format_extent_usage_and_role() {
         7,
         "effect textures can alias across semantic roles"
     );
+}
 
+fn assert_effect_texture_allocation_reuse_and_rejection() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("effect texture allocation coverage requires a selected host adapter");
     let ready = renderer
@@ -8126,6 +8285,14 @@ fn effect_texture_keys_separate_format_extent_usage_and_role() {
         "exact-key effect texture reuse emitted a WGPU validation error"
     );
 
+    assert_effect_texture_rejections_preserve_state(device, &manager, descriptor);
+}
+
+fn assert_effect_texture_rejections_preserve_state(
+    device: &wgpu::Device,
+    manager: &ResourceManager,
+    descriptor: EffectTextureDescriptor,
+) {
     let stats_before_rejection = manager.stats();
     let retained_before_rejection = manager.observation_for_test().retained_bytes;
     let mut rejected_frame = manager.begin_frame().unwrap();
@@ -8157,6 +8324,11 @@ fn effect_texture_keys_separate_format_extent_usage_and_role() {
 
 #[test]
 fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
+    assert_resolved_mask_cache_keys_are_distinct();
+    assert_resolved_mask_upload_lifecycle();
+}
+
+fn assert_resolved_mask_cache_keys_are_distinct() {
     let image_id = ImageId::new(17);
     let keys = std::collections::HashSet::from([
         ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
@@ -8192,7 +8364,9 @@ fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
     ]);
 
     assert_eq!(keys.len(), 5, "mask upload key omits semantic image facts");
+}
 
+fn assert_resolved_mask_upload_lifecycle() {
     let mask_bytes = vec![0, 0, 0, 255, 12, 34, 56, 128];
     let mask_buffer = ImageBuffer::try_new(PhysicalSize::new(2, 1), mask_bytes.clone()).unwrap();
     let mask_image = image_from_buffer(mask_buffer.clone());
@@ -8295,11 +8469,20 @@ fn resolved_mask_upload_keys_include_identity_dimensions_and_sampling() {
         "exact-key resolved-mask reuse emitted a WGPU validation error"
     );
 
+    assert_resolved_mask_over_limit_rejection(device, queue, &manager, &descriptor);
+}
+
+fn assert_resolved_mask_over_limit_rejection(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    manager: &ResourceManager,
+    descriptor: &ResolvedMaskUploadDescriptor,
+) {
     let stats_before_rejection = manager.stats();
     let mut rejected_frame = manager.begin_frame().unwrap();
     let over_limit = DeviceCapabilities::from_test_facts(true, true, 1);
     let error = rejected_frame
-        .acquire_resolved_mask_upload(device, queue, &over_limit, &descriptor)
+        .acquire_resolved_mask_upload(device, queue, &over_limit, descriptor)
         .expect_err("an over-limit mask upload must fail before texture allocation");
     assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
     assert_eq!(manager.stats(), stats_before_rejection);
@@ -8529,6 +8712,15 @@ fn gaussian_kernel_buffer_keys_include_the_exact_plan() {
     let standard_deviation = 2.0_f64;
     let raster_scale = 1.5_f64;
     let support_multiple = 2.5_f64;
+    assert_gaussian_kernel_cache_keys(standard_deviation, raster_scale, support_multiple);
+    assert_gaussian_kernel_upload_lifecycle(standard_deviation, raster_scale, support_multiple);
+}
+
+fn assert_gaussian_kernel_cache_keys(
+    standard_deviation: f64,
+    raster_scale: f64,
+    support_multiple: f64,
+) {
     let keys = std::collections::HashSet::from([
         ResourceCacheKey::GaussianKernelBuffer(GaussianKernelKey::from_exact_plan(
             standard_deviation.to_bits(),
@@ -8579,7 +8771,13 @@ fn gaussian_kernel_buffer_keys_include_the_exact_plan() {
         6,
         "kernel buffer key omits exact planning facts"
     );
+}
 
+fn assert_gaussian_kernel_upload_lifecycle(
+    standard_deviation: f64,
+    raster_scale: f64,
+    support_multiple: f64,
+) {
     let paired = GaussianKernelPlan::try_new(
         standard_deviation,
         raster_scale,
@@ -10762,7 +10960,11 @@ fn filter_bounds_fold_blur_and_signed_drop_shadow_outsets_in_order() {
     assert_eq!(observed.initial_bounds, [10.25, -4.5, 20.0, 10.0]);
     assert_eq!(observed.final_bounds, [3.0, -7.0, 29.75, 21.0]);
     assert_eq!(observed.steps.len(), 4, "zero blur must be elided");
+    assert_ordered_filter_plan_steps(&observed);
+    assert_ordered_filter_edge_cases(&filters);
+}
 
+fn assert_ordered_filter_plan_steps(observed: &OrderedFilterPlanObservation) {
     assert_eq!(
         observed.steps[0],
         OrderedFilterStepObservation {
@@ -10835,7 +11037,9 @@ fn filter_bounds_fold_blur_and_signed_drop_shadow_outsets_in_order() {
             },
         }
     );
+}
 
+fn assert_ordered_filter_edge_cases(filters: &FilterList) {
     let backdrop = observe_ordered_filter_plan(
         &FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap(),
         Rect::new(0.0, 0.0, 4.0, 3.0),
@@ -10856,7 +11060,7 @@ fn filter_bounds_fold_blur_and_signed_drop_shadow_outsets_in_order() {
         } else {
             Rect::new(1.0, 2.0, 4.0, 3.0)
         };
-        let empty = observe_ordered_filter_plan(&filters, source, transform, 2.0, false).unwrap();
+        let empty = observe_ordered_filter_plan(filters, source, transform, 2.0, false).unwrap();
         assert!(empty.is_empty);
         assert!(!empty.has_spatial_mapping);
         assert!(empty.steps.is_empty());
@@ -10922,11 +11126,6 @@ fn color_filter_fusion_preserves_each_source_clamp() {
 
 #[test]
 fn filter_scalar_lowering_handles_f32_f64_exponents_and_huge_angles_finitely() {
-    use super::pass::{
-        RuntimeColorOperationTagForTest as Tag, RuntimeColorScalarObservationForTest as Scalar,
-        RuntimeFilterAmountObservationForTest as Amount,
-    };
-
     let mantissa_renormalization_boundary = f64::from_bits(1.0_f64.to_bits() - (1_u64 << 28));
     let filters = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(0.0).unwrap()),
@@ -10975,6 +11174,17 @@ fn filter_scalar_lowering_handles_f32_f64_exponents_and_huge_angles_finitely() {
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     )
     .expect("the authored color list must reach the real private runtime lowering");
+
+    assert_runtime_color_filter_lowering(&observed);
+}
+
+fn assert_runtime_color_filter_lowering(
+    observed: &super::pass::RuntimeColorFilterObservationForTest,
+) {
+    use super::pass::{
+        RuntimeColorOperationTagForTest as Tag, RuntimeColorScalarObservationForTest as Scalar,
+        RuntimeFilterAmountObservationForTest as Amount,
+    };
 
     assert!(
         observed.operations.len() == 11
@@ -12042,6 +12252,10 @@ fn graph_clip_coverage_is_one_vello_capture_of_ordered_render_clips() {
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
+    assert_ordered_graph_clip_coverage(&observed);
+}
+
+fn assert_ordered_graph_clip_coverage(observed: &super::pass::GraphClipCoverageObservationForTest) {
     let authored_transforms = [
         Transform::translation(0.25, 0.5).unwrap(),
         Transform::translation(0.5, 0.25).unwrap(),
@@ -12778,13 +12992,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
 #[test]
 fn resource_budget_and_device_loss_preserve_public_stats_contract() {
     let commands = c09_composition_commands_for_test();
-    let route_before = super::frame::frame_plan_result_observation_for_test(
-        commands.clone(),
-        Size::new(16.0, 12.0),
-        1.0,
-        Antialiasing::Msaa8,
-        Color::BLACK,
-    );
+    let route_before = resource_lifecycle_route_for_test(commands.clone());
 
     let ordinary_options = Options::default()
         .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -12855,32 +13063,18 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
     let terminal_cleanup_once = disabled.default_device_renderer_released_for_test()
         && disabled.default_device_renderer_released_for_test()
         && drop_witness.was_dropped_for_test();
-    let route_after = super::frame::frame_plan_result_observation_for_test(
-        commands,
-        Size::new(16.0, 12.0),
-        1.0,
-        Antialiasing::Msaa8,
-        Color::BLACK,
-    );
+    let route_after = resource_lifecycle_route_for_test(commands);
 
     assert!(
         ordinary_observation.failure_and_drop_cleanup
             && disabled_observation.failure_and_drop_cleanup
             && ordinary_public_unchanged
             && disabled_public_before_loss
-            && ordinary_resources.leased_count == 0
-            && ordinary_resources.active_frame_count == 0
-            && ordinary_resources.resolved_lease_count == 0
-            && ordinary_resources.accounted_entry_bytes == Some(ordinary_resources.retained_bytes)
-            && ordinary_resources.retained_bytes
-                <= ordinary_options.resource_cache_budget().bytes()
-            && zero_budget_resources.leased_count == 0
-            && zero_budget_resources.active_frame_count == 0
-            && zero_budget_resources.resolved_lease_count == 0
-            && zero_budget_resources.idle_count == 0
-            && zero_budget_resources.entry_count == 0
-            && zero_budget_resources.retained_bytes == 0
-            && zero_budget_resources.accounted_entry_bytes == Some(0)
+            && prepared_resources_are_resolved_and_bounded(
+                &ordinary_resources,
+                ordinary_options.resource_cache_budget(),
+            )
+            && prepared_resources_are_fully_released(&zero_budget_resources)
             && disabled.stats() == disabled_stats
             && terminal_capabilities
                 == RuntimeCapabilities::Unavailable(
@@ -12892,6 +13086,38 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             && route_after == route_before,
         "resource lifecycle leaked into final public stats"
     );
+}
+
+fn resource_lifecycle_route_for_test(
+    commands: command::RenderCommands,
+) -> super::frame::FramePlanResultObservation {
+    super::frame::frame_plan_result_observation_for_test(
+        commands,
+        Size::new(16.0, 12.0),
+        1.0,
+        Antialiasing::Msaa8,
+        Color::BLACK,
+    )
+}
+
+fn prepared_resources_are_resolved_and_bounded(
+    resources: &super::resource::ResourceManagerObservationForTest,
+    budget: ResourceCacheBudget,
+) -> bool {
+    resources.leased_count == 0
+        && resources.active_frame_count == 0
+        && resources.resolved_lease_count == 0
+        && resources.accounted_entry_bytes == Some(resources.retained_bytes)
+        && resources.retained_bytes <= budget.bytes()
+}
+
+fn prepared_resources_are_fully_released(
+    resources: &super::resource::ResourceManagerObservationForTest,
+) -> bool {
+    prepared_resources_are_resolved_and_bounded(resources, ResourceCacheBudget::DISABLED)
+        && resources.idle_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
 }
 
 #[test]
@@ -13685,7 +13911,7 @@ fn c09_shader_mask_sampling_matches_independent_boundary_vectors() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn c09_shader_blend_functions_match_independent_known_vectors() {
-    let (mut backend, identity, requests) = c09_selected_backend_and_requests_for_test();
+    let (backend, identity, requests) = c09_selected_backend_and_requests_for_test();
     let source = [0.4, 0.1, 0.3, 0.5];
     let parent = [0.2, 0.6, 0.32, 0.8];
     let vectors = [
@@ -13776,6 +14002,17 @@ fn c09_shader_blend_functions_match_independent_known_vectors() {
         [0.0; 4],
         parent,
     ];
+    assert_c09_blend_gpu_vectors(backend, identity, &requests, &vectors, &expected);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_c09_blend_gpu_vectors(
+    mut backend: Backend,
+    identity: DeviceSlotIdentity,
+    requests: &super::pass::C09CompositeCacheRequestsForTest,
+    vectors: &[C09BlendVectorForTest],
+    expected: &[[f32; 4]],
+) {
     let observed = pollster::block_on(async {
         let transaction = backend.begin_gpu_operation(
             identity,
@@ -13783,7 +14020,7 @@ fn c09_shader_blend_functions_match_independent_known_vectors() {
             RuntimeOperation::EffectRendering,
         )?;
         let prepared =
-            backend.c09_shader_blend_preparation_for_test(identity, &requests, &vectors)?;
+            backend.c09_shader_blend_preparation_for_test(identity, requests, vectors)?;
         c09_submit_and_read_gpu_vectors_for_test(&mut backend, identity, transaction, prepared)
             .await
     })
@@ -13793,7 +14030,7 @@ fn c09_shader_blend_functions_match_independent_known_vectors() {
     };
 
     assert!(
-        c09_gpu_vectors_match(&observed, &expected, tolerance),
+        c09_gpu_vectors_match(&observed, expected, tolerance),
         "GPU blend math differs from independent constants"
     );
 }
@@ -18946,11 +19183,30 @@ fn background_box_decoration_integration_preserves_command_boundaries_across_fra
     let normalized = input.normalize(Capabilities::CURRENT).unwrap();
     let repeated = input.normalize(Capabilities::CURRENT).unwrap();
 
-    assert_eq!(normalized.commands(), repeated.commands());
-    assert_eq!(normalized.commands().len(), 6);
+    assert_box_decoration_fragment_commands(
+        normalized.commands(),
+        repeated.commands(),
+        &first,
+        &second,
+        first_areas,
+        second_areas,
+        &second_clip_shape,
+    );
+}
+
+fn assert_box_decoration_fragment_commands(
+    commands: &[NormalizedBoxDecorationCommand],
+    repeated: &[NormalizedBoxDecorationCommand],
+    first: &BoxDecorationFragment,
+    second: &BoxDecorationFragment,
+    first_areas: BackgroundAreas,
+    second_areas: BackgroundAreas,
+    second_clip_shape: &Shape,
+) {
+    assert_eq!(commands, repeated);
+    assert_eq!(commands.len(), 6);
     assert_eq!(
-        normalized
-            .commands()
+        commands
             .iter()
             .map(|command| match command.kind() {
                 NormalizedBoxDecorationCommandKind::Border(border) => {
@@ -18991,7 +19247,7 @@ fn background_box_decoration_integration_preserves_command_boundaries_across_fra
         ]
     );
 
-    for command in &normalized.commands()[0..3] {
+    for command in &commands[0..3] {
         match command.kind() {
             NormalizedBoxDecorationCommandKind::Border(border) => {
                 assert_eq!(border.target_rect(), first_areas.border_box());
@@ -19004,15 +19260,15 @@ fn background_box_decoration_integration_preserves_command_boundaries_across_fra
             }
         }
     }
-    for command in &normalized.commands()[3..] {
+    for command in &commands[3..] {
         match command.kind() {
             NormalizedBoxDecorationCommandKind::Border(border) => {
                 assert_eq!(border.target_rect(), second_areas.border_box());
-                assert_eq!(border.clip().shape(), Some(&second_clip_shape));
+                assert_eq!(border.clip().shape(), Some(second_clip_shape));
                 assert_eq!(border.radii(), second.radii());
             }
             NormalizedBoxDecorationCommandKind::Outline(outline) => {
-                assert_eq!(outline.clip().shape(), Some(&second_clip_shape));
+                assert_eq!(outline.clip().shape(), Some(second_clip_shape));
                 assert_eq!(outline.radii(), second.radii());
             }
         }
@@ -21120,6 +21376,10 @@ fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
     assert_eq!(*fit, ImageFit::Contain);
     assert_eq!(generated_font.id(), FontId::new(52));
 
+    assert_sequence14_text_shadow_diagnostic();
+}
+
+fn assert_sequence14_text_shadow_diagnostic() {
     let shadow_glyphs = [TextGlyph::try_new(53, 0.0, 12.0, 7.0).unwrap()];
     let shadow_run = TextRun::try_new(
         FontRef::new(53).named("Sequence 14 text shadow"),
@@ -21352,6 +21612,16 @@ fn matrix_full_background_box_image_text_stack_preserves_render_order() {
         .text_decoration_line(decoration_line)
         .text_run(text);
 
+    assert_matrix_background_and_decoration(&background, &decoration, areas);
+    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
+    assert_matrix_render_command_order(&normalized, areas);
+}
+
+fn assert_matrix_background_and_decoration(
+    background: &NormalizedBackgroundStack,
+    decoration: &NormalizedBoxDecoration,
+    areas: BackgroundAreas,
+) {
     assert_eq!(background.commands().len(), 2);
     assert!(matches!(
         background.commands()[0].kind(),
@@ -21380,9 +21650,12 @@ fn matrix_full_background_box_image_text_stack_preserves_render_order() {
             .collect::<Vec<_>>(),
         ["border", "outline"]
     );
+}
 
-    let normalized = scene.normalize(Capabilities::CURRENT).unwrap();
-
+fn assert_matrix_render_command_order(
+    normalized: &command::RenderCommands,
+    areas: BackgroundAreas,
+) {
     assert_eq!(normalized.stats().fills, 1);
     assert_eq!(normalized.stats().images, 1);
     assert_eq!(normalized.stats().strokes, 2);
@@ -21789,38 +22062,46 @@ fn readback_transaction_maps_validation_internal_oom_and_terminal_failures() {
 
 #[test]
 fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers() {
-    use super::readback::{
-        ReadbackCleanupEventForTest as Cleanup, ReadbackPhaseForTest,
-        ReadbackStagingDispositionForTest as StagingDisposition, ReadbackStateMachineForTest,
-    };
+    assert_readback_submission_index_retained();
+    assert_readback_idle_cleanup();
+    assert_readback_pending_cleanup();
+    assert_readback_callback_cleanup();
+    assert_readback_mapped_completion();
+}
 
-    fn state_at(phase: ReadbackPhaseForTest) -> ReadbackStateMachineForTest {
-        let mut state = ReadbackStateMachineForTest::allocated();
-        match phase {
-            ReadbackPhaseForTest::Allocated => {}
-            ReadbackPhaseForTest::CopySubmitted { submission_index } => {
-                state.copy_submitted_for_test(submission_index);
-            }
-            ReadbackPhaseForTest::MapPending => {
-                state.copy_submitted_for_test(17);
-                state.map_pending_for_test();
-            }
-            ReadbackPhaseForTest::Mapped => {
-                state.copy_submitted_for_test(17);
-                state.map_pending_for_test();
-                state.map_callback_succeeded_for_test();
-                state.mapped_for_test();
-            }
-            ReadbackPhaseForTest::PublishedBytes
-            | ReadbackPhaseForTest::Failed
-            | ReadbackPhaseForTest::Canceled => {
-                panic!("the fixture accepts only uncertain readback phases")
-            }
+use super::readback::{
+    ReadbackCleanupEventForTest as Cleanup, ReadbackPhaseForTest,
+    ReadbackStagingDispositionForTest as StagingDisposition, ReadbackStateMachineForTest,
+};
+
+fn readback_state_at(phase: ReadbackPhaseForTest) -> ReadbackStateMachineForTest {
+    let mut state = ReadbackStateMachineForTest::allocated();
+    match phase {
+        ReadbackPhaseForTest::Allocated => {}
+        ReadbackPhaseForTest::CopySubmitted { submission_index } => {
+            state.copy_submitted_for_test(submission_index);
         }
-        state
+        ReadbackPhaseForTest::MapPending => {
+            state.copy_submitted_for_test(17);
+            state.map_pending_for_test();
+        }
+        ReadbackPhaseForTest::Mapped => {
+            state.copy_submitted_for_test(17);
+            state.map_pending_for_test();
+            state.map_callback_succeeded_for_test();
+            state.mapped_for_test();
+        }
+        ReadbackPhaseForTest::PublishedBytes
+        | ReadbackPhaseForTest::Failed
+        | ReadbackPhaseForTest::Canceled => {
+            panic!("the fixture accepts only uncertain readback phases")
+        }
     }
+    state
+}
 
-    let submitted = state_at(ReadbackPhaseForTest::CopySubmitted {
+fn assert_readback_submission_index_retained() {
+    let submitted = readback_state_at(ReadbackPhaseForTest::CopySubmitted {
         submission_index: 91,
     });
     assert_eq!(
@@ -21830,14 +22111,16 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         },
         "the owner must retain the exact queue submission index"
     );
+}
 
+fn assert_readback_idle_cleanup() {
     for idle_phase in [
         ReadbackPhaseForTest::Allocated,
         ReadbackPhaseForTest::CopySubmitted {
             submission_index: 17,
         },
     ] {
-        let mut failed = state_at(idle_phase);
+        let mut failed = readback_state_at(idle_phase);
         failed.fail_for_test();
         assert_eq!(failed.phase_for_test(), ReadbackPhaseForTest::Failed);
         assert_eq!(
@@ -21860,7 +22143,7 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
             StagingDisposition::Released
         );
 
-        let mut canceled = state_at(idle_phase);
+        let mut canceled = readback_state_at(idle_phase);
         canceled.cancel_for_test();
         assert_eq!(canceled.phase_for_test(), ReadbackPhaseForTest::Canceled);
         assert_eq!(
@@ -21879,8 +22162,10 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
             StagingDisposition::Released
         );
     }
+}
 
-    let mut pending_failure = state_at(ReadbackPhaseForTest::MapPending);
+fn assert_readback_pending_cleanup() {
+    let mut pending_failure = readback_state_at(ReadbackPhaseForTest::MapPending);
     assert_eq!(
         pending_failure.staging_disposition_for_test(),
         StagingDisposition::MapPending
@@ -21912,7 +22197,7 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         "late delivery and second terminal cleanup cannot act on staging again"
     );
 
-    let mut pending_cancellation = state_at(ReadbackPhaseForTest::MapPending);
+    let mut pending_cancellation = readback_state_at(ReadbackPhaseForTest::MapPending);
     pending_cancellation.cancel_for_test();
     assert_eq!(
         pending_cancellation.phase_for_test(),
@@ -21927,9 +22212,11 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         pending_cancellation.staging_disposition_for_test(),
         StagingDisposition::Released
     );
+}
 
+fn assert_readback_callback_cleanup() {
     for terminal_phase in [ReadbackPhaseForTest::Failed, ReadbackPhaseForTest::Canceled] {
-        let mut callback_error = state_at(ReadbackPhaseForTest::MapPending);
+        let mut callback_error = readback_state_at(ReadbackPhaseForTest::MapPending);
         callback_error.map_callback_failed_for_test();
         assert_eq!(
             callback_error.phase_for_test(),
@@ -21958,7 +22245,7 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         );
     }
 
-    let mut callback_success_cancellation = state_at(ReadbackPhaseForTest::MapPending);
+    let mut callback_success_cancellation = readback_state_at(ReadbackPhaseForTest::MapPending);
     callback_success_cancellation.map_callback_succeeded_for_test();
     assert_eq!(
         callback_success_cancellation.phase_for_test(),
@@ -21979,7 +22266,7 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         "cancellation racing callback success must unmap active staging before drop"
     );
 
-    let dropped = state_at(ReadbackPhaseForTest::MapPending);
+    let dropped = readback_state_at(ReadbackPhaseForTest::MapPending);
     let drop_observation = dropped.observation_for_test();
     drop(dropped);
     assert_eq!(
@@ -21994,8 +22281,10 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
         drop_observation.staging_disposition_for_test(),
         StagingDisposition::Released
     );
+}
 
-    let mut incomplete = state_at(ReadbackPhaseForTest::Mapped);
+fn assert_readback_mapped_completion() {
+    let mut incomplete = readback_state_at(ReadbackPhaseForTest::Mapped);
     let error = incomplete
         .finish_mapped_for_test(PhysicalSize::new(1, 2), &[0; 256])
         .expect_err("a missing padded row must fail through checked decoding");
@@ -22018,7 +22307,7 @@ fn readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers(
     let mut mapped = vec![0; 512];
     mapped[0..4].copy_from_slice(&[1, 2, 3, 4]);
     mapped[256..260].copy_from_slice(&[5, 6, 7, 8]);
-    let mut published = state_at(ReadbackPhaseForTest::Mapped);
+    let mut published = readback_state_at(ReadbackPhaseForTest::Mapped);
     let image = published
         .finish_mapped_for_test(PhysicalSize::new(1, 2), &mapped)
         .expect("complete checked rows must publish one validated image");
@@ -22446,30 +22735,7 @@ fn canceled_native_readback_discards_late_callback_without_publication_change() 
             NativeReadbackDriveResultForTest::MapPending
         ));
         let pending = cancellation.snapshot_for_test();
-        assert_eq!(
-            pending.phase_for_test(),
-            Some(NativeReadbackPhaseForTest::MapPending)
-        );
-        assert_eq!(
-            pending.staging_disposition_for_test(),
-            Some(super::readback::ReadbackStagingDispositionForTest::MapPending)
-        );
-        assert!(pending.submission_index_for_test().is_some());
-        assert_eq!(submission.readback_queue_submission_count_for_test(), 1);
-        assert_eq!(
-            submission.readback_transaction_generation_for_test(),
-            submission.readback_active_generation_for_test(),
-            "cancellation must begin only after a real transaction-owned copy submits"
-        );
-        assert!(
-            submission.readback_scopes_resolved_for_test(),
-            "MapPending must follow clean resolution of the real copy transaction"
-        );
-        assert_eq!(
-            format!("{:?}", pending.submission_index_for_test()),
-            format!("{:?}", submission.readback_submission_index_for_test()),
-            "the pending owner must retain the exact submitted copy index"
-        );
+        assert_pending_native_readback(&pending, &submission);
     }
     assert!(
         cancellation.wait_for_canceled_helper_cleanup_for_test(deadline.expires_at()),
@@ -22477,6 +22743,106 @@ fn canceled_native_readback_discards_late_callback_without_publication_change() 
         native_readback_diagnostic_for_test(&cancellation, &submission, &device_signal)
     );
     let canceled = cancellation.snapshot_for_test();
+    assert_canceled_native_readback(&canceled);
+
+    drop(cancellation_scope);
+    let pixels_after = complete_canceled_native_readback(
+        &mut renderer,
+        &surface,
+        deadline,
+        &cancellation,
+        &submission,
+        &device_signal,
+    );
+    assert!(
+        cancellation.wait_for_late_callback_cleanup_for_test(deadline.expires_at()),
+        "native readback diagnostic deadline expired while waiting for late callback discard: {}",
+        native_readback_diagnostic_for_test(&cancellation, &submission, &device_signal)
+    );
+    let cleaned = cancellation.snapshot_for_test();
+    assert_cleaned_native_readback(&cleaned);
+
+    let publication_after = headless_publication_texture_for_test(&surface);
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("canceled readback must retain the ready device resources")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(publication_after, publication_before);
+    assert_eq!(pixels_after, pixels_before);
+    assert_eq!(renderer.stats(), stats_before);
+    assert_eq!(renderer.options(), renderer_options_before);
+    assert_eq!(renderer.uploaded_images_for_test(), uploaded_images_before);
+    assert_eq!(surface.last_parameters, parameters_before);
+    assert_eq!(surface.state(), surface_state_before);
+    assert_eq!(surface.resource_state(), resource_state_before);
+    assert_eq!(surface.physical_size(), physical_size_before);
+    assert_eq!(resources_after, resources_before);
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+    assert!(device_signal.first_terminal().is_none());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn complete_canceled_native_readback(
+    renderer: &mut Renderer,
+    surface: &Surface,
+    deadline: NativeReadbackDiagnosticDeadlineForTest,
+    cancellation: &NativeReadbackObservationForTest,
+    submission: &GpuOperationSubmissionObservationForTest,
+    signal: &Arc<DeviceSignal>,
+) -> ImageBuffer {
+    let future = renderer.read_headless(surface);
+    let mut future = std::pin::pin!(future);
+    let NativeReadbackDriveResultForTest::Completed(result) = drive_native_readback_for_test(
+        future.as_mut(),
+        false,
+        deadline,
+        cancellation,
+        submission,
+        signal,
+    ) else {
+        unreachable!("the follow-up readback drives callback cleanup to completion")
+    };
+    result.expect("the preserved publication must remain readable after cancellation")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_pending_native_readback(
+    pending: &super::readback::NativeReadbackObservationSnapshotForTest,
+    submission: &super::gpu_transaction::GpuOperationSubmissionObservationForTest,
+) {
+    assert_eq!(
+        pending.phase_for_test(),
+        Some(NativeReadbackPhaseForTest::MapPending)
+    );
+    assert_eq!(
+        pending.staging_disposition_for_test(),
+        Some(super::readback::ReadbackStagingDispositionForTest::MapPending)
+    );
+    assert!(pending.submission_index_for_test().is_some());
+    assert_eq!(submission.readback_queue_submission_count_for_test(), 1);
+    assert_eq!(
+        submission.readback_transaction_generation_for_test(),
+        submission.readback_active_generation_for_test(),
+        "cancellation must begin only after a real transaction-owned copy submits"
+    );
+    assert!(
+        submission.readback_scopes_resolved_for_test(),
+        "MapPending must follow clean resolution of the real copy transaction"
+    );
+    assert_eq!(
+        format!("{:?}", pending.submission_index_for_test()),
+        format!("{:?}", submission.readback_submission_index_for_test()),
+        "the pending owner must retain the exact submitted copy index"
+    );
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_canceled_native_readback(
+    canceled: &super::readback::NativeReadbackObservationSnapshotForTest,
+) {
     assert_eq!(
         canceled.phase_for_test(),
         Some(NativeReadbackPhaseForTest::Canceled)
@@ -22500,54 +22866,16 @@ fn canceled_native_readback_discards_late_callback_without_publication_change() 
             "cancellation may only leave callback delivery pending or discard its one late result, got {counts:?}: {canceled:?}"
         ),
     }
+}
 
-    drop(cancellation_scope);
-    let pixels_after = {
-        let future = renderer.read_headless(&surface);
-        let mut future = std::pin::pin!(future);
-        let NativeReadbackDriveResultForTest::Completed(result) = drive_native_readback_for_test(
-            future.as_mut(),
-            false,
-            deadline,
-            &cancellation,
-            &submission,
-            &device_signal,
-        ) else {
-            unreachable!("the follow-up readback drives callback cleanup to completion")
-        };
-        result.expect("the preserved publication must remain readable after cancellation")
-    };
-    assert!(
-        cancellation.wait_for_late_callback_cleanup_for_test(deadline.expires_at()),
-        "native readback diagnostic deadline expired while waiting for late callback discard: {}",
-        native_readback_diagnostic_for_test(&cancellation, &submission, &device_signal)
-    );
-    let cleaned = cancellation.snapshot_for_test();
+#[cfg(not(target_arch = "wasm32"))]
+fn assert_cleaned_native_readback(
+    cleaned: &super::readback::NativeReadbackObservationSnapshotForTest,
+) {
     assert_eq!(cleaned.helper_counts_for_test(), (1, 1));
     assert_eq!(cleaned.callback_counts_for_test(), (1, 1));
     assert_eq!(cleaned.completion_counts_for_test(), (0, 1));
     assert!(cleaned.staging_state_dropped_for_test());
-
-    let publication_after = headless_publication_texture_for_test(&surface);
-    let resources_after = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("canceled readback must retain the ready device resources")
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(publication_after, publication_before);
-    assert_eq!(pixels_after, pixels_before);
-    assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(renderer.options(), renderer_options_before);
-    assert_eq!(renderer.uploaded_images_for_test(), uploaded_images_before);
-    assert_eq!(surface.last_parameters, parameters_before);
-    assert_eq!(surface.state(), surface_state_before);
-    assert_eq!(surface.resource_state(), resource_state_before);
-    assert_eq!(surface.physical_size(), physical_size_before);
-    assert_eq!(resources_after, resources_before);
-    assert_eq!(
-        renderer.default_device_active_operation_generation_for_test(),
-        None
-    );
-    assert!(device_signal.first_terminal().is_none());
 }
 
 #[test]
@@ -22729,124 +23057,21 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             area_parameters.with_antialiasing(Antialiasing::Msaa8),
         )
         .expect("the MSAA8 scene must prepare for internal checked encoding");
-
-        {
-            let mut command_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("T4 checked internal Vello committed command encoding"),
-                });
-            let mut scope = ActiveVelloEncodingScope::begin(device);
-            let (lease, _logical_pass) = {
-                let mut state = TransactionEncodingState::new(
-                    &mut scope,
-                    queue,
-                    &mut command_encoder,
-                    &target_view,
-                    TransactionTargetIntent::new(
-                        target_extent,
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        target_usage,
-                    ),
-                );
-                msaa8_pass
-                    .encode_into(&engine, &resources, &mut state)
-                    .expect("an MSAA8 pass must encode through an active checked scope")
-                    .into_resources_and_logical_pass()
-            };
-            let command_buffer = command_encoder.finish();
-            drop(command_buffer);
-            let lease = pollster::block_on(scope.finish_with_lease(lease))
-                .expect("the caller must resolve a clean checked encoding scope");
-            assert_eq!(
-                super::vello_engine::commit_scope_resolved_for_test(lease)
-                    .expect("the scope-resolved Vello commit must keep accounting clean"),
-                VelloAtlasOutcome::Retain
-            );
-        }
-
-        {
-            let mut command_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("T4 checked internal Vello aborted command encoding"),
-                });
-            let mut scope = ActiveVelloEncodingScope::begin(device);
-            let outcome = {
-                let mut state = TransactionEncodingState::new(
-                    &mut scope,
-                    queue,
-                    &mut command_encoder,
-                    &target_view,
-                    TransactionTargetIntent::new(
-                        target_extent,
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        target_usage,
-                    ),
-                );
-                let (lease, _logical_pass) = area_pass
-                    .encode_into(&engine, &resources, &mut state)
-                    .expect("an area pass must encode through an active checked scope")
-                    .into_resources_and_logical_pass();
-                let aborted = lease.abort();
-                assert!(aborted.discarded_resource_count_for_test() > 0);
-                aborted.into_atlas_outcome()
-            };
-            let command_buffer = command_encoder.finish();
-            drop(command_buffer);
-            pollster::block_on(scope.finish())
-                .expect("the caller must resolve an aborted checked encoding scope");
-            assert_eq!(outcome, VelloAtlasOutcome::Recreate);
-        }
-
-        let no_atlas_committed = pollster::block_on(
-            super::vello_engine::no_atlas_commit_outcome_for_test(device),
-        )
-        .expect("a no-atlas lease commit must resolve through checked scopes");
-        assert_eq!(no_atlas_committed, VelloAtlasOutcome::NoAtlas);
-        let no_atlas_aborted =
-            pollster::block_on(super::vello_engine::no_atlas_abort_outcome_for_test(device))
-                .expect("a no-atlas lease abort must resolve through checked scopes");
-        assert_eq!(no_atlas_aborted, VelloAtlasOutcome::NoAtlas);
-
-        let mismatch_failure = {
-            let mut command_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("T4 checked internal Vello mismatched target encoding"),
-                });
-            let mut scope = ActiveVelloEncodingScope::begin(device);
-            let failure = {
-                let mut state = TransactionEncodingState::new(
-                    &mut scope,
-                    queue,
-                    &mut command_encoder,
-                    &target_view,
-                    TransactionTargetIntent::new(
-                        PhysicalSize::new(63, 48),
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        target_usage,
-                    ),
-                );
-                match area_pass.encode_into(&engine, &resources, &mut state) {
-                    Ok(encoded) => {
-                        let (lease, _logical_pass) = encoded.into_resources_and_logical_pass();
-                        let _ = lease.abort();
-                        panic!("a mismatched transaction target must fail before allocation");
-                    }
-                    Err(failure) => failure,
-                }
-            };
-            let command_buffer = command_encoder.finish();
-            drop(command_buffer);
-            pollster::block_on(scope.finish())
-                .expect("a preflight target mismatch must leave checked scopes clean");
-            failure
+        let fixture = CheckedVelloFixture {
+            device,
+            queue,
+            engine: &engine,
+            resources: &resources,
+            target: &target_view,
+            extent: target_extent,
+            usage: target_usage,
         };
-        assert_eq!(mismatch_failure.error().code(), ErrorCode::RenderFailed);
-        assert_eq!(
-            mismatch_failure
-                .into_aborted_resources()
-                .into_atlas_outcome(),
-            VelloAtlasOutcome::NoAtlas
-        );
+        assert_checked_vello_commit(&fixture, &msaa8_pass);
+        assert_checked_vello_abort(&fixture, &area_pass);
+
+        assert_checked_vello_no_atlas_outcomes(device);
+
+        assert_checked_vello_target_mismatch(&fixture, &area_pass);
 
         let invalid_target = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("T4 checked internal Vello invalid storage target"),
@@ -22864,52 +23089,184 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
         });
         let invalid_target_view =
             invalid_target.create_view(&wgpu::TextureViewDescriptor::default());
-        let invalid_target_failure = {
-            let mut command_encoder =
-                device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("T4 checked internal Vello invalid target encoding"),
-                });
-            let mut scope = ActiveVelloEncodingScope::begin(device);
-            let (lease, _logical_pass) = {
-                let mut state = TransactionEncodingState::new(
-                    &mut scope,
-                    queue,
-                    &mut command_encoder,
-                    &invalid_target_view,
-                    TransactionTargetIntent::new(
-                        target_extent,
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        target_usage,
-                    ),
-                );
-                area_pass
-                    .encode_into(&engine, &resources, &mut state)
-                    .expect("the active scope must own actual target-view validation")
-                    .into_resources_and_logical_pass()
-            };
-            let command_buffer = command_encoder.finish();
-            drop(command_buffer);
-            match pollster::block_on(scope.finish_with_lease(lease)) {
-                Ok(lease) => {
-                    let _ = lease.abort();
-                    panic!("an invalid target view must be captured by the active checked scope");
-                }
-                Err(failure) => failure,
-            }
+        let invalid_fixture = CheckedVelloFixture {
+            target: &invalid_target_view,
+            ..fixture
         };
-        assert_eq!(
-            invalid_target_failure.error().code(),
-            ErrorCode::RenderFailed
-        );
-        assert_eq!(
-            invalid_target_failure
-                .into_aborted_resources()
-                .into_atlas_outcome(),
-            VelloAtlasOutcome::Recreate
-        );
+        assert_checked_vello_invalid_target(&invalid_fixture, &area_pass);
     }
 
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
+}
+
+#[derive(Clone, Copy)]
+struct CheckedVelloFixture<'a> {
+    device: &'a wgpu::Device,
+    queue: &'a wgpu::Queue,
+    engine: &'a VelloEngineState,
+    resources: &'a ResourceManager,
+    target: &'a wgpu::TextureView,
+    extent: PhysicalSize,
+    usage: wgpu::TextureUsages,
+}
+
+fn assert_checked_vello_commit(fixture: &CheckedVelloFixture<'_>, pass: &PreparedVelloPass) {
+    let mut encoder = fixture
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T4 checked internal Vello committed command encoding"),
+        });
+    let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
+    let (lease, _logical_pass) = {
+        let mut state = TransactionEncodingState::new(
+            &mut scope,
+            fixture.queue,
+            &mut encoder,
+            fixture.target,
+            TransactionTargetIntent::new(
+                fixture.extent,
+                wgpu::TextureFormat::Rgba8Unorm,
+                fixture.usage,
+            ),
+        );
+        pass.encode_into(fixture.engine, fixture.resources, &mut state)
+            .expect("an MSAA8 pass must encode through an active checked scope")
+            .into_resources_and_logical_pass()
+    };
+    drop(encoder.finish());
+    let lease = pollster::block_on(scope.finish_with_lease(lease))
+        .expect("the caller must resolve a clean checked encoding scope");
+    assert_eq!(
+        super::vello_engine::commit_scope_resolved_for_test(lease)
+            .expect("the scope-resolved Vello commit must keep accounting clean"),
+        VelloAtlasOutcome::Retain
+    );
+}
+
+fn assert_checked_vello_abort(fixture: &CheckedVelloFixture<'_>, pass: &PreparedVelloPass) {
+    let mut encoder = fixture
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T4 checked internal Vello aborted command encoding"),
+        });
+    let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
+    let outcome = {
+        let mut state = TransactionEncodingState::new(
+            &mut scope,
+            fixture.queue,
+            &mut encoder,
+            fixture.target,
+            TransactionTargetIntent::new(
+                fixture.extent,
+                wgpu::TextureFormat::Rgba8Unorm,
+                fixture.usage,
+            ),
+        );
+        let (lease, _logical_pass) = pass
+            .encode_into(fixture.engine, fixture.resources, &mut state)
+            .expect("an area pass must encode through an active checked scope")
+            .into_resources_and_logical_pass();
+        let aborted = lease.abort();
+        assert!(aborted.discarded_resource_count_for_test() > 0);
+        aborted.into_atlas_outcome()
+    };
+    drop(encoder.finish());
+    pollster::block_on(scope.finish())
+        .expect("the caller must resolve an aborted checked encoding scope");
+    assert_eq!(outcome, VelloAtlasOutcome::Recreate);
+}
+
+fn assert_checked_vello_no_atlas_outcomes(device: &wgpu::Device) {
+    let committed = pollster::block_on(super::vello_engine::no_atlas_commit_outcome_for_test(
+        device,
+    ))
+    .expect("a no-atlas lease commit must resolve through checked scopes");
+    assert_eq!(committed, VelloAtlasOutcome::NoAtlas);
+    let aborted = pollster::block_on(super::vello_engine::no_atlas_abort_outcome_for_test(device))
+        .expect("a no-atlas lease abort must resolve through checked scopes");
+    assert_eq!(aborted, VelloAtlasOutcome::NoAtlas);
+}
+
+fn assert_checked_vello_target_mismatch(
+    fixture: &CheckedVelloFixture<'_>,
+    pass: &PreparedVelloPass,
+) {
+    let mut encoder = fixture
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T4 checked internal Vello mismatched target encoding"),
+        });
+    let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
+    let failure = {
+        let mut state = TransactionEncodingState::new(
+            &mut scope,
+            fixture.queue,
+            &mut encoder,
+            fixture.target,
+            TransactionTargetIntent::new(
+                PhysicalSize::new(63, 48),
+                wgpu::TextureFormat::Rgba8Unorm,
+                fixture.usage,
+            ),
+        );
+        match pass.encode_into(fixture.engine, fixture.resources, &mut state) {
+            Ok(encoded) => {
+                let (lease, _logical_pass) = encoded.into_resources_and_logical_pass();
+                let _ = lease.abort();
+                panic!("a mismatched transaction target must fail before allocation");
+            }
+            Err(failure) => failure,
+        }
+    };
+    drop(encoder.finish());
+    pollster::block_on(scope.finish())
+        .expect("a preflight target mismatch must leave checked scopes clean");
+    assert_eq!(failure.error().code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        failure.into_aborted_resources().into_atlas_outcome(),
+        VelloAtlasOutcome::NoAtlas
+    );
+}
+
+fn assert_checked_vello_invalid_target(
+    fixture: &CheckedVelloFixture<'_>,
+    pass: &PreparedVelloPass,
+) {
+    let mut encoder = fixture
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("T4 checked internal Vello invalid target encoding"),
+        });
+    let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
+    let (lease, _logical_pass) = {
+        let mut state = TransactionEncodingState::new(
+            &mut scope,
+            fixture.queue,
+            &mut encoder,
+            fixture.target,
+            TransactionTargetIntent::new(
+                fixture.extent,
+                wgpu::TextureFormat::Rgba8Unorm,
+                fixture.usage,
+            ),
+        );
+        pass.encode_into(fixture.engine, fixture.resources, &mut state)
+            .expect("the active scope must own actual target-view validation")
+            .into_resources_and_logical_pass()
+    };
+    drop(encoder.finish());
+    let failure = match pollster::block_on(scope.finish_with_lease(lease)) {
+        Ok(lease) => {
+            let _ = lease.abort();
+            panic!("an invalid target view must be captured by the active checked scope");
+        }
+        Err(failure) => failure,
+    };
+    assert_eq!(failure.error().code(), ErrorCode::RenderFailed);
+    assert_eq!(
+        failure.into_aborted_resources().into_atlas_outcome(),
+        VelloAtlasOutcome::Recreate
+    );
 }
 
 #[test]
@@ -24133,10 +24490,7 @@ fn presented_resize_preserves_lost_recovery_gate_for_same_and_changed_extents() 
     let same_render = pollster::block_on(renderer.render(
         &mut surface,
         &Scene::new(),
-        Parameters {
-            base_color: Color::BLACK,
-            debug: true,
-        },
+        presented_black_debug_parameters_for_test(),
     ));
     let same_resource = presented_resource_id_for_test(&surface);
     let same_target = presented_target_identity_for_test(&surface);
@@ -24152,10 +24506,7 @@ fn presented_resize_preserves_lost_recovery_gate_for_same_and_changed_extents() 
     let changed_render = pollster::block_on(renderer.render(
         &mut surface,
         &Scene::new(),
-        Parameters {
-            base_color: Color::BLACK,
-            debug: true,
-        },
+        presented_black_debug_parameters_for_test(),
     ));
     let changed_resource = presented_resource_id_for_test(&surface);
     let changed_target = presented_target_identity_for_test(&surface);
@@ -24206,16 +24557,30 @@ fn presented_resize_preserves_lost_recovery_gate_for_same_and_changed_extents() 
         [None; 2]
     );
 
-    let replacement_attachment = "lost-resize-replacement";
-    pollster::block_on(renderer.resume_surface(
+    assert_explicit_lost_resize_recovery(
+        &mut renderer,
         &mut surface,
-        Attachment::from_web_canvas(replacement_attachment),
-    ))
+        committed_resource,
+        committed_target,
+    );
+}
+
+#[cfg(feature = "render-window")]
+fn assert_explicit_lost_resize_recovery(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+    committed_resource: u64,
+    committed_target: u64,
+) {
+    let replacement_attachment = "lost-resize-replacement";
+    pollster::block_on(
+        renderer.resume_surface(surface, Attachment::from_web_canvas(replacement_attachment)),
+    )
     .expect("explicit resume must recover at the final requested extent");
     assert_eq!(surface.state(), SurfaceState::Available);
     assert_eq!(surface.physical_size(), PhysicalSize::new(3, 2));
     assert!(matches!(
-        presented_lifecycle_for_test(&surface),
+        presented_lifecycle_for_test(surface),
         PresentedLifecycle::Ready { .. }
     ));
     let committed_physical_size = match &surface.backend {
@@ -24224,11 +24589,11 @@ fn presented_resize_preserves_lost_recovery_gate_for_same_and_changed_extents() 
     };
     assert_eq!(committed_physical_size, Some(PhysicalSize::new(3, 2)));
     assert_ne!(
-        presented_resource_id_for_test(&surface),
+        presented_resource_id_for_test(surface),
         Some(committed_resource)
     );
     assert_ne!(
-        presented_target_identity_for_test(&surface),
+        presented_target_identity_for_test(surface),
         committed_target
     );
     assert_eq!(
@@ -24239,14 +24604,14 @@ fn presented_resize_preserves_lost_recovery_gate_for_same_and_changed_extents() 
         replacement_attachment
     );
     assert!(matches!(
-        renderer.runtime_capabilities(&surface),
+        renderer.runtime_capabilities(surface),
         RuntimeCapabilities::Available(_)
     ));
     assert_eq!(
         renderer.default_device_active_operation_generation_for_test(),
         None
     );
-    pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
+    pollster::block_on(renderer.render(surface, &Scene::new(), Parameters::default()))
         .expect("the explicitly resumed surface must render on its ready device");
 }
 
@@ -24530,10 +24895,7 @@ fn suspended_presented_replacement_terminal_loss_before_configuration_uses_surfa
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("suspended replacement attribution coverage requires a compatible device");
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
-    let parameters = Parameters {
-        base_color: Color::BLACK,
-        debug: true,
-    };
+    let parameters = presented_black_debug_parameters_for_test();
     pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
         .expect("the fixture must establish public frame state before replacement");
     surface.suspend().unwrap();
@@ -24719,10 +25081,7 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
         installed_device,
         Attachment::from_web_canvas("terminal-donor-installed-target"),
     );
-    let parameters = Parameters {
-        base_color: Color::BLACK,
-        debug: true,
-    };
+    let parameters = presented_black_debug_parameters_for_test();
     pollster::block_on(renderer.render(&mut surface, &Scene::new(), parameters))
         .expect("the installed surface must establish public frame state before replacement");
     let installed_resource = presented_resource_id_for_test(&surface)
@@ -25050,54 +25409,92 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
         "a failed resume must not disturb another surface's host target"
     );
 
+    assert_successful_presented_resume_coherence(PresentedResumeCoherenceContextForTest {
+        renderer: &mut renderer,
+        first: &mut first,
+        second: &mut second,
+        first_initial,
+        second_initial,
+        first_target_initial,
+        second_target_initial,
+        observation_before,
+        old_target_observation,
+    });
+}
+
+#[cfg(feature = "render-window")]
+struct PresentedResumeCoherenceContextForTest<'a> {
+    renderer: &'a mut Renderer,
+    first: &'a mut Surface,
+    second: &'a mut Surface,
+    first_initial: u64,
+    second_initial: u64,
+    first_target_initial: u64,
+    second_target_initial: u64,
+    observation_before: DisplayFreePresentedSurfaceObservationForTest,
+    old_target_observation: DisplayFreePresentedSurfaceObservationHandleForTest,
+}
+
+#[cfg(feature = "render-window")]
+fn assert_successful_presented_resume_coherence(
+    context: PresentedResumeCoherenceContextForTest<'_>,
+) {
     let resumed_attachment = "display-free-resumed-target";
-    pollster::block_on(
-        renderer.resume_surface(&mut first, Attachment::from_web_canvas(resumed_attachment)),
-    )
+    pollster::block_on(context.renderer.resume_surface(
+        context.first,
+        Attachment::from_web_canvas(resumed_attachment),
+    ))
     .expect("resume must atomically install and configure the replacement host target");
-    let first_resized = presented_resource_id_for_test(&first).unwrap();
-    assert_ne!(first_resized, first_initial);
-    let first_target_resumed = presented_target_identity_for_test(&first);
-    assert_ne!(first_target_resumed, first_target_initial);
+    let first_resized = presented_resource_id_for_test(context.first).unwrap();
+    assert_ne!(first_resized, context.first_initial);
+    let first_target_resumed = presented_target_identity_for_test(context.first);
+    assert_ne!(first_target_resumed, context.first_target_initial);
     assert_eq!(
-        match &first.attachment {
+        match &context.first.attachment {
             Attachment::WebCanvas(canvas) => canvas.id(),
             _ => panic!("the resumed display-free surface must retain a web-canvas attachment"),
         },
         resumed_attachment
     );
-    let resumed_target_observation = presented_observation_handle_for_test(&first);
+    let resumed_target_observation = presented_observation_handle_for_test(context.first);
     assert_eq!(
-        old_target_observation.snapshot_for_test(),
-        observation_before
+        context.old_target_observation.snapshot_for_test(),
+        context.observation_before
     );
     assert_eq!(
-        presented_resource_id_for_test(&second),
-        Some(second_initial)
+        presented_resource_id_for_test(context.second),
+        Some(context.second_initial)
     );
     assert_eq!(
-        presented_target_identity_for_test(&second),
-        second_target_initial,
+        presented_target_identity_for_test(context.second),
+        context.second_target_initial,
         "resuming the first surface must not replace the other surface's host target"
     );
     assert_eq!(
-        renderer.default_device_active_operation_generation_for_test(),
+        context
+            .renderer
+            .default_device_active_operation_generation_for_test(),
         None,
         "a committed resume configuration must return its active generation"
     );
-
-    pollster::block_on(renderer.resume_surface(
-        &mut first,
+    pollster::block_on(context.renderer.resume_surface(
+        context.first,
         Attachment::from_web_canvas("display-free-presented-test-target"),
     ))
     .expect("a compatible duplicate resume must retain the committed target");
-    assert_eq!(presented_resource_id_for_test(&first), Some(first_resized));
-
-    pollster::block_on(renderer.render(&mut first, &Scene::new(), Parameters::default()))
-        .expect("the resized surface must render with its own committed target");
     assert_eq!(
-        old_target_observation.snapshot_for_test(),
-        observation_before
+        presented_resource_id_for_test(context.first),
+        Some(first_resized)
+    );
+    pollster::block_on(context.renderer.render(
+        context.first,
+        &Scene::new(),
+        Parameters::default(),
+    ))
+    .expect("the resized surface must render with its own committed target");
+    assert_eq!(
+        context.old_target_observation.snapshot_for_test(),
+        context.observation_before
     );
     assert_eq!(
         resumed_target_observation
@@ -25106,8 +25503,12 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
         1,
         "the replacement host target must receive the resumed surface's frame"
     );
-    pollster::block_on(renderer.render(&mut second, &Scene::new(), Parameters::default()))
-        .expect("the untouched surface must retain and render with its own target");
+    pollster::block_on(context.renderer.render(
+        context.second,
+        &Scene::new(),
+        Parameters::default(),
+    ))
+    .expect("the untouched surface must retain and render with its own target");
 }
 
 #[cfg(feature = "render-window")]
@@ -25132,6 +25533,14 @@ fn configured_display_free_presented_surface_for_test(renderer: &mut Renderer) -
     pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .expect("the display-free surface must configure through the real Configure transaction");
     surface
+}
+
+#[cfg(feature = "render-window")]
+fn presented_black_debug_parameters_for_test() -> Parameters {
+    Parameters {
+        base_color: Color::BLACK,
+        debug: true,
+    }
 }
 
 #[cfg(feature = "render-window")]
@@ -25573,21 +25982,29 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
         RuntimeCapabilities::Available(_)
     ));
 
-    let idle_signal = renderer
+    assert_idle_uncaptured_fault_is_isolated(&mut renderer, idle_slot, &mut idle, &mut healthy);
+}
+
+fn assert_idle_uncaptured_fault_is_isolated(
+    renderer: &mut Renderer,
+    idle_slot: DeviceSlotIdentity,
+    idle: &mut Surface,
+    healthy: &mut Surface,
+) {
+    let signal = renderer
         .device_signal_for_test(idle_slot)
         .expect("the idle device slot must retain its real DeviceSignal");
-    assert_eq!(idle_signal.active_generation_for_test(), None);
+    assert_eq!(signal.active_generation_for_test(), None);
     renderer.signal_device_uncaptured_fault_for_test(idle_slot, GpuFaultKind::Internal);
     assert_eq!(
-        idle_signal
+        signal
             .first_terminal()
             .expect("an idle uncaptured fault must terminally affect its own device slot")
             .operation_generation_for_test(),
         None
     );
-    let error =
-        pollster::block_on(renderer.render(&mut idle, &Scene::new(), Parameters::default()))
-            .expect_err("the next operation naming the idle faulted slot must reject it");
+    let error = pollster::block_on(renderer.render(idle, &Scene::new(), Parameters::default()))
+        .expect_err("the next operation naming the idle faulted slot must reject it");
     assert_eq!(
         error.runtime_capability_unavailable_diagnostic(),
         Some(
@@ -25601,7 +26018,7 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
         )
     );
     assert_eq!(
-        idle_signal.active_generation_for_test(),
+        signal.active_generation_for_test(),
         None,
         "terminal preflight must not begin an idle-slot GPU operation"
     );
@@ -25609,7 +26026,7 @@ fn uncaptured_gpu_error_faults_only_its_device_generation() {
         renderer.device_renderer_released_for_test(idle_slot),
         "terminal preflight must release the idle slot without resource use"
     );
-    pollster::block_on(renderer.render(&mut healthy, &Scene::new(), Parameters::default()))
+    pollster::block_on(renderer.render(healthy, &Scene::new(), Parameters::default()))
         .expect("the healthy slot must remain usable after active and idle faults elsewhere");
 }
 
@@ -28157,107 +28574,147 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         RenderSurfaceAvailability::Uninitialized,
     );
 
-    let mut graph_renderer = pollster::block_on(Renderer::new(
+    let mut graph_fixture = c08_graph_publication_fixture_for_test(&first);
+
+    assert_failed_c08_graph_publication(&mut graph_fixture, &replacement);
+
+    assert_canceled_c08_graph_publication(&mut graph_fixture, &replacement);
+
+    assert_failed_first_c08_graph_publication(&mut graph_fixture, &replacement);
+}
+
+struct C08GraphPublicationFixtureForTest {
+    renderer: Renderer,
+    surface: Surface,
+    working_format: WorkingFormat,
+    published: ImageBuffer,
+    stats: Stats,
+    parameters: Option<Parameters>,
+    uploaded_images: std::collections::HashSet<ImageId>,
+    publication_count: usize,
+    cache_before: super::shader::DevicePassCacheCountsForTest,
+    resources_before: super::resource::ResourceManagerObservationForTest,
+}
+
+fn c08_graph_publication_fixture_for_test(first: &Scene) -> C08GraphPublicationFixtureForTest {
+    let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("graph publication atomicity requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut graph_renderer);
-    let mut graph_surface =
-        pollster::block_on(graph_renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-            .expect("graph publication atomicity requires a headless surface");
-    pollster::block_on(graph_renderer.render(&mut graph_surface, &first, Parameters::default()))
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("graph publication atomicity requires a headless surface");
+    pollster::block_on(renderer.render(&mut surface, first, Parameters::default()))
         .expect("the direct route must establish the graph failure publication baseline");
-    let graph_published = pollster::block_on(graph_renderer.read_headless(&graph_surface))
+    let published = pollster::block_on(renderer.read_headless(&surface))
         .expect("the graph failure baseline must be readable");
-    let graph_stats = graph_renderer.stats();
-    let graph_parameters = graph_surface.last_parameters;
-    let graph_uploaded_images = graph_renderer.uploaded_images_for_test();
-    let graph_publication_count = graph_surface.headless_publication_count_for_test();
-    let graph_cache_before = graph_renderer
+    let stats = renderer.stats();
+    let parameters = surface.last_parameters;
+    let uploaded_images = renderer.uploaded_images_for_test();
+    let publication_count = surface.headless_publication_count_for_test();
+    let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the graph failure baseline must retain a ready device")
         .device_pass_cache_counts_for_test();
-    let graph_resources_before = graph_renderer
+    let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the graph failure baseline must retain one resource manager")
         .internal_resource_manager_observation_for_test();
-
-    let failure_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let failure_submission = failure_submission_scope.observation_for_test();
-    let graph_failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    let error = pollster::block_on(graph_renderer.render_forced_c08_graph_for_test(
-        &mut graph_surface,
-        &replacement,
-        Parameters {
-            base_color: Color::TRANSPARENT,
-            debug: true,
-        },
+    C08GraphPublicationFixtureForTest {
+        renderer,
+        surface,
         working_format,
+        published,
+        stats,
+        parameters,
+        uploaded_images,
+        publication_count,
+        cache_before,
+        resources_before,
+    }
+}
+
+fn assert_failed_c08_graph_publication(
+    fixture: &mut C08GraphPublicationFixtureForTest,
+    replacement: &Scene,
+) {
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    let error = pollster::block_on(fixture.renderer.render_forced_c08_graph_for_test(
+        &mut fixture.surface,
+        replacement,
+        c08_replacement_parameters_for_test(),
+        fixture.working_format,
     ))
     .expect_err("the scoped C08 graph validation failure must abort publication");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
     assert!(
-        graph_failure.scope_resolution_observed_for_test(),
+        failure.scope_resolution_observed_for_test(),
         "the C08 graph failure must resolve transaction scopes before returning"
     );
-    drop(graph_failure);
-    assert_eq!(failure_submission.queue_submission_count_for_test(), 1);
-    assert!(failure_submission.scopes_resolved_for_test());
-    assert!(!failure_submission.prepared_frame_committed_for_test());
-    assert!(!failure_submission.capture_resources_committed_for_test());
-    assert!(!failure_submission.headless_draft_released_for_test());
-    drop(failure_submission_scope);
-    assert_eq!(graph_renderer.stats(), graph_stats);
-    assert_eq!(graph_surface.last_parameters, graph_parameters);
+    drop(failure);
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    assert!(submission.scopes_resolved_for_test());
+    assert!(!submission.prepared_frame_committed_for_test());
+    assert!(!submission.capture_resources_committed_for_test());
+    assert!(!submission.headless_draft_released_for_test());
+    drop(submission_scope);
+    assert_eq!(fixture.renderer.stats(), fixture.stats);
+    assert_eq!(fixture.surface.last_parameters, fixture.parameters);
     assert_eq!(
-        graph_renderer.uploaded_images_for_test(),
-        graph_uploaded_images
+        fixture.renderer.uploaded_images_for_test(),
+        fixture.uploaded_images
     );
     assert_eq!(
-        graph_surface.headless_publication_count_for_test(),
-        graph_publication_count
+        fixture.surface.headless_publication_count_for_test(),
+        fixture.publication_count
     );
     assert_eq!(
-        pollster::block_on(graph_renderer.read_headless(&graph_surface))
+        pollster::block_on(fixture.renderer.read_headless(&fixture.surface))
             .expect("a failed C08 graph must retain the prior publication")
             .rgba(),
-        graph_published.rgba()
+        fixture.published.rgba()
     );
     assert_eq!(
-        graph_renderer
+        fixture
+            .renderer
             .default_ready_device_state_borrow_for_test()
             .expect("the failed C08 graph must retain its ready device")
             .device_pass_cache_counts_for_test(),
-        graph_cache_before
+        fixture.cache_before
     );
-    let resources_after_failure = graph_renderer
+    let resources_after_failure = fixture
+        .renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the failed C08 graph must return its resource leases")
         .internal_resource_manager_observation_for_test();
     assert_eq!(resources_after_failure.leased_count, 0);
     assert_eq!(
         resources_after_failure.retained_count_for_test(),
-        graph_resources_before.retained_count_for_test()
+        fixture.resources_before.retained_count_for_test()
     );
     assert_eq!(
         resources_after_failure.retained_atlas_byte_len_for_test(),
-        graph_resources_before.retained_atlas_byte_len_for_test()
+        fixture.resources_before.retained_atlas_byte_len_for_test()
     );
+}
 
-    let cancellation_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let cancellation_submission = cancellation_submission_scope.observation_for_test();
-    let graph_pause = ScopedC08GraphPostSubmitControlForTest::paused();
+fn assert_canceled_c08_graph_publication(
+    fixture: &mut C08GraphPublicationFixtureForTest,
+    replacement: &Scene,
+) {
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
     {
-        let future = graph_renderer.render_forced_c08_graph_for_test(
-            &mut graph_surface,
-            &replacement,
-            Parameters {
-                base_color: Color::TRANSPARENT,
-                debug: true,
-            },
-            working_format,
+        let future = fixture.renderer.render_forced_c08_graph_for_test(
+            &mut fixture.surface,
+            replacement,
+            c08_replacement_parameters_for_test(),
+            fixture.working_format,
         );
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
@@ -28265,70 +28722,77 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
             Future::poll(future.as_mut(), &mut context),
             Poll::Pending
         ));
-        graph_pause.wait_for_submission_for_test(Duration::from_secs(2));
+        pause.wait_for_submission_for_test(Duration::from_secs(2));
     }
-    drop(graph_pause);
-    assert_eq!(cancellation_submission.queue_submission_count_for_test(), 1);
-    assert!(!cancellation_submission.scopes_resolved_for_test());
-    assert!(!cancellation_submission.prepared_frame_committed_for_test());
-    assert!(!cancellation_submission.capture_resources_committed_for_test());
-    assert!(!cancellation_submission.headless_draft_released_for_test());
-    drop(cancellation_submission_scope);
-    assert_eq!(graph_renderer.stats(), graph_stats);
-    assert_eq!(graph_surface.last_parameters, graph_parameters);
+    drop(pause);
+    assert_eq!(submission.queue_submission_count_for_test(), 1);
+    assert!(!submission.scopes_resolved_for_test());
+    assert!(!submission.prepared_frame_committed_for_test());
+    assert!(!submission.capture_resources_committed_for_test());
+    assert!(!submission.headless_draft_released_for_test());
+    drop(submission_scope);
+    assert_eq!(fixture.renderer.stats(), fixture.stats);
+    assert_eq!(fixture.surface.last_parameters, fixture.parameters);
     assert_eq!(
-        graph_renderer.uploaded_images_for_test(),
-        graph_uploaded_images
+        fixture.renderer.uploaded_images_for_test(),
+        fixture.uploaded_images
     );
     assert_eq!(
-        graph_surface.headless_publication_count_for_test(),
-        graph_publication_count
+        fixture.surface.headless_publication_count_for_test(),
+        fixture.publication_count
     );
     assert_eq!(
-        pollster::block_on(graph_renderer.read_headless(&graph_surface))
+        pollster::block_on(fixture.renderer.read_headless(&fixture.surface))
             .expect("a canceled C08 graph must retain the prior publication")
             .rgba(),
-        graph_published.rgba()
+        fixture.published.rgba()
     );
     assert_eq!(
-        graph_renderer
+        fixture
+            .renderer
             .default_ready_device_state_borrow_for_test()
             .expect("the canceled C08 graph must retain its ready device")
             .device_pass_cache_counts_for_test(),
-        graph_cache_before
+        fixture.cache_before
     );
-    let resources_after_cancellation = graph_renderer
+    let resources_after_cancellation = fixture
+        .renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the canceled C08 graph must return its resource leases")
         .internal_resource_manager_observation_for_test();
     assert_eq!(resources_after_cancellation.leased_count, 0);
     assert_eq!(
         resources_after_cancellation.retained_count_for_test(),
-        graph_resources_before.retained_count_for_test()
+        fixture.resources_before.retained_count_for_test()
     );
     assert_eq!(
         resources_after_cancellation.retained_atlas_byte_len_for_test(),
-        graph_resources_before.retained_atlas_byte_len_for_test()
+        fixture.resources_before.retained_atlas_byte_len_for_test()
     );
+}
 
-    let mut graph_uninitialized =
-        pollster::block_on(graph_renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+fn assert_failed_first_c08_graph_publication(
+    fixture: &mut C08GraphPublicationFixtureForTest,
+    replacement: &Scene,
+) {
+    let mut uninitialized =
+        pollster::block_on(fixture.renderer.create_headless(Size::new(2.0, 2.0), 1.0))
             .expect("first-frame graph failure coverage requires another headless surface");
-    let graph_failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    pollster::block_on(graph_renderer.render_forced_c08_graph_for_test(
-        &mut graph_uninitialized,
-        &replacement,
+    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    pollster::block_on(fixture.renderer.render_forced_c08_graph_for_test(
+        &mut uninitialized,
+        replacement,
         Parameters::default(),
-        working_format,
+        fixture.working_format,
     ))
     .expect_err("a failed first C08 graph frame must not create a publication");
-    drop(graph_failure);
+    drop(failure);
     assert_eq!(
-        graph_uninitialized.resource_state(),
+        uninitialized.resource_state(),
         SurfaceResourceState::PendingAllocation
     );
-    assert_eq!(graph_uninitialized.headless_publication_count_for_test(), 0);
-    let error = pollster::block_on(graph_renderer.read_headless(&graph_uninitialized))
+    assert_eq!(uninitialized.headless_publication_count_for_test(), 0);
+    let error = pollster::block_on(fixture.renderer.read_headless(&uninitialized))
         .expect_err("a failed first C08 graph frame must remain unreadable");
     assert_surface_unavailable(
         error,
@@ -28363,15 +28827,8 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
         .expect("the baseline must retain a ready device")
         .device_pass_cache_counts_for_test();
 
-    let mut replacement = Scene::new();
-    replacement.fill(
-        Rect::new(0.0, 0.0, 8.0, 8.0),
-        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
-    );
-    let replacement_parameters = Parameters {
-        base_color: Color::TRANSPARENT,
-        debug: true,
-    };
+    let replacement = c08_white_replacement_scene_for_test();
+    let replacement_parameters = c08_replacement_parameters_for_test();
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -28425,21 +28882,7 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
         .default_ready_device_state_borrow_for_test()
         .expect("the accounting fault must retain the resource manager for diagnosis")
         .internal_resource_manager_observation_for_test();
-    let Some(ResourceAccountingFault::RetainedByteMismatch {
-        retained_bytes,
-        registered_entry_bytes,
-    }) = after_fault.accounting_fault_for_test()
-    else {
-        panic!("the transaction must preserve the exact injected accounting fault");
-    };
-    assert_eq!(retained_bytes.checked_add(1), Some(registered_entry_bytes));
-    assert_eq!(after_fault.active_frame_count, 0);
-    assert_eq!(after_fault.leased_count, 0);
-    assert!(
-        prepared_identities
-            .iter()
-            .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
-    );
+    assert_headless_accounting_fault(&after_fault, &prepared_identities);
     assert_eq!(
         pollster::block_on(renderer.read_headless(&surface))
             .expect("the failed C08 graph must preserve the baseline publication")
@@ -28464,45 +28907,132 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
     );
 }
 
-#[test]
-fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget() {
+fn assert_headless_accounting_fault(
+    after_fault: &super::resource::ResourceManagerObservationForTest,
+    prepared_identities: &[ResourceIdentity],
+) {
+    let Some(ResourceAccountingFault::RetainedByteMismatch {
+        retained_bytes,
+        registered_entry_bytes,
+    }) = after_fault.accounting_fault_for_test()
+    else {
+        panic!("the transaction must preserve the exact injected accounting fault");
+    };
+    assert_eq!(retained_bytes.checked_add(1), Some(registered_entry_bytes));
+    assert_eq!(after_fault.active_frame_count, 0);
+    assert_eq!(after_fault.leased_count, 0);
+    assert!(
+        prepared_identities
+            .iter()
+            .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
+    );
+}
+
+fn c08_white_replacement_scene_for_test() -> Scene {
+    let mut replacement = Scene::new();
+    replacement.fill(
+        Rect::new(0.0, 0.0, 8.0, 8.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    );
+    replacement
+}
+
+fn c08_replacement_parameters_for_test() -> Parameters {
+    Parameters {
+        base_color: Color::TRANSPARENT,
+        debug: true,
+    }
+}
+
+struct C08AbortFixtureForTest {
+    renderer: Renderer,
+    surface: Surface,
+    replacement: Scene,
+    replacement_parameters: Parameters,
+    working_format: WorkingFormat,
+    baseline_pixels: ImageBuffer,
+    baseline_stats: Stats,
+    baseline_parameters: Option<Parameters>,
+    baseline_uploaded_images: std::collections::HashSet<ImageId>,
+    baseline_publication_count: usize,
+    baseline_cache: super::shader::DevicePassCacheCountsForTest,
+    resources_before: super::resource::ResourceManagerObservationForTest,
+}
+
+fn c08_abort_fixture_for_test(
+    renderer_expectation: &'static str,
+    surface_expectation: &'static str,
+    baseline_render_expectation: &'static str,
+    baseline_read_expectation: &'static str,
+    ready_device_expectation: &'static str,
+    resource_manager_expectation: &'static str,
+) -> C08AbortFixtureForTest {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .expect("post-submit C08 abort coverage requires a renderer");
+    .expect(renderer_expectation);
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
-        .expect("post-submit C08 abort coverage requires a headless surface");
+        .expect(surface_expectation);
     let mut baseline_scene = Scene::new();
     baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
     pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
-        .expect("the direct baseline frame must publish before C08 abort coverage");
-    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the direct baseline publication must be readable");
+        .expect(baseline_render_expectation);
+    let baseline_pixels =
+        pollster::block_on(renderer.read_headless(&surface)).expect(baseline_read_expectation);
     let baseline_stats = renderer.stats();
     let baseline_parameters = surface.last_parameters;
     let baseline_uploaded_images = renderer.uploaded_images_for_test();
     let baseline_publication_count = surface.headless_publication_count_for_test();
     let baseline_cache = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the direct baseline must retain a ready device")
+        .expect(ready_device_expectation)
         .device_pass_cache_counts_for_test();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the direct baseline must retain one resource manager")
+        .expect(resource_manager_expectation)
         .internal_resource_manager_observation_for_test();
+    C08AbortFixtureForTest {
+        renderer,
+        surface,
+        replacement: c08_white_replacement_scene_for_test(),
+        replacement_parameters: c08_replacement_parameters_for_test(),
+        working_format,
+        baseline_pixels,
+        baseline_stats,
+        baseline_parameters,
+        baseline_uploaded_images,
+        baseline_publication_count,
+        baseline_cache,
+        resources_before,
+    }
+}
 
-    let mut replacement = Scene::new();
-    replacement.fill(
-        Rect::new(0.0, 0.0, 8.0, 8.0),
-        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+#[test]
+fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget() {
+    let C08AbortFixtureForTest {
+        mut renderer,
+        mut surface,
+        replacement,
+        replacement_parameters,
+        working_format,
+        baseline_pixels,
+        baseline_stats,
+        baseline_parameters,
+        baseline_uploaded_images,
+        baseline_publication_count,
+        baseline_cache,
+        resources_before,
+    } = c08_abort_fixture_for_test(
+        "post-submit C08 abort coverage requires a renderer",
+        "post-submit C08 abort coverage requires a headless surface",
+        "the direct baseline frame must publish before C08 abort coverage",
+        "the direct baseline publication must be readable",
+        "the direct baseline must retain a ready device",
+        "the direct baseline must retain one resource manager",
     );
-    let replacement_parameters = Parameters {
-        base_color: Color::TRANSPARENT,
-        debug: true,
-    };
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -28525,71 +29055,28 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
         !aborted_prepared_identities.is_empty(),
         "the real C08 submission must identify every prepared-frame resource"
     );
-    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(
-        generic_submission.readback_queue_submission_count_for_test(),
-        0
-    );
-    assert!(generic_submission.scopes_resolved_for_test());
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.headless_draft_released_for_test());
-    assert_eq!(renderer.stats(), baseline_stats);
-    assert_eq!(surface.last_parameters, baseline_parameters);
-    assert_eq!(
-        renderer.uploaded_images_for_test(),
-        baseline_uploaded_images
-    );
-    assert_eq!(
-        surface.headless_publication_count_for_test(),
-        baseline_publication_count
-    );
-    assert_eq!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the scoped failure must retain the ready device")
-            .device_pass_cache_counts_for_test(),
-        baseline_cache
-    );
-    assert_eq!(
-        renderer.default_device_active_operation_generation_for_test(),
-        None
-    );
-    let resources_after_failure = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the scoped failure must retain one resource manager")
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after_failure.active_frame_count, 0);
-    assert_eq!(resources_after_failure.resolved_lease_count, 0);
-    assert_eq!(resources_after_failure.leased_count, 0);
-    assert_eq!(
-        resources_after_failure.retained_bytes,
-        resources_after_failure
-            .accounted_entry_bytes
-            .expect("post-submit failure resource accounting must have an exact total")
-    );
-    let retained_aborted_identities = aborted_prepared_identities
-        .iter()
-        .filter(|identity| {
-            resources_after_failure
-                .entry_identities_for_test()
-                .contains(identity)
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    assert!(
-        retained_aborted_identities.is_empty(),
-        "submitted-but-uncertain C08 prepared resources remained reusable after post-submit scope failure: {retained_aborted_identities:?}"
-    );
-    assert!(
-        resources_after_failure
-            .lifecycle_stats_for_test()
-            .evictions
-            .saturating_sub(resources_before.lifecycle_stats_for_test().evictions)
-            >= aborted_prepared_identities.len() as u64,
-        "prepared-frame abort must record every discarded resource as an eviction"
+    assert_c08_aborted_state(
+        C08AbortedStateContextForTest {
+            renderer: &mut renderer,
+            surface: &surface,
+            generic_submission: &generic_submission,
+            graph_submission: &graph_submission,
+            prepared_identities: &aborted_prepared_identities,
+            baseline_stats,
+            baseline_parameters,
+            baseline_uploaded_images: &baseline_uploaded_images,
+            baseline_publication_count,
+            baseline_cache,
+            resources_before: &resources_before,
+        },
+        C08AbortedStateExpectationsForTest {
+            scopes_resolved: true,
+            ready_device: "the scoped failure must retain the ready device",
+            resource_manager: "the scoped failure must retain one resource manager",
+            accounting: "post-submit failure resource accounting must have an exact total",
+            retained_resources: "submitted-but-uncertain C08 prepared resources remained reusable after post-submit scope failure",
+            eviction: "prepared-frame abort must record every discarded resource as an eviction",
+        },
     );
     drop(graph_scope);
     drop(generic_scope);
@@ -28600,122 +29087,49 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
         baseline_pixels.rgba()
     );
 
-    let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let retry_generic_submission = retry_generic_scope.observation_for_test();
-    let retry_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let retry_graph_submission = retry_graph_scope.observation_for_test();
-    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
-        &mut surface,
-        &replacement,
-        replacement_parameters,
-        working_format,
-    ))
-    .expect("a clean C08 retry must succeed after prepared-frame abort");
-    let retry_prepared_identities =
-        retry_graph_submission.prepared_frame_resource_identities_for_test();
-    assert_eq!(
-        retry_generic_submission.queue_submission_count_for_test(),
-        1
-    );
-    assert_eq!(
-        retry_generic_submission.readback_queue_submission_count_for_test(),
-        0
-    );
-    assert_eq!(retry_graph_submission.queue_submission_count_for_test(), 1);
-    assert!(retry_graph_submission.scopes_resolved_for_test());
-    assert!(retry_graph_submission.prepared_frame_committed_for_test());
-    assert!(retry_graph_submission.capture_resources_committed_for_test());
-    assert!(retry_graph_submission.headless_draft_released_for_test());
-    assert_eq!(
-        retry_graph_submission.resource_retention_for_test(),
-        Some(C08GraphResourceRetentionForTest::RetainedReusable)
-    );
-    assert!(
-        retry_prepared_identities
-            .iter()
-            .all(|identity| !aborted_prepared_identities.contains(identity)),
-        "a clean retry must allocate fresh prepared-frame identities after uncertainty"
-    );
-    let resources_after_retry = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the clean retry must retain one resource manager")
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after_retry.active_frame_count, 0);
-    assert_eq!(resources_after_retry.resolved_lease_count, 0);
-    assert_eq!(resources_after_retry.leased_count, 0);
-    assert_eq!(
-        resources_after_retry.retained_bytes,
-        resources_after_retry
-            .accounted_entry_bytes
-            .expect("clean retry resource accounting must have an exact total")
-    );
-    assert!(retry_prepared_identities.iter().all(|identity| {
-        resources_after_retry
-            .entry_identities_for_test()
-            .contains(identity)
-    }));
-    assert_ne!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the clean retry must retain its committed pass cache")
-            .device_pass_cache_counts_for_test(),
-        baseline_cache
-    );
-    assert_eq!(renderer.stats(), retry.stats);
-    assert_eq!(surface.last_parameters, Some(replacement_parameters));
-    assert_eq!(
-        surface.headless_publication_count_for_test(),
-        baseline_publication_count + 1
-    );
-    drop(retry_graph_scope);
-    drop(retry_generic_scope);
-    assert_ne!(
-        pollster::block_on(renderer.read_headless(&surface))
-            .expect("the clean C08 retry publication must be readable")
-            .rgba(),
-        baseline_pixels.rgba()
+    assert_c08_retry_after_abort(
+        C08RetryContextForTest {
+            renderer: &mut renderer,
+            surface: &mut surface,
+            replacement: &replacement,
+            replacement_parameters,
+            working_format,
+            aborted_prepared_identities: &aborted_prepared_identities,
+            baseline_cache,
+            baseline_publication_count,
+            baseline_pixels: &baseline_pixels,
+        },
+        C08RetryExpectationsForTest {
+            success: "a clean C08 retry must succeed after prepared-frame abort",
+            fresh_identities: "a clean retry must allocate fresh prepared-frame identities after uncertainty",
+            readable: "the clean C08 retry publication must be readable",
+        },
     );
 }
 
 #[test]
 fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_fresh() {
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
-    ))
-    .expect("submitted C08 cancellation coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
-    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
-        .expect("submitted C08 cancellation coverage requires a headless surface");
-    let mut baseline_scene = Scene::new();
-    baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
-    pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
-        .expect("the direct baseline frame must publish before cancellation coverage");
-    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the cancellation baseline publication must be readable");
-    let baseline_stats = renderer.stats();
-    let baseline_parameters = surface.last_parameters;
-    let baseline_uploaded_images = renderer.uploaded_images_for_test();
-    let baseline_publication_count = surface.headless_publication_count_for_test();
-    let baseline_cache = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the cancellation baseline must retain a ready device")
-        .device_pass_cache_counts_for_test();
-    let resources_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the cancellation baseline must retain one resource manager")
-        .internal_resource_manager_observation_for_test();
-
-    let mut replacement = Scene::new();
-    replacement.fill(
-        Rect::new(0.0, 0.0, 8.0, 8.0),
-        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+    let C08AbortFixtureForTest {
+        mut renderer,
+        mut surface,
+        replacement,
+        replacement_parameters,
+        working_format,
+        baseline_pixels,
+        baseline_stats,
+        baseline_parameters,
+        baseline_uploaded_images,
+        baseline_publication_count,
+        baseline_cache,
+        resources_before,
+    } = c08_abort_fixture_for_test(
+        "submitted C08 cancellation coverage requires a renderer",
+        "submitted C08 cancellation coverage requires a headless surface",
+        "the direct baseline frame must publish before cancellation coverage",
+        "the cancellation baseline publication must be readable",
+        "the cancellation baseline must retain a ready device",
+        "the cancellation baseline must retain one resource manager",
     );
-    let replacement_parameters = Parameters {
-        base_color: Color::TRANSPARENT,
-        debug: true,
-    };
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -28746,71 +29160,28 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
         !canceled_prepared_identities.is_empty(),
         "the real submitted C08 frame must identify every prepared-frame resource"
     );
-    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(
-        generic_submission.readback_queue_submission_count_for_test(),
-        0
-    );
-    assert!(!generic_submission.scopes_resolved_for_test());
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(!graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.headless_draft_released_for_test());
-    assert_eq!(renderer.stats(), baseline_stats);
-    assert_eq!(surface.last_parameters, baseline_parameters);
-    assert_eq!(
-        renderer.uploaded_images_for_test(),
-        baseline_uploaded_images
-    );
-    assert_eq!(
-        surface.headless_publication_count_for_test(),
-        baseline_publication_count
-    );
-    assert_eq!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the canceled frame must retain the ready device")
-            .device_pass_cache_counts_for_test(),
-        baseline_cache
-    );
-    assert_eq!(
-        renderer.default_device_active_operation_generation_for_test(),
-        None
-    );
-    let resources_after_cancellation = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the canceled frame must retain one resource manager")
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after_cancellation.active_frame_count, 0);
-    assert_eq!(resources_after_cancellation.resolved_lease_count, 0);
-    assert_eq!(resources_after_cancellation.leased_count, 0);
-    assert_eq!(
-        resources_after_cancellation.retained_bytes,
-        resources_after_cancellation
-            .accounted_entry_bytes
-            .expect("canceled frame resource accounting must have an exact total")
-    );
-    let retained_canceled_identities = canceled_prepared_identities
-        .iter()
-        .filter(|identity| {
-            resources_after_cancellation
-                .entry_identities_for_test()
-                .contains(identity)
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    assert!(
-        retained_canceled_identities.is_empty(),
-        "canceled submitted C08 prepared resources remained reusable: {retained_canceled_identities:?}"
-    );
-    assert!(
-        resources_after_cancellation
-            .lifecycle_stats_for_test()
-            .evictions
-            .saturating_sub(resources_before.lifecycle_stats_for_test().evictions)
-            >= canceled_prepared_identities.len() as u64,
-        "cancellation abort must record every discarded resource as an eviction"
+    assert_c08_aborted_state(
+        C08AbortedStateContextForTest {
+            renderer: &mut renderer,
+            surface: &surface,
+            generic_submission: &generic_submission,
+            graph_submission: &graph_submission,
+            prepared_identities: &canceled_prepared_identities,
+            baseline_stats,
+            baseline_parameters,
+            baseline_uploaded_images: &baseline_uploaded_images,
+            baseline_publication_count,
+            baseline_cache,
+            resources_before: &resources_before,
+        },
+        C08AbortedStateExpectationsForTest {
+            scopes_resolved: false,
+            ready_device: "the canceled frame must retain the ready device",
+            resource_manager: "the canceled frame must retain one resource manager",
+            accounting: "canceled frame resource accounting must have an exact total",
+            retained_resources: "canceled submitted C08 prepared resources remained reusable",
+            eviction: "cancellation abort must record every discarded resource as an eviction",
+        },
     );
     drop(graph_scope);
     drop(generic_scope);
@@ -28821,17 +29192,184 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
         baseline_pixels.rgba()
     );
 
+    assert_c08_retry_after_abort(
+        C08RetryContextForTest {
+            renderer: &mut renderer,
+            surface: &mut surface,
+            replacement: &replacement,
+            replacement_parameters,
+            working_format,
+            aborted_prepared_identities: &canceled_prepared_identities,
+            baseline_cache,
+            baseline_publication_count,
+            baseline_pixels: &baseline_pixels,
+        },
+        C08RetryExpectationsForTest {
+            success: "a clean C08 retry must succeed after submitted cancellation",
+            fresh_identities: "the frame after submitted cancellation must receive fresh prepared-resource identities",
+            readable: "the clean retry publication must be readable",
+        },
+    );
+}
+
+struct C08AbortedStateContextForTest<'a> {
+    renderer: &'a mut Renderer,
+    surface: &'a Surface,
+    generic_submission: &'a super::gpu_transaction::GpuOperationSubmissionObservationForTest,
+    graph_submission: &'a super::gpu_transaction::C08GraphSubmissionObservationForTest,
+    prepared_identities: &'a [ResourceIdentity],
+    baseline_stats: Stats,
+    baseline_parameters: Option<Parameters>,
+    baseline_uploaded_images: &'a std::collections::HashSet<ImageId>,
+    baseline_publication_count: usize,
+    baseline_cache: super::shader::DevicePassCacheCountsForTest,
+    resources_before: &'a super::resource::ResourceManagerObservationForTest,
+}
+
+struct C08AbortedStateExpectationsForTest {
+    scopes_resolved: bool,
+    ready_device: &'static str,
+    resource_manager: &'static str,
+    accounting: &'static str,
+    retained_resources: &'static str,
+    eviction: &'static str,
+}
+
+fn assert_c08_aborted_state(
+    context: C08AbortedStateContextForTest<'_>,
+    expectations: C08AbortedStateExpectationsForTest,
+) {
+    assert_eq!(
+        context.generic_submission.queue_submission_count_for_test(),
+        1
+    );
+    assert_eq!(
+        context
+            .generic_submission
+            .readback_queue_submission_count_for_test(),
+        0
+    );
+    assert_eq!(
+        context.generic_submission.scopes_resolved_for_test(),
+        expectations.scopes_resolved
+    );
+    assert_eq!(
+        context.graph_submission.queue_submission_count_for_test(),
+        1
+    );
+    assert_eq!(
+        context.graph_submission.scopes_resolved_for_test(),
+        expectations.scopes_resolved
+    );
+    assert!(!context.graph_submission.prepared_frame_committed_for_test());
+    assert!(
+        !context
+            .graph_submission
+            .capture_resources_committed_for_test()
+    );
+    assert!(!context.graph_submission.headless_draft_released_for_test());
+    assert_eq!(context.renderer.stats(), context.baseline_stats);
+    assert_eq!(context.surface.last_parameters, context.baseline_parameters);
+    assert_eq!(
+        context.renderer.uploaded_images_for_test(),
+        *context.baseline_uploaded_images
+    );
+    assert_eq!(
+        context.surface.headless_publication_count_for_test(),
+        context.baseline_publication_count
+    );
+    let ready = context
+        .renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect(expectations.ready_device);
+    assert_eq!(
+        ready.device_pass_cache_counts_for_test(),
+        context.baseline_cache
+    );
+    assert_eq!(
+        context
+            .renderer
+            .default_device_active_operation_generation_for_test(),
+        None
+    );
+    let resources_after_abort = context
+        .renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect(expectations.resource_manager)
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_abort.active_frame_count, 0);
+    assert_eq!(resources_after_abort.resolved_lease_count, 0);
+    assert_eq!(resources_after_abort.leased_count, 0);
+    assert_eq!(
+        resources_after_abort.retained_bytes,
+        resources_after_abort
+            .accounted_entry_bytes
+            .expect(expectations.accounting)
+    );
+    let retained_identities = context
+        .prepared_identities
+        .iter()
+        .filter(|identity| {
+            resources_after_abort
+                .entry_identities_for_test()
+                .contains(identity)
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    assert!(
+        retained_identities.is_empty(),
+        "{}: {retained_identities:?}",
+        expectations.retained_resources
+    );
+    assert!(
+        resources_after_abort
+            .lifecycle_stats_for_test()
+            .evictions
+            .saturating_sub(
+                context
+                    .resources_before
+                    .lifecycle_stats_for_test()
+                    .evictions
+            )
+            >= context.prepared_identities.len() as u64,
+        "{}",
+        expectations.eviction
+    );
+}
+
+struct C08RetryContextForTest<'a> {
+    renderer: &'a mut Renderer,
+    surface: &'a mut Surface,
+    replacement: &'a Scene,
+    replacement_parameters: Parameters,
+    working_format: WorkingFormat,
+    aborted_prepared_identities: &'a [ResourceIdentity],
+    baseline_cache: super::shader::DevicePassCacheCountsForTest,
+    baseline_publication_count: usize,
+    baseline_pixels: &'a ImageBuffer,
+}
+
+struct C08RetryExpectationsForTest {
+    success: &'static str,
+    fresh_identities: &'static str,
+    readable: &'static str,
+}
+
+fn assert_c08_retry_after_abort(
+    context: C08RetryContextForTest<'_>,
+    expectations: C08RetryExpectationsForTest,
+) {
     let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let retry_generic_submission = retry_generic_scope.observation_for_test();
     let retry_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let retry_graph_submission = retry_graph_scope.observation_for_test();
-    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
-        &mut surface,
-        &replacement,
-        replacement_parameters,
-        working_format,
+    let retry = pollster::block_on(context.renderer.render_forced_c08_graph_for_test(
+        context.surface,
+        context.replacement,
+        context.replacement_parameters,
+        context.working_format,
     ))
-    .expect("a clean C08 retry must succeed after submitted cancellation");
+    .expect(expectations.success);
     let retry_prepared_identities =
         retry_graph_submission.prepared_frame_resource_identities_for_test();
     assert_eq!(
@@ -28854,10 +29392,12 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
     assert!(
         retry_prepared_identities
             .iter()
-            .all(|identity| !canceled_prepared_identities.contains(identity)),
-        "the frame after submitted cancellation must receive fresh prepared-resource identities"
+            .all(|identity| { !context.aborted_prepared_identities.contains(identity) }),
+        "{}",
+        expectations.fresh_identities
     );
-    let resources_after_retry = renderer
+    let resources_after_retry = context
+        .renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the clean retry must retain one resource manager")
         .internal_resource_manager_observation_for_test();
@@ -28876,25 +29416,29 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
             .contains(identity)
     }));
     assert_ne!(
-        renderer
+        context
+            .renderer
             .default_ready_device_state_borrow_for_test()
             .expect("the clean retry must retain its committed pass cache")
             .device_pass_cache_counts_for_test(),
-        baseline_cache
+        context.baseline_cache
     );
-    assert_eq!(renderer.stats(), retry.stats);
-    assert_eq!(surface.last_parameters, Some(replacement_parameters));
+    assert_eq!(context.renderer.stats(), retry.stats);
     assert_eq!(
-        surface.headless_publication_count_for_test(),
-        baseline_publication_count + 1
+        context.surface.last_parameters,
+        Some(context.replacement_parameters)
+    );
+    assert_eq!(
+        context.surface.headless_publication_count_for_test(),
+        context.baseline_publication_count + 1
     );
     drop(retry_graph_scope);
     drop(retry_generic_scope);
     assert_ne!(
-        pollster::block_on(renderer.read_headless(&surface))
-            .expect("the clean retry publication must be readable")
+        pollster::block_on(context.renderer.read_headless(context.surface))
+            .expect(expectations.readable)
             .rgba(),
-        baseline_pixels.rgba()
+        context.baseline_pixels.rgba()
     );
 }
 
@@ -30243,27 +30787,10 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
                     )
                     && first_terminal_canonical
                     && second_terminal_canonical;
-            let first_matches = match working_format {
-                WorkingFormat::HighPrecision => {
-                    c10_high_terminal_error_for_test(first_rendered.output.rgba(), &first_expected)
-                        .is_some_and(|error| error <= 2)
-                }
-                WorkingFormat::ReducedPrecision => {
-                    c10_reduced_error_for_test(first_rendered.output.rgba(), &first_expected)
-                        .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
-                }
-            };
-            let second_matches = match working_format {
-                WorkingFormat::HighPrecision => c10_high_terminal_error_for_test(
-                    second_rendered.output.rgba(),
-                    &second_expected,
-                )
-                .is_some_and(|error| error <= 2),
-                WorkingFormat::ReducedPrecision => {
-                    c10_reduced_error_for_test(second_rendered.output.rgba(), &second_expected)
-                        .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
-                }
-            };
+            let first_matches =
+                c10_rendered_output_matches_for_test(&first_rendered, &first_expected);
+            let second_matches =
+                c10_rendered_output_matches_for_test(&second_rendered, &second_expected);
             ordered_results_are_exact &= first_expected != second_expected
                 && first_rendered.output.rgba() != second_rendered.output.rgba()
                 && first_matches
@@ -30279,6 +30806,22 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
         ordered_results_are_exact,
         "the GPU lost authored order or a source clamp"
     );
+}
+
+fn c10_rendered_output_matches_for_test(
+    rendered: &C10ProductionFrameForTest,
+    expected: &[u8],
+) -> bool {
+    match rendered.working_format {
+        WorkingFormat::HighPrecision => {
+            c10_high_terminal_error_for_test(rendered.output.rgba(), expected)
+                .is_some_and(|error| error <= 2)
+        }
+        WorkingFormat::ReducedPrecision => {
+            c10_reduced_error_for_test(rendered.output.rgba(), expected)
+                .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -30368,12 +30911,7 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
             ready.internal_resource_manager_observation_for_test(),
         )
     };
-    let failure_is_reported = failure.is_err_and(|error| {
-        error.code() == ErrorCode::RenderFailed
-            && error
-                .message()
-                .contains("injected C10 color-filter shader failure")
-    });
+    let failure_is_reported = is_injected_c10_shader_failure(failure);
     C10ShaderFailureObservationForTest {
         failure_is_reported,
         prior_pixels_are_preserved: current.rgba() == published.rgba(),
@@ -30399,6 +30937,17 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
             && graph_submissions == 0
             && direct_submissions == 0,
     }
+}
+
+fn is_injected_c10_shader_failure(
+    failure: Result<super::renderer::C10ColorFilterRenderResultForTest>,
+) -> bool {
+    failure.is_err_and(|error| {
+        error.code() == ErrorCode::RenderFailed
+            && error
+                .message()
+                .contains("injected C10 color-filter shader failure")
+    })
 }
 
 #[test]
@@ -31725,15 +32274,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
         ImageQuality::Low,
         Extend::Pad,
     );
-    let mut scene = Scene::new();
-    scene.layer(
-        Layer::new()
-            .blend(BlendMode::Multiply)
-            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask.clone(), rect).unwrap()),
-        |scene| {
-            scene.fill(rect, c09_color_for_test(source));
-        },
-    );
+    let scene = c09_presented_masked_blended_scene_for_test(rect);
     let expected_source = c09_reference_solid_for_test(PhysicalSize::new(1, 1), source)
         .apply_resolved_alpha_mask(rect, &mask, rect)
         .unwrap();
@@ -31829,21 +32370,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
 #[test]
 fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_publication() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
-    let mask = c09_mask_image_from_alpha_for_test(
-        PhysicalSize::new(1, 1),
-        &[160],
-        ImageQuality::Low,
-        Extend::Pad,
-    );
-    let mut scene = Scene::new();
-    scene.layer(
-        Layer::new()
-            .blend(BlendMode::Multiply)
-            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
-        |scene| {
-            scene.fill(rect, c09_color_for_test([224, 64, 32, 192]));
-        },
-    );
+    let scene = c09_presented_masked_blended_scene_for_test(rect);
 
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -31940,21 +32467,7 @@ fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_p
 #[test]
 fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
-    let mask = c09_mask_image_from_alpha_for_test(
-        PhysicalSize::new(1, 1),
-        &[160],
-        ImageQuality::Low,
-        Extend::Pad,
-    );
-    let mut scene = Scene::new();
-    scene.layer(
-        Layer::new()
-            .blend(BlendMode::Multiply)
-            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
-        |scene| {
-            scene.fill(rect, c09_color_for_test([224, 64, 32, 192]));
-        },
-    );
+    let scene = c09_presented_masked_blended_scene_for_test(rect);
 
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -32054,6 +32567,59 @@ fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fail
     assert!(take_last_presented_texture_for_test(&mut surface).is_some());
 }
 
+#[cfg(feature = "render-window")]
+fn c09_presented_masked_blended_scene_for_test(rect: Rect) -> Scene {
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[160],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .blend(BlendMode::Multiply)
+            .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
+        |scene| {
+            scene.fill(rect, c09_color_for_test([224, 64, 32, 192]));
+        },
+    );
+    scene
+}
+
+fn c10_future_backdrop_scene(
+    size: Size,
+    inner_bounds: Rect,
+    outer_color: Color,
+    inner_color: Color,
+) -> Scene {
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25).unwrap(),
+    )])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, size.width(), size.height()))
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.0, 0.0, size.width(), size.height()),
+            outer_color,
+        )
+        .layer(backdrop, |scene| {
+            scene.fill(inner_bounds, inner_color);
+        });
+    scene
+}
+
 #[test]
 fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publication() {
     let mut renderer = pollster::block_on(Renderer::new(
@@ -32090,32 +32656,12 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
         .unwrap()
         .internal_resource_manager_observation_for_test();
 
-    let filters = FilterList::try_ops(vec![FilterOp::brightness(
-        FilterAmount::try_new(1.25).unwrap(),
-    )])
-    .unwrap();
-    let backdrop = Layer::new()
-        .try_backdrop_filter(
-            BackdropFilterInput::try_new(
-                filters,
-                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
-                None,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    let mut future = Scene::new();
-    future
-        .fill(
-            Rect::new(0.0, 0.0, 8.0, 6.0),
-            c09_color_for_test([192, 64, 32, 255]),
-        )
-        .layer(backdrop, |scene| {
-            scene.fill(
-                Rect::new(2.0, 1.0, 3.0, 3.0),
-                c09_color_for_test([16, 224, 96, 192]),
-            );
-        });
+    let future = c10_future_backdrop_scene(
+        Size::new(8.0, 6.0),
+        Rect::new(2.0, 1.0, 3.0, 3.0),
+        c09_color_for_test([192, 64, 32, 255]),
+        c09_color_for_test([16, 224, 96, 192]),
+    );
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -32191,29 +32737,12 @@ fn c10_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
         "the real renderer must accept the scoped no-effect-format capability facts"
     );
 
-    let filters = FilterList::try_ops(vec![FilterOp::brightness(
-        FilterAmount::try_new(1.25).unwrap(),
-    )])
-    .unwrap();
-    let backdrop = Layer::new()
-        .try_backdrop_filter(
-            BackdropFilterInput::try_new(
-                filters,
-                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap(),
-                None,
-            )
-            .unwrap(),
-        )
-        .unwrap();
-    let mut future = Scene::new();
-    future
-        .fill(
-            Rect::new(0.0, 0.0, 4.0, 4.0),
-            Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
-        )
-        .layer(backdrop, |scene| {
-            scene.fill(Rect::new(1.0, 1.0, 2.0, 2.0), Color::BLACK);
-        });
+    let future = c10_future_backdrop_scene(
+        Size::new(4.0, 4.0),
+        Rect::new(1.0, 1.0, 2.0, 2.0),
+        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+        Color::BLACK,
+    );
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -32324,7 +32853,75 @@ fn c09_capabilities_name_only_gpu_semantics_and_keep_broad_masks_diagnostic() {
     let filters = capabilities.filters();
     let masks = capabilities.masks_clips();
     let offscreen = capabilities.offscreen_pipeline();
-    let supported = [
+    let supported = c09_supported_capability_rows(filters, masks, offscreen);
+    let rejected = c09_rejected_capability_rows(filters, masks, offscreen);
+    let supported_are_exact = supported.into_iter().all(|(query, family, operation)| {
+        query
+            && capabilities
+                .ensure_supported(UnsupportedPrimitive::new(family, operation))
+                .is_ok()
+    });
+    let rejected_are_exact = rejected.into_iter().all(|(query, family, operation)| {
+        let expected = UnsupportedPrimitive::new(family, operation);
+        !query
+            && capabilities
+                .ensure_supported(expected)
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+    });
+    let diagnostic_only_rejections = [UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::AlphaMaskSourceExecution,
+    )];
+    let diagnostic_only_rejections_are_exact =
+        diagnostic_only_rejections.into_iter().all(|expected| {
+            capabilities
+                .ensure_supported(expected)
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+        });
+    let affected_sources = [
+        include_str!("capability.rs"),
+        include_str!("error.rs"),
+        include_str!("image.rs"),
+        include_str!("layer.rs"),
+        include_str!("lib.rs"),
+        include_str!("command.rs"),
+        include_str!("renderer.rs"),
+        include_str!("pass.rs"),
+        include_str!("resource.rs"),
+        include_str!("backend.rs"),
+    ];
+    let stale_identities = [
+        ["MaterializedAlphaMask", "Execution"].concat(),
+        ["supports_materialized_alpha_mask", "_execution"].concat(),
+        ["try_resolved_alpha", "_mask"].concat(),
+        ["for_resolved", "_mask"].concat(),
+        ["TransitionalTextureRole::", "ResolvedMask"].concat(),
+        ["materialize_resolved_layer", "_mask"].concat(),
+        ["pub struct ResolvedAlphaMask", "Execution"].concat(),
+    ];
+    let stale_contract_is_absent = stale_identities.iter().all(|identity| {
+        affected_sources
+            .iter()
+            .all(|source| !source.contains(identity))
+    });
+
+    assert!(
+        supported_are_exact
+            && rejected_are_exact
+            && diagnostic_only_rejections_are_exact
+            && stale_contract_is_absent,
+        "C09 capability surface is stale or overclaims broad support"
+    );
+}
+
+type CapabilityRowForTest = (bool, PrimitiveFamily, PrimitiveOperation);
+
+fn c09_supported_capability_rows(
+    filters: FilterCapabilities,
+    masks: MaskClipCapabilities,
+    offscreen: OffscreenPipelineCapabilities,
+) -> [CapabilityRowForTest; 9] {
+    [
         (
             masks.supports_resolved_alpha_mask_execution(),
             PrimitiveFamily::MasksAndClips,
@@ -32370,8 +32967,15 @@ fn c09_capabilities_name_only_gpu_semantics_and_keep_broad_masks_diagnostic() {
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::BoundedBackdropCapture,
         ),
-    ];
-    let rejected = [
+    ]
+}
+
+fn c09_rejected_capability_rows(
+    filters: FilterCapabilities,
+    masks: MaskClipCapabilities,
+    offscreen: OffscreenPipelineCapabilities,
+) -> [CapabilityRowForTest; 13] {
+    [
         (
             filters.supports_gpu_color_filter_execution(),
             PrimitiveFamily::Filters,
@@ -32437,64 +33041,7 @@ fn c09_capabilities_name_only_gpu_semantics_and_keep_broad_masks_diagnostic() {
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::BackdropIsolationComposition,
         ),
-    ];
-    let supported_are_exact = supported.into_iter().all(|(query, family, operation)| {
-        query
-            && capabilities
-                .ensure_supported(UnsupportedPrimitive::new(family, operation))
-                .is_ok()
-    });
-    let rejected_are_exact = rejected.into_iter().all(|(query, family, operation)| {
-        let expected = UnsupportedPrimitive::new(family, operation);
-        !query
-            && capabilities
-                .ensure_supported(expected)
-                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
-    });
-    let diagnostic_only_rejections = [UnsupportedPrimitive::new(
-        PrimitiveFamily::MasksAndClips,
-        PrimitiveOperation::AlphaMaskSourceExecution,
-    )];
-    let diagnostic_only_rejections_are_exact =
-        diagnostic_only_rejections.into_iter().all(|expected| {
-            capabilities
-                .ensure_supported(expected)
-                .is_err_and(|error| error.unsupported_primitive() == Some(expected))
-        });
-    let affected_sources = [
-        include_str!("capability.rs"),
-        include_str!("error.rs"),
-        include_str!("image.rs"),
-        include_str!("layer.rs"),
-        include_str!("lib.rs"),
-        include_str!("command.rs"),
-        include_str!("renderer.rs"),
-        include_str!("pass.rs"),
-        include_str!("resource.rs"),
-        include_str!("backend.rs"),
-    ];
-    let stale_identities = [
-        ["MaterializedAlphaMask", "Execution"].concat(),
-        ["supports_materialized_alpha_mask", "_execution"].concat(),
-        ["try_resolved_alpha", "_mask"].concat(),
-        ["for_resolved", "_mask"].concat(),
-        ["TransitionalTextureRole::", "ResolvedMask"].concat(),
-        ["materialize_resolved_layer", "_mask"].concat(),
-        ["pub struct ResolvedAlphaMask", "Execution"].concat(),
-    ];
-    let stale_contract_is_absent = stale_identities.iter().all(|identity| {
-        affected_sources
-            .iter()
-            .all(|source| !source.contains(identity))
-    });
-
-    assert!(
-        supported_are_exact
-            && rejected_are_exact
-            && diagnostic_only_rejections_are_exact
-            && stale_contract_is_absent,
-        "C09 capability surface is stale or overclaims broad support"
-    );
+    ]
 }
 
 #[test]
@@ -32550,22 +33097,8 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     }
     let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
     let retention_history = graph_submission.resource_retention_history_for_test();
-    let stable_resource_set = resource_observations.iter().all(|observation| {
-        observation.leased_count == 0
-            && observation.active_frame_count == 0
-            && observation.resolved_lease_count == 0
-            && observation.next_resource == warmed_resources.next_resource
-            && observation.entry_count == warmed_resources.entry_count
-            && observation.retained_bytes == warmed_resources.retained_bytes
-            && observation.payload_creation_attempts == warmed_resources.payload_creation_attempts
-            && observation.entry_identities_for_test()
-                == warmed_resources.entry_identities_for_test()
-            && observation.effect_texture_count_for_test()
-                == warmed_resources.effect_texture_count_for_test()
-            && observation.resolved_mask_upload_keys_for_test()
-                == warmed_resources.resolved_mask_upload_keys_for_test()
-            && observation.gaussian_kernel_count_for_test() == 0
-    });
+    let stable_resource_set =
+        c09_resource_observations_are_stable(&resource_observations, &warmed_resources);
     let exact_mask_key_is_retained = warmed_resources.resolved_mask_upload_keys_for_test()
         == [mask_key]
         && mask_key.physical_size() == PhysicalSize::new(2, 2)
@@ -32609,6 +33142,26 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
             && c09_pixels_match_for_test(actual.rgba(), &expected, working_format, 3),
         "C09 resources grow or enter readback"
     );
+}
+
+fn c09_resource_observations_are_stable(
+    observations: &[super::resource::ResourceManagerObservationForTest],
+    warmed: &super::resource::ResourceManagerObservationForTest,
+) -> bool {
+    observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.active_frame_count == 0
+            && observation.resolved_lease_count == 0
+            && observation.next_resource == warmed.next_resource
+            && observation.entry_count == warmed.entry_count
+            && observation.retained_bytes == warmed.retained_bytes
+            && observation.payload_creation_attempts == warmed.payload_creation_attempts
+            && observation.entry_identities_for_test() == warmed.entry_identities_for_test()
+            && observation.effect_texture_count_for_test() == warmed.effect_texture_count_for_test()
+            && observation.resolved_mask_upload_keys_for_test()
+                == warmed.resolved_mask_upload_keys_for_test()
+            && observation.gaussian_kernel_count_for_test() == 0
+    })
 }
 
 #[test]
@@ -32725,42 +33278,9 @@ fn renderer_dispatch_routes_c08_and_c09_to_gpu_but_future_passes_to_typed_diagno
     let c09 =
         pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
 
-    let blur = Filter::try_blur(1.0)
-        .unwrap_or_else(|error| panic!("the future blur fixture must be valid: {error}"));
-    let blur_layer = Layer::new()
-        .try_filter(blur)
-        .unwrap_or_else(|error| panic!("the future blur layer must be valid: {error}"));
-    let mut blur_scene = Scene::new();
-    blur_scene.layer(blur_layer, |scene| {
-        scene.fill(
-            Rect::new(0.0, 0.0, 4.0, 4.0),
-            c09_color_for_test([255, 255, 255, 255]),
-        );
-    });
+    let (blur_scene, backdrop_scene) = c09_future_dispatch_scenes_for_test();
     let mut blur_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .unwrap_or_else(|error| panic!("future blur coverage requires a surface: {error}"));
-
-    let backdrop_filters = FilterList::try_ops(vec![FilterOp::brightness(
-        FilterAmount::try_new(1.25)
-            .unwrap_or_else(|error| panic!("the future color amount must be valid: {error}")),
-    )])
-    .unwrap_or_else(|error| panic!("the future filter list must be valid: {error}"));
-    let backdrop_bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0))
-        .unwrap_or_else(|error| panic!("the future backdrop bounds must be valid: {error}"));
-    let backdrop_input = BackdropFilterInput::try_new(backdrop_filters, backdrop_bounds, None)
-        .unwrap_or_else(|error| panic!("the future backdrop input must be valid: {error}"));
-    let backdrop_layer = Layer::new()
-        .try_backdrop_filter(backdrop_input)
-        .unwrap_or_else(|error| panic!("the future backdrop layer must be valid: {error}"));
-    let mut backdrop_scene = Scene::new();
-    backdrop_scene
-        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
-        .layer(backdrop_layer, |scene| {
-            scene.fill(
-                Rect::new(1.0, 1.0, 2.0, 2.0),
-                c09_color_for_test([255, 255, 255, 255]),
-            );
-        });
     let mut backdrop_surface =
         pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
             .unwrap_or_else(|error| panic!("future backdrop coverage requires a surface: {error}"));
@@ -32805,12 +33325,7 @@ fn renderer_dispatch_routes_c08_and_c09_to_gpu_but_future_passes_to_typed_diagno
                 PrimitiveOperation::BoundedBackdropFilterExecution,
             ))
     });
-    let renderer_source = include_str!("renderer.rs");
-    let pass_source = include_str!("pass.rs");
-    let old_dispatch_names_are_absent = !renderer_source
-        .contains(&["transitional_graph", "_routes"].concat())
-        && !renderer_source.contains(&["LaterCycle", "Transitional"].concat())
-        && !pass_source.contains(&["LaterCycle", "Transitional"].concat());
+    let old_dispatch_names_are_absent = old_graph_dispatch_names_are_absent();
     let dispatch = renderer.dispatch_observation_for_test();
 
     assert!(
@@ -32834,6 +33349,51 @@ fn renderer_dispatch_routes_c08_and_c09_to_gpu_but_future_passes_to_typed_diagno
     );
 }
 
+fn old_graph_dispatch_names_are_absent() -> bool {
+    let renderer = include_str!("renderer.rs");
+    let pass = include_str!("pass.rs");
+    !renderer.contains(&["transitional_graph", "_routes"].concat())
+        && !renderer.contains(&["LaterCycle", "Transitional"].concat())
+        && !pass.contains(&["LaterCycle", "Transitional"].concat())
+}
+
+fn c09_future_dispatch_scenes_for_test() -> (Scene, Scene) {
+    let blur = Filter::try_blur(1.0)
+        .unwrap_or_else(|error| panic!("the future blur fixture must be valid: {error}"));
+    let blur_layer = Layer::new()
+        .try_filter(blur)
+        .unwrap_or_else(|error| panic!("the future blur layer must be valid: {error}"));
+    let mut blur_scene = Scene::new();
+    blur_scene.layer(blur_layer, |scene| {
+        scene.fill(
+            Rect::new(0.0, 0.0, 4.0, 4.0),
+            c09_color_for_test([255, 255, 255, 255]),
+        );
+    });
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25)
+            .unwrap_or_else(|error| panic!("the future color amount must be valid: {error}")),
+    )])
+    .unwrap_or_else(|error| panic!("the future filter list must be valid: {error}"));
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0))
+        .unwrap_or_else(|error| panic!("the future backdrop bounds must be valid: {error}"));
+    let input = BackdropFilterInput::try_new(filters, bounds, None)
+        .unwrap_or_else(|error| panic!("the future backdrop input must be valid: {error}"));
+    let layer = Layer::new()
+        .try_backdrop_filter(input)
+        .unwrap_or_else(|error| panic!("the future backdrop layer must be valid: {error}"));
+    let mut backdrop_scene = Scene::new();
+    backdrop_scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(layer, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                c09_color_for_test([255, 255, 255, 255]),
+            );
+        });
+    (blur_scene, backdrop_scene)
+}
+
 #[test]
 fn repeated_frames_reuse_resources_without_growth_or_readback() {
     let mut renderer = pollster::block_on(Renderer::new(
@@ -32847,17 +33407,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
         .unwrap_or_else(|error| {
             panic!("repeated C08 reuse coverage requires a headless surface: {error}")
         });
-    let mut scene = Scene::new();
-    scene
-        .fill(
-            Rect::new(0.25, 0.5, 5.5, 3.75),
-            Color::try_rgba(0.75, 0.25, 0.125, 0.625).unwrap(),
-        )
-        .stroke(
-            Shape::rect(Rect::new(1.0, 1.0, 4.0, 3.0)),
-            Stroke::try_new(0.75).unwrap(),
-            Color::BLACK,
-        );
+    let scene = repeated_c08_scene_for_test();
 
     for _ in 0..2 {
         pollster::block_on(renderer.render_forced_c08_graph_for_test(
@@ -32904,25 +33454,13 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
 
-    let no_post_warmup_growth = resource_observations.iter().all(|observation| {
-        observation.leased_count == 0
-            && observation.next_resource == warmed_resources.next_resource
-            && observation.entry_count == warmed_resources.entry_count
-            && observation.retained_bytes == warmed_resources.retained_bytes
-            && observation.payload_creation_attempts == warmed_resources.payload_creation_attempts
-            && observation.committed_transient_buffer_count_for_test()
-                == warmed_resources.committed_transient_buffer_count_for_test()
-            && observation.committed_transient_image_count_for_test()
-                == warmed_resources.committed_transient_image_count_for_test()
-    });
+    let no_post_warmup_growth =
+        c08_resource_observations_are_stable(&resource_observations, &warmed_resources);
     let reusable_vello_resources_are_retained =
         warmed_resources.committed_transient_buffer_count_for_test() > 0
             && warmed_resources.committed_transient_image_count_for_test() > 0;
-    let reusable_graph_frame_resources_are_retained = warmed_resources.entry_count
-        > warmed_resources
-            .committed_transient_buffer_count_for_test()
-            .saturating_add(warmed_resources.committed_transient_image_count_for_test())
-            .saturating_add(warmed_resources.retained_atlas_count_for_test());
+    let reusable_graph_frame_resources_are_retained =
+        c08_graph_frame_resources_are_retained(&warmed_resources);
     let stable_cache_and_pipelines = warmed_cache.has_render_pipelines()
         && cache_observations
             .iter()
@@ -32954,6 +33492,48 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             && actual.rgba() == expected.rgba(),
         "repeated C08 frames grew resources or entered readback"
     );
+}
+
+fn repeated_c08_scene_for_test() -> Scene {
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.25, 0.5, 5.5, 3.75),
+            Color::try_rgba(0.75, 0.25, 0.125, 0.625).unwrap(),
+        )
+        .stroke(
+            Shape::rect(Rect::new(1.0, 1.0, 4.0, 3.0)),
+            Stroke::try_new(0.75).unwrap(),
+            Color::BLACK,
+        );
+    scene
+}
+
+fn c08_graph_frame_resources_are_retained(
+    resources: &super::resource::ResourceManagerObservationForTest,
+) -> bool {
+    resources.entry_count
+        > resources
+            .committed_transient_buffer_count_for_test()
+            .saturating_add(resources.committed_transient_image_count_for_test())
+            .saturating_add(resources.retained_atlas_count_for_test())
+}
+
+fn c08_resource_observations_are_stable(
+    observations: &[super::resource::ResourceManagerObservationForTest],
+    warmed: &super::resource::ResourceManagerObservationForTest,
+) -> bool {
+    observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.next_resource == warmed.next_resource
+            && observation.entry_count == warmed.entry_count
+            && observation.retained_bytes == warmed.retained_bytes
+            && observation.payload_creation_attempts == warmed.payload_creation_attempts
+            && observation.committed_transient_buffer_count_for_test()
+                == warmed.committed_transient_buffer_count_for_test()
+            && observation.committed_transient_image_count_for_test()
+                == warmed.committed_transient_image_count_for_test()
+    })
 }
 
 #[test]
@@ -34028,15 +34608,58 @@ fn c08_compare_parity_outputs_for_test(
         ));
     }
 
+    c08_compare_parity_pixel_regions(
+        case,
+        &direct.image,
+        &graph.image,
+        expected_output,
+        profile,
+        tolerance,
+    )?;
+
+    c08_compare_parity_support(case, &direct.image, &graph.image, tolerance)
+}
+
+fn c08_compare_parity_support(
+    case: C08ParityCaseForTest,
+    direct: &ImageBuffer,
+    graph: &ImageBuffer,
+    tolerance: C08ParityToleranceForTest,
+) -> std::result::Result<(), C08ParityFailureForTest> {
+    if !c08_has_antialiased_boundary_for_test(direct)
+        || !c08_has_antialiased_boundary_for_test(graph)
+    {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::AntialiasedBoundaryPixels,
+            "the fixture did not retain an observable partial-alpha AA boundary",
+        ));
+    }
+    c08_compare_support_for_test(
+        case,
+        c08_alpha_support_for_test(direct),
+        c08_alpha_support_for_test(graph),
+        tolerance.centroid_device_pixels,
+    )
+}
+
+fn c08_compare_parity_pixel_regions(
+    case: C08ParityCaseForTest,
+    direct: &ImageBuffer,
+    graph: &ImageBuffer,
+    output: PhysicalSize,
+    profile: C08PixelComparisonProfileForTest,
+    tolerance: C08ParityToleranceForTest,
+) -> std::result::Result<(), C08ParityFailureForTest> {
     let full_output = C08DeviceRegionForTest {
         min_x: 0,
         min_y: 0,
-        max_x_exclusive: expected_output.width(),
-        max_y_exclusive: expected_output.height(),
+        max_x_exclusive: output.width(),
+        max_y_exclusive: output.height(),
     };
     if let Some(summary) = c08_compare_pixel_region_for_test(
-        &direct.image,
-        &graph.image,
+        direct,
+        graph,
         full_output,
         tolerance.metric,
         tolerance.boundary_levels,
@@ -34050,56 +34673,40 @@ fn c08_compare_parity_outputs_for_test(
             ),
         ));
     }
-
-    if profile == C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary {
-        let interior = c08_device_region_for_test(
-            c08_parity_interior_bounds_for_test(case.fixture),
-            case.scale,
-            expected_output,
-        );
-        let contains_ink = (interior.min_y..interior.max_y_exclusive).any(|y| {
-            (interior.min_x..interior.max_x_exclusive).any(|x| pixel_alpha(&direct.image, x, y) > 0)
-        });
-        if !contains_ink {
-            return Err(C08ParityFailureForTest::new(
-                case,
-                C08ParityFailureStageForTest::InteriorPixels,
-                format!("fixture interior contains no direct ink: {interior:?}"),
-            ));
-        }
-        if let Some(summary) = c08_compare_pixel_region_for_test(
-            &direct.image,
-            &graph.image,
-            interior,
-            tolerance.metric,
-            tolerance.interior_levels,
-        ) {
-            return Err(C08ParityFailureForTest::new(
-                case,
-                C08ParityFailureStageForTest::InteriorPixels,
-                format!(
-                    "metric={:?}, tolerance={}, region={interior:?}, summary={summary:?}",
-                    tolerance.metric, tolerance.interior_levels
-                ),
-            ));
-        }
+    if profile != C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary {
+        return Ok(());
     }
-
-    if !c08_has_antialiased_boundary_for_test(&direct.image)
-        || !c08_has_antialiased_boundary_for_test(&graph.image)
-    {
+    let interior = c08_device_region_for_test(
+        c08_parity_interior_bounds_for_test(case.fixture),
+        case.scale,
+        output,
+    );
+    let contains_ink = (interior.min_y..interior.max_y_exclusive)
+        .any(|y| (interior.min_x..interior.max_x_exclusive).any(|x| pixel_alpha(direct, x, y) > 0));
+    if !contains_ink {
         return Err(C08ParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::AntialiasedBoundaryPixels,
-            "the fixture did not retain an observable partial-alpha AA boundary",
+            C08ParityFailureStageForTest::InteriorPixels,
+            format!("fixture interior contains no direct ink: {interior:?}"),
         ));
     }
-    c08_compare_support_for_test(
-        case,
-        c08_alpha_support_for_test(&direct.image),
-        c08_alpha_support_for_test(&graph.image),
-        tolerance.centroid_device_pixels,
-    )
+    if let Some(summary) = c08_compare_pixel_region_for_test(
+        direct,
+        graph,
+        interior,
+        tolerance.metric,
+        tolerance.interior_levels,
+    ) {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::InteriorPixels,
+            format!(
+                "metric={:?}, tolerance={}, region={interior:?}, summary={summary:?}",
+                tolerance.metric, tolerance.interior_levels
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn c08_run_fixture_parity_matrix_for_test(
@@ -34276,59 +34883,12 @@ fn c08_run_transformed_parity_for_test()
             transformed.mapping,
             configuration.scale,
         );
-        if expected_grid.device_origin.0 >= 0 && expected_grid.device_origin.1 >= 0 {
-            let case = C08ParityCaseForTest {
-                fixture: C08ParityFixtureForTest::SolidShape,
-                scenario: transformed.scenario,
-                antialiasing: configuration.antialiasing,
-                scale: configuration.scale,
-                working_format: working_formats[0],
-            };
-            return Err(C08ParityFailureForTest::new(
-                case,
-                C08ParityFailureStageForTest::CaptureGrid,
-                format!("transformed fixture did not retain a signed origin: {expected_grid:?}"),
-            ));
-        }
-        let fractional_origin = expected_grid.texel_origin.x().fract().abs() > f64::EPSILON
-            || expected_grid.texel_origin.y().fract().abs() > f64::EPSILON;
-        if !fractional_origin {
-            let case = C08ParityCaseForTest {
-                fixture: C08ParityFixtureForTest::SolidShape,
-                scenario: transformed.scenario,
-                antialiasing: configuration.antialiasing,
-                scale: configuration.scale,
-                working_format: working_formats[0],
-            };
-            return Err(C08ParityFailureForTest::new(
-                case,
-                C08ParityFailureStageForTest::CaptureGrid,
-                format!(
-                    "transformed fixture did not retain a fractional texel origin: {expected_grid:?}"
-                ),
-            ));
-        }
-        if transformed.scenario == C08ParityScenarioForTest::OrderedCaptureThenParent {
-            let reverse = transformed
-                .mapping
-                .parent_to_surface
-                .then(transformed.mapping.capture_transform)
-                .expect("the reverse-order probe transforms must compose");
-            if transformed.mapping.combined() == reverse {
-                let case = C08ParityCaseForTest {
-                    fixture: C08ParityFixtureForTest::SolidShape,
-                    scenario: transformed.scenario,
-                    antialiasing: configuration.antialiasing,
-                    scale: configuration.scale,
-                    working_format: working_formats[0],
-                };
-                return Err(C08ParityFailureForTest::new(
-                    case,
-                    C08ParityFailureStageForTest::CaptureGrid,
-                    "the ordered transform probe accidentally commutes",
-                ));
-            }
-        }
+        c08_validate_transformed_grid(
+            transformed,
+            expected_grid,
+            configuration,
+            working_formats[0],
+        )?;
         let direct_scene = c08_transformed_direct_solid_scene_for_test(transformed.mapping);
         for working_format in working_formats.iter().copied() {
             let case = C08ParityCaseForTest {
@@ -34367,6 +34927,52 @@ fn c08_run_transformed_parity_for_test()
         }
     }
     Ok(completed)
+}
+
+fn c08_validate_transformed_grid(
+    transformed: C08TransformedPlacementCaseForTest,
+    grid: C08ExpectedCaptureGridForTest,
+    configuration: C08ParityConfigurationForTest,
+    working_format: WorkingFormat,
+) -> std::result::Result<(), C08ParityFailureForTest> {
+    let case = C08ParityCaseForTest {
+        fixture: C08ParityFixtureForTest::SolidShape,
+        scenario: transformed.scenario,
+        antialiasing: configuration.antialiasing,
+        scale: configuration.scale,
+        working_format,
+    };
+    if grid.device_origin.0 >= 0 && grid.device_origin.1 >= 0 {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::CaptureGrid,
+            format!("transformed fixture did not retain a signed origin: {grid:?}"),
+        ));
+    }
+    let fractional = grid.texel_origin.x().fract().abs() > f64::EPSILON
+        || grid.texel_origin.y().fract().abs() > f64::EPSILON;
+    if !fractional {
+        return Err(C08ParityFailureForTest::new(
+            case,
+            C08ParityFailureStageForTest::CaptureGrid,
+            format!("transformed fixture did not retain a fractional texel origin: {grid:?}"),
+        ));
+    }
+    if transformed.scenario == C08ParityScenarioForTest::OrderedCaptureThenParent {
+        let reverse = transformed
+            .mapping
+            .parent_to_surface
+            .then(transformed.mapping.capture_transform)
+            .expect("the reverse-order probe transforms must compose");
+        if transformed.mapping.combined() == reverse {
+            return Err(C08ParityFailureForTest::new(
+                case,
+                C08ParityFailureStageForTest::CaptureGrid,
+                "the ordered transform probe accidentally commutes",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[test]
@@ -34503,7 +35109,23 @@ fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
     )
     .expect("the focused bounded Vello capture must be readable after submission");
 
-    let mut mismatch_count = 0_usize;
+    let (mismatch_count, first) =
+        c08_tile_translation_mismatches(&direct.image, &local_image, grid);
+    local
+        .release()
+        .expect("the focused capture lease must release");
+    assert_eq!(
+        mismatch_count, 0,
+        "internal Vello MSAA8 LUT-boundary coverage changed under integer tile translation: first={first:?}"
+    );
+}
+
+fn c08_tile_translation_mismatches(
+    direct: &ImageBuffer,
+    local: &ImageBuffer,
+    grid: C08ExpectedCaptureGridForTest,
+) -> (usize, Option<C08TileTranslationMismatchForTest>) {
+    let mut count = 0usize;
     let mut first = None;
     for local_y in 0..grid.extent.height() {
         for local_x in 0..grid.extent.width() {
@@ -34511,15 +35133,15 @@ fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
                 .expect("the focused identity capture must remain on the positive surface");
             let surface_y = u32::try_from(i64::from(grid.device_origin.1) + i64::from(local_y))
                 .expect("the focused identity capture must remain on the positive surface");
-            let direct_pixel = pixel_rgba(&direct.image, surface_x, surface_y);
-            let local_pixel = pixel_rgba(&local_image, local_x, local_y);
+            let direct_pixel = pixel_rgba(direct, surface_x, surface_y);
+            let local_pixel = pixel_rgba(local, local_x, local_y);
             let error = c08_metric_error_for_test(
                 direct_pixel,
                 local_pixel,
                 C08PixelMetricForTest::HighPrecisionStraightRgba8,
             );
             if error.iter().any(|channel| *channel > 4) {
-                mismatch_count = mismatch_count.saturating_add(1);
+                count = count.saturating_add(1);
                 first.get_or_insert(C08TileTranslationMismatchForTest {
                     surface_coordinate: C08PixelCoordinateForTest {
                         x: surface_x,
@@ -34536,13 +35158,7 @@ fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
             }
         }
     }
-    local
-        .release()
-        .expect("the focused capture lease must release");
-    assert_eq!(
-        mismatch_count, 0,
-        "internal Vello MSAA8 LUT-boundary coverage changed under integer tile translation: first={first:?}"
-    );
+    (count, first)
 }
 
 fn production_rust_sources_for_static_reachability() -> Vec<(String, String)> {
@@ -34595,101 +35211,99 @@ struct StaticSourceScanForTest {
     code_mask: Vec<bool>,
 }
 
+fn mask_static_non_code(code_only: &mut [u8], code_mask: &mut [bool], start: usize, end: usize) {
+    for (byte, is_code) in code_only[start..end]
+        .iter_mut()
+        .zip(&mut code_mask[start..end])
+    {
+        *is_code = false;
+        if !matches!(*byte, b'\n' | b'\r') {
+            *byte = b' ';
+        }
+    }
+}
+
+fn static_raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let prefix_length = if bytes.get(start) == Some(&b'r') {
+        1
+    } else if matches!(bytes.get(start..start + 2), Some(b"br" | b"cr")) {
+        2
+    } else {
+        return None;
+    };
+    let mut delimiter = start + prefix_length;
+    while bytes.get(delimiter) == Some(&b'#') {
+        delimiter += 1;
+    }
+    if bytes.get(delimiter) != Some(&b'"') {
+        return None;
+    }
+    let hash_count = delimiter - start - prefix_length;
+    let mut cursor = delimiter + 1;
+    while cursor < bytes.len() {
+        if bytes[cursor] == b'"' {
+            let end = cursor + 1 + hash_count;
+            if end <= bytes.len() && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#') {
+                return Some(end);
+            }
+        }
+        cursor += 1;
+    }
+    panic!("static reachability found an unterminated raw string");
+}
+
+fn static_cooked_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    let quote = if bytes.get(start) == Some(&b'"') {
+        start
+    } else if matches!(bytes.get(start..start + 2), Some(b"b\"" | b"c\"")) {
+        start + 1
+    } else {
+        return None;
+    };
+    let mut cursor = quote + 1;
+    while cursor < bytes.len() {
+        match bytes[cursor] {
+            b'\\' => cursor += 2,
+            b'"' => return Some(cursor + 1),
+            _ => cursor += 1,
+        }
+    }
+    panic!("static reachability found an unterminated cooked string");
+}
+
+fn static_char_literal_end(source: &str, start: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let quote = if bytes.get(start) == Some(&b'\'') {
+        start
+    } else if bytes.get(start..start + 2) == Some(b"b'") {
+        start + 1
+    } else {
+        return None;
+    };
+    let value = quote + 1;
+    let after_value = match bytes.get(value)? {
+        b'\\' => match bytes.get(value + 1)? {
+            b'x' => {
+                let digits = bytes.get(value + 2..value + 4)?;
+                if !digits.iter().all(u8::is_ascii_hexdigit) {
+                    return None;
+                }
+                value + 4
+            }
+            b'u' if bytes.get(value + 2) == Some(&b'{') => {
+                let closing = bytes[value + 3..].iter().position(|byte| *byte == b'}')? + value + 3;
+                closing + 1
+            }
+            _ => value + 2,
+        },
+        b'\'' | b'\n' | b'\r' => return None,
+        _ => value + source[value..].chars().next()?.len_utf8(),
+    };
+    (bytes.get(after_value) == Some(&b'\'')).then_some(after_value + 1)
+}
+
 impl StaticSourceScanForTest {
     fn new(source: &str) -> Self {
-        fn mask_non_code(code_only: &mut [u8], code_mask: &mut [bool], start: usize, end: usize) {
-            for (byte, is_code) in code_only[start..end]
-                .iter_mut()
-                .zip(&mut code_mask[start..end])
-            {
-                *is_code = false;
-                if !matches!(*byte, b'\n' | b'\r') {
-                    *byte = b' ';
-                }
-            }
-        }
-
-        fn raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
-            let prefix_length = if bytes.get(start) == Some(&b'r') {
-                1
-            } else if matches!(bytes.get(start..start + 2), Some(b"br" | b"cr")) {
-                2
-            } else {
-                return None;
-            };
-            let mut delimiter = start + prefix_length;
-            while bytes.get(delimiter) == Some(&b'#') {
-                delimiter += 1;
-            }
-            if bytes.get(delimiter) != Some(&b'"') {
-                return None;
-            }
-            let hash_count = delimiter - start - prefix_length;
-            let mut cursor = delimiter + 1;
-            while cursor < bytes.len() {
-                if bytes[cursor] == b'"' {
-                    let end = cursor + 1 + hash_count;
-                    if end <= bytes.len() && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#')
-                    {
-                        return Some(end);
-                    }
-                }
-                cursor += 1;
-            }
-            panic!("static reachability found an unterminated raw string");
-        }
-
-        fn cooked_string_end(bytes: &[u8], start: usize) -> Option<usize> {
-            let quote = if bytes.get(start) == Some(&b'"') {
-                start
-            } else if matches!(bytes.get(start..start + 2), Some(b"b\"" | b"c\"")) {
-                start + 1
-            } else {
-                return None;
-            };
-            let mut cursor = quote + 1;
-            while cursor < bytes.len() {
-                match bytes[cursor] {
-                    b'\\' => cursor += 2,
-                    b'"' => return Some(cursor + 1),
-                    _ => cursor += 1,
-                }
-            }
-            panic!("static reachability found an unterminated cooked string");
-        }
-
-        fn char_literal_end(source: &str, start: usize) -> Option<usize> {
-            let bytes = source.as_bytes();
-            let quote = if bytes.get(start) == Some(&b'\'') {
-                start
-            } else if bytes.get(start..start + 2) == Some(b"b'") {
-                start + 1
-            } else {
-                return None;
-            };
-            let value = quote + 1;
-            let after_value = match bytes.get(value)? {
-                b'\\' => match bytes.get(value + 1)? {
-                    b'x' => {
-                        let digits = bytes.get(value + 2..value + 4)?;
-                        if !digits.iter().all(u8::is_ascii_hexdigit) {
-                            return None;
-                        }
-                        value + 4
-                    }
-                    b'u' if bytes.get(value + 2) == Some(&b'{') => {
-                        let closing =
-                            bytes[value + 3..].iter().position(|byte| *byte == b'}')? + value + 3;
-                        closing + 1
-                    }
-                    _ => value + 2,
-                },
-                b'\'' | b'\n' | b'\r' => return None,
-                _ => value + source[value..].chars().next()?.len_utf8(),
-            };
-            (bytes.get(after_value) == Some(&b'\'')).then_some(after_value + 1)
-        }
-
         let bytes = source.as_bytes();
         let mut code_only = bytes.to_vec();
         let mut code_mask = vec![true; bytes.len()];
@@ -34700,7 +35314,7 @@ impl StaticSourceScanForTest {
                     .iter()
                     .position(|byte| *byte == b'\n')
                     .map_or(bytes.len(), |offset| cursor + 2 + offset);
-                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
@@ -34722,22 +35336,22 @@ impl StaticSourceScanForTest {
                     depth, 0,
                     "static reachability found an unterminated block comment"
                 );
-                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
-            if let Some(end) = raw_string_end(bytes, cursor) {
-                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+            if let Some(end) = static_raw_string_end(bytes, cursor) {
+                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
-            if let Some(end) = cooked_string_end(bytes, cursor) {
-                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+            if let Some(end) = static_cooked_string_end(bytes, cursor) {
+                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
-            if let Some(end) = char_literal_end(source, cursor) {
-                mask_non_code(&mut code_only, &mut code_mask, cursor, end);
+            if let Some(end) = static_char_literal_end(source, cursor) {
+                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
@@ -34877,79 +35491,8 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
     let renderer_code = code_source("src/renderer.rs");
     let transaction_code = code_source("src/gpu_transaction.rs");
 
-    for marker in [
-        "map_async",
-        "MAP_READ",
-        "PollType::Wait",
-        "get_mapped_range",
-        "copy_texture_to_buffer",
-        "decode_padded_rows",
-    ] {
-        let owners = code_sources
-            .iter()
-            .filter_map(|(path, candidate)| candidate.contains(marker).then_some(path.as_str()))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            owners,
-            ["src/readback.rs"],
-            "{marker} must remain confined to the private readback owner"
-        );
-    }
-
-    let queue_submission = ["queue", ".submit"].concat();
-    let submission_owners = code_sources
-        .iter()
-        .filter_map(|(path, candidate)| {
-            candidate
-                .contains(&queue_submission)
-                .then_some(path.as_str())
-        })
-        .collect::<Vec<_>>();
-    assert_eq!(
-        submission_owners,
-        ["src/gpu_transaction.rs"],
-        "every owned queue submission must remain transaction-owned"
-    );
-    assert!(
-        transaction_code.matches(&queue_submission).count() >= 3,
-        "the static submission owner must include render, readback, and internal Vello submissions"
-    );
-
-    for path in ["src/readback.rs", "src/backend.rs", "src/renderer.rs"] {
-        let candidate = code_source(path);
-        for forbidden in [
-            "wait_indefinitely",
-            "std::sync::mpsc::channel",
-            ".recv()",
-            "pollster::block_on",
-        ] {
-            assert!(
-                !candidate.contains(forbidden),
-                "{path} must not contain the blocking readback path {forbidden}"
-            );
-        }
-    }
-
-    let native_helper_marker =
-        "#[cfg(not(target_arch = \"wasm32\"))]\nfn spawn_native_poll_helper(";
-    let native_helper = source_braced_block_from_marker(readback_source, native_helper_marker);
-    let device_poll = ["device", ".poll("].concat();
-    assert!(native_helper.contains(&device_poll));
-    assert!(native_helper.contains("wgpu::PollType::Wait {"));
-    assert!(native_helper.contains("submission_index: Some(submission_index.clone())"));
-    assert!(native_helper.contains("timeout: Some(Duration::from_millis(50))"));
-    assert_eq!(
-        readback_code.matches(&device_poll).count(),
-        native_helper.matches(&device_poll).count(),
-        "Device polling must be reachable only through the cfg-native helper"
-    );
-
-    let wasm_branch_marker = "#[cfg(target_arch = \"wasm32\")]\n        {";
-    let wasm_branch = source_braced_block_from_marker(readback_source, wasm_branch_marker);
-    assert!(wasm_branch.contains("let _ = (device, submission_index);"));
-    assert!(!wasm_branch.contains(&device_poll));
-    assert!(!wasm_branch.contains("PollType::"));
-    assert!(!wasm_branch.contains("spawn_native_poll_helper"));
+    assert_readback_static_owners(&code_sources, transaction_code);
+    assert_native_and_wasm_poll_paths(readback_source, readback_code);
 
     assert!(readback_code.contains("pub(crate) async fn read_texture_rgba("));
     assert!(renderer_code.contains("pub async fn read_headless("));
@@ -35001,6 +35544,87 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         "ImageBuffer fields must remain private"
     );
 
+    assert_required_host_download_routes(renderer_download_routes);
+}
+
+fn assert_readback_static_owners(code_sources: &[(String, String)], transaction_code: &str) {
+    for marker in [
+        "map_async",
+        "MAP_READ",
+        "PollType::Wait",
+        "get_mapped_range",
+        "copy_texture_to_buffer",
+        "decode_padded_rows",
+    ] {
+        let owners = code_sources
+            .iter()
+            .filter_map(|(path, candidate)| candidate.contains(marker).then_some(path.as_str()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            owners,
+            ["src/readback.rs"],
+            "{marker} must remain confined to the private readback owner"
+        );
+    }
+    let submission = ["queue", ".submit"].concat();
+    let owners = code_sources
+        .iter()
+        .filter_map(|(path, candidate)| candidate.contains(&submission).then_some(path.as_str()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        owners,
+        ["src/gpu_transaction.rs"],
+        "every owned queue submission must remain transaction-owned"
+    );
+    assert!(
+        transaction_code.matches(&submission).count() >= 3,
+        "the static submission owner must include render, readback, and internal Vello submissions"
+    );
+    for (path, candidate) in code_sources.iter().filter(|(path, _)| {
+        ["src/readback.rs", "src/backend.rs", "src/renderer.rs"].contains(&path.as_str())
+    }) {
+        assert_no_blocking_readback_path(path, candidate);
+    }
+}
+
+fn assert_no_blocking_readback_path(path: &str, candidate: &str) {
+    for forbidden in [
+        "wait_indefinitely",
+        "std::sync::mpsc::channel",
+        ".recv()",
+        "pollster::block_on",
+    ] {
+        assert!(
+            !candidate.contains(forbidden),
+            "{path} must not contain the blocking readback path {forbidden}"
+        );
+    }
+}
+
+fn assert_native_and_wasm_poll_paths(readback_source: &str, readback_code: &str) {
+    let marker = "#[cfg(not(target_arch = \"wasm32\"))]\nfn spawn_native_poll_helper(";
+    let native = source_braced_block_from_marker(readback_source, marker);
+    let device_poll = ["device", ".poll("].concat();
+    assert!(native.contains(&device_poll));
+    assert!(native.contains("wgpu::PollType::Wait {"));
+    assert!(native.contains("submission_index: Some(submission_index.clone())"));
+    assert!(native.contains("timeout: Some(Duration::from_millis(50))"));
+    assert_eq!(
+        readback_code.matches(&device_poll).count(),
+        native.matches(&device_poll).count(),
+        "Device polling must be reachable only through the cfg-native helper"
+    );
+    let wasm = source_braced_block_from_marker(
+        readback_source,
+        "#[cfg(target_arch = \"wasm32\")]\n        {",
+    );
+    assert!(wasm.contains("let _ = (device, submission_index);"));
+    assert!(!wasm.contains(&device_poll));
+    assert!(!wasm.contains("PollType::"));
+    assert!(!wasm.contains("spawn_native_poll_helper"));
+}
+
+fn assert_required_host_download_routes(renderer_routes: [(&'static str, &'static str); 3]) {
     let tests_source = include_str!("tests.rs");
     let tests_code = source_code_only_for_static_reachability(tests_source);
     let removed_skip_helper = ["render_scene_to_headless_or_skip", "_no_adapter"].concat();
@@ -35013,37 +35637,33 @@ fn readback_static_paths_confine_map_poll_and_copy_submission() {
         tests_code.contains(&format!("fn {contract_test}()")),
         "contract-only behavior must remain separate in {contract_test}"
     );
-    let required_headless_marker = ["fn render_scene_to_required_", "headless("].concat();
-    let required_headless_helper =
-        source_braced_block_from_marker(tests_source, &required_headless_marker);
-    assert!(!required_headless_helper.contains("return;"));
-    assert!(required_headless_helper.contains(".expect("));
+    let marker = ["fn render_scene_to_required_", "headless("].concat();
+    let required = source_braced_block_from_marker(tests_source, &marker);
+    assert!(!required.contains("return;"));
+    assert!(required.contains(".expect("));
     assert!(
-        required_headless_helper.contains(".read_headless("),
+        required.contains(".read_headless("),
         "the required-headless helper must execute Renderer::read_headless"
     );
-    let required_download_routes = renderer_download_routes
+    let routes = renderer_routes
         .map(|(_, call)| call)
         .into_iter()
         .chain(["render_scene_to_required_headless("])
         .collect::<Vec<_>>();
-    for required_host_test in [
+    for name in [
         "offscreen_local_vello_scene_renders_to_texture_when_gpu_context_is_available",
         "offscreen_reuses_resources_across_repeated_bounded_requests",
         "shader_clear_fill_pass_encodes_when_gpu_context_is_available",
         "ahem_font_data_renders_ascent_and_descent_glyph_bands",
     ] {
-        let body =
-            source_braced_block_from_marker(tests_source, &format!("fn {required_host_test}()"));
+        let body = source_braced_block_from_marker(tests_source, &format!("fn {name}()"));
         assert!(
             !body.contains("return;"),
-            "required-host test {required_host_test} must not pass by returning early"
+            "required-host test {name} must not pass by returning early"
         );
         assert!(
-            required_download_routes
-                .iter()
-                .any(|route| body.contains(route)),
-            "required-host test {required_host_test} must execute a recognized download route"
+            routes.iter().any(|route| body.contains(route)),
+            "required-host test {name} must execute a recognized download route"
         );
     }
 }

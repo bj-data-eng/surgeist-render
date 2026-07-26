@@ -401,123 +401,8 @@ impl VelloSceneObservation<'_> {
     pub(crate) fn solid_path_draws_for_test(&self) -> Option<Vec<VelloPathDrawObservationForTest>> {
         // Decode the emitted Vello streams themselves so this observation cannot
         // stay green when a scene method stops recording one of these facts.
-        let mut paths = Vec::with_capacity(self.encoding.n_paths as usize);
-        let mut geometry = Vec::new();
-        let mut path_data_index = 0;
-        let mut transform_index = 0;
-        let mut style_index = 0;
-        let mut current_transform = None;
-        let mut current_fill_rule = None;
-        let mut starts_subpath = true;
-        let mut subpath_start = None;
-
-        for tag in &self.encoding.path_tags {
-            if *tag == PathTag::TRANSFORM {
-                let transform = *self.encoding.transforms.get(transform_index)?;
-                transform_index += 1;
-                current_transform = Some([
-                    transform.matrix[0],
-                    transform.matrix[1],
-                    transform.matrix[2],
-                    transform.matrix[3],
-                    transform.translation[0],
-                    transform.translation[1],
-                ]);
-            } else if *tag == PathTag::STYLE {
-                let style = *self.encoding.styles.get(style_index)?;
-                style_index += 1;
-                current_fill_rule = Some(vello_fill_rule_for_test(style)?);
-            } else if *tag == PathTag::PATH {
-                if !starts_subpath {
-                    return None;
-                }
-                paths.push((
-                    current_transform?,
-                    current_fill_rule?,
-                    std::mem::take(&mut geometry),
-                ));
-            } else if tag.is_path_segment() {
-                if !tag.is_f32() {
-                    return None;
-                }
-                if starts_subpath {
-                    let start =
-                        read_vello_point_for_test(&self.encoding.path_data, &mut path_data_index)?;
-                    geometry.push(VelloPathElementObservationForTest::MoveTo(start));
-                    subpath_start = Some(start);
-                    starts_subpath = false;
-                }
-
-                let element = match tag.path_segment_type().0 {
-                    1 => VelloPathElementObservationForTest::LineTo(read_vello_point_for_test(
-                        &self.encoding.path_data,
-                        &mut path_data_index,
-                    )?),
-                    2 => VelloPathElementObservationForTest::QuadTo(
-                        read_vello_point_for_test(&self.encoding.path_data, &mut path_data_index)?,
-                        read_vello_point_for_test(&self.encoding.path_data, &mut path_data_index)?,
-                    ),
-                    3 => VelloPathElementObservationForTest::CubicTo(
-                        read_vello_point_for_test(&self.encoding.path_data, &mut path_data_index)?,
-                        read_vello_point_for_test(&self.encoding.path_data, &mut path_data_index)?,
-                        read_vello_point_for_test(&self.encoding.path_data, &mut path_data_index)?,
-                    ),
-                    _ => return None,
-                };
-                geometry.push(element);
-
-                if tag.is_subpath_end() {
-                    if matches!(
-                        geometry.last(),
-                        Some(VelloPathElementObservationForTest::LineTo(point))
-                            if Some(*point) == subpath_start
-                    ) {
-                        geometry.pop();
-                    }
-                    geometry.push(VelloPathElementObservationForTest::Close);
-                    starts_subpath = true;
-                    subpath_start = None;
-                }
-            } else {
-                return None;
-            }
-        }
-
-        if path_data_index != self.encoding.path_data.len()
-            || transform_index != self.encoding.transforms.len()
-            || style_index != self.encoding.styles.len()
-            || paths.len() != self.encoding.draw_tags.len()
-            || paths.len() != self.encoding.n_paths as usize
-        {
-            return None;
-        }
-
-        let mut draw_data_index = 0;
-        let draws = self
-            .encoding
-            .draw_tags
-            .iter()
-            .map(|tag| {
-                if *tag == DrawTag::BEGIN_CLIP {
-                    let blend_mode = *self.encoding.draw_data.get(draw_data_index)?;
-                    let alpha = f32::from_bits(*self.encoding.draw_data.get(draw_data_index + 1)?);
-                    draw_data_index += 2;
-                    Some(VelloDrawObservationForTest::BeginClip { blend_mode, alpha })
-                } else if *tag == DrawTag::COLOR {
-                    let rgba = *self.encoding.draw_data.get(draw_data_index)?;
-                    draw_data_index += 1;
-                    Some(VelloDrawObservationForTest::SolidColor { rgba })
-                } else if *tag == DrawTag::END_CLIP {
-                    Some(VelloDrawObservationForTest::EndClip)
-                } else {
-                    None
-                }
-            })
-            .collect::<Option<Vec<_>>>()?;
-        if draw_data_index != self.encoding.draw_data.len() {
-            return None;
-        }
-
+        let paths = decode_vello_paths_for_test(self.encoding)?;
+        let draws = decode_vello_draws_for_test(self.encoding)?;
         Some(
             paths
                 .into_iter()
@@ -533,6 +418,142 @@ impl VelloSceneObservation<'_> {
                 .collect(),
         )
     }
+}
+
+#[cfg(test)]
+type EncodedVelloPathForTest = (
+    [f32; 6],
+    VelloFillRuleObservationForTest,
+    Vec<VelloPathElementObservationForTest>,
+);
+
+#[cfg(test)]
+fn decode_vello_paths_for_test(encoding: &Encoding) -> Option<Vec<EncodedVelloPathForTest>> {
+    let mut paths = Vec::with_capacity(encoding.n_paths as usize);
+    let mut geometry = Vec::new();
+    let mut path_data_index = 0;
+    let mut transform_index = 0;
+    let mut style_index = 0;
+    let mut current_transform = None;
+    let mut current_fill_rule = None;
+    let mut starts_subpath = true;
+    let mut subpath_start = None;
+
+    for tag in &encoding.path_tags {
+        if *tag == PathTag::TRANSFORM {
+            let transform = *encoding.transforms.get(transform_index)?;
+            transform_index += 1;
+            current_transform = Some([
+                transform.matrix[0],
+                transform.matrix[1],
+                transform.matrix[2],
+                transform.matrix[3],
+                transform.translation[0],
+                transform.translation[1],
+            ]);
+        } else if *tag == PathTag::STYLE {
+            let style = *encoding.styles.get(style_index)?;
+            style_index += 1;
+            current_fill_rule = Some(vello_fill_rule_for_test(style)?);
+        } else if *tag == PathTag::PATH {
+            if !starts_subpath {
+                return None;
+            }
+            paths.push((
+                current_transform?,
+                current_fill_rule?,
+                std::mem::take(&mut geometry),
+            ));
+        } else if tag.is_path_segment() {
+            if !tag.is_f32() {
+                return None;
+            }
+            if starts_subpath {
+                let start = read_vello_point_for_test(&encoding.path_data, &mut path_data_index)?;
+                geometry.push(VelloPathElementObservationForTest::MoveTo(start));
+                subpath_start = Some(start);
+                starts_subpath = false;
+            }
+            geometry.push(decode_vello_path_segment_for_test(
+                *tag,
+                &encoding.path_data,
+                &mut path_data_index,
+            )?);
+            if tag.is_subpath_end() {
+                if matches!(
+                    geometry.last(),
+                    Some(VelloPathElementObservationForTest::LineTo(point))
+                        if Some(*point) == subpath_start
+                ) {
+                    geometry.pop();
+                }
+                geometry.push(VelloPathElementObservationForTest::Close);
+                starts_subpath = true;
+                subpath_start = None;
+            }
+        } else {
+            return None;
+        }
+    }
+
+    if path_data_index != encoding.path_data.len()
+        || transform_index != encoding.transforms.len()
+        || style_index != encoding.styles.len()
+        || paths.len() != encoding.draw_tags.len()
+        || paths.len() != encoding.n_paths as usize
+    {
+        return None;
+    }
+    Some(paths)
+}
+
+#[cfg(test)]
+fn decode_vello_path_segment_for_test(
+    tag: PathTag,
+    data: &[u32],
+    index: &mut usize,
+) -> Option<VelloPathElementObservationForTest> {
+    match tag.path_segment_type().0 {
+        1 => Some(VelloPathElementObservationForTest::LineTo(
+            read_vello_point_for_test(data, index)?,
+        )),
+        2 => Some(VelloPathElementObservationForTest::QuadTo(
+            read_vello_point_for_test(data, index)?,
+            read_vello_point_for_test(data, index)?,
+        )),
+        3 => Some(VelloPathElementObservationForTest::CubicTo(
+            read_vello_point_for_test(data, index)?,
+            read_vello_point_for_test(data, index)?,
+            read_vello_point_for_test(data, index)?,
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+fn decode_vello_draws_for_test(encoding: &Encoding) -> Option<Vec<VelloDrawObservationForTest>> {
+    let mut draw_data_index = 0;
+    let draws = encoding
+        .draw_tags
+        .iter()
+        .map(|tag| {
+            if *tag == DrawTag::BEGIN_CLIP {
+                let blend_mode = *encoding.draw_data.get(draw_data_index)?;
+                let alpha = f32::from_bits(*encoding.draw_data.get(draw_data_index + 1)?);
+                draw_data_index += 2;
+                Some(VelloDrawObservationForTest::BeginClip { blend_mode, alpha })
+            } else if *tag == DrawTag::COLOR {
+                let rgba = *encoding.draw_data.get(draw_data_index)?;
+                draw_data_index += 1;
+                Some(VelloDrawObservationForTest::SolidColor { rgba })
+            } else if *tag == DrawTag::END_CLIP {
+                Some(VelloDrawObservationForTest::EndClip)
+            } else {
+                None
+            }
+        })
+        .collect::<Option<Vec<_>>>()?;
+    (draw_data_index == encoding.draw_data.len()).then_some(draws)
 }
 
 #[cfg(test)]

@@ -272,22 +272,127 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         image_atlas,
         antialiasing,
     } = inputs;
-    let info_bin_data = buffer(
+    let (info_bin_data, tile, segments, per_tile_command_list) =
+        allocate_coarse_outputs(recording, &sizes)?;
+    let path_monoids = record_path_scan(recording, &workgroups, &sizes, scene, config)?;
+
+    let (path_bboxes, bump, lines, draw_monoids, clip_bboxes) = record_draw_and_clip(
         recording,
-        BufferRole::InfoBinData,
-        sizes.bin_data.size_in_bytes(),
+        &workgroups,
+        &sizes,
+        scene,
+        config,
+        path_monoids,
+        info_bin_data,
     )?;
-    let tile = buffer(recording, BufferRole::Tile, sizes.tiles.size_in_bytes())?;
-    let segments = buffer(
+
+    let draw_bboxes = buffer(
         recording,
-        BufferRole::Segments,
-        sizes.segments.size_in_bytes(),
+        BufferRole::DrawBboxes,
+        sizes.draw_bboxes.size_in_bytes(),
     )?;
-    let per_tile_command_list = buffer(
+    let bin_headers = buffer(
         recording,
-        BufferRole::PerTileCommandList,
-        sizes.ptcl.size_in_bytes(),
+        BufferRole::BinHeaders,
+        sizes.bin_headers.size_in_bytes(),
     )?;
+    recording.record_coarse(CoarseDispatch::binning(
+        workgroups.binning,
+        BinningBindings {
+            config,
+            draw_monoids,
+            path_bboxes,
+            clip_bboxes,
+            draw_bboxes,
+            bump,
+            info_bin_data,
+            bin_headers,
+        },
+    ));
+    recording.release(path_bboxes);
+    recording.release(clip_bboxes);
+
+    let paths = buffer(recording, BufferRole::Paths, sizes.paths.size_in_bytes())?;
+    recording.record_coarse(CoarseDispatch::tile_alloc(
+        workgroups.tile_alloc,
+        config,
+        scene,
+        draw_bboxes,
+        bump,
+        paths,
+        tile,
+    ));
+    recording.release(draw_bboxes);
+    recording.release(path_monoids);
+
+    record_path_tiling(
+        recording,
+        &workgroups,
+        &sizes,
+        PathTilingInputs {
+            config,
+            scene,
+            draw_monoids,
+            bin_headers,
+            info_bin_data,
+            paths,
+            tile,
+            segments,
+            lines,
+            bump,
+            per_tile_command_list,
+        },
+    )?;
+
+    Ok(FineSchedule {
+        variant: fine_variant(antialiasing),
+        workgroups: workgroups.fine,
+        config,
+        tile,
+        segments,
+        per_tile_command_list,
+        gradient_image,
+        info_bin_data,
+        image_atlas,
+        blend_spill: buffer(
+            recording,
+            BufferRole::BlendSpill,
+            sizes.blend_spill.size_in_bytes(),
+        )?,
+    })
+}
+
+fn allocate_coarse_outputs(
+    recording: &mut RecordingBuilder,
+    sizes: &vello_encoding::BufferSizes,
+) -> Result<(BufferHandle, BufferHandle, BufferHandle, BufferHandle)> {
+    Ok((
+        buffer(
+            recording,
+            BufferRole::InfoBinData,
+            sizes.bin_data.size_in_bytes(),
+        )?,
+        buffer(recording, BufferRole::Tile, sizes.tiles.size_in_bytes())?,
+        buffer(
+            recording,
+            BufferRole::Segments,
+            sizes.segments.size_in_bytes(),
+        )?,
+        buffer(
+            recording,
+            BufferRole::PerTileCommandList,
+            sizes.ptcl.size_in_bytes(),
+        )?,
+    ))
+}
+
+fn record_path_scan(
+    recording: &mut RecordingBuilder,
+    workgroups: &vello_encoding::WorkgroupCounts,
+    sizes: &vello_encoding::BufferSizes,
+    scene: BufferHandle,
+    config: BufferHandle,
+) -> Result<BufferHandle> {
     let path_reduced = buffer(
         recording,
         BufferRole::PathReduced,
@@ -299,7 +404,6 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         scene,
         path_reduced,
     ));
-
     let mut path_tag_parent = path_reduced;
     let mut large_path_scan = None;
     if workgroups.use_large_path_scan {
@@ -327,7 +431,6 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         path_tag_parent = path_reduced_scan;
         large_path_scan = Some((path_reduced2, path_reduced_scan));
     }
-
     let path_monoids = buffer(
         recording,
         BufferRole::PathMonoids,
@@ -355,7 +458,117 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         recording.release(path_reduced2);
         recording.release(path_reduced_scan);
     }
+    Ok(path_monoids)
+}
 
+type DrawAndClipBuffers = (
+    BufferHandle,
+    BufferHandle,
+    BufferHandle,
+    BufferHandle,
+    BufferHandle,
+);
+
+struct PathTilingInputs {
+    config: BufferHandle,
+    scene: BufferHandle,
+    draw_monoids: BufferHandle,
+    bin_headers: BufferHandle,
+    info_bin_data: BufferHandle,
+    paths: BufferHandle,
+    tile: BufferHandle,
+    segments: BufferHandle,
+    lines: BufferHandle,
+    bump: BufferHandle,
+    per_tile_command_list: BufferHandle,
+}
+
+fn record_path_tiling(
+    recording: &mut RecordingBuilder,
+    workgroups: &vello_encoding::WorkgroupCounts,
+    sizes: &vello_encoding::BufferSizes,
+    inputs: PathTilingInputs,
+) -> Result<()> {
+    let indirect_count = buffer(
+        recording,
+        BufferRole::IndirectCount,
+        sizes.indirect_count.size_in_bytes(),
+    )?;
+    recording.record_coarse(CoarseDispatch::path_count_setup(
+        workgroups.path_count_setup,
+        inputs.bump,
+        indirect_count,
+    ));
+    let segment_counts = buffer(
+        recording,
+        BufferRole::SegmentCounts,
+        sizes.seg_counts.size_in_bytes(),
+    )?;
+    recording.record_coarse(CoarseDispatch::path_count(
+        indirect_count,
+        inputs.config,
+        inputs.bump,
+        inputs.lines,
+        inputs.paths,
+        inputs.tile,
+        segment_counts,
+    ));
+    recording.record_coarse(CoarseDispatch::backdrop(
+        workgroups.backdrop,
+        inputs.config,
+        inputs.bump,
+        inputs.paths,
+        inputs.tile,
+    ));
+    recording.record_coarse(CoarseDispatch::coarse(
+        workgroups.coarse,
+        CoarseRasterBindings {
+            config: inputs.config,
+            scene: inputs.scene,
+            draw_monoids: inputs.draw_monoids,
+            bin_headers: inputs.bin_headers,
+            info_bin_data: inputs.info_bin_data,
+            paths: inputs.paths,
+            tile: inputs.tile,
+            bump: inputs.bump,
+            per_tile_command_list: inputs.per_tile_command_list,
+        },
+    ));
+    recording.release(inputs.draw_monoids);
+    recording.release(inputs.bin_headers);
+    recording.release(inputs.scene);
+    recording.record_coarse(CoarseDispatch::path_tiling_setup(
+        workgroups.path_tiling_setup,
+        inputs.bump,
+        indirect_count,
+        inputs.per_tile_command_list,
+    ));
+    recording.record_coarse(CoarseDispatch::path_tiling(
+        indirect_count,
+        inputs.bump,
+        segment_counts,
+        inputs.lines,
+        inputs.paths,
+        inputs.tile,
+        inputs.segments,
+    ));
+    recording.release(indirect_count);
+    recording.release(segment_counts);
+    recording.release(inputs.lines);
+    recording.release(inputs.paths);
+    recording.release(inputs.bump);
+    Ok(())
+}
+
+fn record_draw_and_clip(
+    recording: &mut RecordingBuilder,
+    workgroups: &vello_encoding::WorkgroupCounts,
+    sizes: &vello_encoding::BufferSizes,
+    scene: BufferHandle,
+    config: BufferHandle,
+    path_monoids: BufferHandle,
+    info_bin_data: BufferHandle,
+) -> Result<DrawAndClipBuffers> {
     let path_bboxes = buffer(
         recording,
         BufferRole::PathBboxes,
@@ -416,7 +629,27 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
         },
     ));
     recording.release(draw_reduced);
+    let clip_bboxes = record_clip_stage(
+        recording,
+        workgroups,
+        sizes,
+        config,
+        path_bboxes,
+        draw_monoids,
+        clip_inputs,
+    )?;
+    Ok((path_bboxes, bump, lines, draw_monoids, clip_bboxes))
+}
 
+fn record_clip_stage(
+    recording: &mut RecordingBuilder,
+    workgroups: &vello_encoding::WorkgroupCounts,
+    sizes: &vello_encoding::BufferSizes,
+    config: BufferHandle,
+    path_bboxes: BufferHandle,
+    draw_monoids: BufferHandle,
+    clip_inputs: BufferHandle,
+) -> Result<BufferHandle> {
     let clip_elements = buffer(
         recording,
         BufferRole::ClipElements,
@@ -458,131 +691,7 @@ fn record_coarse(recording: &mut RecordingBuilder, inputs: CoarseInputs) -> Resu
     recording.release(clip_inputs);
     recording.release(clip_bics);
     recording.release(clip_elements);
-
-    let draw_bboxes = buffer(
-        recording,
-        BufferRole::DrawBboxes,
-        sizes.draw_bboxes.size_in_bytes(),
-    )?;
-    let bin_headers = buffer(
-        recording,
-        BufferRole::BinHeaders,
-        sizes.bin_headers.size_in_bytes(),
-    )?;
-    recording.record_coarse(CoarseDispatch::binning(
-        workgroups.binning,
-        BinningBindings {
-            config,
-            draw_monoids,
-            path_bboxes,
-            clip_bboxes,
-            draw_bboxes,
-            bump,
-            info_bin_data,
-            bin_headers,
-        },
-    ));
-    recording.release(path_bboxes);
-    recording.release(clip_bboxes);
-
-    let paths = buffer(recording, BufferRole::Paths, sizes.paths.size_in_bytes())?;
-    recording.record_coarse(CoarseDispatch::tile_alloc(
-        workgroups.tile_alloc,
-        config,
-        scene,
-        draw_bboxes,
-        bump,
-        paths,
-        tile,
-    ));
-    recording.release(draw_bboxes);
-    recording.release(path_monoids);
-
-    let indirect_count = buffer(
-        recording,
-        BufferRole::IndirectCount,
-        sizes.indirect_count.size_in_bytes(),
-    )?;
-    recording.record_coarse(CoarseDispatch::path_count_setup(
-        workgroups.path_count_setup,
-        bump,
-        indirect_count,
-    ));
-    let segment_counts = buffer(
-        recording,
-        BufferRole::SegmentCounts,
-        sizes.seg_counts.size_in_bytes(),
-    )?;
-    recording.record_coarse(CoarseDispatch::path_count(
-        indirect_count,
-        config,
-        bump,
-        lines,
-        paths,
-        tile,
-        segment_counts,
-    ));
-    recording.record_coarse(CoarseDispatch::backdrop(
-        workgroups.backdrop,
-        config,
-        bump,
-        paths,
-        tile,
-    ));
-    recording.record_coarse(CoarseDispatch::coarse(
-        workgroups.coarse,
-        CoarseRasterBindings {
-            config,
-            scene,
-            draw_monoids,
-            bin_headers,
-            info_bin_data,
-            paths,
-            tile,
-            bump,
-            per_tile_command_list,
-        },
-    ));
-    recording.release(draw_monoids);
-    recording.release(bin_headers);
-    recording.release(scene);
-    recording.record_coarse(CoarseDispatch::path_tiling_setup(
-        workgroups.path_tiling_setup,
-        bump,
-        indirect_count,
-        per_tile_command_list,
-    ));
-    recording.record_coarse(CoarseDispatch::path_tiling(
-        indirect_count,
-        bump,
-        segment_counts,
-        lines,
-        paths,
-        tile,
-        segments,
-    ));
-    recording.release(indirect_count);
-    recording.release(segment_counts);
-    recording.release(lines);
-    recording.release(paths);
-    recording.release(bump);
-
-    Ok(FineSchedule {
-        variant: fine_variant(antialiasing),
-        workgroups: workgroups.fine,
-        config,
-        tile,
-        segments,
-        per_tile_command_list,
-        gradient_image,
-        info_bin_data,
-        image_atlas,
-        blend_spill: buffer(
-            recording,
-            BufferRole::BlendSpill,
-            sizes.blend_spill.size_in_bytes(),
-        )?,
-    })
+    Ok(clip_bboxes)
 }
 
 fn record_fine(recording: &mut RecordingBuilder, fine: FineSchedule) -> Result<()> {

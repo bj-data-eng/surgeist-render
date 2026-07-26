@@ -1,5 +1,5 @@
 #[cfg(test)]
-use super::resource::WorkingFormat;
+use super::resource::{ResourceManagerObservationForTest, WorkingFormat};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -115,6 +115,132 @@ pub(crate) struct C08ForcedGraphCaptureForTest {
     pub(crate) texel_origin: Point,
     pub(crate) extent: PhysicalSize,
     pub(crate) raster_scale: f64,
+}
+
+#[cfg(test)]
+impl From<super::frame::ForcedC08GraphCaptureObservationForTest> for C08ForcedGraphCaptureForTest {
+    fn from(capture: super::frame::ForcedC08GraphCaptureObservationForTest) -> Self {
+        Self {
+            antialiasing: capture.antialiasing,
+            capture_transform: capture.capture_transform,
+            parent_to_surface: capture.parent_to_surface,
+            device_origin: capture.device_origin,
+            texel_origin: capture.texel_origin,
+            extent: capture.extent,
+            raster_scale: capture.raster_scale,
+        }
+    }
+}
+
+#[cfg(test)]
+struct ForcedC08PreparationForTest {
+    device_identity: DeviceSlotIdentity,
+    normalized: RenderCommands,
+    preparable: super::pass::C08PreparableGraph,
+    output_extent: PhysicalSize,
+    captures: Vec<C08ForcedGraphCaptureForTest>,
+}
+
+#[cfg(test)]
+fn preparation_resource_observation(
+    backend: &mut Backend,
+    identity: DeviceSlotIdentity,
+    missing: &'static str,
+) -> Result<ResourceManagerObservationForTest> {
+    backend
+        .ready_device_state_borrow_for_test(identity)
+        .ok_or_else(|| Error::new(BackendErrorCode::RenderFailed, missing))
+        .map(|ready| ready.internal_resource_manager_observation_for_test())
+}
+
+#[cfg(test)]
+fn preparation_preflight_is_atomic(
+    backend: &mut Backend,
+    identity: DeviceSlotIdentity,
+    lowered: &super::pass::LoweredGraphPlan,
+    policy: EffectQualityPolicy,
+) -> Result<bool> {
+    let before = preparation_resource_observation(
+        backend,
+        identity,
+        "ready device disappeared before preparation preflight",
+    )?;
+    let rejected = backend
+        .prepare_graph_resources(
+            identity,
+            lowered.with_duplicate_preparation_resource_for_test(),
+            policy,
+        )
+        .is_err();
+    let after = preparation_resource_observation(
+        backend,
+        identity,
+        "ready device disappeared after preparation preflight",
+    )?;
+    Ok(rejected && before == after)
+}
+
+#[cfg(test)]
+fn exercise_preparation_reuse(
+    backend: &mut Backend,
+    identity: DeviceSlotIdentity,
+    lowered: &super::pass::LoweredGraphPlan,
+    policy: EffectQualityPolicy,
+) -> Result<(super::pass::PreparedGraphExerciseObservationForTest, bool)> {
+    let (first_exercise, first_identities) = {
+        let mut prepared = backend.prepare_graph_resources(identity, lowered.clone(), policy)?;
+        let identities = prepared.allocation_identities_for_test();
+        let exercise = prepared.exercise_for_test()?;
+        let _ = prepared.finish()?;
+        (exercise, identities)
+    };
+    let after_first = preparation_resource_observation(
+        backend,
+        identity,
+        "ready device disappeared after first complete preparation",
+    )?;
+    let second_identities = {
+        let mut prepared = backend.prepare_graph_resources(identity, lowered.clone(), policy)?;
+        let identities = prepared.allocation_identities_for_test();
+        let _ = prepared.exercise_for_test()?;
+        let _ = prepared.finish()?;
+        identities
+    };
+    let after_second = preparation_resource_observation(
+        backend,
+        identity,
+        "ready device disappeared after repeated complete preparation",
+    )?;
+    let reuse = first_identities == second_identities
+        && after_second.payload_creation_attempts == after_first.payload_creation_attempts
+        && after_second.entry_count == after_first.entry_count
+        && after_second.retained_bytes == after_first.retained_bytes;
+    Ok((first_exercise, reuse))
+}
+
+#[cfg(test)]
+fn preparation_failure_cleanup(
+    backend: &mut Backend,
+    identity: DeviceSlotIdentity,
+    lowered: super::pass::LoweredGraphPlan,
+    policy: EffectQualityPolicy,
+) -> Result<bool> {
+    let early_finish_failed = {
+        let prepared = backend.prepare_graph_resources(identity, lowered.clone(), policy)?;
+        prepared.finish().is_err()
+    };
+    let after_finish = preparation_resource_observation(
+        backend,
+        identity,
+        "ready device disappeared after failed prepared finish",
+    )?;
+    drop(backend.prepare_graph_resources(identity, lowered, policy)?);
+    let after_drop = preparation_resource_observation(
+        backend,
+        identity,
+        "ready device disappeared after prepared cancellation",
+    )?;
+    Ok(early_finish_failed && after_finish.leased_count == 0 && after_drop.leased_count == 0)
 }
 
 #[cfg(test)]
@@ -782,6 +908,42 @@ impl Renderer {
         scene: &Scene,
         parameters: Parameters,
     ) -> Result<Stats> {
+        let device_identity = self.render_device_identity(surface)?;
+        let frame_start = Instant::now();
+        let encode_start = Instant::now();
+        let (normalized, execution) =
+            self.prepare_render_execution(surface, scene, parameters, device_identity)?;
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
+        let mut stats = Stats {
+            encode_time: Duration::ZERO,
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
+        stats.encode_time = encode_start.elapsed();
+        if parameters.debug || self.options.debug() {
+            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
+        }
+        let frame = self
+            .execute_render_frame(surface, execution, parameters, device_identity)
+            .await?;
+        self.publish_clean_render_frame(
+            surface,
+            device_identity,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+            frame_start,
+        )
+    }
+
+    fn render_device_identity(&mut self, surface: &Surface) -> Result<DeviceSlotIdentity> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
@@ -803,15 +965,16 @@ impl Renderer {
                 "no compatible wgpu adapter is available",
             ));
         }
+        Ok(device_identity)
+    }
 
-        let frame_start = Instant::now();
-        let encode_start = Instant::now();
-        let mut stats = Stats {
-            encode_time: Duration::ZERO,
-            render_time: Duration::ZERO,
-            present_time: Duration::ZERO,
-            ..Stats::default()
-        };
+    fn prepare_render_execution(
+        &mut self,
+        surface: &Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        device_identity: DeviceSlotIdentity,
+    ) -> Result<(RenderCommands, PreparedRendererExecution)> {
         #[cfg(test)]
         {
             self.preexecution_frame_gate_observation =
@@ -858,9 +1021,7 @@ impl Renderer {
             working_format,
             &capabilities,
         )?;
-        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
-            .await?;
-        let (normalized, execution) = match dispatch {
+        Ok(match dispatch {
             RendererFrameDispatch::DirectVello(normalized) => {
                 let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
                 (
@@ -871,14 +1032,16 @@ impl Renderer {
             RendererFrameDispatch::ExactGraph(graph) => {
                 (graph_source, PreparedRendererExecution::ExactGraph(graph))
             }
-        };
-        let mut uploaded_images = self.uploaded_images.clone();
-        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
-        stats.encode_time = encode_start.elapsed();
+        })
+    }
 
-        if parameters.debug || self.options.debug() {
-            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
-        }
+    async fn execute_render_frame(
+        &mut self,
+        surface: &mut Surface,
+        execution: PreparedRendererExecution,
+        parameters: Parameters,
+        device_identity: DeviceSlotIdentity,
+    ) -> Result<SurfaceFrameCommit> {
         let frame = {
             let backend = self
                 .backend
@@ -940,17 +1103,7 @@ impl Renderer {
             Err(error) => return Err(error),
             Ok(frame) => frame,
         };
-        self.publish_clean_render_frame(
-            surface,
-            device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
-            frame_start,
-        )
+        Ok(frame)
     }
 
     fn publish_clean_render_frame(
@@ -1017,110 +1170,25 @@ impl Renderer {
         working_format: WorkingFormat,
         capture_mapping: super::frame::ForcedC08CaptureMappingForTest,
     ) -> Result<C08ForcedGraphRenderResultForTest> {
-        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
-        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
-        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
-        surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
-        surface.ensure_renderable()?;
-        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
-        let device_identity = surface.device_identity().ok_or_else(|| {
-            Error::runtime_unavailable(
-                RuntimeOperation::SurfaceRendering,
-                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "the private C08 forced route requires a device-backed surface",
-            )
-        })?;
         let frame_start = Instant::now();
         let encode_start = Instant::now();
-        let normalized = scene.normalize(self.capabilities())?;
-        let context = FrameContext::try_new(
-            surface.size(),
-            surface.scale(),
-            self.options.antialiasing(),
-            parameters.base_color,
-        )?;
-        let graph = super::frame::forced_c08_graph_with_capture_mapping_for_test(
-            normalized.clone(),
-            context,
+        let ForcedC08PreparationForTest {
+            device_identity,
+            normalized,
+            preparable,
+            output_extent,
+            captures,
+        } = self.prepare_forced_c08_graph_for_test(
+            surface,
+            scene,
+            parameters,
+            working_format,
             capture_mapping,
         )?;
-        let captures = graph.forced_capture_observations_for_test();
-        let capabilities = self
-            .backend
-            .as_mut()
-            .ok_or_else(|| {
-                Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "the private C08 forced route requires a renderer backend",
-                )
-            })?
-            .device_capabilities(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "the private C08 forced route lost immutable device capabilities",
-                )
-            })?;
-        let output_format = runtime_surface_format(surface);
-        let preparable = match self.classify_frame_dispatch(
-            FramePlan::GpuGraph(graph),
-            output_format,
-            ExecutableGraphWorkingFormatRequest::Exact(working_format),
-            &capabilities,
-        )? {
-            RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(preparable)) => preparable,
-            RendererFrameDispatch::DirectVello(_)
-            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(_))
-            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C10(_)) => {
-                return Err(Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "the private forced graph is outside the exact executable C08 subset",
-                ));
-            }
-        };
-        let output_extent = preparable.output_extent()?;
-        let prepared_capture_grids = preparable.capture_grids_for_test();
-        if captures.len() != prepared_capture_grids.len()
-            || captures
-                .iter()
-                .zip(&prepared_capture_grids)
-                .any(|(capture, prepared)| {
-                    capture.texel_origin != prepared.texel_origin
-                        || capture.extent != prepared.extent
-                        || capture.raster_scale != prepared.raster_scale
-                })
-        {
-            return Err(Error::new(
-                BackendErrorCode::RenderFailed,
-                "the prepared C08 capture grid differs from the validated semantic graph",
-            ));
-        }
-        let captures = captures
-            .into_iter()
-            .map(|capture| C08ForcedGraphCaptureForTest {
-                antialiasing: capture.antialiasing,
-                capture_transform: capture.capture_transform,
-                parent_to_surface: capture.parent_to_surface,
-                device_origin: capture.device_origin,
-                texel_origin: capture.texel_origin,
-                extent: capture.extent,
-                raster_scale: capture.raster_scale,
-            })
-            .collect();
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
             .await?;
-        let mut stats = Stats {
-            encode_time: encode_start.elapsed(),
-            render_time: Duration::ZERO,
-            present_time: Duration::ZERO,
-            ..Stats::default()
-        };
-        let mut uploaded_images = self.uploaded_images.clone();
-        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
-        if parameters.debug || self.options.debug() {
-            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
-        }
+        let (stats, uploaded_images) =
+            self.forced_c08_stats_for_test(&normalized, parameters, encode_start);
         let frame = {
             let backend = self
                 .backend
@@ -1193,6 +1261,123 @@ impl Renderer {
             working_format,
             output_extent,
             captures,
+        })
+    }
+
+    #[cfg(test)]
+    fn forced_c08_stats_for_test(
+        &self,
+        normalized: &RenderCommands,
+        parameters: Parameters,
+        encode_start: Instant,
+    ) -> (Stats, HashSet<ImageId>) {
+        let mut stats = Stats {
+            encode_time: encode_start.elapsed(),
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
+        if parameters.debug || self.options.debug() {
+            stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
+        }
+        (stats, uploaded_images)
+    }
+
+    #[cfg(test)]
+    fn prepare_forced_c08_graph_for_test(
+        &mut self,
+        surface: &Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+        capture_mapping: super::frame::ForcedC08CaptureMappingForTest,
+    ) -> Result<ForcedC08PreparationForTest> {
+        let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
+        let normalized = scene.normalize(self.capabilities())?;
+        let context = FrameContext::try_new(
+            surface.size(),
+            surface.scale(),
+            self.options.antialiasing(),
+            parameters.base_color,
+        )?;
+        let graph = super::frame::forced_c08_graph_with_capture_mapping_for_test(
+            normalized.clone(),
+            context,
+            capture_mapping,
+        )?;
+        let captures = graph.forced_capture_observations_for_test();
+        let capabilities = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.device_capabilities(device_identity))
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C08 forced route lost immutable device capabilities",
+                )
+            })?;
+        let preparable = match self.classify_frame_dispatch(
+            FramePlan::GpuGraph(graph),
+            runtime_surface_format(surface),
+            ExecutableGraphWorkingFormatRequest::Exact(working_format),
+            &capabilities,
+        )? {
+            RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(preparable)) => preparable,
+            _ => {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private forced graph is outside the exact executable C08 subset",
+                ));
+            }
+        };
+        let output_extent = preparable.output_extent()?;
+        let prepared_grids = preparable.capture_grids_for_test();
+        if captures.len() != prepared_grids.len()
+            || captures
+                .iter()
+                .zip(&prepared_grids)
+                .any(|(capture, prepared)| {
+                    capture.texel_origin != prepared.texel_origin
+                        || capture.extent != prepared.extent
+                        || capture.raster_scale != prepared.raster_scale
+                })
+        {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "the prepared C08 capture grid differs from the validated semantic graph",
+            ));
+        }
+        Ok(ForcedC08PreparationForTest {
+            device_identity,
+            normalized,
+            preparable,
+            output_extent,
+            captures: captures
+                .into_iter()
+                .map(C08ForcedGraphCaptureForTest::from)
+                .collect(),
+        })
+    }
+
+    #[cfg(test)]
+    fn validate_forced_c08_surface_for_test(
+        &mut self,
+        surface: &Surface,
+    ) -> Result<DeviceSlotIdentity> {
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_available(RuntimeOperation::SurfaceRendering)?;
+        surface.ensure_renderable()?;
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceRendering)?;
+        surface.device_identity().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the private C08 forced route requires a device-backed surface",
+            )
         })
     }
 
@@ -1402,6 +1587,7 @@ impl Renderer {
             ))]
             SurfaceBackend::Presented { state, .. } => {
                 let action = Surface::presented_resume_action(surface.state, state.lifecycle());
+                let resizing = state.lifecycle().resize_state();
                 self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
                 surface.ensure_attachment_compatible(&attachment)?;
                 match action {
@@ -1414,86 +1600,72 @@ impl Renderer {
                         .await
                     }
                     super::surface::PresentedResumeAction::Configure => {
-                        let resizing = state.lifecycle().resize_state();
-                        let preferred_device = surface
-                            .device_identity()
-                            .expect("a presented surface must retain its device slot identity");
-                        #[cfg(all(test, feature = "render-window"))]
-                        if surface.is_display_free_presented_for_test() {
-                            let mut next = self
-                                .create_display_free_presented_surface_with_configuration_operation_for_test(
-                                    attachment,
-                                    surface.options,
-                                    RuntimeOperation::SurfaceResume,
-                                    Some(preferred_device),
-                                )
-                                .await?;
-                            next.last_parameters = surface.last_parameters;
-                            next.renderer_identity = surface.renderer_identity.clone();
-                            if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
-                                state.set_resizing(resizing);
-                            }
-                            *surface = next;
-                            return Ok(());
-                        }
-                        let mut next = self
-                            .create_surface_with_configuration_operation(
-                                attachment,
-                                surface.options,
-                                RuntimeOperation::SurfaceResume,
-                                Some(preferred_device),
-                            )
-                            .await?;
-                        next.last_parameters = surface.last_parameters;
-                        next.renderer_identity = surface.renderer_identity.clone();
-                        if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
-                            state.set_resizing(resizing);
-                        }
-                        *surface = next;
-                        Ok(())
+                        self.recreate_presented_surface_for_resume(
+                            surface, attachment, resizing, true,
+                        )
+                        .await
                     }
                     super::surface::PresentedResumeAction::Recreate => {
-                        let resizing = state.lifecycle().resize_state();
-                        let preferred_device = surface
-                            .device_identity()
-                            .expect("a presented surface must retain its device slot identity");
-                        #[cfg(all(test, feature = "render-window"))]
-                        if surface.is_display_free_presented_for_test() {
-                            let mut next = self
-                                .create_display_free_presented_surface_with_configuration_operation_for_test(
-                                    attachment,
-                                    surface.options,
-                                    RuntimeOperation::SurfaceResume,
-                                    Some(preferred_device),
-                                )
-                                .await?;
-                            next.last_parameters = surface.last_parameters;
-                            next.renderer_identity = surface.renderer_identity.clone();
-                            if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
-                                state.set_resizing(resizing);
-                            }
-                            *surface = next;
-                            return Ok(());
-                        }
-                        let mut next = self
-                            .create_surface_with_configuration_operation(
-                                attachment,
-                                surface.options,
-                                RuntimeOperation::SurfaceResume,
-                                Some(preferred_device),
-                            )
-                            .await?;
-                        next.last_parameters = surface.last_parameters;
-                        if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
-                            state.set_resizing(resizing);
-                        }
-                        *surface = next;
-                        Ok(())
+                        self.recreate_presented_surface_for_resume(
+                            surface, attachment, resizing, false,
+                        )
+                        .await
                     }
                 }
             }
             SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => unreachable!(),
         }
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    async fn recreate_presented_surface_for_resume(
+        &mut self,
+        surface: &mut Surface,
+        attachment: Attachment,
+        resizing: ResizeState,
+        preserve_renderer_identity: bool,
+    ) -> Result<()> {
+        let preferred_device = surface
+            .device_identity()
+            .expect("a presented surface must retain its device slot identity");
+        #[cfg(all(test, feature = "render-window"))]
+        if surface.is_display_free_presented_for_test() {
+            let mut next = self
+                .create_display_free_presented_surface_with_configuration_operation_for_test(
+                    attachment,
+                    surface.options,
+                    RuntimeOperation::SurfaceResume,
+                    Some(preferred_device),
+                )
+                .await?;
+            next.last_parameters = surface.last_parameters;
+            next.renderer_identity = surface.renderer_identity.clone();
+            if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+                state.set_resizing(resizing);
+            }
+            *surface = next;
+            return Ok(());
+        }
+        let mut next = self
+            .create_surface_with_configuration_operation(
+                attachment,
+                surface.options,
+                RuntimeOperation::SurfaceResume,
+                Some(preferred_device),
+            )
+            .await?;
+        next.last_parameters = surface.last_parameters;
+        if preserve_renderer_identity {
+            next.renderer_identity = surface.renderer_identity.clone();
+        }
+        if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+            state.set_resizing(resizing);
+        }
+        *surface = next;
+        Ok(())
     }
 
     /// Reads the current complete publication from a headless surface.
@@ -1925,101 +2097,12 @@ impl Renderer {
                 )
             })?;
 
-        let preflight_before = backend
-            .ready_device_state_borrow_for_test(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "ready device disappeared before preparation preflight",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
-        let invalid = lowered.with_duplicate_preparation_resource_for_test();
-        let preflight_rejected = backend
-            .prepare_graph_resources(device_identity, invalid, policy)
-            .is_err();
-        let preflight_after = backend
-            .ready_device_state_borrow_for_test(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "ready device disappeared after preparation preflight",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
         let allocation_preflight_is_atomic =
-            preflight_rejected && preflight_before == preflight_after;
-
-        let (first_exercise, first_identities) = {
-            let mut prepared =
-                backend.prepare_graph_resources(device_identity, lowered.clone(), policy)?;
-            let identities = prepared.allocation_identities_for_test();
-            let exercise = prepared.exercise_for_test()?;
-            let _ = prepared.finish()?;
-            (exercise, identities)
-        };
-        let after_first = backend
-            .ready_device_state_borrow_for_test(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "ready device disappeared after first complete preparation",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
-
-        let second_identities = {
-            let mut prepared =
-                backend.prepare_graph_resources(device_identity, lowered.clone(), policy)?;
-            let identities = prepared.allocation_identities_for_test();
-            let _ = prepared.exercise_for_test()?;
-            let _ = prepared.finish()?;
-            identities
-        };
-        let after_second = backend
-            .ready_device_state_borrow_for_test(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "ready device disappeared after repeated complete preparation",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
-        let repeated_reuse_is_exact_and_bounded = first_identities == second_identities
-            && after_second.payload_creation_attempts == after_first.payload_creation_attempts
-            && after_second.entry_count == after_first.entry_count
-            && after_second.retained_bytes == after_first.retained_bytes;
-
-        let early_finish_failed = {
-            let prepared =
-                backend.prepare_graph_resources(device_identity, lowered.clone(), policy)?;
-            prepared.finish().is_err()
-        };
-        let after_failed_finish = backend
-            .ready_device_state_borrow_for_test(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "ready device disappeared after failed prepared finish",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
-        {
-            let prepared = backend.prepare_graph_resources(device_identity, lowered, policy)?;
-            drop(prepared);
-        }
-        let after_drop = backend
-            .ready_device_state_borrow_for_test(device_identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "ready device disappeared after prepared cancellation",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
-        let failure_and_drop_cleanup = early_finish_failed
-            && after_failed_finish.leased_count == 0
-            && after_drop.leased_count == 0;
+            preparation_preflight_is_atomic(backend, device_identity, &lowered, policy)?;
+        let (first_exercise, repeated_reuse_is_exact_and_bounded) =
+            exercise_preparation_reuse(backend, device_identity, &lowered, policy)?;
+        let failure_and_drop_cleanup =
+            preparation_failure_cleanup(backend, device_identity, lowered, policy)?;
         let pass_cache_after = backend
             .ready_device_state_borrow_for_test(device_identity)
             .ok_or_else(|| {

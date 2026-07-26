@@ -537,33 +537,8 @@ fn selected_bdt_location_for_subtable(
         ..BitmapLocation::default()
     };
     match subtable {
-        IndexSubtable::Format1(subtable) => {
-            let offsets = subtable.sbit_offsets();
-            let start = checked_offset(
-                subtable.image_data_offset(),
-                offsets
-                    .get(glyph_index)
-                    .ok_or_else(|| font_data_error(font_data))?
-                    .get(),
-                font_data,
-            )?;
-            let end = checked_offset(
-                subtable.image_data_offset(),
-                offsets
-                    .get(
-                        glyph_index
-                            .checked_add(1)
-                            .ok_or_else(|| font_data_error(font_data))?,
-                    )
-                    .ok_or_else(|| font_data_error(font_data))?
-                    .get(),
-                font_data,
-            )?;
-            location.format = subtable.image_format();
-            location.data_offset = start;
-            location.data_size = end
-                .checked_sub(start)
-                .ok_or_else(|| font_data_error(font_data))?;
+        IndexSubtable::Format1(_) | IndexSubtable::Format3(_) => {
+            select_dense_bdt_location(subtable, glyph_index, font_data, &mut location)?;
         }
         IndexSubtable::Format2(subtable) => {
             location.format = subtable.image_format();
@@ -581,38 +556,6 @@ fn selected_bdt_location_for_subtable(
                     .first()
                     .ok_or_else(|| font_data_error(font_data))?,
             );
-        }
-        IndexSubtable::Format3(subtable) => {
-            let offsets = subtable.sbit_offsets();
-            let start = checked_offset(
-                subtable.image_data_offset(),
-                u32::from(
-                    offsets
-                        .get(glyph_index)
-                        .ok_or_else(|| font_data_error(font_data))?
-                        .get(),
-                ),
-                font_data,
-            )?;
-            let end = checked_offset(
-                subtable.image_data_offset(),
-                u32::from(
-                    offsets
-                        .get(
-                            glyph_index
-                                .checked_add(1)
-                                .ok_or_else(|| font_data_error(font_data))?,
-                        )
-                        .ok_or_else(|| font_data_error(font_data))?
-                        .get(),
-                ),
-                font_data,
-            )?;
-            location.format = subtable.image_format();
-            location.data_offset = start;
-            location.data_size = end
-                .checked_sub(start)
-                .ok_or_else(|| font_data_error(font_data))?;
         }
         IndexSubtable::Format4(subtable) => {
             let glyphs = subtable.glyph_array();
@@ -682,6 +625,62 @@ fn selected_bdt_location_for_subtable(
         }
     }
     Ok(Some(location))
+}
+
+fn select_dense_bdt_location(
+    subtable: &IndexSubtable<'_>,
+    glyph_index: usize,
+    font_data: &FontData,
+    location: &mut BitmapLocation,
+) -> Result<()> {
+    let next_index = glyph_index
+        .checked_add(1)
+        .ok_or_else(|| font_data_error(font_data))?;
+    let (format, start, end) = match subtable {
+        IndexSubtable::Format1(subtable) => {
+            let offsets = subtable.sbit_offsets();
+            let start = offsets
+                .get(glyph_index)
+                .ok_or_else(|| font_data_error(font_data))?
+                .get();
+            let end = offsets
+                .get(next_index)
+                .ok_or_else(|| font_data_error(font_data))?
+                .get();
+            (
+                subtable.image_format(),
+                checked_offset(subtable.image_data_offset(), start, font_data)?,
+                checked_offset(subtable.image_data_offset(), end, font_data)?,
+            )
+        }
+        IndexSubtable::Format3(subtable) => {
+            let offsets = subtable.sbit_offsets();
+            let start = u32::from(
+                offsets
+                    .get(glyph_index)
+                    .ok_or_else(|| font_data_error(font_data))?
+                    .get(),
+            );
+            let end = u32::from(
+                offsets
+                    .get(next_index)
+                    .ok_or_else(|| font_data_error(font_data))?
+                    .get(),
+            );
+            (
+                subtable.image_format(),
+                checked_offset(subtable.image_data_offset(), start, font_data)?,
+                checked_offset(subtable.image_data_offset(), end, font_data)?,
+            )
+        }
+        _ => return Err(font_data_error(font_data)),
+    };
+    location.format = format;
+    location.data_offset = start;
+    location.data_size = end
+        .checked_sub(start)
+        .ok_or_else(|| font_data_error(font_data))?;
+    Ok(())
 }
 
 fn selected_bdt_glyph<'a>(

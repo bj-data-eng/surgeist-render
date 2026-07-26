@@ -1075,115 +1075,10 @@ impl Recording {
     }
 
     pub(super) fn is_self_consistent_for_test(&self, intents: &[ResourceIntent]) -> bool {
-        let mut known = Vec::with_capacity(intents.len());
-        let mut persistent = Vec::new();
-        for intent in intents {
-            let (resource, is_persistent) = match intent {
-                ResourceIntent::Buffer(BufferIntent {
-                    resource,
-                    role,
-                    byte_len,
-                    ..
-                }) => {
-                    if *byte_len == 0 {
-                        return false;
-                    }
-                    let _ = role;
-                    (buffer_id(*resource), false)
-                }
-                ResourceIntent::Image(ImageIntent {
-                    resource,
-                    role,
-                    extent,
-                    format,
-                    retention,
-                }) => {
-                    if extent.width() == 0 || extent.height() == 0 {
-                        return false;
-                    }
-                    if !matches!(format, RasterImageFormat::Rgba8Unorm) {
-                        return false;
-                    }
-                    let _ = role;
-                    (
-                        image_id(*resource),
-                        matches!(retention, ImageRetention::PersistentImageAtlas),
-                    )
-                }
-            };
-            if known.contains(&resource) {
-                return false;
-            }
-            known.push(resource);
-            if is_persistent {
-                persistent.push(resource);
-            }
-        }
-
-        let mut released = Vec::new();
-        for command in &self.commands {
-            match command {
-                RasterCommand::UploadScene { buffer, packed } => {
-                    if packed.is_empty() || !is_active(buffer_id(*buffer), &known, &released) {
-                        return false;
-                    }
-                }
-                RasterCommand::UploadConfig { buffer, config } => {
-                    if config.target_width == 0
-                        || config.target_height == 0
-                        || !is_active(buffer_id(*buffer), &known, &released)
-                    {
-                        return false;
-                    }
-                }
-                RasterCommand::UploadGradientRamps { image, ramps } => {
-                    if ramps.is_empty() || !is_active(image_id(*image), &known, &released) {
-                        return false;
-                    }
-                }
-                RasterCommand::UploadMaskLut {
-                    buffer,
-                    variant,
-                    samples,
-                } => {
-                    if matches!(variant, FineRasterVariant::Area)
-                        || samples.is_empty()
-                        || !is_active(buffer_id(*buffer), &known, &released)
-                    {
-                        return false;
-                    }
-                }
-                RasterCommand::WriteImage {
-                    image,
-                    origin,
-                    image_data,
-                } => {
-                    if !is_active(image_id(*image), &known, &released) {
-                        return false;
-                    }
-                    let _ = (origin, image_data);
-                }
-                RasterCommand::ClearBuffer(buffer) => {
-                    if !is_active(buffer_id(*buffer), &known, &released) {
-                        return false;
-                    }
-                }
-                RasterCommand::Dispatch(dispatch) => {
-                    if !dispatch_is_well_formed(dispatch, &known, &released) {
-                        return false;
-                    }
-                }
-                RasterCommand::Release(resource) => {
-                    let id = resource_reference_id(*resource);
-                    if !is_active(id, &known, &released) || persistent.contains(&id) {
-                        return false;
-                    }
-                    released.push(id);
-                }
-            }
-        }
-
-        released.len() + persistent.len() == known.len()
+        let Some((known, persistent)) = validated_resource_ids_for_test(intents) else {
+            return false;
+        };
+        commands_are_self_consistent_for_test(&self.commands, &known, &persistent)
     }
 
     pub(super) fn final_dispatch_targets_output_for_test(&self) -> bool {
@@ -1201,6 +1096,111 @@ impl Recording {
             })
             == Some(true)
     }
+}
+
+#[cfg(test)]
+fn validated_resource_ids_for_test(
+    intents: &[ResourceIntent],
+) -> Option<(Vec<ResourceId>, Vec<ResourceId>)> {
+    let mut known = Vec::with_capacity(intents.len());
+    let mut persistent = Vec::new();
+    for intent in intents {
+        let (resource, is_persistent) = match intent {
+            ResourceIntent::Buffer(BufferIntent {
+                resource,
+                role,
+                byte_len,
+                ..
+            }) => {
+                (*byte_len != 0).then_some(())?;
+                let _ = role;
+                (buffer_id(*resource), false)
+            }
+            ResourceIntent::Image(ImageIntent {
+                resource,
+                role,
+                extent,
+                format,
+                retention,
+            }) => {
+                (extent.width() != 0
+                    && extent.height() != 0
+                    && matches!(format, RasterImageFormat::Rgba8Unorm))
+                .then_some(())?;
+                let _ = role;
+                (
+                    image_id(*resource),
+                    matches!(retention, ImageRetention::PersistentImageAtlas),
+                )
+            }
+        };
+        (!known.contains(&resource)).then_some(())?;
+        known.push(resource);
+        if is_persistent {
+            persistent.push(resource);
+        }
+    }
+    Some((known, persistent))
+}
+
+#[cfg(test)]
+fn commands_are_self_consistent_for_test(
+    commands: &[RasterCommand],
+    known: &[ResourceId],
+    persistent: &[ResourceId],
+) -> bool {
+    let mut released = Vec::new();
+    for command in commands {
+        let valid = match command {
+            RasterCommand::UploadScene { buffer, packed } => {
+                !packed.is_empty() && is_active(buffer_id(*buffer), known, &released)
+            }
+            RasterCommand::UploadConfig { buffer, config } => {
+                config.target_width != 0
+                    && config.target_height != 0
+                    && is_active(buffer_id(*buffer), known, &released)
+            }
+            RasterCommand::UploadGradientRamps { image, ramps } => {
+                !ramps.is_empty() && is_active(image_id(*image), known, &released)
+            }
+            RasterCommand::UploadMaskLut {
+                buffer,
+                variant,
+                samples,
+            } => {
+                !matches!(variant, FineRasterVariant::Area)
+                    && !samples.is_empty()
+                    && is_active(buffer_id(*buffer), known, &released)
+            }
+            RasterCommand::WriteImage {
+                image,
+                origin,
+                image_data,
+            } => {
+                let _ = (origin, image_data);
+                is_active(image_id(*image), known, &released)
+            }
+            RasterCommand::ClearBuffer(buffer) => {
+                is_active(buffer_id(*buffer), known, &released)
+            }
+            RasterCommand::Dispatch(dispatch) => {
+                dispatch_is_well_formed(dispatch, known, &released)
+            }
+            RasterCommand::Release(resource) => {
+                let id = resource_reference_id(*resource);
+                if is_active(id, known, &released) && !persistent.contains(&id) {
+                    released.push(id);
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        if !valid {
+            return false;
+        }
+    }
+    released.len() + persistent.len() == known.len()
 }
 
 #[cfg(test)]

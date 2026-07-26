@@ -1638,6 +1638,40 @@ fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription
             "a C08 pass must bind exactly one exact sampler",
         ));
     };
+    validate_c08_key_consistency(keys, sampled_texture, sampler)?;
+    let (program, expected_role, expected_filter, expected_edge) =
+        c08_program_sampling(keys.layout.program)?;
+    if sampled_texture.binding_role != expected_role
+        || sampler.filter != expected_filter
+        || sampler.edge != expected_edge
+    {
+        return Err(c08_cache_error(
+            "C08 sampled texture and sampler semantics are not exact",
+        ));
+    }
+
+    let Some(working_format) = keys.shader.working_format else {
+        return Err(c08_cache_error(
+            "C08 shader key has no selected working format",
+        ));
+    };
+    if !is_working_format(working_format) {
+        return Err(c08_cache_error(
+            "C08 shader key selected a non-working intermediate format",
+        ));
+    }
+    let target_format = c08_target_format(keys, sampled_texture, program, working_format)?;
+    Ok(C08PassDescription {
+        program,
+        target_format,
+    })
+}
+
+fn validate_c08_key_consistency(
+    keys: C08PassKeyRefs<'_>,
+    sampled_texture: &SampledTextureLayoutKey,
+    sampler: &SamplerKey,
+) -> Result<()> {
     if keys.layout.data_bindings.as_slice() != [ShaderDataBindingKey::SpatialUniform]
         || keys
             .layout
@@ -1658,8 +1692,18 @@ fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription
             "C08 pass keys disagree across sampler, layout, shader, or pipeline phases",
         ));
     }
+    Ok(())
+}
 
-    let (program, expected_role, expected_filter, expected_edge) = match keys.layout.program {
+fn c08_program_sampling(
+    program: ShaderProgramKey,
+) -> Result<(
+    C08Program,
+    ShaderBindingRoleKey,
+    ShaderSamplingFilterKey,
+    ShaderSamplingEdgeKey,
+)> {
+    let sampling = match program {
         ShaderProgramKey::CanonicalizeCapture => (
             C08Program::CanonicalizeCapture,
             ShaderBindingRoleKey::CaptureSource,
@@ -1691,25 +1735,15 @@ fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription
             ));
         }
     };
-    if sampled_texture.binding_role != expected_role
-        || sampler.filter != expected_filter
-        || sampler.edge != expected_edge
-    {
-        return Err(c08_cache_error(
-            "C08 sampled texture and sampler semantics are not exact",
-        ));
-    }
+    Ok(sampling)
+}
 
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(c08_cache_error(
-            "C08 shader key has no selected working format",
-        ));
-    };
-    if !is_working_format(working_format) {
-        return Err(c08_cache_error(
-            "C08 shader key selected a non-working intermediate format",
-        ));
-    }
+fn c08_target_format(
+    keys: C08PassKeyRefs<'_>,
+    sampled_texture: &SampledTextureLayoutKey,
+    program: C08Program,
+    working_format: ShaderTextureFormatKey,
+) -> Result<ShaderTextureFormatKey> {
     let target_format = match program {
         C08Program::CanonicalizeCapture => {
             if sampled_texture.source_format != ShaderTextureFormatKey::VelloCaptureRgba8Unorm
@@ -1748,11 +1782,7 @@ fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription
             output_format
         }
     };
-
-    Ok(C08PassDescription {
-        program,
-        target_format,
-    })
+    Ok(target_format)
 }
 
 fn validate_color_filter_pass_keys(

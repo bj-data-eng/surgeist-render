@@ -478,6 +478,20 @@ pub(crate) struct C08GraphSubmissionCommit {
     frame_cleanup: FrameCleanup,
 }
 
+struct C08SubmittedCommand {
+    #[cfg(test)]
+    generic_observation: Option<GpuOperationSubmissionObservationForTest>,
+    #[cfg(test)]
+    graph_observation: Option<C08GraphSubmissionObservationForTest>,
+    #[cfg(test)]
+    control: Option<C08GraphPostSubmitControlForTest>,
+}
+
+struct C08SubmittedResources {
+    capture_resources: PendingVelloResourceCommit,
+    prepared_frame: PendingC08PreparedFrameCommit,
+}
+
 /// The only output effects that one pending C08 graph transaction may own.
 #[must_use = "pending C08 graph host effects must resolve through their transaction"]
 enum PendingC08GraphHostEffect {
@@ -1709,19 +1723,172 @@ impl GpuOperationTransaction {
             prepared_frame,
             output,
         } = payload;
+        let submitted = self
+            .submit_c08_command(
+                device,
+                queue,
+                command_buffer,
+                &capture_resources,
+                &prepared_frame,
+            )
+            .await;
+        #[cfg(not(test))]
+        let _ = submitted;
+        let resources = C08SubmittedResources {
+            capture_resources,
+            prepared_frame,
+        };
+        let (output, frame_cleanup) = match output {
+            PendingC08GraphHostEffect::Headless(publication) => {
+                self.finish_c08_headless(publication, resources, pass_cache, operation, &submitted)
+                    .await?
+            }
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            PendingC08GraphHostEffect::Presented(effect) => {
+                self.finish_c08_presented(
+                    device, effect, resources, pass_cache, operation, &submitted,
+                )
+                .await?
+            }
+        };
+        #[cfg(test)]
+        if let Some(observation) = submitted.graph_observation {
+            observation.record_commit(
+                output.observation_kind_for_test(),
+                frame_cleanup.retention(),
+            );
+        }
+        Ok(C08GraphSubmissionCommit {
+            output,
+            frame_cleanup,
+        })
+    }
+
+    async fn finish_c08_headless(
+        self,
+        publication: HeadlessPublication,
+        submitted_resources: C08SubmittedResources,
+        pass_cache: &mut DevicePassCache,
+        operation: RuntimeOperation,
+        _submitted: &C08SubmittedCommand,
+    ) -> Result<(C08GraphOutputCommit, FrameCleanup)> {
+        let result = self.finish(operation).await;
+        #[cfg(test)]
+        if let Some(observation) = &_submitted.generic_observation {
+            observation.record_scope_resolution(false);
+        }
+        #[cfg(test)]
+        if let Some(observation) = &_submitted.graph_observation {
+            observation.record_scope_resolution();
+        }
+        #[cfg(test)]
+        if let Some(control) = &_submitted.control {
+            control.notify_submission_scope_resolution();
+        }
+        result?;
+        let resources = AccountingReadyC08GraphResources::try_new(
+            submitted_resources.capture_resources,
+            submitted_resources.prepared_frame,
+            pass_cache,
+        )?;
+        let receipt = resources.authorization_receipt(pass_cache)?;
+        let output = PendingC08GraphHostEffect::Headless(publication).authorize(
+            CleanC08GraphSubmissionReceipt {
+                _resource_readiness: receipt,
+            },
+        );
+        let frame_cleanup = resources.commit(pass_cache)?;
+        Ok((output.apply(), frame_cleanup))
+    }
+
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
+    async fn finish_c08_presented(
+        self,
+        device: &wgpu::Device,
+        effect: PendingC08PresentedHostEffect,
+        submitted_resources: C08SubmittedResources,
+        pass_cache: &mut DevicePassCache,
+        operation: RuntimeOperation,
+        _submitted: &C08SubmittedCommand,
+    ) -> Result<(C08GraphOutputCommit, FrameCleanup)> {
+        let mut transaction = self;
+        let result = transaction.resolve_submission_phase(operation).await;
+        #[cfg(test)]
+        if let Some(observation) = &_submitted.graph_observation {
+            observation.record_scope_resolution();
+        }
+        #[cfg(test)]
+        if let Some(control) = &_submitted.control {
+            control.notify_submission_scope_resolution();
+        }
+        result?;
+        let resources = AccountingReadyC08GraphResources::try_new(
+            submitted_resources.capture_resources,
+            submitted_resources.prepared_frame,
+            pass_cache,
+        )?;
+        let receipt = resources.authorization_receipt(pass_cache)?;
+        let clean = PendingC08GraphHostEffect::Presented(effect).authorize(
+            CleanC08GraphSubmissionReceipt {
+                _resource_readiness: receipt,
+            },
+        );
+        transaction.begin_present_phase(device, operation)?;
+        let output = clean.apply();
+        #[cfg(test)]
+        if let Some(control) = &_submitted.control {
+            control.apply_present_failure(device);
+        }
+        let result = transaction.finish(operation).await;
+        #[cfg(test)]
+        if let Some(observation) = &_submitted.generic_observation {
+            observation.record_scope_resolution(false);
+        }
+        #[cfg(test)]
+        if let Some(observation) = &_submitted.graph_observation {
+            observation.record_presentation_scope_resolution();
+        }
+        #[cfg(all(test, feature = "render-window"))]
+        if let Some(C08GraphPostSubmitControlForTest::PresentFail {
+            scope_resolution_observed,
+        }) = &_submitted.control
+        {
+            let _ = scope_resolution_observed.send(());
+        }
+        result?;
+        let frame_cleanup = resources.commit(pass_cache)?;
+        Ok((output, frame_cleanup))
+    }
+
+    async fn submit_c08_command(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        command_buffer: wgpu::CommandBuffer,
+        capture_resources: &PendingVelloResourceCommit,
+        prepared_frame: &PendingC08PreparedFrameCommit,
+    ) -> C08SubmittedCommand {
+        #[cfg(not(test))]
+        let _ = (device, capture_resources, prepared_frame);
         #[cfg(test)]
         let capture_lease_count = capture_resources.lease_count_for_test();
         #[cfg(test)]
         let prepared_frame_resource_identities = prepared_frame.resource_identities_for_test();
         queue.submit([command_buffer]);
         #[cfg(test)]
-        let generic_submission_observation = record_active_gpu_operation_submission_for_test(
+        let generic_observation = record_active_gpu_operation_submission_for_test(
             self.lease.generation(),
             self.lease.active_generation_for_test(),
             None,
         );
         #[cfg(test)]
-        let graph_submission_observation = record_active_c08_graph_submission_for_test(
+        let graph_observation = record_active_c08_graph_submission_for_test(
             self.lease.generation(),
             self.lease.active_generation_for_test(),
             capture_lease_count,
@@ -1733,108 +1900,19 @@ impl GpuOperationTransaction {
         #[cfg(test)]
         if let Some(control) = control.clone() {
             control
-                .apply(device, &self.lease.signal, &prepared_frame)
+                .apply(device, &self.lease.signal, prepared_frame)
                 .await;
         }
         #[cfg(test)]
         wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
-
-        let (output, frame_cleanup) = match output {
-            PendingC08GraphHostEffect::Headless(publication) => {
-                let result = self.finish(operation).await;
-                #[cfg(test)]
-                if let Some(observation) = &generic_submission_observation {
-                    observation.record_scope_resolution(false);
-                }
-                #[cfg(test)]
-                if let Some(observation) = &graph_submission_observation {
-                    observation.record_scope_resolution();
-                }
-                #[cfg(test)]
-                if let Some(control) = &control {
-                    control.notify_submission_scope_resolution();
-                }
-                result?;
-                let resources = AccountingReadyC08GraphResources::try_new(
-                    capture_resources,
-                    prepared_frame,
-                    pass_cache,
-                )?;
-                let receipt = resources.authorization_receipt(pass_cache)?;
-                let output = PendingC08GraphHostEffect::Headless(publication).authorize(
-                    CleanC08GraphSubmissionReceipt {
-                        _resource_readiness: receipt,
-                    },
-                );
-                let frame_cleanup = resources.commit(pass_cache)?;
-                (output.apply(), frame_cleanup)
-            }
-            #[cfg(any(
-                feature = "render-window",
-                all(feature = "render-web", target_arch = "wasm32")
-            ))]
-            PendingC08GraphHostEffect::Presented(effect) => {
-                let mut transaction = self;
-                let result = transaction.resolve_submission_phase(operation).await;
-                #[cfg(test)]
-                if let Some(observation) = &graph_submission_observation {
-                    observation.record_scope_resolution();
-                }
-                #[cfg(test)]
-                if let Some(control) = &control {
-                    control.notify_submission_scope_resolution();
-                }
-                result?;
-
-                let resources = AccountingReadyC08GraphResources::try_new(
-                    capture_resources,
-                    prepared_frame,
-                    pass_cache,
-                )?;
-                let receipt = resources.authorization_receipt(pass_cache)?;
-                let clean = PendingC08GraphHostEffect::Presented(effect).authorize(
-                    CleanC08GraphSubmissionReceipt {
-                        _resource_readiness: receipt,
-                    },
-                );
-                transaction.begin_present_phase(device, operation)?;
-                let output = clean.apply();
-                #[cfg(test)]
-                if let Some(control) = &control {
-                    control.apply_present_failure(device);
-                }
-                let result = transaction.finish(operation).await;
-                #[cfg(test)]
-                if let Some(observation) = &generic_submission_observation {
-                    observation.record_scope_resolution(false);
-                }
-                #[cfg(test)]
-                if let Some(observation) = &graph_submission_observation {
-                    observation.record_presentation_scope_resolution();
-                }
-                #[cfg(all(test, feature = "render-window"))]
-                if let Some(C08GraphPostSubmitControlForTest::PresentFail {
-                    scope_resolution_observed,
-                }) = &control
-                {
-                    let _ = scope_resolution_observed.send(());
-                }
-                result?;
-                let frame_cleanup = resources.commit(pass_cache)?;
-                (output, frame_cleanup)
-            }
-        };
-        #[cfg(test)]
-        if let Some(observation) = graph_submission_observation {
-            observation.record_commit(
-                output.observation_kind_for_test(),
-                frame_cleanup.retention(),
-            );
+        C08SubmittedCommand {
+            #[cfg(test)]
+            generic_observation,
+            #[cfg(test)]
+            graph_observation,
+            #[cfg(test)]
+            control,
         }
-        Ok(C08GraphSubmissionCommit {
-            output,
-            frame_cleanup,
-        })
     }
 
     /// Submits one texture-copy command and returns its exact queue submission index.

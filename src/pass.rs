@@ -21,11 +21,11 @@ use super::{
         GraphLoweringColorFilter, GraphLoweringComposite, GraphLoweringCompositeKind,
         GraphLoweringDropShadow, GraphLoweringEdgePolicy, GraphLoweringGeneration,
         GraphLoweringImportView, GraphLoweringInitialization, GraphLoweringPassId,
-        GraphLoweringPassKind, GraphLoweringPassResult, GraphLoweringReadBinding,
-        GraphLoweringReadRole, GraphLoweringResourceId, GraphLoweringResourceProducer,
-        GraphLoweringResourceRole, GraphLoweringSamplingEdge, GraphLoweringSamplingFilter,
-        GraphLoweringSpatialDescriptor, GraphLoweringVelloCapture, GraphLoweringVelloSpan,
-        GraphLoweringVelloSpanScope,
+        GraphLoweringPassKind, GraphLoweringPassResult, GraphLoweringPassView,
+        GraphLoweringReadBinding, GraphLoweringReadRole, GraphLoweringResourceId,
+        GraphLoweringResourceProducer, GraphLoweringResourceRole, GraphLoweringResourceView,
+        GraphLoweringSamplingEdge, GraphLoweringSamplingFilter, GraphLoweringSpatialDescriptor,
+        GraphLoweringVelloCapture, GraphLoweringVelloSpan, GraphLoweringVelloSpanScope,
     },
     image::ResolvedMaskUploadDescriptor,
     layer::BlendMode,
@@ -49,7 +49,7 @@ use super::{
     vello_engine::{
         ActiveVelloEncodingScope, EncodedVelloCaptureProof, PendingVelloResourceCommit,
         RasterParameters, TransactionEncodingState, TransactionTargetIntent, VelloEngineState,
-        VelloResourceLeaseAggregate,
+        VelloResourceLeaseAggregate, scene::VelloScene,
     },
 };
 
@@ -59,6 +59,8 @@ use super::texture::EffectTextureRole;
 #[cfg(test)]
 use super::resource::ResourceAccountingFault;
 
+#[cfg(test)]
+use super::frame::GraphLoweringView;
 #[cfg(test)]
 use super::frame::{FrameContext, FramePlan};
 
@@ -1222,24 +1224,9 @@ pub(crate) fn c08_pass_layout_observation_for_test(
             }
         }
     }
-    let output_specialization_is_exact = output_specializations.len() == 4
-        && output_specializations.iter().all(|specialization| {
-            output_specializations
-                .iter()
-                .filter(|candidate| *candidate == specialization)
-                .count()
-                == 1
-        });
-    let c09_typed_vocabulary_is_preserved = matches!(
-        ShaderBindingRoleKey::CompositeParent,
-        ShaderBindingRoleKey::CompositeParent
-    ) && matches!(
-        ShaderDataBindingKey::CompositeParameters,
-        ShaderDataBindingKey::CompositeParameters
-    ) && matches!(
-        ShaderDataBindingKey::PresentParameters,
-        ShaderDataBindingKey::PresentParameters
-    );
+    let output_specialization_is_exact =
+        c08_output_specializations_are_exact(&output_specializations);
+    let c09_typed_vocabulary_is_preserved = c09_typed_vocabulary_is_preserved_for_test();
 
     C08PassLayoutObservationForTest {
         canonicalize_binds_capture_and_spatial_only,
@@ -1250,6 +1237,34 @@ pub(crate) fn c08_pass_layout_observation_for_test(
         c09_typed_vocabulary_is_preserved,
         output_specialization_is_exact,
     }
+}
+
+#[cfg(test)]
+fn c08_output_specializations_are_exact(
+    output_specializations: &[(ShaderTextureFormatKey, Option<ShaderTextureFormatKey>)],
+) -> bool {
+    output_specializations.len() == 4
+        && output_specializations.iter().all(|specialization| {
+            output_specializations
+                .iter()
+                .filter(|candidate| *candidate == specialization)
+                .count()
+                == 1
+        })
+}
+
+#[cfg(test)]
+fn c09_typed_vocabulary_is_preserved_for_test() -> bool {
+    matches!(
+        ShaderBindingRoleKey::CompositeParent,
+        ShaderBindingRoleKey::CompositeParent
+    ) && matches!(
+        ShaderDataBindingKey::CompositeParameters,
+        ShaderDataBindingKey::CompositeParameters
+    ) && matches!(
+        ShaderDataBindingKey::PresentParameters,
+        ShaderDataBindingKey::PresentParameters
+    )
 }
 
 #[cfg(test)]
@@ -1337,45 +1352,14 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
         &capabilities,
     )?;
 
-    let existing_passes = lowered
-        .passes
-        .iter()
-        .map(|pass| pass.id)
-        .collect::<BTreeSet<_>>();
-    let mut donor_passes = donor
-        .passes
-        .iter()
-        .map(|pass| pass.id)
-        .filter(|pass| !existing_passes.contains(pass));
-    let second_capture_pass = donor_passes.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare capture pass identity")
-    })?;
-    let second_canonicalize_pass = donor_passes.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare canonical pass identity")
-    })?;
-    let second_composite_pass = donor_passes.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare composite pass identity")
-    })?;
-
-    let existing_resources = lowered
-        .resources
-        .iter()
-        .map(|resource| resource.id)
-        .collect::<BTreeSet<_>>();
-    let mut donor_resources = donor
-        .resources
-        .iter()
-        .map(|resource| resource.id)
-        .filter(|resource| !existing_resources.contains(resource));
-    let second_capture_target = donor_resources.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare capture resource identity")
-    })?;
-    let second_canonical_target = donor_resources.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare canonical resource identity")
-    })?;
-    let second_composite_target = donor_resources.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare composite resource identity")
-    })?;
+    let C08DonorIdentitiesForTest {
+        second_capture_pass,
+        second_canonicalize_pass,
+        second_composite_pass,
+        second_capture_target,
+        second_canonical_target,
+        second_composite_target,
+    } = c08_donor_identities_for_test(&lowered, &donor)?;
 
     if lowered.passes.len() != 5 || lowered.resources.len() != 4 {
         return Err(lowering_error(
@@ -1405,41 +1389,23 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
         ));
     };
 
-    let mut capture_resource = lowered
-        .resources
-        .iter()
-        .find(|resource| resource.id == first_capture_target)
-        .cloned()
-        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its capture resource"))?;
-    capture_resource.id = second_capture_target;
-    capture_resource.producer = RuntimeResourceProducer::Pass(second_capture_pass);
-    capture_resource.last_use = second_canonicalize_pass;
-
-    let mut canonical_resource = lowered
-        .resources
-        .iter()
-        .find(|resource| resource.id == first_canonical_target)
-        .cloned()
-        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its canonical resource"))?;
-    canonical_resource.id = second_canonical_target;
-    canonical_resource.producer = RuntimeResourceProducer::Pass(second_canonicalize_pass);
-    canonical_resource.last_use = second_composite_pass;
-
-    let mut composite_resource = lowered
-        .resources
-        .iter()
-        .find(|resource| resource.id == first_composite_target)
-        .cloned()
-        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its composite resource"))?;
-    composite_resource.id = second_composite_target;
-    composite_resource.producer = RuntimeResourceProducer::Pass(second_composite_pass);
-    composite_resource.last_use = present.id;
-    lowered
-        .resources
-        .iter_mut()
-        .find(|resource| resource.id == first_composite_target)
-        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its first result"))?
-        .last_use = second_composite_pass;
+    let second_resources = c08_second_capture_resources_for_test(
+        &mut lowered,
+        [
+            first_capture_target,
+            first_canonical_target,
+            first_composite_target,
+        ],
+        &C08DonorIdentitiesForTest {
+            second_capture_pass,
+            second_canonicalize_pass,
+            second_composite_pass,
+            second_capture_target,
+            second_canonical_target,
+            second_composite_target,
+        },
+        present.id,
+    )?;
 
     let mut second_capture = first_capture;
     second_capture.id = second_capture_pass;
@@ -1463,9 +1429,7 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
     present.dependencies = vec![second_composite_pass];
     present.reads[0].resource = second_composite_target;
     present.releases = vec![second_composite_target];
-    lowered
-        .resources
-        .extend([capture_resource, canonical_resource, composite_resource]);
+    lowered.resources.extend(second_resources);
     lowered.passes.extend([
         second_capture,
         second_canonicalize,
@@ -1473,12 +1437,122 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
         present,
     ]);
 
+    validate_two_capture_fixture(lowered)
+}
+
+#[cfg(test)]
+fn validate_two_capture_fixture(lowered: LoweredGraphPlan) -> Result<LoweredGraphPlan> {
     if lowered.c08_execution_facts().is_none() {
         return Err(lowering_error(
             "the two-capture C08 fixture did not preserve the validated executable subset",
         ));
     }
     Ok(lowered)
+}
+
+#[cfg(test)]
+struct C08DonorIdentitiesForTest {
+    second_capture_pass: RuntimePassId,
+    second_canonicalize_pass: RuntimePassId,
+    second_composite_pass: RuntimePassId,
+    second_capture_target: RuntimeResourceId,
+    second_canonical_target: RuntimeResourceId,
+    second_composite_target: RuntimeResourceId,
+}
+
+#[cfg(test)]
+fn c08_second_capture_resources_for_test(
+    lowered: &mut LoweredGraphPlan,
+    first_targets: [RuntimeResourceId; 3],
+    second: &C08DonorIdentitiesForTest,
+    present: RuntimePassId,
+) -> Result<[RuntimeResourceRequest; 3]> {
+    let clone_resource = |id, missing| {
+        lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == id)
+            .cloned()
+            .ok_or_else(|| lowering_error(missing))
+    };
+    let mut capture = clone_resource(
+        first_targets[0],
+        "the two-capture C08 fixture lost its capture resource",
+    )?;
+    capture.id = second.second_capture_target;
+    capture.producer = RuntimeResourceProducer::Pass(second.second_capture_pass);
+    capture.last_use = second.second_canonicalize_pass;
+    let mut canonical = clone_resource(
+        first_targets[1],
+        "the two-capture C08 fixture lost its canonical resource",
+    )?;
+    canonical.id = second.second_canonical_target;
+    canonical.producer = RuntimeResourceProducer::Pass(second.second_canonicalize_pass);
+    canonical.last_use = second.second_composite_pass;
+    let mut composite = clone_resource(
+        first_targets[2],
+        "the two-capture C08 fixture lost its composite resource",
+    )?;
+    composite.id = second.second_composite_target;
+    composite.producer = RuntimeResourceProducer::Pass(second.second_composite_pass);
+    composite.last_use = present;
+    lowered
+        .resources
+        .iter_mut()
+        .find(|resource| resource.id == first_targets[2])
+        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its first result"))?
+        .last_use = second.second_composite_pass;
+    Ok([capture, canonical, composite])
+}
+
+#[cfg(test)]
+fn c08_donor_identities_for_test(
+    lowered: &LoweredGraphPlan,
+    donor: &LoweredGraphPlan,
+) -> Result<C08DonorIdentitiesForTest> {
+    let existing_passes = lowered
+        .passes
+        .iter()
+        .map(|pass| pass.id)
+        .collect::<BTreeSet<_>>();
+    let mut donor_passes = donor
+        .passes
+        .iter()
+        .map(|pass| pass.id)
+        .filter(|pass| !existing_passes.contains(pass));
+    let second_capture_pass = donor_passes.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare capture pass identity")
+    })?;
+    let second_canonicalize_pass = donor_passes.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare canonical pass identity")
+    })?;
+    let second_composite_pass = donor_passes.next().ok_or_else(|| {
+        lowering_error("the two-capture C08 fixture has no spare composite pass identity")
+    })?;
+    let existing_resources = lowered
+        .resources
+        .iter()
+        .map(|resource| resource.id)
+        .collect::<BTreeSet<_>>();
+    let mut donor_resources = donor
+        .resources
+        .iter()
+        .map(|resource| resource.id)
+        .filter(|resource| !existing_resources.contains(resource));
+    Ok(C08DonorIdentitiesForTest {
+        second_capture_pass,
+        second_canonicalize_pass,
+        second_composite_pass,
+        second_capture_target: donor_resources.next().ok_or_else(|| {
+            lowering_error("the two-capture C08 fixture has no spare capture resource identity")
+        })?,
+        second_canonical_target: donor_resources.next().ok_or_else(|| {
+            lowering_error("the two-capture C08 fixture has no spare canonical resource identity")
+        })?,
+        second_composite_target: donor_resources.next().ok_or_else(|| {
+            lowering_error("the two-capture C08 fixture has no spare composite resource identity")
+        })?,
+    })
 }
 
 #[cfg(test)]
@@ -2740,6 +2814,790 @@ fn c08_pass_class(kind: &RuntimePassKind) -> Option<C08PassClass> {
     }
 }
 
+struct LoweredResourceSet {
+    resources: Vec<RuntimeResourceRequest>,
+    resource_formats: BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+}
+
+fn lower_runtime_resources(
+    resource_views: &[GraphLoweringResourceView<'_>],
+    pass_ids: &BTreeSet<RuntimePassId>,
+    working_format: WorkingFormat,
+    capability_validation: GraphLoweringCapabilityValidation<'_>,
+) -> Result<LoweredResourceSet> {
+    let mut resources = Vec::with_capacity(resource_views.len());
+    let mut resource_ids = BTreeSet::new();
+    let mut resource_formats = BTreeMap::new();
+    for resource in resource_views {
+        let resource = *resource;
+        let id = RuntimeResourceId(resource.id());
+        if !resource_ids.insert(id) {
+            return Err(lowering_error("duplicate runtime resource binding"));
+        }
+        let role = runtime_resource_role(resource.role());
+        let spatial = RuntimeSpatialDescriptor::from_graph(resource.spatial());
+        let format = runtime_resource_format(role, working_format);
+        if let GraphLoweringCapabilityValidation::Required(capabilities) = capability_validation {
+            capabilities.validate_effect_texture_extent(spatial.device_extent)?;
+            if let RuntimeResourceFormat::Working(format) = format {
+                capabilities.validate_effect_texture_allocation(
+                    spatial.device_extent,
+                    Some(format),
+                    format.texture_format(),
+                    format.required_usages(),
+                )?;
+            }
+        }
+        let producer = match resource.producer() {
+            GraphLoweringResourceProducer::Imported => RuntimeResourceProducer::Imported,
+            GraphLoweringResourceProducer::Pass(pass) => {
+                let pass = RuntimePassId(pass);
+                if !pass_ids.contains(&pass) {
+                    return Err(lowering_error("resource producer binding is missing"));
+                }
+                RuntimeResourceProducer::Pass(pass)
+            }
+        };
+        let import = resource.import().map(|import| match import {
+            GraphLoweringImportView::ResolvedAlphaMask(upload) => {
+                RuntimeResourceImport::ResolvedAlphaMask(upload.clone())
+            }
+        });
+        if matches!(producer, RuntimeResourceProducer::Imported) != import.is_some() {
+            return Err(lowering_error(
+                "imported runtime resource binding is inconsistent",
+            ));
+        }
+        let last_use = RuntimePassId(resource.last_use());
+        if !pass_ids.contains(&last_use) {
+            return Err(lowering_error("resource last-use binding is missing"));
+        }
+        resource_formats.insert(id, format);
+        resources.push(RuntimeResourceRequest {
+            id,
+            role,
+            format,
+            spatial,
+            producer,
+            expected_reads: resource.expected_reads(),
+            last_use,
+            import,
+        });
+    }
+    Ok(LoweredResourceSet {
+        resources,
+        resource_formats,
+    })
+}
+
+fn lower_runtime_passes(
+    pass_views: &[GraphLoweringPassView<'_>],
+    resource_by_id: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    resource_formats: &BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+    releases: &mut BTreeMap<RuntimePassId, Vec<RuntimeResourceId>>,
+    working_format: WorkingFormat,
+    output_format: Format,
+) -> Result<Vec<RuntimePass>> {
+    let mut seen_passes = BTreeSet::new();
+    let mut passes = Vec::with_capacity(pass_views.len());
+    for pass in pass_views {
+        let pass = *pass;
+        let id = RuntimePassId(pass.id());
+        if seen_passes.contains(&id) {
+            return Err(lowering_error("duplicate runtime pass binding"));
+        }
+        let dependencies = pass
+            .dependencies()
+            .into_iter()
+            .map(RuntimePassId)
+            .collect::<Vec<_>>();
+        if dependencies
+            .iter()
+            .any(|dependency| !seen_passes.contains(dependency))
+        {
+            return Err(lowering_error(
+                "runtime pass has a missing or forward dependency",
+            ));
+        }
+        let kind = runtime_pass_kind(pass.kind()?, working_format)?;
+        let reads = lower_read_bindings(&pass.reads()?, resource_by_id, resource_formats)?;
+        let result =
+            lower_runtime_result(pass.result(), &kind, &reads, resource_by_id, output_format)?;
+        let pass_releases = releases.remove(&id).unwrap_or_default();
+        if pass_releases
+            .iter()
+            .any(|resource| !reads.iter().any(|binding| binding.resource == *resource))
+        {
+            return Err(lowering_error(
+                "runtime release is not the resource's last read",
+            ));
+        }
+        let cache_keys = runtime_pass_cache_keys(
+            &kind,
+            &reads,
+            result,
+            working_format,
+            output_format,
+            resource_formats,
+        )?;
+        passes.push(RuntimePass {
+            id,
+            kind,
+            dependencies,
+            reads,
+            result,
+            releases: pass_releases,
+            cache_keys,
+        });
+        seen_passes.insert(id);
+    }
+    Ok(passes)
+}
+
+fn lower_runtime_result(
+    result: GraphLoweringPassResult,
+    kind: &RuntimePassKind,
+    reads: &[RuntimeReadBinding],
+    resource_by_id: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    output_format: Format,
+) -> Result<RuntimeResultBinding> {
+    match result {
+        GraphLoweringPassResult::Empty if matches!(kind, RuntimePassKind::Present) => {
+            Ok(RuntimeResultBinding::Output(output_format))
+        }
+        GraphLoweringPassResult::Empty => Ok(RuntimeResultBinding::Empty),
+        GraphLoweringPassResult::Resource(resource) => {
+            let resource = RuntimeResourceId(resource);
+            if !resource_by_id.contains_key(&resource)
+                || reads.iter().any(|read| read.resource == resource)
+            {
+                return Err(lowering_error(
+                    "runtime pass result binding is inconsistent",
+                ));
+            }
+            Ok(RuntimeResultBinding::Resource(resource))
+        }
+    }
+}
+
+struct ClosedGraphMaps<'plan> {
+    resource_by_id: BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+    resource_formats: BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+    pass_positions: BTreeMap<RuntimePassId, usize>,
+}
+
+impl<'plan> ClosedGraphMaps<'plan> {
+    fn try_new(plan: &'plan LoweredGraphPlan) -> Option<Self> {
+        let resource_by_id = plan
+            .resources
+            .iter()
+            .map(|resource| (resource.id, resource))
+            .collect::<BTreeMap<_, _>>();
+        if resource_by_id.len() != plan.resources.len() {
+            return None;
+        }
+        let resource_formats = plan
+            .resources
+            .iter()
+            .map(|resource| (resource.id, resource.format))
+            .collect::<BTreeMap<_, _>>();
+        let pass_positions = plan
+            .passes
+            .iter()
+            .enumerate()
+            .map(|(position, pass)| (pass.id, position))
+            .collect::<BTreeMap<_, _>>();
+        (pass_positions.len() == plan.passes.len()).then_some(Self {
+            resource_by_id,
+            resource_formats,
+            pass_positions,
+        })
+    }
+}
+
+struct ClosedGraphAccounting {
+    actual_reads: BTreeMap<RuntimeResourceId, u32>,
+    actual_last_reads: BTreeMap<RuntimeResourceId, RuntimePassId>,
+    releases: BTreeMap<RuntimeResourceId, RuntimePassId>,
+    results: BTreeMap<RuntimeResourceId, RuntimePassId>,
+}
+
+fn validate_closed_graph_accounting(
+    plan: &LoweredGraphPlan,
+    maps: &ClosedGraphMaps<'_>,
+) -> Option<()> {
+    let accounting = validate_closed_pass_accounting(plan, maps)?;
+    for resource in &plan.resources {
+        if resource.format != runtime_resource_format(resource.role, plan.working_format)
+            || resource.expected_reads == 0
+            || accounting.actual_reads.get(&resource.id).copied() != Some(resource.expected_reads)
+            || accounting.actual_last_reads.get(&resource.id).copied() != Some(resource.last_use)
+            || accounting.releases.get(&resource.id).copied() != Some(resource.last_use)
+            || resource.spatial.device_extent.width() == 0
+            || resource.spatial.device_extent.height() == 0
+            || !resource.spatial.texel_origin.x().is_finite()
+            || !resource.spatial.texel_origin.y().is_finite()
+            || !resource.spatial.raster_scale.is_finite()
+            || resource.spatial.raster_scale <= 0.0
+        {
+            return None;
+        }
+        match (&resource.producer, &resource.import) {
+            (
+                RuntimeResourceProducer::Imported,
+                Some(RuntimeResourceImport::ResolvedAlphaMask(_)),
+            ) if resource.role == RuntimeResourceRole::ImportedImage
+                && resource.format == RuntimeResourceFormat::ResolvedMaskRgba8Unorm => {}
+            (RuntimeResourceProducer::Pass(pass), None)
+                if accounting.results.get(&resource.id).copied() == Some(*pass) => {}
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+fn validate_closed_pass_accounting(
+    plan: &LoweredGraphPlan,
+    maps: &ClosedGraphMaps<'_>,
+) -> Option<ClosedGraphAccounting> {
+    let mut accounting = ClosedGraphAccounting {
+        actual_reads: BTreeMap::new(),
+        actual_last_reads: BTreeMap::new(),
+        releases: BTreeMap::new(),
+        results: BTreeMap::new(),
+    };
+    for (position, pass) in plan.passes.iter().enumerate() {
+        let mut dependencies = BTreeSet::new();
+        if pass.dependencies.iter().any(|dependency| {
+            !dependencies.insert(*dependency)
+                || maps
+                    .pass_positions
+                    .get(dependency)
+                    .is_none_or(|dependency_position| *dependency_position >= position)
+        }) {
+            return None;
+        }
+        let mut pass_reads = BTreeSet::new();
+        for read in &pass.reads {
+            if !pass_reads.insert(read.resource)
+                || !runtime_read_sampler_is_exact(read, &maps.resource_by_id)
+            {
+                return None;
+            }
+            validate_closed_read(plan, maps, &mut accounting, pass, read, position)?;
+        }
+        validate_closed_result(plan, maps, &mut accounting, pass)?;
+        let mut pass_releases = BTreeSet::new();
+        if pass.releases.iter().any(|resource| {
+            !pass_releases.insert(*resource)
+                || !pass_reads.contains(resource)
+                || accounting.releases.insert(*resource, pass.id).is_some()
+        }) {
+            return None;
+        }
+        let expected_cache_keys = runtime_pass_cache_keys(
+            &pass.kind,
+            &pass.reads,
+            pass.result,
+            plan.working_format,
+            plan.output_format,
+            &maps.resource_formats,
+        )
+        .ok()?;
+        if expected_cache_keys != pass.cache_keys {
+            return None;
+        }
+    }
+    Some(accounting)
+}
+
+fn validate_closed_read(
+    _plan: &LoweredGraphPlan,
+    maps: &ClosedGraphMaps<'_>,
+    accounting: &mut ClosedGraphAccounting,
+    pass: &RuntimePass,
+    read: &RuntimeReadBinding,
+    position: usize,
+) -> Option<()> {
+    let resource = maps.resource_by_id.get(&read.resource).copied()?;
+    if pass.result == RuntimeResultBinding::Resource(read.resource) {
+        return None;
+    }
+    if let RuntimeResourceProducer::Pass(producer) = resource.producer
+        && (maps
+            .pass_positions
+            .get(&producer)
+            .is_none_or(|producer_position| *producer_position >= position)
+            || !pass.dependencies.contains(&producer))
+    {
+        return None;
+    }
+    let reads = accounting.actual_reads.entry(read.resource).or_default();
+    *reads = reads.checked_add(1)?;
+    accounting.actual_last_reads.insert(read.resource, pass.id);
+    Some(())
+}
+
+fn validate_closed_result(
+    plan: &LoweredGraphPlan,
+    maps: &ClosedGraphMaps<'_>,
+    accounting: &mut ClosedGraphAccounting,
+    pass: &RuntimePass,
+) -> Option<()> {
+    match pass.result {
+        RuntimeResultBinding::Resource(resource) => {
+            let request = maps.resource_by_id.get(&resource).copied()?;
+            if request.producer != RuntimeResourceProducer::Pass(pass.id)
+                || accounting.results.insert(resource, pass.id).is_some()
+            {
+                return None;
+            }
+        }
+        RuntimeResultBinding::Output(format) => {
+            if !matches!(pass.kind, RuntimePassKind::Present) || format != plan.output_format {
+                return None;
+            }
+        }
+        RuntimeResultBinding::Empty => {}
+    }
+    Some(())
+}
+
+fn closed_graph_root<'plan>(
+    plan: &'plan LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+) -> Option<(&'plan RuntimePass, &'plan RuntimeResourceRequest)> {
+    let clear = plan.passes.first()?;
+    let RuntimePassKind::ClearRoot {
+        initialization: RuntimeInitialization::SurfaceBaseColor,
+        ..
+    } = clear.kind
+    else {
+        return None;
+    };
+    if !clear.dependencies.is_empty()
+        || !clear.reads.is_empty()
+        || !clear.releases.is_empty()
+        || clear.cache_keys.is_some()
+        || clear.result != RuntimeResultBinding::Resource(plan.root_working_image)
+    {
+        return None;
+    }
+    let root = resources.get(&plan.root_working_image).copied()?;
+    c08_resource_has_fixed_facts(
+        root,
+        RuntimeResourceRole::RootWorkingImage,
+        RuntimeResourceFormat::Working(plan.working_format),
+        RuntimeResourceProducer::Pass(clear.id),
+    )
+    .then_some((clear, root))
+}
+
+struct ClosedGraphTraversal<'plan> {
+    plan: &'plan LoweredGraphPlan,
+    resources: BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+    contexts: Vec<ExecutableCompositionContext>,
+    captures: Vec<ExecutableVelloCaptureFacts>,
+    layer_compositions: Vec<ExecutableLayerCompositionFacts>,
+    color_filters: Vec<ExecutableColorFilterFacts>,
+    expected_resources: BTreeSet<RuntimeResourceId>,
+    cursor: usize,
+}
+
+impl<'plan> ClosedGraphTraversal<'plan> {
+    fn new(
+        plan: &'plan LoweredGraphPlan,
+        resources: BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+        clear: &RuntimePass,
+        root: &RuntimeResourceRequest,
+    ) -> Self {
+        Self {
+            plan,
+            resources,
+            contexts: vec![ExecutableCompositionContext {
+                current: root.id,
+                producer: clear.id,
+                contains_captured_source: false,
+            }],
+            captures: Vec::new(),
+            layer_compositions: Vec::new(),
+            color_filters: Vec::new(),
+            expected_resources: BTreeSet::from([root.id]),
+            cursor: 1,
+        }
+    }
+
+    fn run(mut self) -> Option<ClosedExecutableGraphFacts> {
+        while self.cursor < self.plan.passes.len() {
+            self.visit_current_pass()?;
+        }
+        let clip_coverages_are_exact = self
+            .layer_compositions
+            .iter()
+            .all(|layer| layer_has_exact_clip_coverage_capture(layer, &self.captures))
+            && self.captures.iter().all(|capture| {
+                capture.work().clip_coverage().is_none()
+                    || self
+                        .layer_compositions
+                        .iter()
+                        .any(|layer| layer.clip_coverage == Some(capture.target()))
+            });
+        if self.captures.is_empty()
+            || self.contexts.len() != 1
+            || !clip_coverages_are_exact
+            || self.expected_resources.len() != self.plan.resources.len()
+            || self
+                .expected_resources
+                .iter()
+                .any(|resource| !self.resources.contains_key(resource))
+        {
+            return None;
+        }
+        Some(ClosedExecutableGraphFacts {
+            working_format: self.plan.working_format,
+            output_format: self.plan.output_format,
+            captures: self.captures,
+            layer_compositions: self.layer_compositions,
+            color_filters: self.color_filters,
+        })
+    }
+
+    fn visit_current_pass(&mut self) -> Option<()> {
+        let pass = self.plan.passes.get(self.cursor)?;
+        match &pass.kind {
+            RuntimePassKind::ClearRoot {
+                initialization: RuntimeInitialization::Transparent,
+                color,
+            } => self.visit_transparent_clear(pass, *color),
+            RuntimePassKind::VelloCapture(Some(work)) if work.span().is_some() => {
+                self.visit_span_capture(pass, work)
+            }
+            RuntimePassKind::VelloCapture(Some(work)) if work.clip_coverage().is_some() => {
+                self.visit_clip_coverage_capture(pass)
+            }
+            RuntimePassKind::ColorFilter(Some(filter)) => self.visit_color_filter(pass, filter),
+            RuntimePassKind::Composite(Some(composite))
+                if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
+            {
+                self.visit_layer_composite(pass)
+            }
+            RuntimePassKind::Present => self.visit_present(pass),
+            RuntimePassKind::ClearRoot {
+                initialization: RuntimeInitialization::SurfaceBaseColor,
+                ..
+            }
+            | RuntimePassKind::VelloCapture(None)
+            | RuntimePassKind::VelloCapture(Some(_))
+            | RuntimePassKind::CanonicalizeCapture
+            | RuntimePassKind::CopyBackdrop
+            | RuntimePassKind::ColorFilter(_)
+            | RuntimePassKind::BlurHorizontal(_)
+            | RuntimePassKind::BlurVertical(_)
+            | RuntimePassKind::DropShadowColorize(_)
+            | RuntimePassKind::Composite(_) => None,
+        }
+    }
+
+    fn visit_transparent_clear(&mut self, pass: &RuntimePass, color: Color) -> Option<()> {
+        if color != Color::TRANSPARENT
+            || !pass.dependencies.is_empty()
+            || !pass.reads.is_empty()
+            || !pass.releases.is_empty()
+            || pass.cache_keys.is_some()
+        {
+            return None;
+        }
+        let RuntimeResultBinding::Resource(resource) = pass.result else {
+            return None;
+        };
+        let request = self.resources.get(&resource).copied()?;
+        if !c08_resource_has_fixed_facts(
+            request,
+            RuntimeResourceRole::IsolationWorkingImage,
+            RuntimeResourceFormat::Working(self.plan.working_format),
+            RuntimeResourceProducer::Pass(pass.id),
+        ) {
+            return None;
+        }
+        self.expected_resources.insert(resource);
+        self.contexts.push(ExecutableCompositionContext {
+            current: resource,
+            producer: pass.id,
+            contains_captured_source: false,
+        });
+        self.advance(1)
+    }
+
+    fn visit_span_capture(&mut self, pass: &RuntimePass, work: &RuntimeVelloCapture) -> Option<()> {
+        let span = work.span()?;
+        let canonicalize = self.plan.passes.get(self.cursor.checked_add(1)?)?;
+        let after_canonicalize = self.plan.passes.get(self.cursor.checked_add(2)?)?;
+        let (coverage_pass, composite, pass_count) = if matches!(
+            after_canonicalize.kind,
+            RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::ClipCoverage(_)))
+        ) {
+            (
+                Some(after_canonicalize),
+                self.plan.passes.get(self.cursor.checked_add(3)?)?,
+                4,
+            )
+        } else {
+            (None, after_canonicalize, 3)
+        };
+        let (capture_target, capture_resource) =
+            self.validate_span_capture_source(pass, canonicalize, span)?;
+        let (canonical_target, canonical_resource) = self.validate_canonical_capture(
+            pass,
+            canonicalize,
+            composite,
+            capture_target,
+            capture_resource,
+        )?;
+        let capture_facts = executable_vello_capture_facts(
+            pass.id,
+            capture_target,
+            work,
+            capture_resource.spatial,
+        )?;
+        let coverage_facts = match coverage_pass {
+            Some(coverage) => Some(validate_closed_clip_coverage_capture(
+                coverage,
+                composite.id,
+                &self.resources,
+            )?),
+            None => None,
+        };
+        let parent = *self.contexts.last()?;
+        let layer = validate_closed_composite(
+            composite,
+            parent,
+            canonical_resource,
+            &self.resources,
+            self.plan.working_format,
+            false,
+        )?;
+        let RuntimeResultBinding::Resource(result) = composite.result else {
+            return None;
+        };
+        self.record_span_capture(
+            composite,
+            [capture_target, canonical_target, result],
+            capture_facts,
+            coverage_facts,
+            layer,
+        )?;
+        self.advance(pass_count)
+    }
+
+    fn validate_span_capture_source(
+        &self,
+        pass: &RuntimePass,
+        canonicalize: &RuntimePass,
+        span: &RuntimeVelloSpan,
+    ) -> Option<(RuntimeResourceId, &'plan RuntimeResourceRequest)> {
+        let RuntimeResultBinding::Resource(capture_target) = pass.result else {
+            return None;
+        };
+        let expected_scope = if self.contexts.len() == 1 {
+            RuntimeVelloSpanScope::CurrentParent
+        } else {
+            RuntimeVelloSpanScope::LayerSource
+        };
+        if !pass.dependencies.is_empty()
+            || !pass.reads.is_empty()
+            || !pass.releases.is_empty()
+            || pass.cache_keys.is_some()
+            || span.scope != expected_scope
+        {
+            return None;
+        }
+        let resource = self.resources.get(&capture_target).copied()?;
+        c08_resource_has_fixed_facts(
+            resource,
+            RuntimeResourceRole::CaptureWorkingImage,
+            RuntimeResourceFormat::VelloCaptureRgba8Unorm,
+            RuntimeResourceProducer::Pass(pass.id),
+        )
+        .then_some(())
+        .filter(|()| resource.expected_reads == 1 && resource.last_use == canonicalize.id)?;
+        Some((capture_target, resource))
+    }
+
+    fn validate_canonical_capture(
+        &self,
+        capture: &RuntimePass,
+        canonicalize: &RuntimePass,
+        composite: &RuntimePass,
+        capture_target: RuntimeResourceId,
+        capture_resource: &RuntimeResourceRequest,
+    ) -> Option<(RuntimeResourceId, &'plan RuntimeResourceRequest)> {
+        if !matches!(canonicalize.kind, RuntimePassKind::CanonicalizeCapture)
+            || canonicalize.dependencies.as_slice() != [capture.id]
+            || canonicalize.reads.len() != 1
+            || !runtime_read_has_exact_facts(
+                &canonicalize.reads[0],
+                RuntimeReadRole::CaptureSource,
+                capture_resource,
+                RuntimeSamplingFilter::Linear,
+                RuntimeSamplingEdge::ClampToExtent,
+            )
+            || canonicalize.releases.as_slice() != [capture_target]
+        {
+            return None;
+        }
+        let RuntimeResultBinding::Resource(canonical_target) = canonicalize.result else {
+            return None;
+        };
+        let resource = self.resources.get(&canonical_target).copied()?;
+        c08_resource_has_fixed_facts(
+            resource,
+            RuntimeResourceRole::FilterIntermediate,
+            RuntimeResourceFormat::Working(self.plan.working_format),
+            RuntimeResourceProducer::Pass(canonicalize.id),
+        )
+        .then_some(())
+        .filter(|()| {
+            resource.expected_reads == 1
+                && resource.last_use == composite.id
+                && resource.spatial == capture_resource.spatial
+        })?;
+        Some((canonical_target, resource))
+    }
+
+    fn record_span_capture(
+        &mut self,
+        composite: &RuntimePass,
+        resources: [RuntimeResourceId; 3],
+        capture: ExecutableVelloCaptureFacts,
+        coverage: Option<(RuntimeResourceId, ExecutableVelloCaptureFacts)>,
+        layer: Option<ExecutableLayerCompositionFacts>,
+    ) -> Option<()> {
+        let context = self.contexts.last_mut()?;
+        context.current = resources[2];
+        context.producer = composite.id;
+        context.contains_captured_source = true;
+        self.expected_resources.extend(resources);
+        self.captures.push(capture);
+        if let Some((resource, facts)) = coverage {
+            self.expected_resources.insert(resource);
+            self.captures.push(facts);
+        }
+        if let Some(layer) = layer {
+            self.record_layer_resources(&layer);
+            self.layer_compositions.push(layer);
+        }
+        Some(())
+    }
+
+    fn visit_clip_coverage_capture(&mut self, pass: &RuntimePass) -> Option<()> {
+        let composite = self.plan.passes.get(self.cursor.checked_add(1)?)?;
+        let (coverage, facts) =
+            validate_closed_clip_coverage_capture(pass, composite.id, &self.resources)?;
+        self.expected_resources.insert(coverage);
+        self.captures.push(facts);
+        self.advance(1)
+    }
+
+    fn visit_color_filter(
+        &mut self,
+        pass: &RuntimePass,
+        filter: &RuntimeColorFilter,
+    ) -> Option<()> {
+        let context = *self.contexts.last()?;
+        if !context.contains_captured_source {
+            return None;
+        }
+        let source = self.resources.get(&context.current).copied()?;
+        let color = validate_closed_color_filter(
+            pass,
+            context,
+            source,
+            filter,
+            &self.resources,
+            self.plan.working_format,
+        )?;
+        let runtime_context = self.contexts.last_mut()?;
+        runtime_context.current = color.result;
+        runtime_context.producer = pass.id;
+        self.expected_resources.insert(color.result);
+        self.color_filters.push(color);
+        self.advance(1)
+    }
+
+    fn visit_layer_composite(&mut self, pass: &RuntimePass) -> Option<()> {
+        if self.contexts.len() < 2 {
+            return None;
+        }
+        let source_context = self.contexts.pop()?;
+        if !source_context.contains_captured_source {
+            return None;
+        }
+        let parent = *self.contexts.last()?;
+        let source = self.resources.get(&source_context.current).copied()?;
+        let layer = validate_closed_composite(
+            pass,
+            parent,
+            source,
+            &self.resources,
+            self.plan.working_format,
+            true,
+        )??;
+        let RuntimeResultBinding::Resource(result) = pass.result else {
+            return None;
+        };
+        let context = self.contexts.last_mut()?;
+        context.current = result;
+        context.producer = pass.id;
+        context.contains_captured_source = true;
+        self.expected_resources.insert(result);
+        self.record_layer_resources(&layer);
+        self.layer_compositions.push(layer);
+        self.advance(1)
+    }
+
+    fn visit_present(&mut self, pass: &RuntimePass) -> Option<()> {
+        if self.cursor.checked_add(1)? != self.plan.passes.len()
+            || pass.id != self.plan.final_present
+            || self.contexts.len() != 1
+        {
+            return None;
+        }
+        let parent = self.contexts[0];
+        let resource = self.resources.get(&parent.current).copied()?;
+        if pass.dependencies.as_slice() != [parent.producer]
+            || pass.reads.len() != 1
+            || !runtime_read_has_exact_facts(
+                &pass.reads[0],
+                RuntimeReadRole::FinalWorkingImage,
+                resource,
+                RuntimeSamplingFilter::Linear,
+                RuntimeSamplingEdge::ClampToExtent,
+            )
+            || pass.result != RuntimeResultBinding::Output(self.plan.output_format)
+            || pass.releases.as_slice() != [parent.current]
+            || resource.expected_reads != 1
+            || resource.last_use != pass.id
+        {
+            return None;
+        }
+        self.advance(1)
+    }
+
+    fn record_layer_resources(&mut self, layer: &ExecutableLayerCompositionFacts) {
+        if let Some(coverage) = layer.clip_coverage {
+            self.expected_resources.insert(coverage);
+        }
+        if let Some(mask) = layer.alpha_mask {
+            self.expected_resources.insert(mask);
+        }
+    }
+
+    fn advance(&mut self, count: usize) -> Option<()> {
+        self.cursor = self.cursor.checked_add(count)?;
+        Some(())
+    }
+}
+
 impl LoweredGraphPlan {
     pub(crate) fn try_lower_validated_graph(
         graph: &GpuRenderGraph,
@@ -2781,70 +3639,15 @@ impl LoweredGraphPlan {
             .iter()
             .map(|pass| RuntimePassId(pass.id()))
             .collect::<BTreeSet<_>>();
-
-        let mut resources = Vec::with_capacity(resource_views.len());
-        let mut resource_ids = BTreeSet::new();
-        let mut resource_formats = BTreeMap::new();
-        for resource in resource_views {
-            let id = RuntimeResourceId(resource.id());
-            if !resource_ids.insert(id) {
-                return Err(lowering_error("duplicate runtime resource binding"));
-            }
-            let role = runtime_resource_role(resource.role());
-            let spatial = RuntimeSpatialDescriptor::from_graph(resource.spatial());
-            let format = runtime_resource_format(role, working_format);
-            if let GraphLoweringCapabilityValidation::Required(capabilities) = capability_validation
-            {
-                capabilities.validate_effect_texture_extent(spatial.device_extent)?;
-            }
-            if let (
-                GraphLoweringCapabilityValidation::Required(capabilities),
-                RuntimeResourceFormat::Working(format),
-            ) = (capability_validation, format)
-            {
-                capabilities.validate_effect_texture_allocation(
-                    spatial.device_extent,
-                    Some(format),
-                    format.texture_format(),
-                    format.required_usages(),
-                )?;
-            }
-            let producer = match resource.producer() {
-                GraphLoweringResourceProducer::Imported => RuntimeResourceProducer::Imported,
-                GraphLoweringResourceProducer::Pass(pass) => {
-                    let pass = RuntimePassId(pass);
-                    if !pass_ids.contains(&pass) {
-                        return Err(lowering_error("resource producer binding is missing"));
-                    }
-                    RuntimeResourceProducer::Pass(pass)
-                }
-            };
-            let import = resource.import().map(|import| match import {
-                GraphLoweringImportView::ResolvedAlphaMask(upload) => {
-                    RuntimeResourceImport::ResolvedAlphaMask(upload.clone())
-                }
-            });
-            if matches!(producer, RuntimeResourceProducer::Imported) != import.is_some() {
-                return Err(lowering_error(
-                    "imported runtime resource binding is inconsistent",
-                ));
-            }
-            let last_use = RuntimePassId(resource.last_use());
-            if !pass_ids.contains(&last_use) {
-                return Err(lowering_error("resource last-use binding is missing"));
-            }
-            resource_formats.insert(id, format);
-            resources.push(RuntimeResourceRequest {
-                id,
-                role,
-                format,
-                spatial,
-                producer,
-                expected_reads: resource.expected_reads(),
-                last_use,
-                import,
-            });
-        }
+        let LoweredResourceSet {
+            resources,
+            resource_formats,
+        } = lower_runtime_resources(
+            &resource_views,
+            &pass_ids,
+            working_format,
+            capability_validation,
+        )?;
 
         let mut releases = BTreeMap::<RuntimePassId, Vec<RuntimeResourceId>>::new();
         for resource in &resources {
@@ -2858,75 +3661,14 @@ impl LoweredGraphPlan {
             .map(|resource| (resource.id, resource))
             .collect::<BTreeMap<_, _>>();
 
-        let mut seen_passes = BTreeSet::new();
-        let mut passes = Vec::with_capacity(pass_views.len());
-        for pass in pass_views {
-            let id = RuntimePassId(pass.id());
-            if seen_passes.contains(&id) {
-                return Err(lowering_error("duplicate runtime pass binding"));
-            }
-            let dependencies = pass
-                .dependencies()
-                .into_iter()
-                .map(RuntimePassId)
-                .collect::<Vec<_>>();
-            if dependencies
-                .iter()
-                .any(|dependency| !seen_passes.contains(dependency))
-            {
-                return Err(lowering_error(
-                    "runtime pass has a missing or forward dependency",
-                ));
-            }
-            let graph_kind = pass.kind()?;
-            let kind = runtime_pass_kind(graph_kind, working_format)?;
-            let graph_reads = pass.reads()?;
-            let reads = lower_read_bindings(&graph_reads, &resource_by_id, &resource_formats)?;
-            let result = match pass.result() {
-                GraphLoweringPassResult::Empty if matches!(kind, RuntimePassKind::Present) => {
-                    RuntimeResultBinding::Output(output_format)
-                }
-                GraphLoweringPassResult::Empty => RuntimeResultBinding::Empty,
-                GraphLoweringPassResult::Resource(resource) => {
-                    let resource = RuntimeResourceId(resource);
-                    if !resource_by_id.contains_key(&resource)
-                        || reads.iter().any(|read| read.resource == resource)
-                    {
-                        return Err(lowering_error(
-                            "runtime pass result binding is inconsistent",
-                        ));
-                    }
-                    RuntimeResultBinding::Resource(resource)
-                }
-            };
-            let pass_releases = releases.remove(&id).unwrap_or_default();
-            if pass_releases
-                .iter()
-                .any(|resource| !reads.iter().any(|binding| binding.resource == *resource))
-            {
-                return Err(lowering_error(
-                    "runtime release is not the resource's last read",
-                ));
-            }
-            let cache_keys = runtime_pass_cache_keys(
-                &kind,
-                &reads,
-                result,
-                working_format,
-                output_format,
-                &resource_formats,
-            )?;
-            passes.push(RuntimePass {
-                id,
-                kind,
-                dependencies,
-                reads,
-                result,
-                releases: pass_releases,
-                cache_keys,
-            });
-            seen_passes.insert(id);
-        }
+        let passes = lower_runtime_passes(
+            &pass_views,
+            &resource_by_id,
+            &resource_formats,
+            &mut releases,
+            working_format,
+            output_format,
+        )?;
         if !releases.is_empty() {
             return Err(lowering_error(
                 "one or more release bindings have no runtime pass",
@@ -2965,461 +3707,10 @@ impl LoweredGraphPlan {
         if !matches!(self.output_format, Format::Rgba8 | Format::Bgra8) || self.passes.len() < 5 {
             return None;
         }
-        let resource_by_id = self
-            .resources
-            .iter()
-            .map(|resource| (resource.id, resource))
-            .collect::<BTreeMap<_, _>>();
-        if resource_by_id.len() != self.resources.len() {
-            return None;
-        }
-        let resource_formats = self
-            .resources
-            .iter()
-            .map(|resource| (resource.id, resource.format))
-            .collect::<BTreeMap<_, _>>();
-        let pass_positions = self
-            .passes
-            .iter()
-            .enumerate()
-            .map(|(position, pass)| (pass.id, position))
-            .collect::<BTreeMap<_, _>>();
-        if pass_positions.len() != self.passes.len() {
-            return None;
-        }
-
-        let mut actual_reads = BTreeMap::<RuntimeResourceId, u32>::new();
-        let mut actual_last_reads = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
-        let mut releases = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
-        let mut results = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
-        for (position, pass) in self.passes.iter().enumerate() {
-            let mut dependencies = BTreeSet::new();
-            if pass.dependencies.iter().any(|dependency| {
-                !dependencies.insert(*dependency)
-                    || pass_positions
-                        .get(dependency)
-                        .is_none_or(|dependency_position| *dependency_position >= position)
-            }) {
-                return None;
-            }
-            let mut pass_reads = BTreeSet::new();
-            for read in &pass.reads {
-                if !pass_reads.insert(read.resource)
-                    || !runtime_read_sampler_is_exact(read, &resource_by_id)
-                {
-                    return None;
-                }
-                let resource = resource_by_id.get(&read.resource).copied()?;
-                if pass.result == RuntimeResultBinding::Resource(read.resource) {
-                    return None;
-                }
-                if let RuntimeResourceProducer::Pass(producer) = resource.producer
-                    && (pass_positions
-                        .get(&producer)
-                        .is_none_or(|producer_position| *producer_position >= position)
-                        || !pass.dependencies.contains(&producer))
-                {
-                    return None;
-                }
-                let reads = actual_reads.entry(read.resource).or_default();
-                *reads = reads.checked_add(1)?;
-                actual_last_reads.insert(read.resource, pass.id);
-            }
-            match pass.result {
-                RuntimeResultBinding::Resource(resource) => {
-                    let request = resource_by_id.get(&resource).copied()?;
-                    if request.producer != RuntimeResourceProducer::Pass(pass.id)
-                        || results.insert(resource, pass.id).is_some()
-                    {
-                        return None;
-                    }
-                }
-                RuntimeResultBinding::Output(format) => {
-                    if !matches!(pass.kind, RuntimePassKind::Present)
-                        || format != self.output_format
-                    {
-                        return None;
-                    }
-                }
-                RuntimeResultBinding::Empty => {}
-            }
-            let mut pass_releases = BTreeSet::new();
-            if pass.releases.iter().any(|resource| {
-                !pass_releases.insert(*resource)
-                    || !pass_reads.contains(resource)
-                    || releases.insert(*resource, pass.id).is_some()
-            }) {
-                return None;
-            }
-            let expected_cache_keys = runtime_pass_cache_keys(
-                &pass.kind,
-                &pass.reads,
-                pass.result,
-                self.working_format,
-                self.output_format,
-                &resource_formats,
-            )
-            .ok()?;
-            if expected_cache_keys != pass.cache_keys {
-                return None;
-            }
-        }
-        for resource in &self.resources {
-            if resource.format != runtime_resource_format(resource.role, self.working_format)
-                || resource.expected_reads == 0
-                || actual_reads.get(&resource.id).copied() != Some(resource.expected_reads)
-                || actual_last_reads.get(&resource.id).copied() != Some(resource.last_use)
-                || releases.get(&resource.id).copied() != Some(resource.last_use)
-                || resource.spatial.device_extent.width() == 0
-                || resource.spatial.device_extent.height() == 0
-                || !resource.spatial.texel_origin.x().is_finite()
-                || !resource.spatial.texel_origin.y().is_finite()
-                || !resource.spatial.raster_scale.is_finite()
-                || resource.spatial.raster_scale <= 0.0
-            {
-                return None;
-            }
-            match (&resource.producer, &resource.import) {
-                (
-                    RuntimeResourceProducer::Imported,
-                    Some(RuntimeResourceImport::ResolvedAlphaMask(_)),
-                ) if resource.role == RuntimeResourceRole::ImportedImage
-                    && resource.format == RuntimeResourceFormat::ResolvedMaskRgba8Unorm => {}
-                (RuntimeResourceProducer::Pass(pass), None)
-                    if results.get(&resource.id).copied() == Some(*pass) => {}
-                _ => return None,
-            }
-        }
-
-        let clear = self.passes.first()?;
-        let RuntimePassKind::ClearRoot {
-            initialization: RuntimeInitialization::SurfaceBaseColor,
-            ..
-        } = clear.kind
-        else {
-            return None;
-        };
-        if !clear.dependencies.is_empty()
-            || !clear.reads.is_empty()
-            || !clear.releases.is_empty()
-            || clear.cache_keys.is_some()
-            || clear.result != RuntimeResultBinding::Resource(self.root_working_image)
-        {
-            return None;
-        }
-        let root = resource_by_id.get(&self.root_working_image).copied()?;
-        if !c08_resource_has_fixed_facts(
-            root,
-            RuntimeResourceRole::RootWorkingImage,
-            RuntimeResourceFormat::Working(self.working_format),
-            RuntimeResourceProducer::Pass(clear.id),
-        ) {
-            return None;
-        }
-
-        let mut contexts = vec![ExecutableCompositionContext {
-            current: root.id,
-            producer: clear.id,
-            contains_captured_source: false,
-        }];
-        let mut captures = Vec::new();
-        let mut layer_compositions = Vec::new();
-        let mut color_filters = Vec::new();
-        let mut expected_resources = BTreeSet::from([root.id]);
-        let mut cursor = 1usize;
-        while cursor < self.passes.len() {
-            let pass = self.passes.get(cursor)?;
-            match &pass.kind {
-                RuntimePassKind::ClearRoot {
-                    initialization: RuntimeInitialization::Transparent,
-                    color,
-                } => {
-                    if *color != Color::TRANSPARENT
-                        || !pass.dependencies.is_empty()
-                        || !pass.reads.is_empty()
-                        || !pass.releases.is_empty()
-                        || pass.cache_keys.is_some()
-                    {
-                        return None;
-                    }
-                    let RuntimeResultBinding::Resource(resource) = pass.result else {
-                        return None;
-                    };
-                    let request = resource_by_id.get(&resource).copied()?;
-                    if !c08_resource_has_fixed_facts(
-                        request,
-                        RuntimeResourceRole::IsolationWorkingImage,
-                        RuntimeResourceFormat::Working(self.working_format),
-                        RuntimeResourceProducer::Pass(pass.id),
-                    ) {
-                        return None;
-                    }
-                    expected_resources.insert(resource);
-                    contexts.push(ExecutableCompositionContext {
-                        current: resource,
-                        producer: pass.id,
-                        contains_captured_source: false,
-                    });
-                    cursor = cursor.checked_add(1)?;
-                }
-                RuntimePassKind::VelloCapture(Some(work)) if work.span().is_some() => {
-                    let span = work.span()?;
-                    let canonicalize = self.passes.get(cursor.checked_add(1)?)?;
-                    let after_canonicalize = self.passes.get(cursor.checked_add(2)?)?;
-                    let (coverage_pass, composite, pass_count) = if matches!(
-                        after_canonicalize.kind,
-                        RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::ClipCoverage(_)))
-                    ) {
-                        (
-                            Some(after_canonicalize),
-                            self.passes.get(cursor.checked_add(3)?)?,
-                            4,
-                        )
-                    } else {
-                        (None, after_canonicalize, 3)
-                    };
-                    let RuntimeResultBinding::Resource(capture_target) = pass.result else {
-                        return None;
-                    };
-                    if !pass.dependencies.is_empty()
-                        || !pass.reads.is_empty()
-                        || !pass.releases.is_empty()
-                        || pass.cache_keys.is_some()
-                        || span.scope
-                            != if contexts.len() == 1 {
-                                RuntimeVelloSpanScope::CurrentParent
-                            } else {
-                                RuntimeVelloSpanScope::LayerSource
-                            }
-                    {
-                        return None;
-                    }
-                    let capture_resource = resource_by_id.get(&capture_target).copied()?;
-                    if !c08_resource_has_fixed_facts(
-                        capture_resource,
-                        RuntimeResourceRole::CaptureWorkingImage,
-                        RuntimeResourceFormat::VelloCaptureRgba8Unorm,
-                        RuntimeResourceProducer::Pass(pass.id),
-                    ) || capture_resource.expected_reads != 1
-                        || capture_resource.last_use != canonicalize.id
-                    {
-                        return None;
-                    }
-                    let capture_facts = executable_vello_capture_facts(
-                        pass.id,
-                        capture_target,
-                        work,
-                        capture_resource.spatial,
-                    )?;
-
-                    if !matches!(canonicalize.kind, RuntimePassKind::CanonicalizeCapture)
-                        || canonicalize.dependencies.as_slice() != [pass.id]
-                        || canonicalize.reads.len() != 1
-                        || !runtime_read_has_exact_facts(
-                            &canonicalize.reads[0],
-                            RuntimeReadRole::CaptureSource,
-                            capture_resource,
-                            RuntimeSamplingFilter::Linear,
-                            RuntimeSamplingEdge::ClampToExtent,
-                        )
-                        || canonicalize.releases.as_slice() != [capture_target]
-                    {
-                        return None;
-                    }
-                    let RuntimeResultBinding::Resource(canonical_target) = canonicalize.result
-                    else {
-                        return None;
-                    };
-                    let canonical_resource = resource_by_id.get(&canonical_target).copied()?;
-                    if !c08_resource_has_fixed_facts(
-                        canonical_resource,
-                        RuntimeResourceRole::FilterIntermediate,
-                        RuntimeResourceFormat::Working(self.working_format),
-                        RuntimeResourceProducer::Pass(canonicalize.id),
-                    ) || canonical_resource.expected_reads != 1
-                        || canonical_resource.last_use != composite.id
-                        || canonical_resource.spatial != capture_resource.spatial
-                    {
-                        return None;
-                    }
-
-                    let coverage_facts = match coverage_pass {
-                        Some(coverage_pass) => Some(validate_closed_clip_coverage_capture(
-                            coverage_pass,
-                            composite.id,
-                            &resource_by_id,
-                        )?),
-                        None => None,
-                    };
-
-                    let parent = *contexts.last()?;
-                    let layer = validate_closed_composite(
-                        composite,
-                        parent,
-                        canonical_resource,
-                        &resource_by_id,
-                        self.working_format,
-                        false,
-                    )?;
-                    let RuntimeResultBinding::Resource(result) = composite.result else {
-                        return None;
-                    };
-                    let context = contexts.last_mut()?;
-                    context.current = result;
-                    context.producer = composite.id;
-                    context.contains_captured_source = true;
-                    expected_resources.extend([capture_target, canonical_target, result]);
-                    captures.push(capture_facts);
-                    if let Some((coverage, facts)) = coverage_facts {
-                        expected_resources.insert(coverage);
-                        captures.push(facts);
-                    }
-                    if let Some(layer) = layer {
-                        if let Some(coverage) = layer.clip_coverage {
-                            expected_resources.insert(coverage);
-                        }
-                        if let Some(mask) = layer.alpha_mask {
-                            expected_resources.insert(mask);
-                        }
-                        layer_compositions.push(layer);
-                    }
-                    cursor = cursor.checked_add(pass_count)?;
-                }
-                RuntimePassKind::VelloCapture(Some(work)) if work.clip_coverage().is_some() => {
-                    let composite = self.passes.get(cursor.checked_add(1)?)?;
-                    let (coverage, facts) =
-                        validate_closed_clip_coverage_capture(pass, composite.id, &resource_by_id)?;
-                    expected_resources.insert(coverage);
-                    captures.push(facts);
-                    cursor = cursor.checked_add(1)?;
-                }
-                RuntimePassKind::ColorFilter(Some(filter)) => {
-                    let context = *contexts.last()?;
-                    if !context.contains_captured_source {
-                        return None;
-                    }
-                    let source = resource_by_id.get(&context.current).copied()?;
-                    let color = validate_closed_color_filter(
-                        pass,
-                        context,
-                        source,
-                        filter,
-                        &resource_by_id,
-                        self.working_format,
-                    )?;
-                    let runtime_context = contexts.last_mut()?;
-                    runtime_context.current = color.result;
-                    runtime_context.producer = pass.id;
-                    expected_resources.insert(color.result);
-                    color_filters.push(color);
-                    cursor = cursor.checked_add(1)?;
-                }
-                RuntimePassKind::Composite(Some(composite))
-                    if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
-                {
-                    if contexts.len() < 2 {
-                        return None;
-                    }
-                    let source_context = contexts.pop()?;
-                    if !source_context.contains_captured_source {
-                        return None;
-                    }
-                    let parent = *contexts.last()?;
-                    let source = resource_by_id.get(&source_context.current).copied()?;
-                    let layer = validate_closed_composite(
-                        pass,
-                        parent,
-                        source,
-                        &resource_by_id,
-                        self.working_format,
-                        true,
-                    )??;
-                    let RuntimeResultBinding::Resource(result) = pass.result else {
-                        return None;
-                    };
-                    let context = contexts.last_mut()?;
-                    context.current = result;
-                    context.producer = pass.id;
-                    context.contains_captured_source = true;
-                    expected_resources.insert(result);
-                    if let Some(coverage) = layer.clip_coverage {
-                        expected_resources.insert(coverage);
-                    }
-                    if let Some(mask) = layer.alpha_mask {
-                        expected_resources.insert(mask);
-                    }
-                    layer_compositions.push(layer);
-                    cursor = cursor.checked_add(1)?;
-                }
-                RuntimePassKind::Present => {
-                    if cursor.checked_add(1)? != self.passes.len()
-                        || pass.id != self.final_present
-                        || contexts.len() != 1
-                    {
-                        return None;
-                    }
-                    let parent = contexts[0];
-                    let parent_resource = resource_by_id.get(&parent.current).copied()?;
-                    if pass.dependencies.as_slice() != [parent.producer]
-                        || pass.reads.len() != 1
-                        || !runtime_read_has_exact_facts(
-                            &pass.reads[0],
-                            RuntimeReadRole::FinalWorkingImage,
-                            parent_resource,
-                            RuntimeSamplingFilter::Linear,
-                            RuntimeSamplingEdge::ClampToExtent,
-                        )
-                        || pass.result != RuntimeResultBinding::Output(self.output_format)
-                        || pass.releases.as_slice() != [parent.current]
-                        || parent_resource.expected_reads != 1
-                        || parent_resource.last_use != pass.id
-                    {
-                        return None;
-                    }
-                    cursor = cursor.checked_add(1)?;
-                }
-                RuntimePassKind::ClearRoot {
-                    initialization: RuntimeInitialization::SurfaceBaseColor,
-                    ..
-                }
-                | RuntimePassKind::VelloCapture(None)
-                | RuntimePassKind::VelloCapture(Some(_))
-                | RuntimePassKind::CanonicalizeCapture
-                | RuntimePassKind::CopyBackdrop
-                | RuntimePassKind::ColorFilter(_)
-                | RuntimePassKind::BlurHorizontal(_)
-                | RuntimePassKind::BlurVertical(_)
-                | RuntimePassKind::DropShadowColorize(_)
-                | RuntimePassKind::Composite(_) => return None,
-            }
-        }
-        let clip_coverages_are_exact = layer_compositions
-            .iter()
-            .all(|layer| layer_has_exact_clip_coverage_capture(layer, &captures))
-            && captures.iter().all(|capture| {
-                capture.work().clip_coverage().is_none()
-                    || layer_compositions
-                        .iter()
-                        .any(|layer| layer.clip_coverage == Some(capture.target()))
-            });
-        if captures.is_empty()
-            || contexts.len() != 1
-            || !clip_coverages_are_exact
-            || expected_resources.len() != self.resources.len()
-            || expected_resources
-                .iter()
-                .any(|resource| !resource_by_id.contains_key(resource))
-        {
-            return None;
-        }
-
-        Some(ClosedExecutableGraphFacts {
-            working_format: self.working_format,
-            output_format: self.output_format,
-            captures,
-            layer_compositions,
-            color_filters,
-        })
+        let maps = ClosedGraphMaps::try_new(self)?;
+        validate_closed_graph_accounting(self, &maps)?;
+        let (clear, root) = closed_graph_root(self, &maps.resource_by_id)?;
+        ClosedGraphTraversal::new(self, maps.resource_by_id, clear, root).run()
     }
 
     #[cfg(test)]
@@ -3450,195 +3741,29 @@ impl LoweredGraphPlan {
         }
 
         let clear = self.passes.first()?;
-        if c08_pass_class(&clear.kind) != Some(C08PassClass::ClearRoot)
-            || !clear.dependencies.is_empty()
-            || !clear.reads.is_empty()
-            || !clear.releases.is_empty()
-            || clear.cache_keys.is_some()
-            || clear.result != RuntimeResultBinding::Resource(self.root_working_image)
-        {
-            return None;
-        }
         let root = resource_by_id.get(&self.root_working_image).copied()?;
-        if !c08_resource_has_fixed_facts(
-            root,
-            RuntimeResourceRole::RootWorkingImage,
-            RuntimeResourceFormat::Working(self.working_format),
-            RuntimeResourceProducer::Pass(clear.id),
-        ) {
+        if !c08_root_is_exact(self, clear, root) {
             return None;
         }
-
-        let mut cursor = 1;
-        let mut parent = root;
-        let mut parent_producer = clear.id;
-        let mut captures = Vec::new();
-        let mut expected_resources = BTreeSet::from([self.root_working_image]);
-        while let Some(capture) = self.passes.get(cursor)
-            && c08_pass_class(&capture.kind) == Some(C08PassClass::VelloCapture)
-        {
-            let canonicalize = self.passes.get(cursor.checked_add(1)?)?;
-            let composite = self.passes.get(cursor.checked_add(2)?)?;
-            let RuntimePassKind::VelloCapture(Some(work @ RuntimeVelloCapture::Span(_))) =
-                &capture.kind
-            else {
-                return None;
-            };
-            let RuntimeResultBinding::Resource(capture_target) = capture.result else {
-                return None;
-            };
-            if !capture.dependencies.is_empty()
-                || !capture.reads.is_empty()
-                || !capture.releases.is_empty()
-                || capture.cache_keys.is_some()
-            {
-                return None;
-            }
-            let capture_resource = resource_by_id.get(&capture_target).copied()?;
-            if !c08_resource_has_fixed_facts(
-                capture_resource,
-                RuntimeResourceRole::CaptureWorkingImage,
-                RuntimeResourceFormat::VelloCaptureRgba8Unorm,
-                RuntimeResourceProducer::Pass(capture.id),
-            ) || capture_resource.expected_reads != 1
-                || capture_resource.last_use != canonicalize.id
-            {
-                return None;
-            }
-
-            if c08_pass_class(&canonicalize.kind) != Some(C08PassClass::CanonicalizeCapture)
-                || canonicalize.dependencies.as_slice() != [capture.id]
-                || canonicalize.reads.len() != 1
-                || !c08_read_is_exact(
-                    &canonicalize.reads[0],
-                    RuntimeReadRole::CaptureSource,
-                    capture_target,
-                    RuntimeSamplingFilter::Linear,
-                    RuntimeSamplingEdge::ClampToExtent,
-                    capture_resource.format,
-                )
-                || canonicalize.releases.as_slice() != [capture_target]
-            {
-                return None;
-            }
-            let RuntimeResultBinding::Resource(canonical_target) = canonicalize.result else {
-                return None;
-            };
-            let canonical_resource = resource_by_id.get(&canonical_target).copied()?;
-            if !c08_resource_has_fixed_facts(
-                canonical_resource,
-                RuntimeResourceRole::FilterIntermediate,
-                RuntimeResourceFormat::Working(self.working_format),
-                RuntimeResourceProducer::Pass(canonicalize.id),
-            ) || canonical_resource.expected_reads != 1
-                || canonical_resource.last_use != composite.id
-                || canonical_resource.spatial != capture_resource.spatial
-            {
-                return None;
-            }
-
-            if c08_pass_class(&composite.kind) != Some(C08PassClass::SpanSourceOver)
-                || composite.dependencies.as_slice() != [parent_producer, canonicalize.id]
-                || composite.reads.len() != 2
-                || !c08_read_is_exact(
-                    &composite.reads[0],
-                    RuntimeReadRole::CompositeParent,
-                    parent.id,
-                    RuntimeSamplingFilter::Linear,
-                    RuntimeSamplingEdge::ClampToExtent,
-                    parent.format,
-                )
-                || !c08_read_is_exact(
-                    &composite.reads[1],
-                    RuntimeReadRole::CompositeSource,
-                    canonical_target,
-                    RuntimeSamplingFilter::Linear,
-                    RuntimeSamplingEdge::TransparentBlack,
-                    canonical_resource.format,
-                )
-                || composite.releases.as_slice() != [parent.id, canonical_target]
-                || parent.expected_reads != 1
-                || parent.last_use != composite.id
-            {
-                return None;
-            }
-            let RuntimeResultBinding::Resource(composite_target) = composite.result else {
-                return None;
-            };
-            let composite_resource = resource_by_id.get(&composite_target).copied()?;
-            if !c08_resource_has_fixed_facts(
-                composite_resource,
-                RuntimeResourceRole::CompositeResult,
-                RuntimeResourceFormat::Working(self.working_format),
-                RuntimeResourceProducer::Pass(composite.id),
-            ) || composite_resource.spatial != root.spatial
-            {
-                return None;
-            }
-
-            expected_resources.extend([capture_target, canonical_target, composite_target]);
-            captures.push(executable_vello_capture_facts(
-                capture.id,
-                capture_target,
-                work,
-                capture_resource.spatial,
-            )?);
-            parent = composite_resource;
-            parent_producer = composite.id;
-            cursor = cursor.checked_add(3)?;
-        }
-
-        if captures.is_empty() {
+        let sequence = c08_capture_sequence(self, &resource_by_id, root, clear.id)?;
+        let present = self.passes.get(sequence.cursor)?;
+        if !c08_present_is_exact(self, present, &sequence) {
             return None;
         }
-
-        let present = self.passes.get(cursor)?;
-        if cursor.checked_add(1)? != self.passes.len()
-            || present.id != self.final_present
-            || c08_pass_class(&present.kind) != Some(C08PassClass::Present)
-            || present.dependencies.as_slice() != [parent_producer]
-            || present.reads.len() != 1
-            || !c08_read_is_exact(
-                &present.reads[0],
-                RuntimeReadRole::FinalWorkingImage,
-                parent.id,
-                RuntimeSamplingFilter::Linear,
-                RuntimeSamplingEdge::ClampToExtent,
-                parent.format,
-            )
-            || present.result != RuntimeResultBinding::Output(self.output_format)
-            || present.releases.as_slice() != [parent.id]
-            || parent.expected_reads != 1
-            || parent.last_use != present.id
-        {
-            return None;
-        }
-        if expected_resources.len() != self.resources.len()
-            || expected_resources
+        if sequence.expected_resources.len() != self.resources.len()
+            || sequence
+                .expected_resources
                 .iter()
                 .any(|resource| !resource_by_id.contains_key(resource))
+            || !c08_cache_keys_are_exact(self, &resource_formats)
         {
             return None;
-        }
-        for pass in &self.passes {
-            let expected_cache_keys = runtime_pass_cache_keys(
-                &pass.kind,
-                &pass.reads,
-                pass.result,
-                self.working_format,
-                self.output_format,
-                &resource_formats,
-            )
-            .ok()?;
-            if pass.cache_keys != expected_cache_keys {
-                return None;
-            }
         }
 
         let execution = C08ExecutionFacts {
             working_format: self.working_format,
             output_format: self.output_format,
-            captures,
+            captures: sequence.captures,
         };
         execution
             .proves_exact_execution_facts_for(self)
@@ -3653,6 +3778,251 @@ impl LoweredGraphPlan {
         }
         invalid
     }
+}
+
+#[cfg(test)]
+struct C08CaptureSequenceFacts<'resource> {
+    cursor: usize,
+    parent: &'resource RuntimeResourceRequest,
+    parent_producer: RuntimePassId,
+    captures: Vec<ExecutableVelloCaptureFacts>,
+    expected_resources: BTreeSet<RuntimeResourceId>,
+}
+
+#[cfg(test)]
+struct C08CapturePairFacts {
+    capture_target: RuntimeResourceId,
+    canonical_target: RuntimeResourceId,
+    canonical_pass: RuntimePassId,
+    capture: ExecutableVelloCaptureFacts,
+}
+
+#[cfg(test)]
+fn c08_root_is_exact(
+    plan: &LoweredGraphPlan,
+    clear: &RuntimePass,
+    root: &RuntimeResourceRequest,
+) -> bool {
+    c08_pass_class(&clear.kind) == Some(C08PassClass::ClearRoot)
+        && clear.dependencies.is_empty()
+        && clear.reads.is_empty()
+        && clear.releases.is_empty()
+        && clear.cache_keys.is_none()
+        && clear.result == RuntimeResultBinding::Resource(plan.root_working_image)
+        && c08_resource_has_fixed_facts(
+            root,
+            RuntimeResourceRole::RootWorkingImage,
+            RuntimeResourceFormat::Working(plan.working_format),
+            RuntimeResourceProducer::Pass(clear.id),
+        )
+}
+
+#[cfg(test)]
+fn c08_capture_pair(
+    plan: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    cursor: usize,
+) -> Option<C08CapturePairFacts> {
+    let capture = plan.passes.get(cursor)?;
+    let canonicalize = plan.passes.get(cursor.checked_add(1)?)?;
+    let RuntimePassKind::VelloCapture(Some(work @ RuntimeVelloCapture::Span(_))) = &capture.kind
+    else {
+        return None;
+    };
+    let RuntimeResultBinding::Resource(capture_target) = capture.result else {
+        return None;
+    };
+    if !capture.dependencies.is_empty()
+        || !capture.reads.is_empty()
+        || !capture.releases.is_empty()
+        || capture.cache_keys.is_some()
+    {
+        return None;
+    }
+    let capture_resource = resources.get(&capture_target).copied()?;
+    if !c08_resource_has_fixed_facts(
+        capture_resource,
+        RuntimeResourceRole::CaptureWorkingImage,
+        RuntimeResourceFormat::VelloCaptureRgba8Unorm,
+        RuntimeResourceProducer::Pass(capture.id),
+    ) || capture_resource.expected_reads != 1
+        || capture_resource.last_use != canonicalize.id
+        || c08_pass_class(&canonicalize.kind) != Some(C08PassClass::CanonicalizeCapture)
+        || canonicalize.dependencies.as_slice() != [capture.id]
+        || canonicalize.reads.len() != 1
+        || !c08_read_is_exact(
+            &canonicalize.reads[0],
+            RuntimeReadRole::CaptureSource,
+            capture_target,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::ClampToExtent,
+            capture_resource.format,
+        )
+        || canonicalize.releases.as_slice() != [capture_target]
+    {
+        return None;
+    }
+    let RuntimeResultBinding::Resource(canonical_target) = canonicalize.result else {
+        return None;
+    };
+    let canonical_resource = resources.get(&canonical_target).copied()?;
+    let composite = plan.passes.get(cursor.checked_add(2)?)?;
+    if !c08_resource_has_fixed_facts(
+        canonical_resource,
+        RuntimeResourceRole::FilterIntermediate,
+        RuntimeResourceFormat::Working(plan.working_format),
+        RuntimeResourceProducer::Pass(canonicalize.id),
+    ) || canonical_resource.expected_reads != 1
+        || canonical_resource.last_use != composite.id
+        || canonical_resource.spatial != capture_resource.spatial
+    {
+        return None;
+    }
+    Some(C08CapturePairFacts {
+        capture_target,
+        canonical_target,
+        canonical_pass: canonicalize.id,
+        capture: executable_vello_capture_facts(
+            capture.id,
+            capture_target,
+            work,
+            capture_resource.spatial,
+        )?,
+    })
+}
+
+#[cfg(test)]
+fn c08_composite_after_capture<'resource>(
+    plan: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &'resource RuntimeResourceRequest>,
+    cursor: usize,
+    parent: &RuntimeResourceRequest,
+    parent_producer: RuntimePassId,
+    pair: &C08CapturePairFacts,
+    root_spatial: RuntimeSpatialDescriptor,
+) -> Option<&'resource RuntimeResourceRequest> {
+    let composite = plan.passes.get(cursor.checked_add(2)?)?;
+    let canonical = resources.get(&pair.canonical_target).copied()?;
+    if c08_pass_class(&composite.kind) != Some(C08PassClass::SpanSourceOver)
+        || composite.dependencies.as_slice() != [parent_producer, pair.canonical_pass]
+        || composite.reads.len() != 2
+        || !c08_read_is_exact(
+            &composite.reads[0],
+            RuntimeReadRole::CompositeParent,
+            parent.id,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::ClampToExtent,
+            parent.format,
+        )
+        || !c08_read_is_exact(
+            &composite.reads[1],
+            RuntimeReadRole::CompositeSource,
+            pair.canonical_target,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::TransparentBlack,
+            canonical.format,
+        )
+        || composite.releases.as_slice() != [parent.id, pair.canonical_target]
+        || parent.expected_reads != 1
+        || parent.last_use != composite.id
+    {
+        return None;
+    }
+    let RuntimeResultBinding::Resource(target) = composite.result else {
+        return None;
+    };
+    let result = resources.get(&target).copied()?;
+    (c08_resource_has_fixed_facts(
+        result,
+        RuntimeResourceRole::CompositeResult,
+        RuntimeResourceFormat::Working(plan.working_format),
+        RuntimeResourceProducer::Pass(composite.id),
+    ) && result.spatial == root_spatial)
+        .then_some(result)
+}
+
+#[cfg(test)]
+fn c08_capture_sequence<'resource>(
+    plan: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &'resource RuntimeResourceRequest>,
+    root: &'resource RuntimeResourceRequest,
+    clear: RuntimePassId,
+) -> Option<C08CaptureSequenceFacts<'resource>> {
+    let mut facts = C08CaptureSequenceFacts {
+        cursor: 1,
+        parent: root,
+        parent_producer: clear,
+        captures: Vec::new(),
+        expected_resources: BTreeSet::from([plan.root_working_image]),
+    };
+    while plan
+        .passes
+        .get(facts.cursor)
+        .is_some_and(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::VelloCapture))
+    {
+        let pair = c08_capture_pair(plan, resources, facts.cursor)?;
+        let result = c08_composite_after_capture(
+            plan,
+            resources,
+            facts.cursor,
+            facts.parent,
+            facts.parent_producer,
+            &pair,
+            root.spatial,
+        )?;
+        facts
+            .expected_resources
+            .extend([pair.capture_target, pair.canonical_target, result.id]);
+        facts.captures.push(pair.capture);
+        facts.parent = result;
+        facts.parent_producer = plan.passes[facts.cursor.checked_add(2)?].id;
+        facts.cursor = facts.cursor.checked_add(3)?;
+    }
+    (!facts.captures.is_empty()).then_some(facts)
+}
+
+#[cfg(test)]
+fn c08_present_is_exact(
+    plan: &LoweredGraphPlan,
+    present: &RuntimePass,
+    sequence: &C08CaptureSequenceFacts<'_>,
+) -> bool {
+    sequence.cursor.checked_add(1) == Some(plan.passes.len())
+        && present.id == plan.final_present
+        && c08_pass_class(&present.kind) == Some(C08PassClass::Present)
+        && present.dependencies.as_slice() == [sequence.parent_producer]
+        && present.reads.len() == 1
+        && c08_read_is_exact(
+            &present.reads[0],
+            RuntimeReadRole::FinalWorkingImage,
+            sequence.parent.id,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::ClampToExtent,
+            sequence.parent.format,
+        )
+        && present.result == RuntimeResultBinding::Output(plan.output_format)
+        && present.releases.as_slice() == [sequence.parent.id]
+        && sequence.parent.expected_reads == 1
+        && sequence.parent.last_use == present.id
+}
+
+#[cfg(test)]
+fn c08_cache_keys_are_exact(
+    plan: &LoweredGraphPlan,
+    resource_formats: &BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+) -> bool {
+    plan.passes.iter().all(|pass| {
+        runtime_pass_cache_keys(
+            &pass.kind,
+            &pass.reads,
+            pass.result,
+            plan.working_format,
+            plan.output_format,
+            resource_formats,
+        )
+        .ok()
+        .is_some_and(|expected| pass.cache_keys == expected)
+    })
 }
 
 fn runtime_read_sampler_is_exact(
@@ -3888,6 +4258,56 @@ fn validate_closed_composite(
     let RuntimePassKind::Composite(Some(composite)) = &pass.kind else {
         return None;
     };
+    let result =
+        validate_closed_composite_base(pass, parent, source, resources, working_format, composite)?;
+
+    match &composite.kind {
+        RuntimeCompositeKind::SpanSourceOver => {
+            if requires_isolated_source
+                || pass.reads.len() != 2
+                || source.role != RuntimeResourceRole::FilterIntermediate
+            {
+                return None;
+            }
+            Some(None)
+        }
+        RuntimeCompositeKind::Layer {
+            transform,
+            parameters,
+            clip,
+            outer_clips,
+            clip_coverage,
+        } => {
+            let layer = ClosedLayerCompositeView {
+                composite,
+                transform,
+                parameters,
+                clip,
+                outer_clips,
+                clip_coverage: *clip_coverage,
+            };
+            validate_closed_layer_composite(
+                pass,
+                parent,
+                source,
+                resources,
+                requires_isolated_source,
+                result,
+                layer,
+            )
+        }
+        RuntimeCompositeKind::DropShadow => None,
+    }
+}
+
+fn validate_closed_composite_base(
+    pass: &RuntimePass,
+    parent: ExecutableCompositionContext,
+    source: &RuntimeResourceRequest,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+    composite: &RuntimeComposite,
+) -> Option<RuntimeResourceId> {
     if !composite.source_captured_before_outer_semantics || source.id == parent.current {
         return None;
     }
@@ -3942,138 +4362,160 @@ fn validate_closed_composite(
         return None;
     };
     let result_resource = resources.get(&result).copied()?;
-    if !c08_resource_has_fixed_facts(
+    c08_resource_has_fixed_facts(
         result_resource,
         RuntimeResourceRole::CompositeResult,
         RuntimeResourceFormat::Working(working_format),
         RuntimeResourceProducer::Pass(pass.id),
-    ) || result_resource.spatial != parent_resource.spatial
+    )
+    .then_some(())
+    .filter(|()| result_resource.spatial == parent_resource.spatial)
+    .map(|()| result)
+}
+
+struct ClosedLayerCompositeView<'a> {
+    composite: &'a RuntimeComposite,
+    transform: &'a Transform,
+    parameters: &'a RuntimeLayerCompositeParameters,
+    clip: &'a Option<Box<RenderClip>>,
+    outer_clips: &'a [RuntimeOuterClip],
+    clip_coverage: Option<RuntimeResourceId>,
+}
+
+fn validate_closed_layer_composite(
+    pass: &RuntimePass,
+    parent: ExecutableCompositionContext,
+    source: &RuntimeResourceRequest,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    requires_isolated_source: bool,
+    result: RuntimeResourceId,
+    layer: ClosedLayerCompositeView<'_>,
+) -> Option<Option<ExecutableLayerCompositionFacts>> {
+    let opacity = layer.parameters.opacity();
+    let alpha_mask = layer.parameters.alpha_mask();
+    if layer
+        .transform
+        .as_array()
+        .iter()
+        .any(|value| !value.is_finite())
+        || !opacity.is_finite()
+        || !(0.0..=1.0).contains(&opacity)
+        || !runtime_affine_is_finite_and_non_singular(
+            layer.parameters.destination_to_layer_local().affine(),
+        )
+        || layer.outer_clips.iter().any(|clip| {
+            clip.transform
+                .as_array()
+                .iter()
+                .any(|value| !value.is_finite())
+        })
+        || layer.parameters.has_clip() != (layer.clip.is_some() || !layer.outer_clips.is_empty())
+        || layer.parameters.has_clip() != layer.clip_coverage.is_some()
+        || !closed_composite_source_is_valid(source, requires_isolated_source, &layer)
     {
         return None;
     }
-
-    match &composite.kind {
-        RuntimeCompositeKind::SpanSourceOver => {
-            if requires_isolated_source
-                || pass.reads.len() != 2
-                || source.role != RuntimeResourceRole::FilterIntermediate
-            {
-                return None;
-            }
-            Some(None)
-        }
-        RuntimeCompositeKind::Layer {
-            transform,
-            parameters,
-            clip,
-            outer_clips,
-            clip_coverage,
-        } => {
-            let opacity = parameters.opacity();
-            let blend = parameters.blend();
-            let alpha_mask = parameters.alpha_mask();
-            if transform.as_array().iter().any(|value| !value.is_finite())
-                || !opacity.is_finite()
-                || !(0.0..=1.0).contains(&opacity)
-                || !runtime_affine_is_finite_and_non_singular(
-                    parameters.destination_to_layer_local().affine(),
-                )
-                || outer_clips.iter().any(|clip| {
-                    clip.transform
-                        .as_array()
-                        .iter()
-                        .any(|value| !value.is_finite())
-                })
-                || parameters.has_clip() != (clip.is_some() || !outer_clips.is_empty())
-                || parameters.has_clip() != clip_coverage.is_some()
-                || (requires_isolated_source
-                    && !matches!(
-                        source.role,
-                        RuntimeResourceRole::CompositeResult
-                            | RuntimeResourceRole::FilterIntermediate
-                    ))
-                || (!requires_isolated_source
-                    && (source.role != RuntimeResourceRole::FilterIntermediate
-                        || *transform != Transform::identity()
-                        || opacity != 1.0
-                        || blend != BlendMode::Normal
-                        || clip.is_some()
-                        || outer_clips.is_empty()
-                        || alpha_mask.is_some()))
-            {
-                return None;
-            }
-            let expected_read_count = 2usize
-                .checked_add(usize::from(clip_coverage.is_some()))?
-                .checked_add(usize::from(alpha_mask.is_some()))?;
-            if pass.reads.len() != expected_read_count {
-                return None;
-            }
-            let mut next_read = 2;
-            if let Some(coverage) = clip_coverage {
-                let coverage_resource = resources.get(coverage).copied()?;
-                if !runtime_read_has_exact_facts(
-                    &pass.reads[next_read],
-                    RuntimeReadRole::ClipCoverage,
-                    coverage_resource,
-                    RuntimeSamplingFilter::Linear,
-                    RuntimeSamplingEdge::TransparentBlack,
-                ) || coverage_resource.role != RuntimeResourceRole::ClipCoverage
-                    || coverage_resource.format != RuntimeResourceFormat::ClipCoverageRgba8Unorm
-                    || !matches!(coverage_resource.producer, RuntimeResourceProducer::Pass(_))
-                    || coverage_resource.import.is_some()
-                    || coverage_resource.expected_reads != 1
-                    || coverage_resource.last_use != pass.id
-                {
-                    return None;
-                }
-                next_read = next_read.checked_add(1)?;
-            }
-            if let Some(mask) = alpha_mask {
-                let mask_resource = resources.get(&mask.resource()).copied()?;
-                let Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) = &mask_resource.import
-                else {
-                    return None;
-                };
-                let mask_filter = match mask.sampling().quality() {
-                    ShaderMaskQualityKey::Low => RuntimeSamplingFilter::Nearest,
-                    ShaderMaskQualityKey::Medium | ShaderMaskQualityKey::High => {
-                        RuntimeSamplingFilter::Linear
-                    }
-                };
-                if !runtime_read_has_exact_facts(
-                    &pass.reads[next_read],
-                    RuntimeReadRole::AlphaMask,
-                    mask_resource,
-                    mask_filter,
-                    RuntimeSamplingEdge::ClampToExtent,
-                ) || mask_resource.role != RuntimeResourceRole::ImportedImage
-                    || mask_resource.format != RuntimeResourceFormat::ResolvedMaskRgba8Unorm
-                    || mask_resource.producer != RuntimeResourceProducer::Imported
-                    || upload.physical_size() != mask.image_dimensions()
-                    || mask_resource.spatial.device_extent != mask.image_dimensions()
-                    || mask.sampling()
-                        != ShaderMaskSamplingKey::new(upload.quality(), upload.extend())
-                    || RuntimeMaskTexelCenterFacts::try_new(mask.image_dimensions()).ok()
-                        != Some(mask.texel_center_facts())
-                    || mask_resource.expected_reads == 0
-                    || mask_resource.last_use < pass.id
-                {
-                    return None;
-                }
-            }
-            Some(Some(ExecutableLayerCompositionFacts {
-                pass: pass.id,
-                parent: parent.current,
-                source: source.id,
-                clip_coverage: *clip_coverage,
-                alpha_mask: alpha_mask.map(RuntimeResolvedAlphaMaskComposition::resource),
-                result,
-                composite: composite.clone(),
-            }))
-        }
-        RuntimeCompositeKind::DropShadow => None,
+    let expected_read_count = 2usize
+        .checked_add(usize::from(layer.clip_coverage.is_some()))?
+        .checked_add(usize::from(alpha_mask.is_some()))?;
+    if pass.reads.len() != expected_read_count {
+        return None;
     }
+    let next_read = validate_closed_clip_coverage(pass, resources, layer.clip_coverage, 2)?;
+    validate_closed_alpha_mask(pass, resources, alpha_mask, next_read)?;
+    Some(Some(ExecutableLayerCompositionFacts {
+        pass: pass.id,
+        parent: parent.current,
+        source: source.id,
+        clip_coverage: layer.clip_coverage,
+        alpha_mask: alpha_mask.map(RuntimeResolvedAlphaMaskComposition::resource),
+        result,
+        composite: layer.composite.clone(),
+    }))
+}
+
+fn closed_composite_source_is_valid(
+    source: &RuntimeResourceRequest,
+    requires_isolated_source: bool,
+    layer: &ClosedLayerCompositeView<'_>,
+) -> bool {
+    (requires_isolated_source
+        && matches!(
+            source.role,
+            RuntimeResourceRole::CompositeResult | RuntimeResourceRole::FilterIntermediate
+        ))
+        || (!requires_isolated_source
+            && source.role == RuntimeResourceRole::FilterIntermediate
+            && *layer.transform == Transform::identity()
+            && layer.parameters.opacity() == 1.0
+            && layer.parameters.blend() == BlendMode::Normal
+            && layer.clip.is_none()
+            && !layer.outer_clips.is_empty()
+            && layer.parameters.alpha_mask().is_none())
+}
+
+fn validate_closed_clip_coverage(
+    pass: &RuntimePass,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    clip_coverage: Option<RuntimeResourceId>,
+    next_read: usize,
+) -> Option<usize> {
+    let Some(coverage) = clip_coverage else {
+        return Some(next_read);
+    };
+    let coverage_resource = resources.get(&coverage).copied()?;
+    if !runtime_read_has_exact_facts(
+        &pass.reads[next_read],
+        RuntimeReadRole::ClipCoverage,
+        coverage_resource,
+        RuntimeSamplingFilter::Linear,
+        RuntimeSamplingEdge::TransparentBlack,
+    ) || coverage_resource.role != RuntimeResourceRole::ClipCoverage
+        || coverage_resource.format != RuntimeResourceFormat::ClipCoverageRgba8Unorm
+        || !matches!(coverage_resource.producer, RuntimeResourceProducer::Pass(_))
+        || coverage_resource.import.is_some()
+        || coverage_resource.expected_reads != 1
+        || coverage_resource.last_use != pass.id
+    {
+        return None;
+    }
+    next_read.checked_add(1)
+}
+
+fn validate_closed_alpha_mask(
+    pass: &RuntimePass,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    alpha_mask: Option<RuntimeResolvedAlphaMaskComposition>,
+    next_read: usize,
+) -> Option<()> {
+    let Some(mask) = alpha_mask else {
+        return Some(());
+    };
+    let mask_resource = resources.get(&mask.resource()).copied()?;
+    let Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) = &mask_resource.import else {
+        return None;
+    };
+    let mask_filter = match mask.sampling().quality() {
+        ShaderMaskQualityKey::Low => RuntimeSamplingFilter::Nearest,
+        ShaderMaskQualityKey::Medium | ShaderMaskQualityKey::High => RuntimeSamplingFilter::Linear,
+    };
+    (runtime_read_has_exact_facts(
+        &pass.reads[next_read],
+        RuntimeReadRole::AlphaMask,
+        mask_resource,
+        mask_filter,
+        RuntimeSamplingEdge::ClampToExtent,
+    ) && mask_resource.role == RuntimeResourceRole::ImportedImage
+        && mask_resource.format == RuntimeResourceFormat::ResolvedMaskRgba8Unorm
+        && mask_resource.producer == RuntimeResourceProducer::Imported
+        && upload.physical_size() == mask.image_dimensions()
+        && mask_resource.spatial.device_extent == mask.image_dimensions()
+        && mask.sampling() == ShaderMaskSamplingKey::new(upload.quality(), upload.extend())
+        && RuntimeMaskTexelCenterFacts::try_new(mask.image_dimensions()).ok()
+            == Some(mask.texel_center_facts())
+        && mask_resource.expected_reads != 0
+        && mask_resource.last_use >= pass.id)
+        .then_some(())
 }
 
 fn c08_resource_has_fixed_facts(
@@ -4277,31 +4719,8 @@ fn c09_executable_graph_observation(
         return None;
     };
 
-    let mut accepts_spine_and_layer_composition_for_all_formats = true;
-    for working_format in [
-        WorkingFormat::HighPrecision,
-        WorkingFormat::ReducedPrecision,
-    ] {
-        for output_format in [Format::Rgba8, Format::Bgra8] {
-            let c08 = LoweredGraphPlan::try_lower_for_dispatch_classification(
-                &c08_graph,
-                working_format,
-                output_format,
-            )
-            .ok()
-            .and_then(|lowered| ClosedExecutableGraph::try_from_lowered(lowered).ok());
-            let c09 = LoweredGraphPlan::try_lower_for_dispatch_classification(
-                &c09_graph,
-                working_format,
-                output_format,
-            )
-            .ok()
-            .and_then(|lowered| ClosedExecutableGraph::try_from_lowered(lowered).ok());
-            accepts_spine_and_layer_composition_for_all_formats &= c08
-                .is_some_and(|closed| !closed.has_layer_composition())
-                && c09.is_some_and(|closed| closed.has_layer_composition());
-        }
-    }
+    let accepts_spine_and_layer_composition_for_all_formats =
+        c09_accepts_all_working_and_output_formats(&c08_graph, &c09_graph);
 
     let c09_lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
         &c09_graph,
@@ -4310,30 +4729,7 @@ fn c09_executable_graph_observation(
     )
     .ok()?;
     let c09_closed = ClosedExecutableGraph::try_from_lowered(c09_lowered.clone()).ok()?;
-    let layer_composition_reads_are_exact = !c09_closed.facts.layer_compositions.is_empty()
-        && c09_closed.facts.layer_compositions.iter().all(|layer| {
-            let pass = c09_closed
-                .lowered
-                .passes
-                .iter()
-                .find(|pass| pass.id == layer.pass);
-            pass.is_some_and(|pass| {
-                let mut expected = vec![
-                    (RuntimeReadRole::CompositeParent, layer.parent),
-                    (RuntimeReadRole::CompositeSource, layer.source),
-                ];
-                if let Some(coverage) = layer.clip_coverage {
-                    expected.push((RuntimeReadRole::ClipCoverage, coverage));
-                }
-                if let Some(mask) = layer.alpha_mask {
-                    expected.push((RuntimeReadRole::AlphaMask, mask));
-                }
-                pass.reads
-                    .iter()
-                    .map(|read| (read.role, read.resource))
-                    .eq(expected)
-            })
-        });
+    let layer_composition_reads_are_exact = c09_layer_composition_reads_are_exact(&c09_closed);
 
     let c10_lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
         &c10_graph,
@@ -4381,30 +4777,12 @@ fn c09_executable_graph_observation(
     missing_composite.passes[layer_index].kind = RuntimePassKind::Composite(None);
     let rejects_missing_payloads = rejects(missing_capture) && rejects(missing_composite);
 
-    let mut malformed = Vec::new();
-    let mut invalid = c09_lowered.clone();
-    invalid.passes[canonicalize_index].dependencies.clear();
-    malformed.push(invalid);
-    let mut invalid = c09_lowered.clone();
-    invalid.passes[layer_index].reads.swap(0, 1);
-    malformed.push(invalid);
-    let mut invalid = c09_lowered.clone();
-    invalid.passes[layer_index].result =
-        RuntimeResultBinding::Resource(invalid.passes[layer_index].reads[0].resource);
-    malformed.push(invalid);
-    let mut invalid = c09_lowered.clone();
-    invalid.passes[layer_index].releases.clear();
-    malformed.push(invalid);
-    let mut invalid = c09_lowered.clone();
-    invalid.resources[0].expected_reads = invalid.resources[0].expected_reads.saturating_add(1);
-    malformed.push(invalid);
-    let mut invalid = c09_lowered.clone();
-    invalid.passes.swap(capture_index, canonicalize_index);
-    malformed.push(invalid);
-    let mut invalid = c09_lowered.clone();
-    invalid.resources[1].id = invalid.resources[0].id;
-    malformed.push(invalid);
-    let rejects_malformed_graph_facts = malformed.into_iter().all(rejects);
+    let rejects_malformed_graph_facts = c09_rejects_malformed_graph_facts(
+        &c09_lowered,
+        capture_index,
+        canonicalize_index,
+        layer_index,
+    );
 
     let mut unsupported_output = c09_lowered;
     unsupported_output.passes[present_index].result = RuntimeResultBinding::Output(Format::Bgra8);
@@ -4428,6 +4806,98 @@ fn c09_executable_graph_observation(
         rejects_unsupported_output_binding,
         preserves_exact_c09_dispatch,
     })
+}
+
+#[cfg(test)]
+fn c09_accepts_all_working_and_output_formats(
+    c08_graph: &GpuRenderGraph,
+    c09_graph: &GpuRenderGraph,
+) -> bool {
+    [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ]
+    .into_iter()
+    .all(|working_format| {
+        [Format::Rgba8, Format::Bgra8]
+            .into_iter()
+            .all(|output_format| {
+                let lower = |graph| {
+                    LoweredGraphPlan::try_lower_for_dispatch_classification(
+                        graph,
+                        working_format,
+                        output_format,
+                    )
+                    .ok()
+                    .and_then(|lowered| ClosedExecutableGraph::try_from_lowered(lowered).ok())
+                };
+                lower(c08_graph).is_some_and(|closed| !closed.has_layer_composition())
+                    && lower(c09_graph).is_some_and(|closed| closed.has_layer_composition())
+            })
+    })
+}
+
+#[cfg(test)]
+fn c09_layer_composition_reads_are_exact(closed: &ClosedExecutableGraph) -> bool {
+    !closed.facts.layer_compositions.is_empty()
+        && closed.facts.layer_compositions.iter().all(|layer| {
+            closed
+                .lowered
+                .passes
+                .iter()
+                .find(|pass| pass.id == layer.pass)
+                .is_some_and(|pass| {
+                    let mut expected = vec![
+                        (RuntimeReadRole::CompositeParent, layer.parent),
+                        (RuntimeReadRole::CompositeSource, layer.source),
+                    ];
+                    if let Some(coverage) = layer.clip_coverage {
+                        expected.push((RuntimeReadRole::ClipCoverage, coverage));
+                    }
+                    if let Some(mask) = layer.alpha_mask {
+                        expected.push((RuntimeReadRole::AlphaMask, mask));
+                    }
+                    pass.reads
+                        .iter()
+                        .map(|read| (read.role, read.resource))
+                        .eq(expected)
+                })
+        })
+}
+
+#[cfg(test)]
+fn c09_rejects_malformed_graph_facts(
+    lowered: &LoweredGraphPlan,
+    capture: usize,
+    canonicalize: usize,
+    layer: usize,
+) -> bool {
+    let mut malformed = Vec::new();
+    let mut invalid = lowered.clone();
+    invalid.passes[canonicalize].dependencies.clear();
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[layer].reads.swap(0, 1);
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[layer].result =
+        RuntimeResultBinding::Resource(invalid.passes[layer].reads[0].resource);
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[layer].releases.clear();
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.resources[0].expected_reads = invalid.resources[0].expected_reads.saturating_add(1);
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes.swap(capture, canonicalize);
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.resources[1].id = invalid.resources[0].id;
+    malformed.push(invalid);
+    malformed
+        .into_iter()
+        .all(|invalid| ClosedExecutableGraph::try_from_lowered(invalid).is_err())
 }
 
 #[cfg(test)]
@@ -4483,11 +4953,6 @@ fn c10_executable_graph_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let is_closed = |lowered| {
-        ClosedExecutableGraph::try_from_lowered(lowered)
-            .ok()
-            .is_some_and(|closed| C10PreparableGraph::try_from_closed(closed).is_ok())
-    };
     let mut accepts_spine_composition_and_color_for_all_formats = true;
     for working_format in [
         WorkingFormat::HighPrecision,
@@ -4502,7 +4967,7 @@ fn c10_executable_graph_observation(
                 output_format,
                 &capabilities,
             )?;
-            accepts_spine_composition_and_color_for_all_formats &= is_closed(lowered);
+            accepts_spine_composition_and_color_for_all_formats &= c10_plan_is_closed(lowered);
         }
     }
 
@@ -4516,64 +4981,20 @@ fn c10_executable_graph_observation(
         .collect::<Vec<_>>();
     let accepts_multiple_ordered_color_runs = color_pass_indices.len() == color_filters.len()
         && color_pass_indices.len() > 1
-        && is_closed(color_lowered.clone());
-    let rejects = |invalid| !is_closed(invalid);
-
-    let mut malformed = Vec::new();
+        && c10_plan_is_closed(color_lowered.clone());
     let first_color = *color_pass_indices.first()?;
-    let mut invalid = color_lowered.clone();
-    invalid.passes[first_color].kind = RuntimePassKind::ColorFilter(None);
-    malformed.push(invalid);
-    let mut invalid = color_lowered.clone();
-    let RuntimePassKind::ColorFilter(Some(filter)) = &mut invalid.passes[first_color].kind else {
-        return None;
-    };
-    filter.operations.clear();
-    malformed.push(invalid);
-    let mut invalid = color_lowered.clone();
-    invalid.passes[first_color].dependencies.clear();
-    malformed.push(invalid);
-    let mut invalid = color_lowered.clone();
-    invalid.passes[first_color].reads[0].sampling_filter = RuntimeSamplingFilter::Linear;
-    malformed.push(invalid);
-    let mut invalid = color_lowered.clone();
-    let source = invalid.passes[first_color].reads[0].resource;
-    invalid.passes[first_color].result = RuntimeResultBinding::Resource(source);
-    malformed.push(invalid);
-    let mut invalid = color_lowered.clone();
-    invalid.passes[first_color].releases.clear();
-    malformed.push(invalid);
-    let mut invalid = color_lowered.clone();
-    let RuntimeResultBinding::Resource(result) = invalid.passes[first_color].result else {
-        return None;
-    };
-    let result_index = invalid
-        .resources
-        .iter()
-        .position(|resource| resource.id == result)?;
-    invalid.resources[result_index].spatial.device_origin.0 = invalid.resources[result_index]
-        .spatial
-        .device_origin
-        .0
-        .checked_add(1)?;
-    malformed.push(invalid);
-    if color_pass_indices.len() > 1 {
-        let mut invalid = color_lowered.clone();
-        invalid
-            .passes
-            .swap(color_pass_indices[0], color_pass_indices[1]);
-        malformed.push(invalid);
-    }
-    let rejects_empty_missing_and_malformed_color_facts = malformed.into_iter().all(rejects);
+    let rejects_empty_missing_and_malformed_color_facts =
+        c10_rejects_malformed_color_facts(&color_lowered, &color_pass_indices)?;
 
     let mut copy = color_lowered.clone();
     copy.passes[first_color].kind = RuntimePassKind::CopyBackdrop;
-    let rejects_copy_blur_shadow_and_drop_shadow_composite =
-        rejects(copy) && rejects(blur_lowered) && rejects(shadow_lowered);
+    let rejects_copy_blur_shadow_and_drop_shadow_composite = !c10_plan_is_closed(copy)
+        && !c10_plan_is_closed(blur_lowered)
+        && !c10_plan_is_closed(shadow_lowered);
 
     let mut unsupported_output = color_lowered;
     unsupported_output.output_format = Format::Bgra8;
-    let rejects_unsupported_output = rejects(unsupported_output);
+    let rejects_unsupported_output = !c10_plan_is_closed(unsupported_output);
     let preserves_public_c09_dispatch_boundary = matches!(
         ExecutableGraphDispatchEligibility::try_classify(
             &color_graph,
@@ -4592,6 +5013,64 @@ fn c10_executable_graph_observation(
         rejects_unsupported_output,
         preserves_public_c09_dispatch_boundary,
     })
+}
+
+#[cfg(test)]
+fn c10_plan_is_closed(lowered: LoweredGraphPlan) -> bool {
+    ClosedExecutableGraph::try_from_lowered(lowered)
+        .ok()
+        .is_some_and(|closed| C10PreparableGraph::try_from_closed(closed).is_ok())
+}
+
+#[cfg(test)]
+fn c10_rejects_malformed_color_facts(
+    lowered: &LoweredGraphPlan,
+    color_passes: &[usize],
+) -> Option<bool> {
+    let first = *color_passes.first()?;
+    let mut malformed = Vec::new();
+    let mut invalid = lowered.clone();
+    invalid.passes[first].kind = RuntimePassKind::ColorFilter(None);
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::ColorFilter(Some(filter)) = &mut invalid.passes[first].kind else {
+        return None;
+    };
+    filter.operations.clear();
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[first].dependencies.clear();
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[first].reads[0].sampling_filter = RuntimeSamplingFilter::Linear;
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    let source = invalid.passes[first].reads[0].resource;
+    invalid.passes[first].result = RuntimeResultBinding::Resource(source);
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[first].releases.clear();
+    malformed.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimeResultBinding::Resource(result) = invalid.passes[first].result else {
+        return None;
+    };
+    let result_index = invalid
+        .resources
+        .iter()
+        .position(|resource| resource.id == result)?;
+    invalid.resources[result_index].spatial.device_origin.0 = invalid.resources[result_index]
+        .spatial
+        .device_origin
+        .0
+        .checked_add(1)?;
+    malformed.push(invalid);
+    if color_passes.len() > 1 {
+        let mut invalid = lowered.clone();
+        invalid.passes.swap(color_passes[0], color_passes[1]);
+        malformed.push(invalid);
+    }
+    Some(malformed.into_iter().all(|plan| !c10_plan_is_closed(plan)))
 }
 
 #[cfg(test)]
@@ -4901,117 +5380,15 @@ fn composition_graph_observation(
         .layer_compositions
         .iter()
         .map(|layer| {
-            let RuntimeCompositeKind::Layer {
-                transform,
-                parameters,
-                clip,
-                outer_clips,
-                clip_coverage,
-            } = &layer.composite.kind
-            else {
-                return None;
-            };
-            let alpha_mask = parameters
-                .alpha_mask()
-                .map(RuntimeResolvedAlphaMaskComposition::resource);
-            if clip_coverage != &layer.clip_coverage || alpha_mask != layer.alpha_mask {
-                return None;
-            }
-            if let Some(mask) = alpha_mask {
-                let resource = resources.get(&mask).copied()?;
-                let Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) = &resource.import
-                else {
-                    return None;
-                };
-                observed_mask_ids.push(upload.cache_key().image_id());
-            }
-            let pass = closed
-                .lowered
-                .passes
-                .iter()
-                .find(|pass| pass.id == layer.pass)?;
-            let reads = pass
-                .reads
-                .iter()
-                .map(|read| match read.role {
-                    RuntimeReadRole::CompositeParent => {
-                        Some(CompositionReadObservationForTest::Parent)
-                    }
-                    RuntimeReadRole::CompositeSource => {
-                        Some(CompositionReadObservationForTest::Source)
-                    }
-                    RuntimeReadRole::ClipCoverage => {
-                        Some(CompositionReadObservationForTest::ClipCoverage)
-                    }
-                    RuntimeReadRole::AlphaMask => {
-                        Some(CompositionReadObservationForTest::AlphaMask)
-                    }
-                    RuntimeReadRole::CaptureSource
-                    | RuntimeReadRole::CompletedParent
-                    | RuntimeReadRole::FilterSource
-                    | RuntimeReadRole::BlurredSourceAlpha
-                    | RuntimeReadRole::Shadow
-                    | RuntimeReadRole::FinalWorkingImage => None,
-                })
-                .collect::<Option<Vec<_>>>()?;
-            let mut outer_operations =
-                vec![CompositionOuterOperationObservationForTest::SourceMapping];
-            if clip.is_some() || !outer_clips.is_empty() {
-                outer_operations.push(CompositionOuterOperationObservationForTest::ClipCoverage);
-            }
-            if alpha_mask.is_some() {
-                outer_operations.push(CompositionOuterOperationObservationForTest::AlphaMask);
-            }
-            outer_operations.extend([
-                CompositionOuterOperationObservationForTest::Opacity,
-                CompositionOuterOperationObservationForTest::Blend,
-            ]);
-            Some(LayerCompositionObservationForTest {
-                transform: *transform,
-                opacity: parameters.opacity(),
-                blend: parameters.blend(),
-                has_own_clip: clip.is_some(),
-                inherited_outer_clip_count: outer_clips.len(),
-                inherited_outer_clip_transforms: outer_clips
-                    .iter()
-                    .map(|clip| clip.transform)
-                    .collect(),
-                reads,
-                outer_operations,
-                source_captured_before_outer_semantics: layer
-                    .composite
-                    .source_captured_before_outer_semantics,
-            })
+            observe_layer_composition(layer, &closed.lowered, &resources, &mut observed_mask_ids)
         })
         .collect::<Option<Vec<_>>>()?;
-
-    let mut root_surface_base_clears = 0usize;
-    let mut root_surface_base_color = None;
-    let mut transparent_isolation_clears = 0usize;
-    let mut nontransparent_isolation_clears = 0usize;
-    for pass in &closed.lowered.passes {
-        let RuntimePassKind::ClearRoot {
-            initialization,
-            color,
-        } = pass.kind
-        else {
-            continue;
-        };
-        match initialization {
-            RuntimeInitialization::SurfaceBaseColor => {
-                root_surface_base_clears = root_surface_base_clears.saturating_add(1);
-                root_surface_base_color = Some(color);
-            }
-            RuntimeInitialization::Transparent => {
-                if color == Color::TRANSPARENT {
-                    transparent_isolation_clears = transparent_isolation_clears.saturating_add(1);
-                } else {
-                    nontransparent_isolation_clears =
-                        nontransparent_isolation_clears.saturating_add(1);
-                }
-            }
-        }
-    }
+    let (
+        root_surface_base_clears,
+        root_surface_base_color,
+        transparent_isolation_clears,
+        nontransparent_isolation_clears,
+    ) = composition_clear_observation(&closed.lowered);
 
     Some(CompositionGraphObservationForTest {
         layers_inner_to_outer,
@@ -5021,6 +5398,108 @@ fn composition_graph_observation(
         transparent_isolation_clears,
         nontransparent_isolation_clears,
     })
+}
+
+#[cfg(test)]
+fn observe_layer_composition(
+    layer: &ExecutableLayerCompositionFacts,
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    observed_mask_ids: &mut Vec<super::ImageId>,
+) -> Option<LayerCompositionObservationForTest> {
+    let RuntimeCompositeKind::Layer {
+        transform,
+        parameters,
+        clip,
+        outer_clips,
+        clip_coverage,
+    } = &layer.composite.kind
+    else {
+        return None;
+    };
+    let alpha_mask = parameters
+        .alpha_mask()
+        .map(RuntimeResolvedAlphaMaskComposition::resource);
+    if clip_coverage != &layer.clip_coverage || alpha_mask != layer.alpha_mask {
+        return None;
+    }
+    if let Some(mask) = alpha_mask {
+        let resource = resources.get(&mask).copied()?;
+        let Some(RuntimeResourceImport::ResolvedAlphaMask(upload)) = &resource.import else {
+            return None;
+        };
+        observed_mask_ids.push(upload.cache_key().image_id());
+    }
+    let pass = lowered.passes.iter().find(|pass| pass.id == layer.pass)?;
+    let reads = pass
+        .reads
+        .iter()
+        .map(|read| match read.role {
+            RuntimeReadRole::CompositeParent => Some(CompositionReadObservationForTest::Parent),
+            RuntimeReadRole::CompositeSource => Some(CompositionReadObservationForTest::Source),
+            RuntimeReadRole::ClipCoverage => Some(CompositionReadObservationForTest::ClipCoverage),
+            RuntimeReadRole::AlphaMask => Some(CompositionReadObservationForTest::AlphaMask),
+            RuntimeReadRole::CaptureSource
+            | RuntimeReadRole::CompletedParent
+            | RuntimeReadRole::FilterSource
+            | RuntimeReadRole::BlurredSourceAlpha
+            | RuntimeReadRole::Shadow
+            | RuntimeReadRole::FinalWorkingImage => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let mut outer_operations = vec![CompositionOuterOperationObservationForTest::SourceMapping];
+    if clip.is_some() || !outer_clips.is_empty() {
+        outer_operations.push(CompositionOuterOperationObservationForTest::ClipCoverage);
+    }
+    if alpha_mask.is_some() {
+        outer_operations.push(CompositionOuterOperationObservationForTest::AlphaMask);
+    }
+    outer_operations.extend([
+        CompositionOuterOperationObservationForTest::Opacity,
+        CompositionOuterOperationObservationForTest::Blend,
+    ]);
+    Some(LayerCompositionObservationForTest {
+        transform: *transform,
+        opacity: parameters.opacity(),
+        blend: parameters.blend(),
+        has_own_clip: clip.is_some(),
+        inherited_outer_clip_count: outer_clips.len(),
+        inherited_outer_clip_transforms: outer_clips.iter().map(|clip| clip.transform).collect(),
+        reads,
+        outer_operations,
+        source_captured_before_outer_semantics: layer
+            .composite
+            .source_captured_before_outer_semantics,
+    })
+}
+
+#[cfg(test)]
+fn composition_clear_observation(
+    lowered: &LoweredGraphPlan,
+) -> (usize, Option<Color>, usize, usize) {
+    let mut observation = (0usize, None, 0usize, 0usize);
+    for pass in &lowered.passes {
+        let RuntimePassKind::ClearRoot {
+            initialization,
+            color,
+        } = pass.kind
+        else {
+            continue;
+        };
+        match initialization {
+            RuntimeInitialization::SurfaceBaseColor => {
+                observation.0 = observation.0.saturating_add(1);
+                observation.1 = Some(color);
+            }
+            RuntimeInitialization::Transparent if color == Color::TRANSPARENT => {
+                observation.2 = observation.2.saturating_add(1);
+            }
+            RuntimeInitialization::Transparent => {
+                observation.3 = observation.3.saturating_add(1);
+            }
+        }
+    }
+    observation
 }
 
 #[cfg(test)]
@@ -5328,16 +5807,8 @@ fn bounded_capture_transform_observation(
             spatial,
         )?;
 
-        let expected_transform = capture_transform
-            .then(parent_to_surface)
-            .ok()?
-            .then(
-                Transform::translation(-spatial.texel_origin.x(), -spatial.texel_origin.y())
-                    .ok()?,
-            )
-            .ok()?
-            .then(Transform::scale(raster_scale, raster_scale).ok()?)
-            .ok()?;
+        let expected_transform =
+            expected_bounded_capture_transform(capture_transform, parent_to_surface, spatial)?;
         preserves_application_order_formula &= transforms_are_close(
             facts.initial_transform(),
             expected_transform,
@@ -5385,6 +5856,21 @@ fn bounded_capture_transform_observation(
         preserves_capture_execution_facts,
         lowers_scene_with_explicit_initial_transform,
     })
+}
+
+#[cfg(test)]
+fn expected_bounded_capture_transform(
+    capture_transform: Transform,
+    parent_to_surface: Transform,
+    spatial: RuntimeSpatialDescriptor,
+) -> Option<Transform> {
+    capture_transform
+        .then(parent_to_surface)
+        .ok()?
+        .then(Transform::translation(-spatial.texel_origin.x(), -spatial.texel_origin.y()).ok()?)
+        .ok()?
+        .then(Transform::scale(spatial.raster_scale, spatial.raster_scale).ok()?)
+        .ok()
 }
 
 #[cfg(test)]
@@ -5533,362 +6019,508 @@ impl RuntimeGraphPreparationPlan {
                 "the lowered graph working format does not match immutable device policy",
             ));
         }
-
-        let mut resource_by_id = BTreeMap::new();
-        let mut resource_formats = BTreeMap::new();
-        let mut resources = Vec::with_capacity(lowered.resources.len());
-        let mut allocation_preflights = Vec::with_capacity(lowered.resources.len());
-        for resource in &lowered.resources {
-            if resource_by_id.insert(resource.id, resource).is_some() {
-                return Err(preparation_error(
-                    "duplicate runtime resource reached graph preparation",
-                ));
-            }
-            if runtime_resource_format(resource.role, lowered.working_format) != resource.format {
-                return Err(preparation_error(
-                    "runtime resource role and working format are inconsistent",
-                ));
-            }
-            if resource.expected_reads == 0 {
-                return Err(preparation_error(
-                    "a prepared runtime resource has no scheduled reader",
-                ));
-            }
-            let extent = resource.spatial.device_extent;
-            if extent.width() == 0 || extent.height() == 0 {
-                return Err(preparation_error(
-                    "a concrete runtime resource has an empty allocation extent",
-                ));
-            }
-            capabilities.validate_effect_texture_extent(extent)?;
-
-            let allocation = match (&resource.format, &resource.import) {
-                (RuntimeResourceFormat::VelloCaptureRgba8Unorm, None)
-                    if resource.role == RuntimeResourceRole::CaptureWorkingImage
-                        && matches!(resource.producer, RuntimeResourceProducer::Pass(_)) =>
-                {
-                    let descriptor =
-                        EffectTextureDescriptor::try_capture(extent, VELLO_CAPTURE_TEXTURE_USAGES)?;
-                    capabilities.validate_effect_texture_allocation(
-                        extent,
-                        None,
-                        descriptor.texture_format(),
-                        descriptor.usage(),
-                    )?;
-                    RuntimeAllocationRequest::EffectTexture(descriptor)
-                }
-                (RuntimeResourceFormat::ClipCoverageRgba8Unorm, None)
-                    if resource.role == RuntimeResourceRole::ClipCoverage
-                        && matches!(resource.producer, RuntimeResourceProducer::Pass(_)) =>
-                {
-                    let descriptor = EffectTextureDescriptor::try_coverage(
-                        extent,
-                        VELLO_CAPTURE_TEXTURE_USAGES,
-                    )?;
-                    capabilities.validate_effect_texture_allocation(
-                        extent,
-                        None,
-                        descriptor.texture_format(),
-                        descriptor.usage(),
-                    )?;
-                    RuntimeAllocationRequest::EffectTexture(descriptor)
-                }
-                (RuntimeResourceFormat::Working(format), None)
-                    if *format == lowered.working_format
-                        && resource.role != RuntimeResourceRole::CaptureWorkingImage
-                        && resource.role != RuntimeResourceRole::ClipCoverage
-                        && resource.role != RuntimeResourceRole::ImportedImage =>
-                {
-                    let descriptor = EffectTextureDescriptor::try_working(
-                        *format,
-                        extent,
-                        format.required_usages(),
-                    )?;
-                    capabilities.validate_effect_texture_allocation(
-                        extent,
-                        Some(*format),
-                        descriptor.texture_format(),
-                        descriptor.usage(),
-                    )?;
-                    RuntimeAllocationRequest::EffectTexture(descriptor)
-                }
-                (
-                    RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
-                    Some(RuntimeResourceImport::ResolvedAlphaMask(descriptor)),
-                ) if resource.role == RuntimeResourceRole::ImportedImage
-                    && matches!(resource.producer, RuntimeResourceProducer::Imported) =>
-                {
-                    if descriptor.physical_size() != extent {
-                        return Err(preparation_error(
-                            "resolved-mask upload extent differs from its runtime resource",
-                        ));
-                    }
-                    descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
-                    capabilities.validate_effect_texture_allocation(
-                        extent,
-                        None,
-                        wgpu::TextureFormat::Rgba8Unorm,
-                        RESOLVED_MASK_TEXTURE_USAGES,
-                    )?;
-                    RuntimeAllocationRequest::ResolvedMask(descriptor.clone())
-                }
-                _ => {
-                    return Err(preparation_error(
-                        "runtime resource has no exact concrete preparation request",
-                    ));
-                }
-            };
-            allocation_preflights.push(allocation.preflight()?);
-            resource_formats.insert(resource.id, resource.format);
-            resources.push(RuntimeResourcePreparationRequest {
-                runtime: resource.clone(),
-                allocation,
-            });
-        }
-
-        let mut pass_positions = BTreeMap::new();
-        for (position, pass) in lowered.passes.iter().enumerate() {
-            if pass_positions.insert(pass.id, position).is_some() {
-                return Err(preparation_error(
-                    "duplicate runtime pass reached graph preparation",
-                ));
-            }
-        }
-        let mut actual_reads = BTreeMap::<RuntimeResourceId, u32>::new();
-        let mut actual_last_reads = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
-        let mut release_passes = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
-        let mut produced_results = BTreeMap::<RuntimeResourceId, RuntimePassId>::new();
-        let mut kernel_by_pass = BTreeMap::<RuntimePassId, GaussianKernelKey>::new();
-        let mut kernels = BTreeMap::<GaussianKernelKey, RuntimeKernelPreparationRequest>::new();
-
-        for (position, pass) in lowered.passes.iter().enumerate() {
-            if pass.dependencies.iter().any(|dependency| {
-                pass_positions
-                    .get(dependency)
-                    .is_none_or(|dependency_position| *dependency_position >= position)
-            }) {
-                return Err(preparation_error(
-                    "prepared pass has a missing or forward dependency",
-                ));
-            }
-            let mut pass_reads = BTreeSet::new();
-            for read in &pass.reads {
-                if !pass_reads.insert(read.resource) {
-                    return Err(preparation_error(
-                        "prepared pass contains a duplicate runtime read binding",
-                    ));
-                }
-                let resource = resource_by_id.get(&read.resource).ok_or_else(|| {
-                    preparation_error("prepared pass names a missing runtime resource")
-                })?;
-                if let RuntimeResourceProducer::Pass(producer) = resource.producer
-                    && pass_positions
-                        .get(&producer)
-                        .is_none_or(|producer_position| *producer_position >= position)
-                {
-                    return Err(preparation_error(
-                        "prepared pass reads before its runtime resource producer",
-                    ));
-                }
-                let reads = actual_reads.entry(read.resource).or_default();
-                *reads = reads
-                    .checked_add(1)
-                    .ok_or_else(|| preparation_error("prepared runtime read count overflowed"))?;
-                actual_last_reads.insert(read.resource, pass.id);
-            }
-            match pass.result {
-                RuntimeResultBinding::Resource(resource_id) => {
-                    let resource = resource_by_id.get(&resource_id).ok_or_else(|| {
-                        preparation_error("prepared pass result resource is missing")
-                    })?;
-                    if resource.producer != RuntimeResourceProducer::Pass(pass.id)
-                        || pass_reads.contains(&resource_id)
-                        || produced_results.insert(resource_id, pass.id).is_some()
-                    {
-                        return Err(preparation_error(
-                            "prepared pass result binding has no unique matching producer",
-                        ));
-                    }
-                }
-                RuntimeResultBinding::Output(format) => {
-                    if !matches!(pass.kind, RuntimePassKind::Present)
-                        || format != lowered.output_format
-                    {
-                        return Err(preparation_error(
-                            "prepared output binding differs from the terminal present target",
-                        ));
-                    }
-                }
-                RuntimeResultBinding::Empty => {}
-            }
-            let expected_cache_keys = runtime_pass_cache_keys(
-                &pass.kind,
-                &pass.reads,
-                pass.result,
-                lowered.working_format,
-                lowered.output_format,
-                &resource_formats,
-            )?;
-            if expected_cache_keys != pass.cache_keys {
-                return Err(preparation_error(
-                    "prepared pass cache keys differ from exact runtime lowering",
-                ));
-            }
-            for resource in &pass.releases {
-                if !pass_reads.contains(resource)
-                    || release_passes.insert(*resource, pass.id).is_some()
-                {
-                    return Err(preparation_error(
-                        "prepared pass release is missing, duplicate, or not a last read",
-                    ));
-                }
-            }
-
-            if let Some(blur) = runtime_blur_for_kernel(&pass.kind) {
-                let kernel_plan = GaussianKernelPlan::try_new(
-                    blur.standard_deviation,
-                    blur.spatial.result.raster_scale,
-                    CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS,
-                    GaussianKernelSamplingForm::PairedLinear,
-                )?;
-                if kernel_plan.key() != blur.kernel
-                    || kernel_plan.byte_len() == 0
-                    || kernel_plan.byte_len() > device.limits().max_buffer_size
-                {
-                    return Err(preparation_error(
-                        "Gaussian kernel preparation differs from the exact runtime blur plan",
-                    ));
-                }
-                kernel_by_pass.insert(pass.id, blur.kernel);
-                match kernels.entry(blur.kernel) {
-                    std::collections::btree_map::Entry::Vacant(entry) => {
-                        entry.insert(RuntimeKernelPreparationRequest {
-                            key: blur.kernel,
-                            plan: kernel_plan,
-                            last_use: pass.id,
-                        });
-                    }
-                    std::collections::btree_map::Entry::Occupied(mut entry) => {
-                        if entry.get().plan != kernel_plan {
-                            return Err(preparation_error(
-                                "one Gaussian kernel identity names conflicting plans",
-                            ));
-                        }
-                        entry.get_mut().last_use = pass.id;
-                    }
-                }
-            }
-        }
-
-        for resource in &lowered.resources {
-            if actual_reads.get(&resource.id).copied().unwrap_or(0) != resource.expected_reads
-                || actual_last_reads.get(&resource.id).copied() != Some(resource.last_use)
-                || release_passes.get(&resource.id).copied() != Some(resource.last_use)
-            {
-                return Err(preparation_error(
-                    "prepared runtime resource lifetime differs from exact lowering",
-                ));
-            }
-            match resource.producer {
-                RuntimeResourceProducer::Imported if resource.import.is_some() => {}
-                RuntimeResourceProducer::Pass(pass)
-                    if resource.import.is_none()
-                        && produced_results.get(&resource.id).copied() == Some(pass) => {}
-                RuntimeResourceProducer::Imported | RuntimeResourceProducer::Pass(_) => {
-                    return Err(preparation_error(
-                        "prepared runtime resource producer/import binding is inconsistent",
-                    ));
-                }
-            }
-        }
-
-        let root = resource_by_id
-            .get(&lowered.root_working_image)
-            .ok_or_else(|| preparation_error("prepared root working resource is missing"))?;
-        if root.format != RuntimeResourceFormat::Working(lowered.working_format) {
-            return Err(preparation_error(
-                "prepared root resource does not use the selected working format",
-            ));
-        }
-        if lowered.passes.last().is_none_or(|pass| {
-            pass.id != lowered.final_present
-                || !matches!(pass.kind, RuntimePassKind::Present)
-                || pass.result != RuntimeResultBinding::Output(lowered.output_format)
-        }) {
-            return Err(preparation_error(
-                "prepared graph has no exact terminal present binding",
-            ));
-        }
-
-        let kernel_releases = kernels
-            .values()
-            .map(|kernel| (kernel.last_use, kernel.key))
-            .fold(
-                BTreeMap::<RuntimePassId, Vec<GaussianKernelKey>>::new(),
-                |mut releases, (pass, kernel)| {
-                    releases.entry(pass).or_default().push(kernel);
-                    releases
-                },
-            );
-        let passes = lowered
-            .passes
-            .iter()
-            .map(|pass| {
-                let spatial_uniform = prepared_pass_spatial_uniform(
-                    pass,
-                    &resource_by_id,
-                    lowered.root_working_image,
-                )?;
-                let color_filter_operations = match &pass.kind {
-                    RuntimePassKind::ColorFilter(Some(filter)) => {
-                        let bytes =
-                            ColorFilterOperationBytes::try_from_runtime_operations_with_limits(
-                                filter.operations(),
-                                color_filter_limits,
-                            )?;
-                        if bytes.as_bytes().is_empty() {
-                            return Err(preparation_error(
-                                "prepared color-filter operation bytes are empty",
-                            ));
-                        }
-                        Some(bytes)
-                    }
-                    _ => None,
-                };
-                let composite_parameters = prepared_pass_composite_parameters(pass)?;
-                if spatial_uniform.is_some() != pass.cache_keys.is_some() {
-                    return Err(preparation_error(
-                        "prepared pass spatial bytes and executable cache keys disagree",
-                    ));
-                }
-                Ok(RuntimePassPreparationRequest {
-                    runtime: pass.clone(),
-                    spatial_uniform,
-                    color_filter_operations,
-                    composite_parameters,
-                    cache_keys: pass.cache_keys.clone(),
-                    kernel: kernel_by_pass.get(&pass.id).copied(),
-                    kernel_releases: kernel_releases.get(&pass.id).cloned().unwrap_or_default(),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let kernels = kernels.into_values().collect::<Vec<_>>();
+        let mut prepared_resources = prepare_runtime_resources(&lowered, capabilities)?;
+        let pass_facts = analyze_runtime_passes(
+            &lowered,
+            &prepared_resources.resource_by_id,
+            &prepared_resources.resource_formats,
+            device,
+        )?;
+        validate_prepared_graph_lifetimes(
+            &lowered,
+            &prepared_resources.resource_by_id,
+            &pass_facts,
+        )?;
+        let passes = prepare_runtime_pass_requests(
+            &lowered,
+            &prepared_resources.resource_by_id,
+            &pass_facts,
+            color_filter_limits,
+        )?;
+        let kernels = pass_facts.kernels.into_values().collect::<Vec<_>>();
         for kernel in &kernels {
-            allocation_preflights.push(ResourceAllocationPreflight::gaussian_kernel(&kernel.plan)?);
+            prepared_resources
+                .allocation_preflights
+                .push(ResourceAllocationPreflight::gaussian_kernel(&kernel.plan)?);
         }
 
         Ok(Self {
             generation: lowered.generation,
             working_format: lowered.working_format,
             output_format: lowered.output_format,
-            resources,
+            resources: prepared_resources.resources,
             kernels,
             passes,
             root_working_image: lowered.root_working_image,
             final_present: lowered.final_present,
-            allocation_preflights,
+            allocation_preflights: prepared_resources.allocation_preflights,
         })
     }
+}
+
+struct PreparedRuntimeResources<'a> {
+    resource_by_id: BTreeMap<RuntimeResourceId, &'a RuntimeResourceRequest>,
+    resource_formats: BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+    resources: Vec<RuntimeResourcePreparationRequest>,
+    allocation_preflights: Vec<ResourceAllocationPreflight>,
+}
+
+fn prepare_runtime_resources<'a>(
+    lowered: &'a LoweredGraphPlan,
+    capabilities: &DeviceCapabilities,
+) -> Result<PreparedRuntimeResources<'a>> {
+    let mut prepared = PreparedRuntimeResources {
+        resource_by_id: BTreeMap::new(),
+        resource_formats: BTreeMap::new(),
+        resources: Vec::with_capacity(lowered.resources.len()),
+        allocation_preflights: Vec::with_capacity(lowered.resources.len()),
+    };
+    for resource in &lowered.resources {
+        if prepared
+            .resource_by_id
+            .insert(resource.id, resource)
+            .is_some()
+        {
+            return Err(preparation_error(
+                "duplicate runtime resource reached graph preparation",
+            ));
+        }
+        validate_runtime_resource_request(resource, lowered.working_format, capabilities)?;
+        let allocation =
+            prepare_runtime_resource_allocation(resource, lowered.working_format, capabilities)?;
+        prepared.allocation_preflights.push(allocation.preflight()?);
+        prepared
+            .resource_formats
+            .insert(resource.id, resource.format);
+        prepared.resources.push(RuntimeResourcePreparationRequest {
+            runtime: resource.clone(),
+            allocation,
+        });
+    }
+    Ok(prepared)
+}
+
+fn validate_runtime_resource_request(
+    resource: &RuntimeResourceRequest,
+    working_format: WorkingFormat,
+    capabilities: &DeviceCapabilities,
+) -> Result<()> {
+    if runtime_resource_format(resource.role, working_format) != resource.format {
+        return Err(preparation_error(
+            "runtime resource role and working format are inconsistent",
+        ));
+    }
+    if resource.expected_reads == 0 {
+        return Err(preparation_error(
+            "a prepared runtime resource has no scheduled reader",
+        ));
+    }
+    let extent = resource.spatial.device_extent;
+    if extent.width() == 0 || extent.height() == 0 {
+        return Err(preparation_error(
+            "a concrete runtime resource has an empty allocation extent",
+        ));
+    }
+    capabilities.validate_effect_texture_extent(extent)
+}
+
+fn prepare_runtime_resource_allocation(
+    resource: &RuntimeResourceRequest,
+    working_format: WorkingFormat,
+    capabilities: &DeviceCapabilities,
+) -> Result<RuntimeAllocationRequest> {
+    let extent = resource.spatial.device_extent;
+    match (&resource.format, &resource.import) {
+        (RuntimeResourceFormat::VelloCaptureRgba8Unorm, None)
+            if resource.role == RuntimeResourceRole::CaptureWorkingImage
+                && matches!(resource.producer, RuntimeResourceProducer::Pass(_)) =>
+        {
+            let descriptor =
+                EffectTextureDescriptor::try_capture(extent, VELLO_CAPTURE_TEXTURE_USAGES)?;
+            capabilities.validate_effect_texture_allocation(
+                extent,
+                None,
+                descriptor.texture_format(),
+                descriptor.usage(),
+            )?;
+            Ok(RuntimeAllocationRequest::EffectTexture(descriptor))
+        }
+        (RuntimeResourceFormat::ClipCoverageRgba8Unorm, None)
+            if resource.role == RuntimeResourceRole::ClipCoverage
+                && matches!(resource.producer, RuntimeResourceProducer::Pass(_)) =>
+        {
+            let descriptor =
+                EffectTextureDescriptor::try_coverage(extent, VELLO_CAPTURE_TEXTURE_USAGES)?;
+            capabilities.validate_effect_texture_allocation(
+                extent,
+                None,
+                descriptor.texture_format(),
+                descriptor.usage(),
+            )?;
+            Ok(RuntimeAllocationRequest::EffectTexture(descriptor))
+        }
+        (RuntimeResourceFormat::Working(format), None)
+            if *format == working_format
+                && resource.role != RuntimeResourceRole::CaptureWorkingImage
+                && resource.role != RuntimeResourceRole::ClipCoverage
+                && resource.role != RuntimeResourceRole::ImportedImage =>
+        {
+            let descriptor =
+                EffectTextureDescriptor::try_working(*format, extent, format.required_usages())?;
+            capabilities.validate_effect_texture_allocation(
+                extent,
+                Some(*format),
+                descriptor.texture_format(),
+                descriptor.usage(),
+            )?;
+            Ok(RuntimeAllocationRequest::EffectTexture(descriptor))
+        }
+        (
+            RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
+            Some(RuntimeResourceImport::ResolvedAlphaMask(descriptor)),
+        ) if resource.role == RuntimeResourceRole::ImportedImage
+            && matches!(resource.producer, RuntimeResourceProducer::Imported) =>
+        {
+            if descriptor.physical_size() != extent {
+                return Err(preparation_error(
+                    "resolved-mask upload extent differs from its runtime resource",
+                ));
+            }
+            descriptor.validate_upload_byte_len(descriptor.bytes().len())?;
+            capabilities.validate_effect_texture_allocation(
+                extent,
+                None,
+                wgpu::TextureFormat::Rgba8Unorm,
+                RESOLVED_MASK_TEXTURE_USAGES,
+            )?;
+            Ok(RuntimeAllocationRequest::ResolvedMask(descriptor.clone()))
+        }
+        _ => Err(preparation_error(
+            "runtime resource has no exact concrete preparation request",
+        )),
+    }
+}
+
+struct RuntimePassAnalysis {
+    actual_reads: BTreeMap<RuntimeResourceId, u32>,
+    actual_last_reads: BTreeMap<RuntimeResourceId, RuntimePassId>,
+    release_passes: BTreeMap<RuntimeResourceId, RuntimePassId>,
+    produced_results: BTreeMap<RuntimeResourceId, RuntimePassId>,
+    kernel_by_pass: BTreeMap<RuntimePassId, GaussianKernelKey>,
+    kernels: BTreeMap<GaussianKernelKey, RuntimeKernelPreparationRequest>,
+}
+
+fn analyze_runtime_passes(
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    resource_formats: &BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+    device: &wgpu::Device,
+) -> Result<RuntimePassAnalysis> {
+    let mut pass_positions = BTreeMap::new();
+    for (position, pass) in lowered.passes.iter().enumerate() {
+        if pass_positions.insert(pass.id, position).is_some() {
+            return Err(preparation_error(
+                "duplicate runtime pass reached graph preparation",
+            ));
+        }
+    }
+    let mut facts = RuntimePassAnalysis {
+        actual_reads: BTreeMap::new(),
+        actual_last_reads: BTreeMap::new(),
+        release_passes: BTreeMap::new(),
+        produced_results: BTreeMap::new(),
+        kernel_by_pass: BTreeMap::new(),
+        kernels: BTreeMap::new(),
+    };
+    for (position, pass) in lowered.passes.iter().enumerate() {
+        let pass_reads = analyze_runtime_pass(
+            pass,
+            position,
+            lowered,
+            resources,
+            resource_formats,
+            &pass_positions,
+            &mut facts,
+        )?;
+        analyze_runtime_kernel(pass, device, &mut facts)?;
+        debug_assert!(pass_reads.len() == pass.reads.len());
+    }
+    Ok(facts)
+}
+
+fn analyze_runtime_pass(
+    pass: &RuntimePass,
+    position: usize,
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    resource_formats: &BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
+    pass_positions: &BTreeMap<RuntimePassId, usize>,
+    facts: &mut RuntimePassAnalysis,
+) -> Result<BTreeSet<RuntimeResourceId>> {
+    if pass.dependencies.iter().any(|dependency| {
+        pass_positions
+            .get(dependency)
+            .is_none_or(|dependency_position| *dependency_position >= position)
+    }) {
+        return Err(preparation_error(
+            "prepared pass has a missing or forward dependency",
+        ));
+    }
+    let pass_reads = analyze_runtime_reads(pass, position, resources, pass_positions, facts)?;
+    analyze_runtime_result(pass, lowered, resources, &pass_reads, facts)?;
+    let expected_cache_keys = runtime_pass_cache_keys(
+        &pass.kind,
+        &pass.reads,
+        pass.result,
+        lowered.working_format,
+        lowered.output_format,
+        resource_formats,
+    )?;
+    if expected_cache_keys != pass.cache_keys {
+        return Err(preparation_error(
+            "prepared pass cache keys differ from exact runtime lowering",
+        ));
+    }
+    for resource in &pass.releases {
+        if !pass_reads.contains(resource)
+            || facts.release_passes.insert(*resource, pass.id).is_some()
+        {
+            return Err(preparation_error(
+                "prepared pass release is missing, duplicate, or not a last read",
+            ));
+        }
+    }
+    Ok(pass_reads)
+}
+
+fn analyze_runtime_reads(
+    pass: &RuntimePass,
+    position: usize,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    pass_positions: &BTreeMap<RuntimePassId, usize>,
+    facts: &mut RuntimePassAnalysis,
+) -> Result<BTreeSet<RuntimeResourceId>> {
+    let mut pass_reads = BTreeSet::new();
+    for read in &pass.reads {
+        if !pass_reads.insert(read.resource) {
+            return Err(preparation_error(
+                "prepared pass contains a duplicate runtime read binding",
+            ));
+        }
+        let resource = resources
+            .get(&read.resource)
+            .ok_or_else(|| preparation_error("prepared pass names a missing runtime resource"))?;
+        if let RuntimeResourceProducer::Pass(producer) = resource.producer
+            && pass_positions
+                .get(&producer)
+                .is_none_or(|producer_position| *producer_position >= position)
+        {
+            return Err(preparation_error(
+                "prepared pass reads before its runtime resource producer",
+            ));
+        }
+        let reads = facts.actual_reads.entry(read.resource).or_default();
+        *reads = reads
+            .checked_add(1)
+            .ok_or_else(|| preparation_error("prepared runtime read count overflowed"))?;
+        facts.actual_last_reads.insert(read.resource, pass.id);
+    }
+    Ok(pass_reads)
+}
+
+fn analyze_runtime_result(
+    pass: &RuntimePass,
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    pass_reads: &BTreeSet<RuntimeResourceId>,
+    facts: &mut RuntimePassAnalysis,
+) -> Result<()> {
+    match pass.result {
+        RuntimeResultBinding::Resource(resource_id) => {
+            let resource = resources
+                .get(&resource_id)
+                .ok_or_else(|| preparation_error("prepared pass result resource is missing"))?;
+            if resource.producer != RuntimeResourceProducer::Pass(pass.id)
+                || pass_reads.contains(&resource_id)
+                || facts
+                    .produced_results
+                    .insert(resource_id, pass.id)
+                    .is_some()
+            {
+                return Err(preparation_error(
+                    "prepared pass result binding has no unique matching producer",
+                ));
+            }
+        }
+        RuntimeResultBinding::Output(format)
+            if !matches!(pass.kind, RuntimePassKind::Present)
+                || format != lowered.output_format =>
+        {
+            return Err(preparation_error(
+                "prepared output binding differs from the terminal present target",
+            ));
+        }
+        RuntimeResultBinding::Output(_) | RuntimeResultBinding::Empty => {}
+    }
+    Ok(())
+}
+
+fn analyze_runtime_kernel(
+    pass: &RuntimePass,
+    device: &wgpu::Device,
+    facts: &mut RuntimePassAnalysis,
+) -> Result<()> {
+    let Some(blur) = runtime_blur_for_kernel(&pass.kind) else {
+        return Ok(());
+    };
+    let kernel_plan = GaussianKernelPlan::try_new(
+        blur.standard_deviation,
+        blur.spatial.result.raster_scale,
+        CSS_FILTER_KERNEL_SUPPORT_STANDARD_DEVIATIONS,
+        GaussianKernelSamplingForm::PairedLinear,
+    )?;
+    if kernel_plan.key() != blur.kernel
+        || kernel_plan.byte_len() == 0
+        || kernel_plan.byte_len() > device.limits().max_buffer_size
+    {
+        return Err(preparation_error(
+            "Gaussian kernel preparation differs from the exact runtime blur plan",
+        ));
+    }
+    facts.kernel_by_pass.insert(pass.id, blur.kernel);
+    match facts.kernels.entry(blur.kernel) {
+        std::collections::btree_map::Entry::Vacant(entry) => {
+            entry.insert(RuntimeKernelPreparationRequest {
+                key: blur.kernel,
+                plan: kernel_plan,
+                last_use: pass.id,
+            });
+        }
+        std::collections::btree_map::Entry::Occupied(mut entry) => {
+            if entry.get().plan != kernel_plan {
+                return Err(preparation_error(
+                    "one Gaussian kernel identity names conflicting plans",
+                ));
+            }
+            entry.get_mut().last_use = pass.id;
+        }
+    }
+    Ok(())
+}
+
+fn validate_prepared_graph_lifetimes(
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    facts: &RuntimePassAnalysis,
+) -> Result<()> {
+    for resource in &lowered.resources {
+        if facts.actual_reads.get(&resource.id).copied().unwrap_or(0) != resource.expected_reads
+            || facts.actual_last_reads.get(&resource.id).copied() != Some(resource.last_use)
+            || facts.release_passes.get(&resource.id).copied() != Some(resource.last_use)
+        {
+            return Err(preparation_error(
+                "prepared runtime resource lifetime differs from exact lowering",
+            ));
+        }
+        match resource.producer {
+            RuntimeResourceProducer::Imported if resource.import.is_some() => {}
+            RuntimeResourceProducer::Pass(pass)
+                if resource.import.is_none()
+                    && facts.produced_results.get(&resource.id).copied() == Some(pass) => {}
+            RuntimeResourceProducer::Imported | RuntimeResourceProducer::Pass(_) => {
+                return Err(preparation_error(
+                    "prepared runtime resource producer/import binding is inconsistent",
+                ));
+            }
+        }
+    }
+    validate_prepared_graph_root(lowered, resources)
+}
+
+fn validate_prepared_graph_root(
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+) -> Result<()> {
+    let root = resources
+        .get(&lowered.root_working_image)
+        .ok_or_else(|| preparation_error("prepared root working resource is missing"))?;
+    if root.format != RuntimeResourceFormat::Working(lowered.working_format) {
+        return Err(preparation_error(
+            "prepared root resource does not use the selected working format",
+        ));
+    }
+    if lowered.passes.last().is_none_or(|pass| {
+        pass.id != lowered.final_present
+            || !matches!(pass.kind, RuntimePassKind::Present)
+            || pass.result != RuntimeResultBinding::Output(lowered.output_format)
+    }) {
+        return Err(preparation_error(
+            "prepared graph has no exact terminal present binding",
+        ));
+    }
+    Ok(())
+}
+
+fn prepare_runtime_pass_requests(
+    lowered: &LoweredGraphPlan,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    facts: &RuntimePassAnalysis,
+    color_filter_limits: ColorFilterOperationBufferLimits,
+) -> Result<Vec<RuntimePassPreparationRequest>> {
+    let kernel_releases = facts.kernels.values().fold(
+        BTreeMap::<RuntimePassId, Vec<GaussianKernelKey>>::new(),
+        |mut releases, kernel| {
+            releases
+                .entry(kernel.last_use)
+                .or_default()
+                .push(kernel.key);
+            releases
+        },
+    );
+    lowered
+        .passes
+        .iter()
+        .map(|pass| {
+            let spatial_uniform =
+                prepared_pass_spatial_uniform(pass, resources, lowered.root_working_image)?;
+            let color_filter_operations =
+                prepare_color_filter_operations(pass, color_filter_limits)?;
+            let composite_parameters = prepared_pass_composite_parameters(pass)?;
+            if spatial_uniform.is_some() != pass.cache_keys.is_some() {
+                return Err(preparation_error(
+                    "prepared pass spatial bytes and executable cache keys disagree",
+                ));
+            }
+            Ok(RuntimePassPreparationRequest {
+                runtime: pass.clone(),
+                spatial_uniform,
+                color_filter_operations,
+                composite_parameters,
+                cache_keys: pass.cache_keys.clone(),
+                kernel: facts.kernel_by_pass.get(&pass.id).copied(),
+                kernel_releases: kernel_releases.get(&pass.id).cloned().unwrap_or_default(),
+            })
+        })
+        .collect()
+}
+
+fn prepare_color_filter_operations(
+    pass: &RuntimePass,
+    limits: ColorFilterOperationBufferLimits,
+) -> Result<Option<ColorFilterOperationBytes>> {
+    let RuntimePassKind::ColorFilter(Some(filter)) = &pass.kind else {
+        return Ok(None);
+    };
+    let bytes = ColorFilterOperationBytes::try_from_runtime_operations_with_limits(
+        filter.operations(),
+        limits,
+    )?;
+    if bytes.as_bytes().is_empty() {
+        return Err(preparation_error(
+            "prepared color-filter operation bytes are empty",
+        ));
+    }
+    Ok(Some(bytes))
 }
 
 fn runtime_blur_for_kernel(kind: &RuntimePassKind) -> Option<&RuntimeBlur> {
@@ -6507,6 +7139,213 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
 }
 
+struct C08CustomSpineEncodingProgress {
+    scheduled: Vec<C08ScheduledEncodingKind>,
+    expected_capture_count: usize,
+    expected_pass_count: usize,
+    capture_count: usize,
+    validated_capture_receipts: usize,
+    bounded_capture_handoffs: bool,
+    custom_encoded: usize,
+    custom_completed: usize,
+    completed_pass_count: usize,
+    root_clear_count: usize,
+    clears_full_root: bool,
+    exact_spatial: bool,
+    exact_external_output: bool,
+    source_over_count: usize,
+    layer_composite_count: usize,
+    normal_composite_count: usize,
+    destination_composite_count: usize,
+    parent_and_result_are_distinct: bool,
+    full_copy_before_bounded_render: bool,
+    samples_source_with_fixed_blend: bool,
+    preserves_signed_origin: bool,
+    normal_fixed_blend: bool,
+    normal_omits_parent_sample: bool,
+    destination_copies_full_parent: bool,
+    destination_avoids_alias: bool,
+    layer_bindings_are_exact: bool,
+    layer_signed_mapping_is_exact: bool,
+    color_filter_count: usize,
+    color_filters_preserve_authored_order: bool,
+    color_filter_bindings_are_exact: bool,
+    color_filter_sources_and_results_are_distinct: bool,
+    color_filter_regions_are_validated: bool,
+    color_filter_signed_texel_mapping_is_exact: bool,
+    color_filter_operation_buffers_released: bool,
+    #[cfg(test)]
+    capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+    #[cfg(test)]
+    composite_encoder_identities: Vec<usize>,
+}
+
+impl C08CustomSpineEncodingProgress {
+    fn new(expected_pass_count: usize, expected_capture_count: usize) -> Self {
+        Self {
+            scheduled: Vec::with_capacity(expected_pass_count),
+            expected_capture_count,
+            expected_pass_count,
+            capture_count: 0,
+            validated_capture_receipts: 0,
+            bounded_capture_handoffs: true,
+            custom_encoded: 0,
+            custom_completed: 0,
+            completed_pass_count: 0,
+            root_clear_count: 0,
+            clears_full_root: true,
+            exact_spatial: true,
+            exact_external_output: false,
+            source_over_count: 0,
+            layer_composite_count: 0,
+            normal_composite_count: 0,
+            destination_composite_count: 0,
+            parent_and_result_are_distinct: true,
+            full_copy_before_bounded_render: true,
+            samples_source_with_fixed_blend: true,
+            preserves_signed_origin: true,
+            normal_fixed_blend: true,
+            normal_omits_parent_sample: true,
+            destination_copies_full_parent: true,
+            destination_avoids_alias: true,
+            layer_bindings_are_exact: true,
+            layer_signed_mapping_is_exact: true,
+            color_filter_count: 0,
+            color_filters_preserve_authored_order: true,
+            color_filter_bindings_are_exact: true,
+            color_filter_sources_and_results_are_distinct: true,
+            color_filter_regions_are_validated: true,
+            color_filter_signed_texel_mapping_is_exact: true,
+            color_filter_operation_buffers_released: true,
+            #[cfg(test)]
+            capture_observations: Vec::with_capacity(expected_capture_count),
+            #[cfg(test)]
+            composite_encoder_identities: Vec::new(),
+        }
+    }
+
+    fn record_custom_completion(&mut self, kind: C08ScheduledEncodingKind) {
+        self.scheduled.push(kind);
+        self.custom_encoded = self.custom_encoded.saturating_add(1);
+        self.custom_completed = self.custom_completed.saturating_add(1);
+        self.completed_pass_count = self.completed_pass_count.saturating_add(1);
+    }
+
+    fn record_capture_completion(&mut self) {
+        self.scheduled.push(C08ScheduledEncodingKind::VelloCapture);
+        self.capture_count = self.capture_count.saturating_add(1);
+        self.validated_capture_receipts = self.validated_capture_receipts.saturating_add(1);
+        self.completed_pass_count = self.completed_pass_count.saturating_add(1);
+    }
+
+    fn finish(self, prepared: &PreparedGraph<'_>) -> C08CustomSpineEncodingSummary {
+        let total_composites = self
+            .source_over_count
+            .saturating_add(self.layer_composite_count);
+        C08CustomSpineEncodingSummary {
+            encodes_custom_passes_in_order: c08_scheduled_encoding_order_is_exact(
+                &self.scheduled,
+                &prepared.plan.passes,
+            ),
+            clears_full_root_once: self.root_clear_count == 1 && self.clears_full_root,
+            uses_exact_prepared_spatial_mapping: self.exact_spatial,
+            presents_to_exact_external_output: self.exact_external_output,
+            exposes_bounded_capture_handoff: self.expected_capture_count > 0
+                && self.capture_count == self.expected_capture_count
+                && self.bounded_capture_handoffs,
+            validates_checked_capture_completion: self.validated_capture_receipts
+                == self.expected_capture_count,
+            completes_custom_passes_after_encoding: self.custom_encoded > 0
+                && self.custom_completed == self.custom_encoded,
+            parent_and_result_are_distinct: total_composites > 0
+                && self.parent_and_result_are_distinct,
+            copies_full_parent_before_bounded_source_render: total_composites > 0
+                && self.full_copy_before_bounded_render,
+            samples_only_source_with_fixed_premultiplied_blend: (self.source_over_count > 0
+                || self.normal_composite_count > 0
+                || self.destination_composite_count > 0)
+                && self.samples_source_with_fixed_blend,
+            preserves_signed_source_origin: total_composites > 0 && self.preserves_signed_origin,
+            keeps_cache_update_provisional: prepared.pass_cache_update.is_some(),
+            layer_composite_count: self.layer_composite_count,
+            normal_composite_count: self.normal_composite_count,
+            destination_composite_count: self.destination_composite_count,
+            normal_composites_use_fixed_premultiplied_blend: self.normal_fixed_blend,
+            normal_composites_omit_parent_sample: self.normal_omits_parent_sample,
+            destination_composites_copy_full_parent: self.destination_copies_full_parent,
+            destination_composites_avoid_read_write_alias: self.destination_avoids_alias,
+            layer_composites_bind_exact_resources_and_parameters: self.layer_bindings_are_exact,
+            layer_composites_preserve_signed_mapping: self.layer_signed_mapping_is_exact,
+            color_filter_count: self.color_filter_count,
+            color_filters_preserve_authored_order: self.color_filter_count > 0
+                && self.color_filters_preserve_authored_order,
+            color_filters_bind_exact_source_spatial_and_operations: self.color_filter_count > 0
+                && self.color_filter_bindings_are_exact,
+            color_filter_sources_and_results_are_distinct: self.color_filter_count > 0
+                && self.color_filter_sources_and_results_are_distinct,
+            color_filters_use_validated_viewport_and_scissor: self.color_filter_count > 0
+                && self.color_filter_regions_are_validated,
+            color_filters_preserve_signed_texel_mapping: self.color_filter_count > 0
+                && self.color_filter_signed_texel_mapping_is_exact,
+            color_filter_operation_buffers_released: self.color_filter_count > 0
+                && self.color_filter_operation_buffers_released,
+            advances_every_pass_once: self.completed_pass_count == self.expected_pass_count
+                && prepared.next_pass == self.expected_pass_count,
+            #[cfg(test)]
+            capture_count: self.capture_count,
+            #[cfg(test)]
+            captures_share_one_command_encoder: self.captures_share_one_command_encoder(),
+            #[cfg(test)]
+            captures_share_one_active_vello_scope: self.captures_share_one_active_vello_scope(),
+            #[cfg(test)]
+            graph_work_shares_one_command_encoder: self
+                .graph_work_shares_one_command_encoder(prepared.c10_execution.is_some()),
+            #[cfg(test)]
+            capture_observations: self.capture_observations,
+        }
+    }
+
+    #[cfg(test)]
+    fn captures_share_one_command_encoder(&self) -> bool {
+        self.capture_observations.first().is_some_and(|first| {
+            self.capture_observations.len() == self.expected_capture_count
+                && self
+                    .capture_observations
+                    .iter()
+                    .all(|capture| capture.encoder_identity == first.encoder_identity)
+        })
+    }
+
+    #[cfg(test)]
+    fn captures_share_one_active_vello_scope(&self) -> bool {
+        self.capture_observations.first().is_some_and(|first| {
+            self.capture_observations.len() == self.expected_capture_count
+                && self
+                    .capture_observations
+                    .iter()
+                    .all(|capture| capture.scope_identity == first.scope_identity)
+        })
+    }
+
+    #[cfg(test)]
+    fn graph_work_shares_one_command_encoder(&self, has_color_filters: bool) -> bool {
+        self.capture_observations
+            .first()
+            .map(|capture| capture.encoder_identity)
+            .or_else(|| self.composite_encoder_identities.first().copied())
+            .is_some_and(|identity| {
+                self.capture_observations
+                    .iter()
+                    .all(|capture| capture.encoder_identity == identity)
+                    && self
+                        .composite_encoder_identities
+                        .iter()
+                        .all(|composite| *composite == identity)
+            })
+            && (self.color_filter_count == 0 || has_color_filters)
+    }
+}
+
 impl C08CustomSpineEncodingSummary {
     fn proves_complete_submission(&self) -> bool {
         let common = self.encodes_custom_passes_in_order
@@ -6752,6 +7591,42 @@ struct C10ColorFilterEncodingFacts {
     preserved_signed_texel_mapping: bool,
 }
 
+struct PreparedC10ColorFilterEncoding<'prepared> {
+    source_binding: PreparedTextureBinding<'prepared>,
+    target_binding: PreparedTextureBinding<'prepared>,
+    objects: ProvisionalColorFilterPassObjects<'prepared>,
+    spatial: &'prepared PassSpatialUniformBytes,
+    operation_buffer: &'prepared wgpu::Buffer,
+    region: C08RenderRegion,
+    facts: C10ColorFilterEncodingFacts,
+}
+
+struct C09CompositeSemantic<'prepared> {
+    transform: Transform,
+    parameters: &'prepared RuntimeLayerCompositeParameters,
+    parent: RuntimeReadBinding,
+    source: RuntimeReadBinding,
+    clip: Option<RuntimeReadBinding>,
+    alpha_mask: Option<RuntimeReadBinding>,
+    target: RuntimeResourceId,
+    normal_path: bool,
+    destination_path: bool,
+}
+
+struct C09CompositeBindings<'prepared> {
+    semantic: C09CompositeSemantic<'prepared>,
+    parent: PreparedTextureBinding<'prepared>,
+    source: PreparedTextureBinding<'prepared>,
+    target: PreparedTextureBinding<'prepared>,
+    clip: Option<PreparedTextureBinding<'prepared>>,
+    mask: Option<PreparedTextureBinding<'prepared>>,
+    parent_spatial: RuntimeSpatialDescriptor,
+    source_spatial: RuntimeSpatialDescriptor,
+    target_spatial: RuntimeSpatialDescriptor,
+    parent_and_result_are_distinct: bool,
+    sampled_allocations_are_distinct: bool,
+}
+
 struct C08SampledRenderTarget<'target> {
     view: &'target wgpu::TextureView,
     extent: PhysicalSize,
@@ -6976,6 +7851,24 @@ fn c08_scheduled_encoding_order_is_exact(
         })
 }
 
+fn c08_capture_handoff_is_bounded(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> bool {
+    handoff.has_bounded_work()
+        && handoff.target_extent().width() > 0
+        && handoff.target_extent().height() > 0
+        && handoff.texture().width() == handoff.target_extent().width()
+        && handoff.texture().height() == handoff.target_extent().height()
+        && handoff.texture().depth_or_array_layers() == 1
+        && handoff.texture().mip_level_count() == 1
+        && handoff.texture().sample_count() == 1
+        && handoff.raster_scale().is_finite()
+        && handoff.raster_scale() > 0.0
+        && handoff
+            .initial_transform()
+            .as_array()
+            .iter()
+            .all(|value| value.is_finite())
+}
+
 fn c08_spatial_uniform_preserves_source_origin(
     bytes: &PassSpatialUniformBytes,
     source: RuntimeSpatialDescriptor,
@@ -6988,6 +7881,133 @@ fn c08_spatial_uniform_preserves_source_origin(
 fn close_f64(left: f64, right: f64) -> bool {
     let tolerance = f64::EPSILON * left.abs().max(right.abs()).max(1.0) * 8.0;
     (left - right).abs() <= tolerance
+}
+
+fn validate_c10_render_region(
+    spatial: &PassSpatialUniformBytes,
+    source: RuntimeSpatialDescriptor,
+    target: RuntimeSpatialDescriptor,
+) -> Result<(C08RenderRegion, bool, bool)> {
+    let region = C08RenderRegion::bounded_source(source, target)?
+        .ok_or_else(|| preparation_error("the C10 color pass has an empty bounded region"))?;
+    let viewport_and_scissor = region.scissor_x.saturating_add(region.scissor_width)
+        <= target.device_extent.width()
+        && region.scissor_y.saturating_add(region.scissor_height) <= target.device_extent.height()
+        && region.viewport_width > 0.0
+        && region.viewport_height > 0.0;
+    let signed_texel_mapping = c08_spatial_uniform_preserves_source_origin(spatial, source)
+        && close_f64(region.unclipped_x, 0.0)
+        && close_f64(region.unclipped_y, 0.0)
+        && source.texel_origin == target.texel_origin
+        && source.device_origin == target.device_origin;
+    if !viewport_and_scissor || !signed_texel_mapping {
+        return Err(preparation_error(
+            "the C10 bounded viewport or signed texel mapping changed after validation",
+        ));
+    }
+    Ok((region, viewport_and_scissor, signed_texel_mapping))
+}
+
+fn encode_c09_composite_region(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &PreparedTextureBinding<'_>,
+    objects: &ProvisionalCompositePassObjects<'_>,
+    bind_group: &wgpu::BindGroup,
+    region: Option<C08RenderRegion>,
+    target_spatial: RuntimeSpatialDescriptor,
+) -> Result<()> {
+    let Some(region) = region else {
+        return Ok(());
+    };
+    if region.scissor_x.saturating_add(region.scissor_width) > target_spatial.device_extent.width()
+        || region.scissor_y.saturating_add(region.scissor_height)
+            > target_spatial.device_extent.height()
+    {
+        return Err(preparation_error(
+            "the C09 bounded composite exceeds its exact parent extent",
+        ));
+    }
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("Surgeist C09 bounded layer composite"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target.view(),
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        occlusion_query_set: None,
+        timestamp_writes: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(objects.render_pipeline());
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.set_viewport(
+        region.viewport_x,
+        region.viewport_y,
+        region.viewport_width,
+        region.viewport_height,
+        0.0,
+        1.0,
+    );
+    pass.set_scissor_rect(
+        region.scissor_x,
+        region.scissor_y,
+        region.scissor_width,
+        region.scissor_height,
+    );
+    pass.draw(0..3, 0..1);
+    Ok(())
+}
+
+fn copy_c09_composite_parent(
+    encoder: &mut wgpu::CommandEncoder,
+    parent: &PreparedTextureBinding<'_>,
+    target: &PreparedTextureBinding<'_>,
+    extent: wgpu::Extent3d,
+) {
+    encoder.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: parent.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: target.texture(),
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        extent,
+    );
+}
+
+fn c09_composite_copy_extent(spatial: RuntimeSpatialDescriptor) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: spatial.device_extent.width(),
+        height: spatial.device_extent.height(),
+        depth_or_array_layers: 1,
+    }
+}
+
+fn c09_composite_region_mapping(
+    spatial: &PassSpatialUniformBytes,
+    source: RuntimeSpatialDescriptor,
+    target: RuntimeSpatialDescriptor,
+    transform: Transform,
+) -> Result<(Option<C08RenderRegion>, bool)> {
+    let (region, transformed_source_bounds) =
+        C08RenderRegion::bounded_transformed_source(source, target, transform)?;
+    let preserved = c08_spatial_uniform_preserves_source_origin(spatial, source)
+        && region.is_none_or(|region| {
+            close_f64(region.unclipped_x, transformed_source_bounds[0])
+                && close_f64(region.unclipped_y, transformed_source_bounds[1])
+        });
+    Ok((region, preserved))
 }
 
 /// One allocation-backed, generation-bound C07 handoff. Its lifetime prevents
@@ -7017,6 +8037,219 @@ pub(crate) struct PreparedGraph<'device> {
     resources: &'device ResourceManager,
     pass_cache: &'device DevicePassCache,
     _ready_device: PhantomData<&'device ResourceManager>,
+}
+
+type PreparedGraphResourceBindings = (
+    BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
+    BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
+);
+
+fn acquire_prepared_graph_resources(
+    plan: &RuntimeGraphPreparationPlan,
+    frame_scope: &mut FrameResourceScope,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    capabilities: &DeviceCapabilities,
+) -> Result<PreparedGraphResourceBindings> {
+    let mut resource_bindings = BTreeMap::new();
+    for request in &plan.resources {
+        let lease = request
+            .allocation
+            .acquire(frame_scope, device, queue, capabilities)?;
+        if resource_bindings
+            .insert(
+                request.runtime.id,
+                PreparedResourceBinding {
+                    allocation: request.allocation.clone(),
+                    lease: Some(lease),
+                },
+            )
+            .is_some()
+        {
+            return Err(preparation_error(
+                "one runtime resource acquired more than one concrete binding",
+            ));
+        }
+    }
+    let mut kernel_bindings = BTreeMap::new();
+    for request in &plan.kernels {
+        let lease = frame_scope.acquire_gaussian_kernel_buffer(device, &request.plan)?;
+        if kernel_bindings
+            .insert(request.key, PreparedKernelBinding { lease: Some(lease) })
+            .is_some()
+        {
+            return Err(preparation_error(
+                "one Gaussian kernel acquired more than one concrete binding",
+            ));
+        }
+    }
+    Ok((resource_bindings, kernel_bindings))
+}
+
+fn create_color_filter_operation_bindings(
+    plan: &RuntimeGraphPreparationPlan,
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<BTreeMap<RuntimePassId, PreparedColorFilterOperationBinding>> {
+    let mut bindings = BTreeMap::new();
+    for request in &plan.passes {
+        let Some(bytes) = request.color_filter_operations.as_ref() else {
+            continue;
+        };
+        if !matches!(request.runtime.kind, RuntimePassKind::ColorFilter(Some(_)))
+            || bytes.as_bytes().is_empty()
+        {
+            return Err(preparation_error(
+                "prepared color-filter bytes have no exact runtime pass",
+            ));
+        }
+        let size = u64::try_from(bytes.as_bytes().len()).map_err(|_| {
+            preparation_error("prepared color-filter buffer length does not fit u64")
+        })?;
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Surgeist C10 ordered color-filter operations"),
+            size,
+            usage: wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST),
+            mapped_at_creation: false,
+        });
+        queue.write_buffer(&buffer, 0, bytes.as_bytes());
+        if bindings
+            .insert(
+                request.runtime.id,
+                PreparedColorFilterOperationBinding {
+                    bytes: bytes.clone(),
+                    buffer: Some(buffer),
+                },
+            )
+            .is_some()
+        {
+            return Err(preparation_error(
+                "one color-filter pass acquired more than one operation buffer",
+            ));
+        }
+    }
+    Ok(bindings)
+}
+
+fn realize_prepared_graph_passes(
+    plan: &RuntimeGraphPreparationPlan,
+    device: &wgpu::Device,
+    pass_cache: &DevicePassCache,
+    enabled: bool,
+) -> Result<Option<ProvisionalDevicePassCacheUpdate>> {
+    if !enabled {
+        return Ok(None);
+    }
+    let mut update = pass_cache.provisional_update();
+    let mut realized_pass = false;
+    for request in &plan.passes {
+        let Some(keys) = request.cache_keys.as_ref() else {
+            continue;
+        };
+        realize_prepared_graph_pass(&mut update, device, pass_cache, request, keys)?;
+        realized_pass = true;
+    }
+    Ok(realized_pass.then_some(update))
+}
+
+fn realize_prepared_graph_pass(
+    update: &mut ProvisionalDevicePassCacheUpdate,
+    device: &wgpu::Device,
+    pass_cache: &DevicePassCache,
+    request: &RuntimePassPreparationRequest,
+    keys: &RuntimePassCacheKeys,
+) -> Result<()> {
+    match &request.runtime.kind {
+        RuntimePassKind::ColorFilter(Some(_)) => update
+            .realize_color_filter_pass(
+                device,
+                pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+            .require_encoding_ready(),
+        RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::Layer { .. },
+            ..
+        })) => update
+            .realize_composite_pass(
+                device,
+                pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+            .require_encoding_ready(),
+        RuntimePassKind::CanonicalizeCapture
+        | RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::SpanSourceOver,
+            ..
+        }))
+        | RuntimePassKind::Present => update
+            .realize_c08_pass(
+                device,
+                pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+            .require_encoding_ready(),
+        RuntimePassKind::ClearRoot { .. }
+        | RuntimePassKind::VelloCapture(_)
+        | RuntimePassKind::CopyBackdrop
+        | RuntimePassKind::ColorFilter(None)
+        | RuntimePassKind::BlurHorizontal(_)
+        | RuntimePassKind::BlurVertical(_)
+        | RuntimePassKind::DropShadowColorize(_)
+        | RuntimePassKind::Composite(None)
+        | RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::DropShadow,
+            ..
+        })) => Err(preparation_error(
+            "checked pass realization reached an unsupported graph pass",
+        )),
+    }
+}
+
+fn validate_c08_vello_capture_target(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> Result<()> {
+    let target_extent = handoff.target_extent();
+    if target_extent.width() == 0
+        || target_extent.height() == 0
+        || handoff.texture().width() != target_extent.width()
+        || handoff.texture().height() != target_extent.height()
+        || handoff.texture().depth_or_array_layers() != 1
+        || handoff.texture().mip_level_count() != 1
+        || handoff.texture().sample_count() != 1
+        || handoff.texture().dimension() != wgpu::TextureDimension::D2
+        || handoff.texture().format() != wgpu::TextureFormat::Rgba8Unorm
+        || handoff.texture().usage() != VELLO_CAPTURE_TEXTURE_USAGES
+    {
+        return Err(preparation_error(
+            "the C08 Vello capture target changed its exact RGBA8 storage contract",
+        ));
+    }
+    Ok(())
+}
+
+fn c08_vello_capture_scene(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> Result<VelloScene> {
+    let initial_transform = handoff.initial_transform();
+    match handoff.work() {
+        RuntimeVelloCapture::Span(span) => {
+            encode_vello_scene_with_initial_transform(&span.commands, initial_transform)
+        }
+        RuntimeVelloCapture::ClipCoverage(coverage) => {
+            let elements = coverage
+                .elements
+                .iter()
+                .map(|element| (element.clip.clone(), element.transform))
+                .collect::<Vec<_>>();
+            encode_vello_clip_coverage_scene(&elements, initial_transform, handoff.target_extent())
+        }
+    }
 }
 
 impl<'device> PreparedGraph<'device> {
@@ -7275,147 +8508,12 @@ impl<'device> PreparedGraph<'device> {
         if c08_execution.is_some() || c09_execution.is_some() || c10_execution.is_some() {
             frame_scope.discard_on_drop();
         }
-        let mut resource_bindings = BTreeMap::new();
-        for request in &plan.resources {
-            let lease =
-                request
-                    .allocation
-                    .acquire(&mut frame_scope, device, queue, capabilities)?;
-            if resource_bindings
-                .insert(
-                    request.runtime.id,
-                    PreparedResourceBinding {
-                        allocation: request.allocation.clone(),
-                        lease: Some(lease),
-                    },
-                )
-                .is_some()
-            {
-                return Err(preparation_error(
-                    "one runtime resource acquired more than one concrete binding",
-                ));
-            }
-        }
-        let mut kernel_bindings = BTreeMap::new();
-        for request in &plan.kernels {
-            let lease = frame_scope.acquire_gaussian_kernel_buffer(device, &request.plan)?;
-            if kernel_bindings
-                .insert(request.key, PreparedKernelBinding { lease: Some(lease) })
-                .is_some()
-            {
-                return Err(preparation_error(
-                    "one Gaussian kernel acquired more than one concrete binding",
-                ));
-            }
-        }
-
-        let mut color_filter_operation_bindings = BTreeMap::new();
-        for request in &plan.passes {
-            let Some(bytes) = request.color_filter_operations.as_ref() else {
-                continue;
-            };
-            if !matches!(request.runtime.kind, RuntimePassKind::ColorFilter(Some(_)))
-                || bytes.as_bytes().is_empty()
-            {
-                return Err(preparation_error(
-                    "prepared color-filter bytes have no exact runtime pass",
-                ));
-            }
-            let size = u64::try_from(bytes.as_bytes().len()).map_err(|_| {
-                preparation_error("prepared color-filter buffer length does not fit u64")
-            })?;
-            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("Surgeist C10 ordered color-filter operations"),
-                size,
-                usage: wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST),
-                mapped_at_creation: false,
-            });
-            queue.write_buffer(&buffer, 0, bytes.as_bytes());
-            if color_filter_operation_bindings
-                .insert(
-                    request.runtime.id,
-                    PreparedColorFilterOperationBinding {
-                        bytes: bytes.clone(),
-                        buffer: Some(buffer),
-                    },
-                )
-                .is_some()
-            {
-                return Err(preparation_error(
-                    "one color-filter pass acquired more than one operation buffer",
-                ));
-            }
-        }
-
-        let pass_cache_update = if realize_checked_passes {
-            let mut update = pass_cache.provisional_update();
-            let mut realized_pass = false;
-            for request in &plan.passes {
-                let Some(keys) = request.cache_keys.as_ref() else {
-                    continue;
-                };
-                match &request.runtime.kind {
-                    RuntimePassKind::ColorFilter(Some(_)) => update
-                        .realize_color_filter_pass(
-                            device,
-                            pass_cache,
-                            keys.samplers(),
-                            keys.layout(),
-                            keys.shader(),
-                            keys.pipeline(),
-                        )?
-                        .require_encoding_ready()?,
-                    RuntimePassKind::Composite(Some(RuntimeComposite {
-                        kind: RuntimeCompositeKind::Layer { .. },
-                        ..
-                    })) => update
-                        .realize_composite_pass(
-                            device,
-                            pass_cache,
-                            keys.samplers(),
-                            keys.layout(),
-                            keys.shader(),
-                            keys.pipeline(),
-                        )?
-                        .require_encoding_ready()?,
-                    RuntimePassKind::CanonicalizeCapture
-                    | RuntimePassKind::Composite(Some(RuntimeComposite {
-                        kind: RuntimeCompositeKind::SpanSourceOver,
-                        ..
-                    }))
-                    | RuntimePassKind::Present => update
-                        .realize_c08_pass(
-                            device,
-                            pass_cache,
-                            keys.samplers(),
-                            keys.layout(),
-                            keys.shader(),
-                            keys.pipeline(),
-                        )?
-                        .require_encoding_ready()?,
-                    RuntimePassKind::ClearRoot { .. }
-                    | RuntimePassKind::VelloCapture(_)
-                    | RuntimePassKind::CopyBackdrop
-                    | RuntimePassKind::ColorFilter(None)
-                    | RuntimePassKind::BlurHorizontal(_)
-                    | RuntimePassKind::BlurVertical(_)
-                    | RuntimePassKind::DropShadowColorize(_)
-                    | RuntimePassKind::Composite(None)
-                    | RuntimePassKind::Composite(Some(RuntimeComposite {
-                        kind: RuntimeCompositeKind::DropShadow,
-                        ..
-                    })) => {
-                        return Err(preparation_error(
-                            "checked pass realization reached an unsupported graph pass",
-                        ));
-                    }
-                }
-                realized_pass = true;
-            }
-            realized_pass.then_some(update)
-        } else {
-            None
-        };
+        let (resource_bindings, kernel_bindings) =
+            acquire_prepared_graph_resources(&plan, &mut frame_scope, device, queue, capabilities)?;
+        let color_filter_operation_bindings =
+            create_color_filter_operation_bindings(&plan, device, queue)?;
+        let pass_cache_update =
+            realize_prepared_graph_passes(&plan, device, pass_cache, realize_checked_passes)?;
         let c08_encoding_state =
             (c08_execution.is_some() || c09_execution.is_some() || c10_execution.is_some())
                 .then_some(C08CustomSpineEncodingState::Ready);
@@ -7517,6 +8615,66 @@ impl<'device> PreparedGraph<'device> {
         encoder: &mut wgpu::CommandEncoder,
         output: C08ExternalOutputView<'_>,
     ) -> Result<C08PendingGraphEncoding> {
+        let expected_capture_count = self.c08_custom_spine_requirements(&output)?;
+        let engine = self.vello_engine.ok_or_else(|| {
+            preparation_error("the C08 capture scheduler has no ready internal Vello engine")
+        })?;
+        let resources = self.resources;
+        let queue = self.queue;
+
+        let session = Arc::new(());
+        let mut scope = ActiveVelloEncodingScope::begin(self.device);
+        let mut leases = VelloResourceLeaseAggregate::new();
+        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Encoding);
+        let result = {
+            let mut capture_encoding = C08VelloCaptureEncodingContext {
+                engine,
+                resources,
+                queue,
+                scope: &mut scope,
+                leases: &mut leases,
+            };
+            self.encode_c08_custom_spine_once(
+                encoder,
+                &output,
+                expected_capture_count,
+                &session,
+                &mut capture_encoding,
+            )
+        };
+        let summary = match result {
+            Ok(summary) => summary,
+            Err(encoding_error) => {
+                let _ = leases.abort();
+                let scope_result = scope.finish().await;
+                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
+                return match scope_result {
+                    Ok(()) => Err(encoding_error),
+                    Err(scope_error) => Err(scope_error),
+                };
+            }
+        };
+        #[cfg(test)]
+        if self.fail_scope_resolution_for_test {
+            scope.inject_validation_error_for_test();
+        }
+        let leases = match scope.finish_with_leases(leases).await {
+            Ok(leases) => leases,
+            Err(failure) => {
+                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
+                return Err(failure.into_error_and_aborted_resources().0);
+            }
+        };
+        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Complete);
+        self.c08_completed_session = Some(Arc::clone(&session));
+        Ok(C08PendingGraphEncoding {
+            summary,
+            resources: PendingVelloResourceCommit::from_aggregate(leases),
+            session,
+        })
+    }
+
+    fn c08_custom_spine_requirements(&self, output: &C08ExternalOutputView<'_>) -> Result<usize> {
         match self.c08_encoding_state {
             Some(C08CustomSpineEncodingState::Ready) => {}
             Some(
@@ -7577,62 +8735,7 @@ impl<'device> PreparedGraph<'device> {
                 "the C08 custom scheduler requires one unstarted capture spine",
             ));
         }
-        let engine = self.vello_engine.ok_or_else(|| {
-            preparation_error("the C08 capture scheduler has no ready internal Vello engine")
-        })?;
-        let resources = self.resources;
-        let queue = self.queue;
-
-        let session = Arc::new(());
-        let mut scope = ActiveVelloEncodingScope::begin(self.device);
-        let mut leases = VelloResourceLeaseAggregate::new();
-        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Encoding);
-        let result = {
-            let mut capture_encoding = C08VelloCaptureEncodingContext {
-                engine,
-                resources,
-                queue,
-                scope: &mut scope,
-                leases: &mut leases,
-            };
-            self.encode_c08_custom_spine_once(
-                encoder,
-                &output,
-                expected_capture_count,
-                &session,
-                &mut capture_encoding,
-            )
-        };
-        let summary = match result {
-            Ok(summary) => summary,
-            Err(encoding_error) => {
-                let _ = leases.abort();
-                let scope_result = scope.finish().await;
-                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
-                return match scope_result {
-                    Ok(()) => Err(encoding_error),
-                    Err(scope_error) => Err(scope_error),
-                };
-            }
-        };
-        #[cfg(test)]
-        if self.fail_scope_resolution_for_test {
-            scope.inject_validation_error_for_test();
-        }
-        let leases = match scope.finish_with_leases(leases).await {
-            Ok(leases) => leases,
-            Err(failure) => {
-                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
-                return Err(failure.into_error_and_aborted_resources().0);
-            }
-        };
-        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Complete);
-        self.c08_completed_session = Some(Arc::clone(&session));
-        Ok(C08PendingGraphEncoding {
-            summary,
-            resources: PendingVelloResourceCommit::from_aggregate(leases),
-            session,
-        })
+        Ok(expected_capture_count)
     }
 
     fn encode_c08_custom_spine_once(
@@ -7643,294 +8746,226 @@ impl<'device> PreparedGraph<'device> {
         session: &Arc<()>,
         capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
     ) -> Result<C08CustomSpineEncodingSummary> {
-        let mut scheduled = Vec::with_capacity(self.plan.passes.len());
-        let mut capture_count = 0_usize;
-        let mut validated_capture_receipts = 0_usize;
-        let mut bounded_capture_handoffs = true;
-        let mut custom_encoded = 0_usize;
-        let mut custom_completed = 0_usize;
-        let mut completed_pass_count = 0_usize;
-        let mut root_clear_count = 0_usize;
-        let mut clears_full_root = true;
-        let mut exact_spatial = true;
-        let mut exact_external_output = false;
-        let mut source_over_count = 0_usize;
-        let mut layer_composite_count = 0_usize;
-        let mut normal_composite_count = 0_usize;
-        let mut destination_composite_count = 0_usize;
-        let mut parent_and_result_are_distinct = true;
-        let mut full_copy_before_bounded_render = true;
-        let mut samples_source_with_fixed_blend = true;
-        let mut preserves_signed_origin = true;
-        let mut normal_fixed_blend = true;
-        let mut normal_omits_parent_sample = true;
-        let mut destination_copies_full_parent = true;
-        let mut destination_avoids_alias = true;
-        let mut layer_bindings_are_exact = true;
-        let mut layer_signed_mapping_is_exact = true;
-        let mut color_filter_count = 0_usize;
-        let mut color_filters_preserve_authored_order = true;
-        let mut color_filter_bindings_are_exact = true;
-        let mut color_filter_sources_and_results_are_distinct = true;
-        let mut color_filter_regions_are_validated = true;
-        let mut color_filter_signed_texel_mapping_is_exact = true;
-        let mut color_filter_operation_buffers_released = true;
-        #[cfg(test)]
-        let mut capture_observations = Vec::with_capacity(expected_capture_count);
-        #[cfg(test)]
-        let mut composite_encoder_identities = Vec::new();
-
+        let mut progress =
+            C08CustomSpineEncodingProgress::new(self.plan.passes.len(), expected_capture_count);
         while let Some(request) = self
             .plan
             .passes
             .get(self.next_pass)
             .map(C08PreparedPassEncodingRequest::from)
         {
-            let pass = request.id;
-            match &request.kind {
-                RuntimePassKind::ClearRoot { initialization, .. } => {
-                    let facts = self.encode_c08_clear_root(encoder, &request)?;
-                    custom_encoded = custom_encoded.saturating_add(1);
-                    if *initialization == RuntimeInitialization::SurfaceBaseColor {
-                        root_clear_count = root_clear_count.saturating_add(1);
-                        clears_full_root &= facts.full_target;
-                    }
-                    scheduled.push(C08ScheduledEncodingKind::ClearRoot);
-                    self.complete_c08_custom_pass(pass)?;
-                    custom_completed = custom_completed.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::VelloCapture(Some(_)) => {
-                    #[cfg(test)]
-                    if self.fail_capture_encoding_after_for_test == Some(capture_count) {
-                        return Err(preparation_error(
-                            "injected C08 Vello capture encoding failure",
-                        ));
-                    }
-                    let handoff = self.c08_vello_capture_handoff(&request, session)?;
-                    let target = handoff.target();
-                    bounded_capture_handoffs &= handoff.has_bounded_work()
-                        && handoff.target_extent().width() > 0
-                        && handoff.target_extent().height() > 0
-                        && handoff.texture().width() == handoff.target_extent().width()
-                        && handoff.texture().height() == handoff.target_extent().height()
-                        && handoff.texture().depth_or_array_layers() == 1
-                        && handoff.texture().mip_level_count() == 1
-                        && handoff.texture().sample_count() == 1
-                        && handoff.raster_scale().is_finite()
-                        && handoff.raster_scale() > 0.0
-                        && handoff
-                            .initial_transform()
-                            .as_array()
-                            .iter()
-                            .all(|value| value.is_finite());
-                    scheduled.push(C08ScheduledEncodingKind::VelloCapture);
-                    let encoded =
-                        Self::encode_c08_vello_capture(handoff, encoder, capture_encoding)?;
-                    #[cfg(test)]
-                    capture_observations.push(encoded.observation);
-                    self.complete_c08_capture(pass, target, session, encoded.receipt)?;
-                    capture_count = capture_count.saturating_add(1);
-                    #[cfg(test)]
-                    {
-                        self.acquired_capture_lease_count_for_test =
-                            self.acquired_capture_lease_count_for_test.saturating_add(1);
-                    }
-                    validated_capture_receipts = validated_capture_receipts.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::CanonicalizeCapture => {
-                    let facts = self.encode_c08_canonicalize(encoder, &request)?;
-                    custom_encoded = custom_encoded.saturating_add(1);
-                    exact_spatial &= facts.exact_spatial_uniform;
-                    scheduled.push(C08ScheduledEncodingKind::CanonicalizeCapture);
-                    self.complete_c08_custom_pass(pass)?;
-                    custom_completed = custom_completed.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::ColorFilter(Some(_)) => {
-                    let facts = self.encode_c10_color_filter(encoder, &request)?;
-                    custom_encoded = custom_encoded.saturating_add(1);
-                    color_filter_count = color_filter_count.saturating_add(1);
-                    color_filters_preserve_authored_order &= facts.exact_operation_bytes;
-                    color_filter_bindings_are_exact &= facts.exact_source_spatial_and_operations;
-                    color_filter_sources_and_results_are_distinct &=
-                        facts.source_and_result_are_distinct;
-                    color_filter_regions_are_validated &= facts.validated_viewport_and_scissor;
-                    color_filter_signed_texel_mapping_is_exact &=
-                        facts.preserved_signed_texel_mapping;
-                    scheduled.push(C08ScheduledEncodingKind::ColorFilter);
-                    self.complete_c08_custom_pass(pass)?;
-                    color_filter_operation_buffers_released &= self
-                        .color_filter_operation_bindings
-                        .get(&pass)
-                        .is_some_and(|binding| binding.buffer.is_none());
-                    custom_completed = custom_completed.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::Composite(Some(composite))
-                    if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
-                {
-                    let facts = self.encode_c08_span_source_over(encoder, &request)?;
-                    custom_encoded = custom_encoded.saturating_add(1);
-                    source_over_count = source_over_count.saturating_add(1);
-                    exact_spatial &= facts.exact_spatial_uniform;
-                    parent_and_result_are_distinct &= facts.parent_and_result_distinct;
-                    full_copy_before_bounded_render &= facts.copied_full_parent_before_render;
-                    samples_source_with_fixed_blend &=
-                        facts.sampled_only_source && facts.fixed_source_over_blend;
-                    preserves_signed_origin &= facts.preserved_signed_source_origin;
-                    scheduled.push(C08ScheduledEncodingKind::SpanSourceOver);
-                    self.complete_c08_custom_pass(pass)?;
-                    custom_completed = custom_completed.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::Composite(Some(composite))
-                    if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
-                {
-                    let facts = self.encode_c09_layer_composite(encoder, &request)?;
-                    custom_encoded = custom_encoded.saturating_add(1);
-                    layer_composite_count = layer_composite_count.saturating_add(1);
-                    normal_composite_count =
-                        normal_composite_count.saturating_add(usize::from(facts.normal_path));
-                    destination_composite_count = destination_composite_count
-                        .saturating_add(usize::from(facts.destination_path));
-                    parent_and_result_are_distinct &= facts.avoids_read_write_alias;
-                    full_copy_before_bounded_render &= facts.copied_full_parent;
-                    if facts.normal_path {
-                        samples_source_with_fixed_blend &=
-                            facts.fixed_premultiplied_blend && facts.omits_parent_sample;
-                        normal_fixed_blend &= facts.fixed_premultiplied_blend;
-                        normal_omits_parent_sample &= facts.omits_parent_sample;
-                    }
-                    if facts.destination_path {
-                        destination_copies_full_parent &= facts.copied_full_parent;
-                        destination_avoids_alias &= facts.avoids_read_write_alias;
-                    }
-                    layer_bindings_are_exact &= facts.exact_resources_and_parameters;
-                    layer_signed_mapping_is_exact &= facts.preserved_signed_mapping;
-                    preserves_signed_origin &= facts.preserved_signed_mapping;
-                    #[cfg(test)]
-                    composite_encoder_identities.push(facts.encoder_identity);
-                    scheduled.push(C08ScheduledEncodingKind::LayerComposite);
-                    self.complete_c08_custom_pass(pass)?;
-                    custom_completed = custom_completed.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::Present => {
-                    let facts = self.encode_c08_present(encoder, &request, output)?;
-                    custom_encoded = custom_encoded.saturating_add(1);
-                    exact_spatial &= facts.exact_spatial_uniform;
-                    exact_external_output |= facts.external_output_exact;
-                    scheduled.push(C08ScheduledEncodingKind::Present);
-                    self.complete_c08_custom_pass(pass)?;
-                    custom_completed = custom_completed.saturating_add(1);
-                    completed_pass_count = completed_pass_count.saturating_add(1);
-                }
-                RuntimePassKind::VelloCapture(None)
-                | RuntimePassKind::CopyBackdrop
-                | RuntimePassKind::ColorFilter(None)
-                | RuntimePassKind::BlurHorizontal(_)
-                | RuntimePassKind::BlurVertical(_)
-                | RuntimePassKind::DropShadowColorize(_)
-                | RuntimePassKind::Composite(_) => {
-                    return Err(preparation_error(
-                        "a non-C08 pass reached the custom graph spine scheduler",
-                    ));
-                }
-            }
+            self.encode_c08_custom_request(
+                encoder,
+                output,
+                session,
+                capture_encoding,
+                &request,
+                &mut progress,
+            )?;
         }
+        Ok(progress.finish(self))
+    }
 
-        let encodes_custom_passes_in_order =
-            c08_scheduled_encoding_order_is_exact(&scheduled, &self.plan.passes);
+    fn encode_c08_custom_request(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &C08ExternalOutputView<'_>,
+        session: &Arc<()>,
+        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        match &request.kind {
+            RuntimePassKind::ClearRoot { initialization, .. } => {
+                self.encode_c08_clear_step(encoder, request, *initialization, progress)
+            }
+            RuntimePassKind::VelloCapture(Some(_)) => {
+                self.encode_c08_capture_step(encoder, request, session, capture_encoding, progress)
+            }
+            RuntimePassKind::CanonicalizeCapture => {
+                self.encode_c08_canonicalize_step(encoder, request, progress)
+            }
+            RuntimePassKind::ColorFilter(Some(_)) => {
+                self.encode_c10_color_filter_step(encoder, request, progress)
+            }
+            RuntimePassKind::Composite(Some(composite))
+                if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
+            {
+                self.encode_c08_source_over_step(encoder, request, progress)
+            }
+            RuntimePassKind::Composite(Some(composite))
+                if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
+            {
+                self.encode_c09_layer_step(encoder, request, progress)
+            }
+            RuntimePassKind::Present => {
+                self.encode_c08_present_step(encoder, output, request, progress)
+            }
+            RuntimePassKind::VelloCapture(None)
+            | RuntimePassKind::CopyBackdrop
+            | RuntimePassKind::ColorFilter(None)
+            | RuntimePassKind::BlurHorizontal(_)
+            | RuntimePassKind::BlurVertical(_)
+            | RuntimePassKind::DropShadowColorize(_)
+            | RuntimePassKind::Composite(_) => Err(preparation_error(
+                "a non-C08 pass reached the custom graph spine scheduler",
+            )),
+        }
+    }
+
+    fn encode_c08_clear_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        initialization: RuntimeInitialization,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c08_clear_root(encoder, request)?;
+        if initialization == RuntimeInitialization::SurfaceBaseColor {
+            progress.root_clear_count = progress.root_clear_count.saturating_add(1);
+            progress.clears_full_root &= facts.full_target;
+        }
+        self.complete_c08_custom_pass(request.id)?;
+        progress.record_custom_completion(C08ScheduledEncodingKind::ClearRoot);
+        Ok(())
+    }
+
+    fn encode_c08_capture_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        session: &Arc<()>,
+        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
         #[cfg(test)]
-        let captures_share_one_command_encoder =
-            capture_observations.first().is_some_and(|first| {
-                capture_observations.len() == expected_capture_count
-                    && capture_observations
-                        .iter()
-                        .all(|capture| capture.encoder_identity == first.encoder_identity)
-            });
+        if self.fail_capture_encoding_after_for_test == Some(progress.capture_count) {
+            return Err(preparation_error(
+                "injected C08 Vello capture encoding failure",
+            ));
+        }
+        let handoff = self.c08_vello_capture_handoff(request, session)?;
+        let target = handoff.target();
+        progress.bounded_capture_handoffs &= c08_capture_handoff_is_bounded(&handoff);
+        let encoded = Self::encode_c08_vello_capture(handoff, encoder, capture_encoding)?;
         #[cfg(test)]
-        let captures_share_one_active_vello_scope =
-            capture_observations.first().is_some_and(|first| {
-                capture_observations.len() == expected_capture_count
-                    && capture_observations
-                        .iter()
-                        .all(|capture| capture.scope_identity == first.scope_identity)
-            });
+        progress.capture_observations.push(encoded.observation);
+        self.complete_c08_capture(request.id, target, session, encoded.receipt)?;
         #[cfg(test)]
-        let graph_work_shares_one_command_encoder = capture_observations
-            .first()
-            .map(|capture| capture.encoder_identity)
-            .or_else(|| composite_encoder_identities.first().copied())
-            .is_some_and(|identity| {
-                capture_observations
-                    .iter()
-                    .all(|capture| capture.encoder_identity == identity)
-                    && composite_encoder_identities
-                        .iter()
-                        .all(|composite| *composite == identity)
-            })
-            && (color_filter_count == 0 || self.c10_execution.is_some());
-        let total_composite_count = source_over_count.saturating_add(layer_composite_count);
-        Ok(C08CustomSpineEncodingSummary {
-            encodes_custom_passes_in_order,
-            clears_full_root_once: root_clear_count == 1 && clears_full_root,
-            uses_exact_prepared_spatial_mapping: exact_spatial,
-            presents_to_exact_external_output: exact_external_output,
-            exposes_bounded_capture_handoff: expected_capture_count > 0
-                && capture_count == expected_capture_count
-                && bounded_capture_handoffs,
-            validates_checked_capture_completion: validated_capture_receipts
-                == expected_capture_count,
-            completes_custom_passes_after_encoding: custom_encoded > 0
-                && custom_completed == custom_encoded,
-            parent_and_result_are_distinct: total_composite_count > 0
-                && parent_and_result_are_distinct,
-            copies_full_parent_before_bounded_source_render: total_composite_count > 0
-                && full_copy_before_bounded_render,
-            samples_only_source_with_fixed_premultiplied_blend: (source_over_count > 0
-                || normal_composite_count > 0
-                || destination_composite_count > 0)
-                && samples_source_with_fixed_blend,
-            preserves_signed_source_origin: total_composite_count > 0 && preserves_signed_origin,
-            keeps_cache_update_provisional: self.pass_cache_update.is_some(),
-            layer_composite_count,
-            normal_composite_count,
-            destination_composite_count,
-            normal_composites_use_fixed_premultiplied_blend: normal_fixed_blend,
-            normal_composites_omit_parent_sample: normal_omits_parent_sample,
-            destination_composites_copy_full_parent: destination_copies_full_parent,
-            destination_composites_avoid_read_write_alias: destination_avoids_alias,
-            layer_composites_bind_exact_resources_and_parameters: layer_bindings_are_exact,
-            layer_composites_preserve_signed_mapping: layer_signed_mapping_is_exact,
-            color_filter_count,
-            color_filters_preserve_authored_order: color_filter_count > 0
-                && color_filters_preserve_authored_order,
-            color_filters_bind_exact_source_spatial_and_operations: color_filter_count > 0
-                && color_filter_bindings_are_exact,
-            color_filter_sources_and_results_are_distinct: color_filter_count > 0
-                && color_filter_sources_and_results_are_distinct,
-            color_filters_use_validated_viewport_and_scissor: color_filter_count > 0
-                && color_filter_regions_are_validated,
-            color_filters_preserve_signed_texel_mapping: color_filter_count > 0
-                && color_filter_signed_texel_mapping_is_exact,
-            color_filter_operation_buffers_released: color_filter_count > 0
-                && color_filter_operation_buffers_released,
-            advances_every_pass_once: completed_pass_count == self.plan.passes.len()
-                && self.next_pass == self.plan.passes.len(),
-            #[cfg(test)]
-            capture_count,
-            #[cfg(test)]
-            captures_share_one_command_encoder,
-            #[cfg(test)]
-            captures_share_one_active_vello_scope,
-            #[cfg(test)]
-            graph_work_shares_one_command_encoder,
-            #[cfg(test)]
-            capture_observations,
-        })
+        {
+            self.acquired_capture_lease_count_for_test =
+                self.acquired_capture_lease_count_for_test.saturating_add(1);
+        }
+        progress.record_capture_completion();
+        Ok(())
+    }
+
+    fn encode_c08_canonicalize_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c08_canonicalize(encoder, request)?;
+        progress.exact_spatial &= facts.exact_spatial_uniform;
+        self.complete_c08_custom_pass(request.id)?;
+        progress.record_custom_completion(C08ScheduledEncodingKind::CanonicalizeCapture);
+        Ok(())
+    }
+
+    fn encode_c10_color_filter_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c10_color_filter(encoder, request)?;
+        progress.color_filter_count = progress.color_filter_count.saturating_add(1);
+        progress.color_filters_preserve_authored_order &= facts.exact_operation_bytes;
+        progress.color_filter_bindings_are_exact &= facts.exact_source_spatial_and_operations;
+        progress.color_filter_sources_and_results_are_distinct &=
+            facts.source_and_result_are_distinct;
+        progress.color_filter_regions_are_validated &= facts.validated_viewport_and_scissor;
+        progress.color_filter_signed_texel_mapping_is_exact &= facts.preserved_signed_texel_mapping;
+        self.complete_c08_custom_pass(request.id)?;
+        progress.color_filter_operation_buffers_released &= self
+            .color_filter_operation_bindings
+            .get(&request.id)
+            .is_some_and(|binding| binding.buffer.is_none());
+        progress.record_custom_completion(C08ScheduledEncodingKind::ColorFilter);
+        Ok(())
+    }
+
+    fn encode_c08_source_over_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c08_span_source_over(encoder, request)?;
+        progress.source_over_count = progress.source_over_count.saturating_add(1);
+        progress.exact_spatial &= facts.exact_spatial_uniform;
+        progress.parent_and_result_are_distinct &= facts.parent_and_result_distinct;
+        progress.full_copy_before_bounded_render &= facts.copied_full_parent_before_render;
+        progress.samples_source_with_fixed_blend &=
+            facts.sampled_only_source && facts.fixed_source_over_blend;
+        progress.preserves_signed_origin &= facts.preserved_signed_source_origin;
+        self.complete_c08_custom_pass(request.id)?;
+        progress.record_custom_completion(C08ScheduledEncodingKind::SpanSourceOver);
+        Ok(())
+    }
+
+    fn encode_c09_layer_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c09_layer_composite(encoder, request)?;
+        progress.layer_composite_count = progress.layer_composite_count.saturating_add(1);
+        progress.normal_composite_count = progress
+            .normal_composite_count
+            .saturating_add(usize::from(facts.normal_path));
+        progress.destination_composite_count = progress
+            .destination_composite_count
+            .saturating_add(usize::from(facts.destination_path));
+        progress.parent_and_result_are_distinct &= facts.avoids_read_write_alias;
+        progress.full_copy_before_bounded_render &= facts.copied_full_parent;
+        if facts.normal_path {
+            progress.samples_source_with_fixed_blend &=
+                facts.fixed_premultiplied_blend && facts.omits_parent_sample;
+            progress.normal_fixed_blend &= facts.fixed_premultiplied_blend;
+            progress.normal_omits_parent_sample &= facts.omits_parent_sample;
+        }
+        if facts.destination_path {
+            progress.destination_copies_full_parent &= facts.copied_full_parent;
+            progress.destination_avoids_alias &= facts.avoids_read_write_alias;
+        }
+        progress.layer_bindings_are_exact &= facts.exact_resources_and_parameters;
+        progress.layer_signed_mapping_is_exact &= facts.preserved_signed_mapping;
+        progress.preserves_signed_origin &= facts.preserved_signed_mapping;
+        #[cfg(test)]
+        progress
+            .composite_encoder_identities
+            .push(facts.encoder_identity);
+        self.complete_c08_custom_pass(request.id)?;
+        progress.record_custom_completion(C08ScheduledEncodingKind::LayerComposite);
+        Ok(())
+    }
+
+    fn encode_c08_present_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        output: &C08ExternalOutputView<'_>,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c08_present(encoder, request, output)?;
+        progress.exact_spatial &= facts.exact_spatial_uniform;
+        progress.exact_external_output |= facts.external_output_exact;
+        self.complete_c08_custom_pass(request.id)?;
+        progress.record_custom_completion(C08ScheduledEncodingKind::Present);
+        Ok(())
     }
 
     fn encode_c08_vello_capture(
@@ -7940,35 +8975,8 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<C08EncodedCaptureResult> {
         let target_extent = handoff.target_extent();
         let antialiasing = handoff.antialiasing();
-        if target_extent.width() == 0
-            || target_extent.height() == 0
-            || handoff.texture().width() != target_extent.width()
-            || handoff.texture().height() != target_extent.height()
-            || handoff.texture().depth_or_array_layers() != 1
-            || handoff.texture().mip_level_count() != 1
-            || handoff.texture().sample_count() != 1
-            || handoff.texture().dimension() != wgpu::TextureDimension::D2
-            || handoff.texture().format() != wgpu::TextureFormat::Rgba8Unorm
-            || handoff.texture().usage() != VELLO_CAPTURE_TEXTURE_USAGES
-        {
-            return Err(preparation_error(
-                "the C08 Vello capture target changed its exact RGBA8 storage contract",
-            ));
-        }
-        let initial_transform = handoff.initial_transform();
-        let scene = match handoff.work() {
-            RuntimeVelloCapture::Span(span) => {
-                encode_vello_scene_with_initial_transform(&span.commands, initial_transform)?
-            }
-            RuntimeVelloCapture::ClipCoverage(coverage) => {
-                let elements = coverage
-                    .elements
-                    .iter()
-                    .map(|element| (element.clip.clone(), element.transform))
-                    .collect::<Vec<_>>();
-                encode_vello_clip_coverage_scene(&elements, initial_transform, target_extent)?
-            }
-        };
+        validate_c08_vello_capture_target(&handoff)?;
+        let scene = c08_vello_capture_scene(&handoff)?;
         #[cfg(test)]
         let lowers_with_exact_initial_transform = match handoff.work() {
             RuntimeVelloCapture::Span(_) => scene
@@ -7977,7 +8985,7 @@ impl<'device> PreparedGraph<'device> {
                 .is_some_and(|run| {
                     run.transform_components_for_test()
                         .iter()
-                        .zip(initial_transform.as_array())
+                        .zip(handoff.initial_transform().as_array())
                         .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5)
                 }),
             RuntimeVelloCapture::ClipCoverage(_) => true,
@@ -8366,26 +9374,8 @@ impl<'device> PreparedGraph<'device> {
             ));
         }
 
-        let copy_extent = wgpu::Extent3d {
-            width: parent_spatial.device_extent.width(),
-            height: parent_spatial.device_extent.height(),
-            depth_or_array_layers: 1,
-        };
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: parent_binding.texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: target_binding.texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            copy_extent,
-        );
+        let copy_extent = c09_composite_copy_extent(parent_spatial);
+        copy_c09_composite_parent(encoder, &parent_binding, &target_binding, copy_extent);
 
         let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
         let preserved_signed_source_origin =
@@ -8426,11 +9416,10 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    fn encode_c10_color_filter(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C10ColorFilterEncodingFacts> {
+    fn prepare_c10_color_filter_encoding<'prepared>(
+        &'prepared self,
+        request: &'prepared C08PreparedPassEncodingRequest,
+    ) -> Result<PreparedC10ColorFilterEncoding<'prepared>> {
         let RuntimePassKind::ColorFilter(Some(filter)) = &request.kind else {
             return Err(preparation_error(
                 "the C10 color pass changed its checked semantic payload",
@@ -8447,7 +9436,6 @@ impl<'device> PreparedGraph<'device> {
                 "the C10 color pass must have one source and a nonempty ordered program",
             ));
         }
-
         let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
         let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
         let target_binding = self.texture_binding_for_pass(request.id, target)?;
@@ -8478,7 +9466,6 @@ impl<'device> PreparedGraph<'device> {
                 "the C10 source and distinct working result bindings are inconsistent",
             ));
         }
-
         let keys = request
             .cache_keys
             .as_ref()
@@ -8501,6 +9488,34 @@ impl<'device> PreparedGraph<'device> {
                 "the C10 color spatial bytes changed after immutable preparation",
             ));
         }
+        let (operation_buffer, exact_operation_bytes) =
+            self.validate_c10_operation_buffer(request, filter)?;
+        let objects = self.c10_color_filter_pass_objects(keys)?;
+        objects.require_encoding_ready()?;
+        let (region, validated_viewport_and_scissor, preserved_signed_texel_mapping) =
+            validate_c10_render_region(spatial, source_spatial, target_spatial)?;
+        Ok(PreparedC10ColorFilterEncoding {
+            source_binding,
+            target_binding,
+            objects,
+            spatial,
+            operation_buffer,
+            region,
+            facts: C10ColorFilterEncodingFacts {
+                exact_operation_bytes,
+                exact_source_spatial_and_operations: spatial == &expected_spatial,
+                source_and_result_are_distinct,
+                validated_viewport_and_scissor,
+                preserved_signed_texel_mapping,
+            },
+        })
+    }
+
+    fn validate_c10_operation_buffer<'prepared>(
+        &'prepared self,
+        request: &'prepared C08PreparedPassEncodingRequest,
+        filter: &RuntimeColorFilter,
+    ) -> Result<(&'prepared wgpu::Buffer, bool)> {
         let operation_bytes = request.color_filter_operations.as_ref().ok_or_else(|| {
             preparation_error("the C10 color pass has no checked operation bytes")
         })?;
@@ -8516,7 +9531,7 @@ impl<'device> PreparedGraph<'device> {
         let operation_buffer = operation_binding.buffer.as_ref().ok_or_else(|| {
             preparation_error("the C10 operation buffer is stale or already released")
         })?;
-        let exact_operation_bytes = operation_bytes == &expected_operation_bytes
+        let exact = operation_bytes == &expected_operation_bytes
             && &operation_binding.bytes == operation_bytes
             && operation_buffer.size()
                 == u64::try_from(operation_bytes.as_bytes().len()).map_err(|_| {
@@ -8524,48 +9539,34 @@ impl<'device> PreparedGraph<'device> {
                 })?
             && operation_buffer.usage()
                 == wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
-        if !exact_operation_bytes {
+        if !exact {
             return Err(preparation_error(
                 "the C10 operation buffer differs from its exact checked bytes",
             ));
         }
+        Ok((operation_buffer, exact))
+    }
 
-        let objects = self.c10_color_filter_pass_objects(keys)?;
-        objects.require_encoding_ready()?;
+    fn encode_c10_color_filter(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C10ColorFilterEncodingFacts> {
+        let prepared = self.prepare_c10_color_filter_encoding(request)?;
         #[cfg(test)]
         inject_c10_color_filter_shader_failure_for_test()?;
-        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?
-            .ok_or_else(|| preparation_error("the C10 color pass has an empty bounded region"))?;
-        let validated_viewport_and_scissor = region.scissor_x.saturating_add(region.scissor_width)
-            <= target_spatial.device_extent.width()
-            && region.scissor_y.saturating_add(region.scissor_height)
-                <= target_spatial.device_extent.height()
-            && region.viewport_width > 0.0
-            && region.viewport_height > 0.0;
-        let preserved_signed_texel_mapping =
-            c08_spatial_uniform_preserves_source_origin(spatial, source_spatial)
-                && close_f64(region.unclipped_x, 0.0)
-                && close_f64(region.unclipped_y, 0.0)
-                && source_spatial.texel_origin == target_spatial.texel_origin
-                && source_spatial.device_origin == target_spatial.device_origin;
-        if !validated_viewport_and_scissor || !preserved_signed_texel_mapping {
-            return Err(preparation_error(
-                "the C10 bounded viewport or signed texel mapping changed after validation",
-            ));
-        }
-
-        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let spatial_buffer = self.create_c08_spatial_uniform_buffer(prepared.spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Surgeist C10 exact color-filter bindings"),
-            layout: objects.bind_group_layout(),
+            layout: prepared.objects.bind_group_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(source_binding.view()),
+                    resource: wgpu::BindingResource::TextureView(prepared.source_binding.view()),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
+                    resource: wgpu::BindingResource::Sampler(prepared.objects.source_sampler()),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -8573,14 +9574,14 @@ impl<'device> PreparedGraph<'device> {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: operation_buffer.as_entire_binding(),
+                    resource: prepared.operation_buffer.as_entire_binding(),
                 },
             ],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("Surgeist C10 bounded ordered color filter"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target_binding.view(),
+                view: prepared.target_binding.view(),
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
@@ -8593,38 +9594,30 @@ impl<'device> PreparedGraph<'device> {
             timestamp_writes: None,
             multiview_mask: None,
         });
-        pass.set_pipeline(objects.render_pipeline());
+        pass.set_pipeline(prepared.objects.render_pipeline());
         pass.set_bind_group(0, &bind_group, &[]);
         pass.set_viewport(
-            region.viewport_x,
-            region.viewport_y,
-            region.viewport_width,
-            region.viewport_height,
+            prepared.region.viewport_x,
+            prepared.region.viewport_y,
+            prepared.region.viewport_width,
+            prepared.region.viewport_height,
             0.0,
             1.0,
         );
         pass.set_scissor_rect(
-            region.scissor_x,
-            region.scissor_y,
-            region.scissor_width,
-            region.scissor_height,
+            prepared.region.scissor_x,
+            prepared.region.scissor_y,
+            prepared.region.scissor_width,
+            prepared.region.scissor_height,
         );
         pass.draw(0..3, 0..1);
 
-        Ok(C10ColorFilterEncodingFacts {
-            exact_operation_bytes,
-            exact_source_spatial_and_operations: spatial == &expected_spatial,
-            source_and_result_are_distinct,
-            validated_viewport_and_scissor,
-            preserved_signed_texel_mapping,
-        })
+        Ok(prepared.facts)
     }
 
-    fn encode_c09_layer_composite(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C09LayerCompositeEncodingFacts> {
+    fn c09_composite_semantic<'prepared>(
+        request: &'prepared C08PreparedPassEncodingRequest,
+    ) -> Result<C09CompositeSemantic<'prepared>> {
         let RuntimePassKind::Composite(Some(RuntimeComposite {
             kind:
                 RuntimeCompositeKind::Layer {
@@ -8640,13 +9633,11 @@ impl<'device> PreparedGraph<'device> {
                 "the C09 layer composite changed its checked semantic payload",
             ));
         };
-        let normal_path = parameters.blend() == BlendMode::Normal;
-        let destination_path = !normal_path;
-        let parent = exact_c08_read(request, RuntimeReadRole::CompositeParent)?;
-        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
+        let parent = *exact_c08_read(request, RuntimeReadRole::CompositeParent)?;
+        let source = *exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
         let clip = clip_coverage
             .map(|resource| {
-                let read = exact_c08_read(request, RuntimeReadRole::ClipCoverage)?;
+                let read = *exact_c08_read(request, RuntimeReadRole::ClipCoverage)?;
                 if read.resource() != resource {
                     return Err(preparation_error(
                         "the C09 clip coverage read changed its exact resource",
@@ -8658,7 +9649,7 @@ impl<'device> PreparedGraph<'device> {
         let alpha_mask = parameters
             .alpha_mask()
             .map(|mask| {
-                let read = exact_c08_read(request, RuntimeReadRole::AlphaMask)?;
+                let read = *exact_c08_read(request, RuntimeReadRole::AlphaMask)?;
                 if read.resource() != mask.resource() {
                     return Err(preparation_error(
                         "the C09 alpha-mask read changed its exact retained upload",
@@ -8667,31 +9658,49 @@ impl<'device> PreparedGraph<'device> {
                 Ok(read)
             })
             .transpose()?;
-        let expected_read_count = 2usize
-            .saturating_add(usize::from(clip.is_some()))
-            .saturating_add(usize::from(alpha_mask.is_some()));
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
                 "the C09 layer composite has no prepared result",
             ));
         };
+        let expected_read_count = 2usize
+            .saturating_add(usize::from(clip.is_some()))
+            .saturating_add(usize::from(alpha_mask.is_some()));
         if request.reads.len() != expected_read_count {
             return Err(preparation_error(
                 "the C09 layer composite contains an absent or duplicated semantic read",
             ));
         }
+        let normal_path = parameters.blend() == BlendMode::Normal;
+        Ok(C09CompositeSemantic {
+            transform: *transform,
+            parameters,
+            parent,
+            source,
+            clip,
+            alpha_mask,
+            target,
+            normal_path,
+            destination_path: !normal_path,
+        })
+    }
 
-        let parent_binding = self.texture_binding_for_pass(request.id, parent.resource())?;
-        let parent_spatial = self.validate_texture_binding(&parent_binding, parent.resource())?;
-        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
-        let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
-        let target_binding = self.texture_binding_for_pass(request.id, target)?;
-        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
-        let clip_binding = clip
+    fn c09_composite_bindings<'prepared>(
+        &'prepared self,
+        request: &'prepared C08PreparedPassEncodingRequest,
+        semantic: C09CompositeSemantic<'prepared>,
+    ) -> Result<C09CompositeBindings<'prepared>> {
+        let parent = self.texture_binding_for_pass(request.id, semantic.parent.resource())?;
+        let parent_spatial = self.validate_texture_binding(&parent, semantic.parent.resource())?;
+        let source = self.texture_binding_for_pass(request.id, semantic.source.resource())?;
+        let source_spatial = self.validate_texture_binding(&source, semantic.source.resource())?;
+        let target = self.texture_binding_for_pass(request.id, semantic.target)?;
+        let target_spatial = self.validate_texture_binding(&target, semantic.target)?;
+        let clip = semantic
+            .clip
             .map(|read| {
                 let binding = self.texture_binding_for_pass(request.id, read.resource())?;
-                let spatial = self.validate_texture_binding(&binding, read.resource())?;
-                if spatial != target_spatial {
+                if self.validate_texture_binding(&binding, read.resource())? != target_spatial {
                     return Err(preparation_error(
                         "the C09 clip coverage grid changed from its parent mapping",
                     ));
@@ -8699,11 +9708,13 @@ impl<'device> PreparedGraph<'device> {
                 Ok(binding)
             })
             .transpose()?;
-        let mask_binding = alpha_mask
+        let mask = semantic
+            .alpha_mask
             .map(|read| {
                 let binding = self.texture_binding_for_pass(request.id, read.resource())?;
                 let spatial = self.validate_texture_binding(&binding, read.resource())?;
-                if parameters
+                if semantic
+                    .parameters
                     .alpha_mask()
                     .is_none_or(|mask| spatial.device_extent != mask.image_dimensions())
                 {
@@ -8714,67 +9725,85 @@ impl<'device> PreparedGraph<'device> {
                 Ok(binding)
             })
             .transpose()?;
-
-        let parent_and_result_are_distinct = parent.resource() != target
-            && parent_binding.allocation_resource() != target_binding.allocation_resource();
-        let sampled_allocations_are_distinct = source_binding.allocation_resource()
-            != target_binding.allocation_resource()
-            && clip_binding.as_ref().is_none_or(|binding| {
-                binding.allocation_resource() != target_binding.allocation_resource()
+        let parent_and_result_are_distinct = semantic.parent.resource() != semantic.target
+            && parent.allocation_resource() != target.allocation_resource();
+        let sampled_allocations_are_distinct = source.allocation_resource()
+            != target.allocation_resource()
+            && clip.as_ref().is_none_or(|binding| {
+                binding.allocation_resource() != target.allocation_resource()
             })
-            && mask_binding.as_ref().is_none_or(|binding| {
-                binding.allocation_resource() != target_binding.allocation_resource()
+            && mask.as_ref().is_none_or(|binding| {
+                binding.allocation_resource() != target.allocation_resource()
             });
-        let clip_format_is_exact = match clip {
-            Some(read) => {
-                self.resource_request(read.resource())?.format
-                    == RuntimeResourceFormat::ClipCoverageRgba8Unorm
-            }
-            None => true,
+        let bindings = C09CompositeBindings {
+            semantic,
+            parent,
+            source,
+            target,
+            clip,
+            mask,
+            parent_spatial,
+            source_spatial,
+            target_spatial,
+            parent_and_result_are_distinct,
+            sampled_allocations_are_distinct,
         };
-        let mask_format_is_exact = match alpha_mask {
-            Some(read) => {
-                self.resource_request(read.resource())?.format
-                    == RuntimeResourceFormat::ResolvedMaskRgba8Unorm
-            }
-            None => true,
-        };
-        if !parent_and_result_are_distinct
-            || !sampled_allocations_are_distinct
-            || parent_spatial != target_spatial
-            || parent_binding.texture().format() != target_binding.texture().format()
-            || self.resource_request(parent.resource())?.format
+        self.validate_c09_composite_bindings(&bindings)?;
+        Ok(bindings)
+    }
+
+    fn validate_c09_composite_bindings(&self, bindings: &C09CompositeBindings<'_>) -> Result<()> {
+        let semantic = &bindings.semantic;
+        let clip_format_is_exact = semantic.clip.is_none_or(|read| {
+            self.resource_request(read.resource()).is_ok_and(|request| {
+                request.format == RuntimeResourceFormat::ClipCoverageRgba8Unorm
+            })
+        });
+        let mask_format_is_exact = semantic.alpha_mask.is_none_or(|read| {
+            self.resource_request(read.resource()).is_ok_and(|request| {
+                request.format == RuntimeResourceFormat::ResolvedMaskRgba8Unorm
+            })
+        });
+        if !bindings.parent_and_result_are_distinct
+            || !bindings.sampled_allocations_are_distinct
+            || bindings.parent_spatial != bindings.target_spatial
+            || bindings.parent.texture().format() != bindings.target.texture().format()
+            || self.resource_request(semantic.parent.resource())?.format
                 != RuntimeResourceFormat::Working(self.plan.working_format)
-            || self.resource_request(source.resource())?.format
+            || self.resource_request(semantic.source.resource())?.format
                 != RuntimeResourceFormat::Working(self.plan.working_format)
-            || self.resource_request(target)?.format
+            || self.resource_request(semantic.target)?.format
                 != RuntimeResourceFormat::Working(self.plan.working_format)
             || !clip_format_is_exact
             || !mask_format_is_exact
-            || !parent_binding
+            || !bindings
+                .parent
                 .texture()
                 .usage()
                 .contains(wgpu::TextureUsages::COPY_SRC)
-            || (destination_path
-                && !parent_binding
+            || (semantic.destination_path
+                && !bindings
+                    .parent
                     .texture()
                     .usage()
                     .contains(wgpu::TextureUsages::TEXTURE_BINDING))
-            || !target_binding
+            || !bindings
+                .target
                 .texture()
                 .usage()
                 .contains(wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::RENDER_ATTACHMENT)
-            || !source_binding
+            || !bindings
+                .source
                 .texture()
                 .usage()
                 .contains(wgpu::TextureUsages::TEXTURE_BINDING)
-            || clip_binding.as_ref().is_some_and(|binding| {
+            || bindings.clip.as_ref().is_some_and(|binding| {
                 !binding
                     .texture()
                     .usage()
                     .contains(wgpu::TextureUsages::TEXTURE_BINDING)
             })
-            || mask_binding.as_ref().is_some_and(|binding| {
+            || bindings.mask.as_ref().is_some_and(|binding| {
                 !binding
                     .texture()
                     .usage()
@@ -8785,6 +9814,96 @@ impl<'device> PreparedGraph<'device> {
                 "C09 parent, source, and distinct composite result bindings are inconsistent",
             ));
         }
+        Ok(())
+    }
+
+    fn create_c09_composite_bind_group(
+        &self,
+        bindings: &C09CompositeBindings<'_>,
+        objects: &ProvisionalCompositePassObjects<'_>,
+        spatial: &PassSpatialUniformBytes,
+        parameters: &CompositeParameterBytes,
+        expected_read_count: usize,
+    ) -> Result<(wgpu::BindGroup, bool)> {
+        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let parameter_buffer = self.create_c09_composite_parameter_buffer(parameters);
+        let mut entries = Vec::with_capacity(expected_read_count.saturating_add(4));
+        entries.push(wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(bindings.source.view()),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
+        });
+        if bindings.semantic.destination_path {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(bindings.parent.view()),
+            });
+        }
+        if let Some(binding) = &bindings.clip {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(binding.view()),
+            });
+        }
+        if let Some(binding) = &bindings.mask {
+            entries.push(wgpu::BindGroupEntry {
+                binding: 4,
+                resource: wgpu::BindingResource::TextureView(binding.view()),
+            });
+        }
+        entries.push(wgpu::BindGroupEntry {
+            binding: 5,
+            resource: spatial_buffer.as_entire_binding(),
+        });
+        entries.push(wgpu::BindGroupEntry {
+            binding: 6,
+            resource: parameter_buffer.as_entire_binding(),
+        });
+        let binds_parent_sample = entries.iter().any(|entry| entry.binding == 2);
+        let expected_entry_count = 4usize
+            .saturating_add(usize::from(bindings.semantic.destination_path))
+            .saturating_add(usize::from(bindings.clip.is_some()))
+            .saturating_add(usize::from(bindings.mask.is_some()));
+        if entries.len() != expected_entry_count
+            || binds_parent_sample != bindings.semantic.destination_path
+        {
+            return Err(preparation_error(
+                "the C09 composite bind group contains a dummy or missing resource",
+            ));
+        }
+        Ok((
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("Surgeist C09 exact layer-composite bindings"),
+                layout: objects.bind_group_layout(),
+                entries: &entries,
+            }),
+            binds_parent_sample,
+        ))
+    }
+
+    fn encode_c09_layer_composite(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C09LayerCompositeEncodingFacts> {
+        let semantic = Self::c09_composite_semantic(request)?;
+        let bindings = self.c09_composite_bindings(request, semantic)?;
+        let normal_path = bindings.semantic.normal_path;
+        let destination_path = bindings.semantic.destination_path;
+        let source = bindings.semantic.source;
+        let source_spatial = bindings.source_spatial;
+        let target_spatial = bindings.target_spatial;
+        let parent_spatial = bindings.parent_spatial;
+        let parameters = bindings.semantic.parameters;
+        let transform = bindings.semantic.transform;
+        let parent_binding = &bindings.parent;
+        let target_binding = &bindings.target;
+        let parent_and_result_are_distinct = bindings.parent_and_result_are_distinct;
+        let sampled_allocations_are_distinct = bindings.sampled_allocations_are_distinct;
+        let expected_read_count = request.reads.len();
 
         let keys = request.cache_keys.as_ref().ok_or_else(|| {
             preparation_error("the C09 layer composite has no provisional cache keys")
@@ -8823,144 +9942,36 @@ impl<'device> PreparedGraph<'device> {
             } else {
                 ShaderCompositePathKey::DestinationSampling
             }
-            || objects.has_clip_coverage() != clip_binding.is_some()
-            || objects.has_alpha_mask() != mask_binding.is_some()
+            || objects.has_clip_coverage() != bindings.clip.is_some()
+            || objects.has_alpha_mask() != bindings.mask.is_some()
         {
             return Err(preparation_error(
                 "the C09 composite objects changed their checked entry-point interface",
             ));
         }
 
-        let copy_extent = wgpu::Extent3d {
-            width: parent_spatial.device_extent.width(),
-            height: parent_spatial.device_extent.height(),
-            depth_or_array_layers: 1,
-        };
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: parent_binding.texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: target_binding.texture(),
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            copy_extent,
-        );
+        let copy_extent = c09_composite_copy_extent(parent_spatial);
+        copy_c09_composite_parent(encoder, parent_binding, target_binding, copy_extent);
 
-        let (region, transformed_source_bounds) = C08RenderRegion::bounded_transformed_source(
-            source_spatial,
-            target_spatial,
-            *transform,
+        let (region, preserved_signed_mapping) =
+            c09_composite_region_mapping(spatial, source_spatial, target_spatial, transform)?;
+        let (bind_group, binds_parent_sample) = self.create_c09_composite_bind_group(
+            &bindings,
+            &objects,
+            spatial,
+            composite_parameters,
+            expected_read_count,
         )?;
-        let preserved_signed_mapping =
-            c08_spatial_uniform_preserves_source_origin(spatial, source_spatial)
-                && region.is_none_or(|region| {
-                    close_f64(region.unclipped_x, transformed_source_bounds[0])
-                        && close_f64(region.unclipped_y, transformed_source_bounds[1])
-                });
-        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
-        let parameter_buffer = self.create_c09_composite_parameter_buffer(composite_parameters);
-        let mut entries = Vec::with_capacity(expected_read_count.saturating_add(4));
-        entries.push(wgpu::BindGroupEntry {
-            binding: 0,
-            resource: wgpu::BindingResource::TextureView(source_binding.view()),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: 1,
-            resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
-        });
-        if destination_path {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(parent_binding.view()),
-            });
-        }
-        if let Some(binding) = &clip_binding {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(binding.view()),
-            });
-        }
-        if let Some(binding) = &mask_binding {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(binding.view()),
-            });
-        }
-        entries.push(wgpu::BindGroupEntry {
-            binding: 5,
-            resource: spatial_buffer.as_entire_binding(),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: 6,
-            resource: parameter_buffer.as_entire_binding(),
-        });
-        let binds_parent_sample = entries.iter().any(|entry| entry.binding == 2);
-        let expected_entry_count = 4usize
-            .saturating_add(usize::from(destination_path))
-            .saturating_add(usize::from(clip_binding.is_some()))
-            .saturating_add(usize::from(mask_binding.is_some()));
-        if entries.len() != expected_entry_count || binds_parent_sample != destination_path {
-            return Err(preparation_error(
-                "the C09 composite bind group contains a dummy or missing resource",
-            ));
-        }
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C09 exact layer-composite bindings"),
-            layout: objects.bind_group_layout(),
-            entries: &entries,
-        });
         #[cfg(test)]
         let encoder_identity = std::ptr::from_mut(&mut *encoder) as usize;
-        if let Some(region) = region {
-            if region.scissor_x.saturating_add(region.scissor_width)
-                > target_spatial.device_extent.width()
-                || region.scissor_y.saturating_add(region.scissor_height)
-                    > target_spatial.device_extent.height()
-            {
-                return Err(preparation_error(
-                    "the C09 bounded composite exceeds its exact parent extent",
-                ));
-            }
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Surgeist C09 bounded layer composite"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: target_binding.view(),
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(objects.render_pipeline());
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.set_viewport(
-                region.viewport_x,
-                region.viewport_y,
-                region.viewport_width,
-                region.viewport_height,
-                0.0,
-                1.0,
-            );
-            pass.set_scissor_rect(
-                region.scissor_x,
-                region.scissor_y,
-                region.scissor_width,
-                region.scissor_height,
-            );
-            pass.draw(0..3, 0..1);
-        }
+        encode_c09_composite_region(
+            encoder,
+            target_binding,
+            &objects,
+            &bind_group,
+            region,
+            target_spatial,
+        )?;
 
         Ok(C09LayerCompositeEncodingFacts {
             normal_path,
@@ -9470,217 +10481,11 @@ impl<'device> PreparedGraph<'device> {
             self.output_format(),
             self.root_and_final(),
         );
-        let mut vocabulary = [false; 10];
-        for pass in &self.plan.passes {
-            vocabulary[runtime_pass_kind_index(&pass.runtime.kind)] = true;
-        }
-        let closed_c09_vocabulary = vocabulary[0]
-            && vocabulary[1]
-            && vocabulary[2]
-            && vocabulary[8]
-            && vocabulary[9]
-            && vocabulary[3..8].iter().all(|present| !present);
-        let complete_resource_and_pass_handoff = self
-            .plan
-            .resources
-            .iter()
-            .find(|resource| resource.runtime.role == RuntimeResourceRole::RootWorkingImage)
-            .map(|resource| resource.runtime.id)
-            == Some(self.plan.root_working_image)
-            && self
-                .plan
-                .passes
-                .last()
-                .is_some_and(|pass| pass.runtime.id == self.plan.final_present)
-            && closed_c09_vocabulary
-            && !self.plan.resources.is_empty()
-            && self.plan.kernels.is_empty();
-
-        let mut has_capture = false;
-        let mut has_coverage = false;
-        let mut has_working = false;
-        let mut has_mask = false;
-        let exact_resources = self.plan.resources.iter().all(|request| {
-            match (&request.runtime.format, &request.allocation) {
-                (
-                    RuntimeResourceFormat::VelloCaptureRgba8Unorm,
-                    RuntimeAllocationRequest::EffectTexture(descriptor),
-                ) => {
-                    has_capture = true;
-                    descriptor.role() == EffectTextureRole::Capture
-                        && descriptor.working_format().is_none()
-                        && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
-                        && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
-                }
-                (
-                    RuntimeResourceFormat::ClipCoverageRgba8Unorm,
-                    RuntimeAllocationRequest::EffectTexture(descriptor),
-                ) => {
-                    has_coverage = true;
-                    descriptor.role() == EffectTextureRole::Coverage
-                        && descriptor.working_format().is_none()
-                        && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
-                        && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
-                }
-                (
-                    RuntimeResourceFormat::Working(format),
-                    RuntimeAllocationRequest::EffectTexture(descriptor),
-                ) => {
-                    has_working = true;
-                    descriptor.role() == EffectTextureRole::Working
-                        && descriptor.working_format() == Some(*format)
-                        && descriptor.texture_format() == format.texture_format()
-                        && descriptor.usage() == format.required_usages()
-                }
-                (
-                    RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
-                    RuntimeAllocationRequest::ResolvedMask(descriptor),
-                ) => {
-                    has_mask = true;
-                    matches!(
-                        &request.runtime.import,
-                        Some(RuntimeResourceImport::ResolvedAlphaMask(runtime))
-                            if runtime.cache_key() == descriptor.cache_key()
-                                && runtime.physical_size() == descriptor.physical_size()
-                    )
-                }
-                _ => false,
-            }
-        });
-        let exact_kernels = self.plan.kernels.iter().all(|kernel| {
-            kernel.key == kernel.plan.key()
-                && kernel.plan.byte_len() > 0
-                && self
-                    .plan
-                    .passes
-                    .iter()
-                    .any(|pass| pass.kernel == Some(kernel.key))
-        });
-        let exact_capture_coverage_working_and_mask_allocations = has_capture
-            && has_coverage
-            && has_working
-            && has_mask
-            && exact_resources
-            && exact_kernels
-            && self.plan.kernels.is_empty();
-        let spatial_bytes_and_cache_keys_preserved = self.plan.passes.iter().all(|pass| {
-            pass.cache_keys == pass.runtime.cache_keys
-                && pass.spatial_uniform.is_some() == pass.cache_keys.is_some()
-                && pass
-                    .spatial_uniform
-                    .as_ref()
-                    .is_none_or(|bytes| bytes.as_bytes().len() == 48)
-        });
-
-        let initial_pass = self
-            .current_pass()
-            .ok_or_else(|| preparation_error("prepared test graph has no first pass"))?
-            .id();
-        let initial_outstanding = self.outstanding_lease_count_for_test();
-        let out_of_order_rejected = (self.plan.final_present != initial_pass)
-            && self.complete_pass(self.plan.final_present).is_err()
-            && self.next_pass == 0
-            && self.outstanding_lease_count_for_test() == initial_outstanding;
-        let unrelated_resource = self.plan.resources.iter().find_map(|resource| {
-            let bound = self.plan.passes[0]
-                .runtime
-                .reads
-                .iter()
-                .any(|read| read.resource == resource.runtime.id)
-                || self.plan.passes[0].runtime.result
-                    == RuntimeResultBinding::Resource(resource.runtime.id);
-            (!bound).then_some(resource.runtime.id)
-        });
-        let missing_binding_rejected = unrelated_resource.is_some_and(|resource| {
-            self.texture_binding_for_pass(initial_pass, resource)
-                .is_err()
-                && self.next_pass == 0
-                && self.outstanding_lease_count_for_test() == initial_outstanding
-        });
-
-        let mut all_bindings_inspected = true;
-        let mut releases_are_exact = true;
-        let mut duplicate_release_rejected = false;
-        let mut completed = 0_usize;
-        while let Some(pass) = self.current_pass() {
-            let pass_id = pass.id();
-            let _ = (pass.kind(), pass.dependencies(), pass.result());
-            all_bindings_inspected &= pass.reads().iter().all(|read| {
-                let _ = (
-                    read.role(),
-                    read.resource(),
-                    read.sampling_filter(),
-                    read.sampling_edge(),
-                    read.sampler_key(),
-                );
-                true
-            });
-            all_bindings_inspected &= pass
-                .spatial_uniform()
-                .is_some_and(|bytes| bytes.as_bytes().len() == 48)
-                == pass.cache_keys().is_some();
-            all_bindings_inspected &= pass
-                .composite_parameters()
-                .is_some_and(|bytes| bytes.as_bytes().len() == 112)
-                == matches!(
-                    pass.kind(),
-                    RuntimePassKind::Composite(Some(RuntimeComposite {
-                        kind: RuntimeCompositeKind::Layer { .. },
-                        ..
-                    }))
-                );
-            if let Some(keys) = pass.cache_keys() {
-                let _ = (
-                    keys.samplers(),
-                    keys.layout(),
-                    keys.shader(),
-                    keys.pipeline(),
-                );
-            }
-            let bound_resources = pass.bound_resources_for_test();
-            let resource_releases = pass.resource_releases_for_test().to_vec();
-            let kernel_releases = pass.kernel_releases_for_test().to_vec();
-            for resource in bound_resources {
-                let binding = self.texture_binding_for_pass(pass_id, resource)?;
-                all_bindings_inspected &= binding.runtime_resource() == resource
-                    && binding.allocation_resource().get() > 0
-                    && binding.texture().width() > 0;
-                let _ = binding.view();
-            }
-            if let Some(binding) = self.gaussian_kernel_binding_for_pass(pass_id)? {
-                all_bindings_inspected &= binding.allocation_resource().get() > 0
-                    && self
-                        .plan
-                        .passes
-                        .get(self.next_pass)
-                        .is_some_and(|request| request.kernel == Some(binding.key()));
-                let _ = binding.buffer();
-            }
-            self.complete_pass(pass_id)?;
-            releases_are_exact &= resource_releases.iter().all(|resource| {
-                self.resource_bindings
-                    .get(resource)
-                    .is_some_and(|binding| binding.lease.is_none())
-            }) && kernel_releases.iter().all(|kernel| {
-                self.kernel_bindings
-                    .get(kernel)
-                    .is_some_and(|binding| binding.lease.is_none())
-            });
-            if completed == 0 {
-                let after_first = self.outstanding_lease_count_for_test();
-                duplicate_release_rejected = self.complete_pass(pass_id).is_err()
-                    && self.outstanding_lease_count_for_test() == after_first
-                    && self.next_pass == 1;
-            }
-            completed = completed.saturating_add(1);
-        }
-        let typed_bindings_and_last_use_releases = out_of_order_rejected
-            && missing_binding_rejected
-            && duplicate_release_rejected
-            && all_bindings_inspected
-            && releases_are_exact
-            && completed == self.plan.passes.len()
-            && self.outstanding_lease_count_for_test() == 0;
+        let complete_resource_and_pass_handoff = prepared_handoff_is_complete(&self.plan);
+        let exact_capture_coverage_working_and_mask_allocations =
+            prepared_allocations_are_exact(&self.plan);
+        let spatial_bytes_and_cache_keys_preserved = prepared_spatial_keys_are_exact(&self.plan);
+        let typed_bindings_and_last_use_releases = exercise_prepared_bindings(self)?;
 
         Ok(PreparedGraphExerciseObservationForTest {
             complete_resource_and_pass_handoff,
@@ -9702,6 +10507,236 @@ impl<'device> PreparedGraph<'device> {
                 .filter(|binding| binding.lease.is_some())
                 .count()
     }
+}
+
+#[cfg(test)]
+fn prepared_handoff_is_complete(plan: &RuntimeGraphPreparationPlan) -> bool {
+    let mut vocabulary = [false; 10];
+    for pass in &plan.passes {
+        vocabulary[runtime_pass_kind_index(&pass.runtime.kind)] = true;
+    }
+    let closed_c09_vocabulary = vocabulary[0]
+        && vocabulary[1]
+        && vocabulary[2]
+        && vocabulary[8]
+        && vocabulary[9]
+        && vocabulary[3..8].iter().all(|present| !present);
+    plan.resources
+        .iter()
+        .find(|resource| resource.runtime.role == RuntimeResourceRole::RootWorkingImage)
+        .map(|resource| resource.runtime.id)
+        == Some(plan.root_working_image)
+        && plan
+            .passes
+            .last()
+            .is_some_and(|pass| pass.runtime.id == plan.final_present)
+        && closed_c09_vocabulary
+        && !plan.resources.is_empty()
+        && plan.kernels.is_empty()
+}
+
+#[cfg(test)]
+fn prepared_allocations_are_exact(plan: &RuntimeGraphPreparationPlan) -> bool {
+    let mut present = [false; 4];
+    let exact_resources =
+        plan.resources.iter().all(
+            |request| match (&request.runtime.format, &request.allocation) {
+                (
+                    RuntimeResourceFormat::VelloCaptureRgba8Unorm,
+                    RuntimeAllocationRequest::EffectTexture(descriptor),
+                ) => {
+                    present[0] = true;
+                    descriptor.role() == EffectTextureRole::Capture
+                        && descriptor.working_format().is_none()
+                        && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
+                        && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
+                }
+                (
+                    RuntimeResourceFormat::ClipCoverageRgba8Unorm,
+                    RuntimeAllocationRequest::EffectTexture(descriptor),
+                ) => {
+                    present[1] = true;
+                    descriptor.role() == EffectTextureRole::Coverage
+                        && descriptor.working_format().is_none()
+                        && descriptor.texture_format() == wgpu::TextureFormat::Rgba8Unorm
+                        && descriptor.usage() == VELLO_CAPTURE_TEXTURE_USAGES
+                }
+                (
+                    RuntimeResourceFormat::Working(format),
+                    RuntimeAllocationRequest::EffectTexture(descriptor),
+                ) => {
+                    present[2] = true;
+                    descriptor.role() == EffectTextureRole::Working
+                        && descriptor.working_format() == Some(*format)
+                        && descriptor.texture_format() == format.texture_format()
+                        && descriptor.usage() == format.required_usages()
+                }
+                (
+                    RuntimeResourceFormat::ResolvedMaskRgba8Unorm,
+                    RuntimeAllocationRequest::ResolvedMask(descriptor),
+                ) => {
+                    present[3] = true;
+                    matches!(
+                        &request.runtime.import,
+                        Some(RuntimeResourceImport::ResolvedAlphaMask(runtime))
+                            if runtime.cache_key() == descriptor.cache_key()
+                                && runtime.physical_size() == descriptor.physical_size()
+                    )
+                }
+                _ => false,
+            },
+        );
+    let exact_kernels = plan.kernels.iter().all(|kernel| {
+        kernel.key == kernel.plan.key()
+            && kernel.plan.byte_len() > 0
+            && plan
+                .passes
+                .iter()
+                .any(|pass| pass.kernel == Some(kernel.key))
+    });
+    present.into_iter().all(|value| value)
+        && exact_resources
+        && exact_kernels
+        && plan.kernels.is_empty()
+}
+
+#[cfg(test)]
+fn prepared_spatial_keys_are_exact(plan: &RuntimeGraphPreparationPlan) -> bool {
+    plan.passes.iter().all(|pass| {
+        pass.cache_keys == pass.runtime.cache_keys
+            && pass.spatial_uniform.is_some() == pass.cache_keys.is_some()
+            && pass
+                .spatial_uniform
+                .as_ref()
+                .is_none_or(|bytes| bytes.as_bytes().len() == 48)
+    })
+}
+
+#[cfg(test)]
+fn prepared_exercise_rejections(graph: &mut PreparedGraph<'_>) -> Result<(bool, bool)> {
+    let initial_pass = graph
+        .current_pass()
+        .ok_or_else(|| preparation_error("prepared test graph has no first pass"))?
+        .id();
+    let initial_outstanding = graph.outstanding_lease_count_for_test();
+    let out_of_order = graph.plan.final_present != initial_pass
+        && graph.complete_pass(graph.plan.final_present).is_err()
+        && graph.next_pass == 0
+        && graph.outstanding_lease_count_for_test() == initial_outstanding;
+    let unrelated_resource = graph.plan.resources.iter().find_map(|resource| {
+        let bound = graph.plan.passes[0]
+            .runtime
+            .reads
+            .iter()
+            .any(|read| read.resource == resource.runtime.id)
+            || graph.plan.passes[0].runtime.result
+                == RuntimeResultBinding::Resource(resource.runtime.id);
+        (!bound).then_some(resource.runtime.id)
+    });
+    let missing_binding = unrelated_resource.is_some_and(|resource| {
+        graph
+            .texture_binding_for_pass(initial_pass, resource)
+            .is_err()
+            && graph.next_pass == 0
+            && graph.outstanding_lease_count_for_test() == initial_outstanding
+    });
+    Ok((out_of_order, missing_binding))
+}
+
+#[cfg(test)]
+fn exercise_prepared_bindings(graph: &mut PreparedGraph<'_>) -> Result<bool> {
+    let (out_of_order, missing_binding) = prepared_exercise_rejections(graph)?;
+    let mut bindings_inspected = true;
+    let mut releases_exact = true;
+    let mut duplicate_release = false;
+    let mut completed = 0usize;
+    while let Some(pass) = graph.current_pass() {
+        let pass_id = pass.id();
+        bindings_inspected &= prepared_pass_view_is_consistent(&pass);
+        let bound_resources = pass.bound_resources_for_test();
+        let resource_releases = pass.resource_releases_for_test().to_vec();
+        let kernel_releases = pass.kernel_releases_for_test().to_vec();
+        for resource in bound_resources {
+            let binding = graph.texture_binding_for_pass(pass_id, resource)?;
+            bindings_inspected &= binding.runtime_resource() == resource
+                && binding.allocation_resource().get() > 0
+                && binding.texture().width() > 0;
+            let _ = binding.view();
+        }
+        if let Some(binding) = graph.gaussian_kernel_binding_for_pass(pass_id)? {
+            bindings_inspected &= binding.allocation_resource().get() > 0
+                && graph
+                    .plan
+                    .passes
+                    .get(graph.next_pass)
+                    .is_some_and(|request| request.kernel == Some(binding.key()));
+            let _ = binding.buffer();
+        }
+        graph.complete_pass(pass_id)?;
+        releases_exact &= resource_releases.iter().all(|resource| {
+            graph
+                .resource_bindings
+                .get(resource)
+                .is_some_and(|binding| binding.lease.is_none())
+        }) && kernel_releases.iter().all(|kernel| {
+            graph
+                .kernel_bindings
+                .get(kernel)
+                .is_some_and(|binding| binding.lease.is_none())
+        });
+        if completed == 0 {
+            let after_first = graph.outstanding_lease_count_for_test();
+            duplicate_release = graph.complete_pass(pass_id).is_err()
+                && graph.outstanding_lease_count_for_test() == after_first
+                && graph.next_pass == 1;
+        }
+        completed = completed.saturating_add(1);
+    }
+    Ok(out_of_order
+        && missing_binding
+        && duplicate_release
+        && bindings_inspected
+        && releases_exact
+        && completed == graph.plan.passes.len()
+        && graph.outstanding_lease_count_for_test() == 0)
+}
+
+#[cfg(test)]
+fn prepared_pass_view_is_consistent(pass: &PreparedPassView<'_>) -> bool {
+    let _ = (pass.kind(), pass.dependencies(), pass.result());
+    let reads_are_accessible = pass.reads().iter().all(|read| {
+        let _ = (
+            read.role(),
+            read.resource(),
+            read.sampling_filter(),
+            read.sampling_edge(),
+            read.sampler_key(),
+        );
+        true
+    });
+    if let Some(keys) = pass.cache_keys() {
+        let _ = (
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        );
+    }
+    reads_are_accessible
+        && pass
+            .spatial_uniform()
+            .is_some_and(|bytes| bytes.as_bytes().len() == 48)
+            == pass.cache_keys().is_some()
+        && pass
+            .composite_parameters()
+            .is_some_and(|bytes| bytes.as_bytes().len() == 112)
+            == matches!(
+                pass.kind(),
+                RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::Layer { .. },
+                    ..
+                }))
+            )
 }
 
 #[cfg_attr(
@@ -10506,11 +11541,48 @@ pub(crate) fn runtime_lowering_observation_for_test(
     )?;
     let graph_view = graph.lowering_view()?;
 
+    let has_exact_closed_vocabulary = runtime_vocabulary_is_exact(&plan);
+    let preserves_backend_ready_resource_facts =
+        runtime_resource_facts_are_exact(&graph, graph_view, &plan, output_format);
+    let preserves_semantic_pass_facts = runtime_semantic_pass_facts_are_exact(&plan);
+    let preserves_topological_bindings = runtime_topology_is_exact(graph_view, &plan);
+    let preserves_exact_last_use_releases = runtime_releases_are_exact(graph_view, &plan);
+    let rejects_inconsistent_bindings_atomically =
+        lowering_faults_are_rejected(&graph, &capabilities);
+    let (has_exact_cache_keys, keys_separate_program_layout_sampling_and_edge) =
+        runtime_cache_key_facts(&plan);
+    let keys_separate_source_working_and_output_formats =
+        runtime_format_keys_are_separate(graph_view, &plan, &reduced, &alternate_output);
+
+    Ok(RuntimeLoweringObservationForTest {
+        has_exact_closed_vocabulary,
+        preserves_backend_ready_resource_facts,
+        preserves_semantic_pass_facts,
+        preserves_topological_bindings,
+        preserves_exact_last_use_releases,
+        rejects_inconsistent_bindings_atomically,
+        has_exact_cache_keys,
+        keys_separate_program_layout_sampling_and_edge,
+        keys_separate_source_working_and_output_formats,
+    })
+}
+
+#[cfg(test)]
+fn runtime_vocabulary_is_exact(plan: &LoweredGraphPlan) -> bool {
     let mut vocabulary = [false; 10];
     for pass in &plan.passes {
         vocabulary[runtime_pass_kind_index(&pass.kind)] = true;
     }
-    let has_exact_closed_vocabulary = vocabulary.into_iter().all(|present| present);
+    vocabulary.into_iter().all(|present| present)
+}
+
+#[cfg(test)]
+fn runtime_resource_facts_are_exact(
+    graph: &GpuRenderGraph,
+    graph_view: GraphLoweringView<'_>,
+    plan: &LoweredGraphPlan,
+    output_format: Format,
+) -> bool {
     let imported_keys = plan
         .resources
         .iter()
@@ -10543,14 +11615,13 @@ pub(crate) fn runtime_lowering_observation_for_test(
             .any(|resource| resource.format == RuntimeResourceFormat::ResolvedMaskRgba8Unorm);
     let over_limit = DeviceCapabilities::from_test_facts(true, true, 1);
     let extent_rejected = LoweredGraphPlan::try_lower_validated_graph(
-        &graph,
+        graph,
         WorkingFormat::HighPrecision,
         output_format,
         &over_limit,
     )
     .is_err();
-    let preserves_backend_ready_resource_facts = plan.working_format
-        == WorkingFormat::HighPrecision
+    plan.working_format == WorkingFormat::HighPrecision
         && plan.output_format == output_format
         && plan.resources.iter().all(|resource| {
             resource.spatial.device_extent.width() > 0
@@ -10560,8 +11631,12 @@ pub(crate) fn runtime_lowering_observation_for_test(
         && has_distinct_formats
         && imported_keys == graph_imported_keys
         && !imported_keys.is_empty()
-        && extent_rejected;
-    let preserves_semantic_pass_facts = plan.passes.iter().any(|pass| {
+        && extent_rejected
+}
+
+#[cfg(test)]
+fn runtime_semantic_pass_facts_are_exact(plan: &LoweredGraphPlan) -> bool {
+    plan.passes.iter().any(|pass| {
         matches!(
             &pass.kind,
             RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::Span(span)))
@@ -10589,10 +11664,13 @@ pub(crate) fn runtime_lowering_observation_for_test(
                 ..
             })) if parameters.alpha_mask().is_some()
         )
-    });
+    })
+}
 
+#[cfg(test)]
+fn runtime_topology_is_exact(graph_view: GraphLoweringView<'_>, plan: &LoweredGraphPlan) -> bool {
     let graph_passes = graph_view.passes();
-    let preserves_topological_bindings = graph_passes.len() == plan.passes.len()
+    graph_passes.len() == plan.passes.len()
         && graph_passes
             .iter()
             .zip(&plan.passes)
@@ -10608,15 +11686,14 @@ pub(crate) fn runtime_lowering_observation_for_test(
                         reads
                             .into_iter()
                             .map(|read| RuntimeResourceId(read.resource()))
-                            .collect::<Vec<_>>()
-                            == runtime_pass
-                                .reads
-                                .iter()
-                                .map(|read| read.resource)
-                                .collect::<Vec<_>>()
+                            .eq(runtime_pass.reads.iter().map(|read| read.resource))
                     })
-            });
-    let expected_releases = graph_view
+            })
+}
+
+#[cfg(test)]
+fn runtime_releases_are_exact(graph_view: GraphLoweringView<'_>, plan: &LoweredGraphPlan) -> bool {
+    let expected = graph_view
         .resources()
         .into_iter()
         .map(|resource| {
@@ -10626,7 +11703,7 @@ pub(crate) fn runtime_lowering_observation_for_test(
             )
         })
         .collect::<BTreeMap<_, _>>();
-    let observed_releases = plan
+    let observed = plan
         .passes
         .iter()
         .flat_map(|pass| {
@@ -10636,16 +11713,16 @@ pub(crate) fn runtime_lowering_observation_for_test(
                 .map(move |resource| (resource, pass.id))
         })
         .collect::<BTreeMap<_, _>>();
-    let preserves_exact_last_use_releases = expected_releases == observed_releases
+    expected == observed
         && plan
             .resources
             .iter()
-            .any(|resource| resource.expected_reads > 1);
+            .any(|resource| resource.expected_reads > 1)
+}
 
-    let rejects_inconsistent_bindings_atomically =
-        lowering_faults_are_rejected(&graph, &capabilities);
-
-    let custom_passes = plan
+#[cfg(test)]
+fn runtime_cache_key_facts(plan: &LoweredGraphPlan) -> (bool, bool) {
+    let custom = plan
         .passes
         .iter()
         .filter(|pass| {
@@ -10655,8 +11732,8 @@ pub(crate) fn runtime_lowering_observation_for_test(
             )
         })
         .collect::<Vec<_>>();
-    let has_exact_cache_keys = !custom_passes.is_empty()
-        && custom_passes.iter().all(|pass| pass.cache_keys.is_some())
+    let exact = !custom.is_empty()
+        && custom.iter().all(|pass| pass.cache_keys.is_some())
         && plan.passes.iter().all(|pass| {
             matches!(
                 pass.kind,
@@ -10664,39 +11741,11 @@ pub(crate) fn runtime_lowering_observation_for_test(
             ) == pass.cache_keys.is_none()
         })
         && plan.passes.iter().all(|pass| {
-            pass.reads.iter().all(|read| {
-                let Some(resource) = plan
-                    .resources
-                    .iter()
-                    .find(|resource| resource.id == read.resource)
-                else {
-                    return false;
-                };
-                let expected_mask = match &resource.import {
-                    Some(RuntimeResourceImport::ResolvedAlphaMask(upload))
-                        if read.role == RuntimeReadRole::AlphaMask =>
-                    {
-                        Some(ShaderMaskSamplingKey::new(
-                            upload.quality(),
-                            upload.extend(),
-                        ))
-                    }
-                    Some(RuntimeResourceImport::ResolvedAlphaMask(_)) | None => None,
-                };
-                read.sampler_key.facts_for_test()
-                    == (
-                        shader_binding_role(read.role),
-                        resource.format.shader_key(),
-                        match read.sampling_filter {
-                            RuntimeSamplingFilter::Nearest => ShaderSamplingFilterKey::Nearest,
-                            RuntimeSamplingFilter::Linear => ShaderSamplingFilterKey::Linear,
-                        },
-                        shader_sampling_edge(read.sampling_edge),
-                        expected_mask,
-                    )
-            })
+            pass.reads
+                .iter()
+                .all(|read| runtime_read_key_is_exact(plan, read))
         });
-    let unique_layouts = custom_passes
+    let unique_layouts = custom
         .iter()
         .filter_map(|pass| pass.cache_keys.as_ref().map(|keys| &keys.layout))
         .fold(Vec::new(), |mut unique, key| {
@@ -10705,7 +11754,7 @@ pub(crate) fn runtime_lowering_observation_for_test(
             }
             unique
         });
-    let unique_shaders = custom_passes
+    let unique_shaders = custom
         .iter()
         .filter_map(|pass| pass.cache_keys.as_ref().map(|keys| &keys.shader))
         .fold(Vec::new(), |mut unique, key| {
@@ -10714,59 +11763,80 @@ pub(crate) fn runtime_lowering_observation_for_test(
             }
             unique
         });
-    let sampler_edges_are_distinct = custom_passes
-        .iter()
-        .flat_map(|pass| pass.reads.iter())
-        .any(|read| matches!(read.sampling_edge, RuntimeSamplingEdge::TransparentBlack))
-        && custom_passes
-            .iter()
-            .flat_map(|pass| pass.reads.iter())
-            .any(|read| {
-                matches!(
-                    read.sampling_edge,
-                    RuntimeSamplingEdge::SemanticBorderMirror(_)
-                )
-            });
-    let keys_separate_program_layout_sampling_and_edge =
-        unique_layouts.len() > 3 && unique_shaders.len() > 5 && sampler_edges_are_distinct;
-
-    let main_custom_keys = custom_key_map(&plan);
-    let reduced_custom_keys = custom_key_map(&reduced);
-    let alternate_output_keys = custom_key_map(&alternate_output);
-    let working_changes_every_custom_key = main_custom_keys.iter().all(|(id, keys)| {
-        reduced_custom_keys
-            .get(id)
-            .is_some_and(|other| *other != *keys)
+    let edges = custom.iter().flat_map(|pass| pass.reads.iter());
+    let transparent = edges
+        .clone()
+        .any(|read| matches!(read.sampling_edge, RuntimeSamplingEdge::TransparentBlack));
+    let mirror = edges.clone().any(|read| {
+        matches!(
+            read.sampling_edge,
+            RuntimeSamplingEdge::SemanticBorderMirror(_)
+        )
     });
+    (
+        exact,
+        unique_layouts.len() > 3 && unique_shaders.len() > 5 && transparent && mirror,
+    )
+}
+
+#[cfg(test)]
+fn runtime_read_key_is_exact(plan: &LoweredGraphPlan, read: &RuntimeReadBinding) -> bool {
+    let Some(resource) = plan
+        .resources
+        .iter()
+        .find(|resource| resource.id == read.resource)
+    else {
+        return false;
+    };
+    let expected_mask = match &resource.import {
+        Some(RuntimeResourceImport::ResolvedAlphaMask(upload))
+            if read.role == RuntimeReadRole::AlphaMask =>
+        {
+            Some(ShaderMaskSamplingKey::new(
+                upload.quality(),
+                upload.extend(),
+            ))
+        }
+        Some(RuntimeResourceImport::ResolvedAlphaMask(_)) | None => None,
+    };
+    read.sampler_key.facts_for_test()
+        == (
+            shader_binding_role(read.role),
+            resource.format.shader_key(),
+            match read.sampling_filter {
+                RuntimeSamplingFilter::Nearest => ShaderSamplingFilterKey::Nearest,
+                RuntimeSamplingFilter::Linear => ShaderSamplingFilterKey::Linear,
+            },
+            shader_sampling_edge(read.sampling_edge),
+            expected_mask,
+        )
+}
+
+#[cfg(test)]
+fn runtime_format_keys_are_separate(
+    graph_view: GraphLoweringView<'_>,
+    plan: &LoweredGraphPlan,
+    reduced: &LoweredGraphPlan,
+    alternate_output: &LoweredGraphPlan,
+) -> bool {
+    let main_keys = custom_key_map(plan);
+    let reduced_keys = custom_key_map(reduced);
+    let alternate_keys = custom_key_map(alternate_output);
+    let working_changes = main_keys
+        .iter()
+        .all(|(id, keys)| reduced_keys.get(id).is_some_and(|other| *other != *keys));
     let output_changes_only_present = plan.passes.iter().all(|pass| {
-        let Some(main_keys) = pass.cache_keys.as_ref() else {
+        let Some(main) = pass.cache_keys.as_ref() else {
             return true;
         };
-        let Some(other_keys) = alternate_output_keys.get(&pass.id) else {
-            return false;
-        };
-        if matches!(pass.kind, RuntimePassKind::Present) {
-            *other_keys != main_keys
-        } else {
-            *other_keys == main_keys
-        }
+        alternate_keys
+            .get(&pass.id)
+            .is_some_and(|other| matches!(pass.kind, RuntimePassKind::Present) == (*other != main))
     });
-    let keys_separate_source_working_and_output_formats = working_changes_every_custom_key
+    working_changes
         && output_changes_only_present
         && plan.root_working_image == RuntimeResourceId(graph_view.root_working_image())
-        && plan.final_present == RuntimePassId(graph_view.final_present());
-
-    Ok(RuntimeLoweringObservationForTest {
-        has_exact_closed_vocabulary,
-        preserves_backend_ready_resource_facts,
-        preserves_semantic_pass_facts,
-        preserves_topological_bindings,
-        preserves_exact_last_use_releases,
-        rejects_inconsistent_bindings_atomically,
-        has_exact_cache_keys,
-        keys_separate_program_layout_sampling_and_edge,
-        keys_separate_source_working_and_output_formats,
-    })
+        && plan.final_present == RuntimePassId(graph_view.final_present())
 }
 
 #[cfg(test)]

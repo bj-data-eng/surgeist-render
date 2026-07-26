@@ -17,6 +17,14 @@ use super::resource::{
 };
 #[cfg(test)]
 use super::shader::{ColorFilterOperationBufferLimits, DevicePassCacheCountsForTest};
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use super::surface::{
+    AcquiredPresentedSurfaceTexture, PresentedResourceBundle, PresentedSurface,
+    PresentedSurfaceAcquire, PresentedSurfaceState,
+};
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(test)]
 use super::surface::{HeadlessResources, RendererIdentity};
@@ -25,11 +33,6 @@ use super::surface::{HeadlessResources, RendererIdentity};
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use super::surface::{PresentedConfigurationDraft, PresentedLifecycle};
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-use super::surface::{PresentedSurface, PresentedSurfaceAcquire};
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
     TransactionTargetIntent, VelloEngineState, scene::VelloScene,
@@ -821,6 +824,303 @@ fn c09_vector_uniform_buffer(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_upload_vector_mask(
+    ready: &ReadyDeviceState,
+    mask: Option<&C09GpuMaskTextureForTest<'_>>,
+) -> Result<Option<wgpu::Texture>> {
+    let Some(mask) = mask else {
+        return Ok(None);
+    };
+    let expected_len = usize::try_from(mask.size.width())
+        .ok()
+        .and_then(|width| {
+            usize::try_from(mask.size.height())
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C09 GPU mask vector byte length overflowed",
+            )
+        })?;
+    if mask.rgba.len() != expected_len || mask.size.width() == 0 || mask.size.height() == 0 {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "C09 GPU mask vector bytes do not match a positive RGBA8 extent",
+        ));
+    }
+    let texture = c09_vector_texture(
+        &ready.device,
+        mask.size,
+        wgpu::TextureFormat::Rgba8Unorm,
+        wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST),
+        "Surgeist C09 GPU vector mask",
+    );
+    ready.queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        mask.rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(mask.size.width() * 4),
+            rows_per_image: None,
+        },
+        wgpu::Extent3d {
+            width: mask.size.width(),
+            height: mask.size.height(),
+            depth_or_array_layers: 1,
+        },
+    );
+    Ok(Some(texture))
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct C09VectorDrawTextures {
+    source: wgpu::TextureView,
+    parent: Option<wgpu::TextureView>,
+    clip: Option<wgpu::TextureView>,
+    output: wgpu::Texture,
+    output_view: wgpu::TextureView,
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+struct C09VectorDrawEncodingContext<'a> {
+    ready: &'a ReadyDeviceState,
+    requests: &'a C09CompositeCacheRequestsForTest,
+    mask_view: Option<&'a wgpu::TextureView>,
+    mask: Option<&'a C09GpuMaskTextureForTest<'a>>,
+    spatial_bytes: &'a [u8],
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_prepare_vector_draw_textures(
+    ready: &ReadyDeviceState,
+    encoder: &mut wgpu::CommandEncoder,
+    working_format: WorkingFormat,
+    source_size: PhysicalSize,
+    draw: C09GpuVectorDrawForTest,
+) -> C09VectorDrawTextures {
+    let source = c09_vector_texture(
+        &ready.device,
+        source_size,
+        working_format.texture_format(),
+        wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
+        "Surgeist C09 GPU vector source",
+    );
+    let source = source.create_view(&wgpu::TextureViewDescriptor::default());
+    c09_clear_vector_texture(
+        encoder,
+        &source,
+        draw.source,
+        "Surgeist C09 GPU vector source clear",
+    );
+    let parent =
+        (draw.path == super::shader::ShaderCompositePathKey::DestinationSampling).then(|| {
+            let texture = c09_vector_texture(
+                &ready.device,
+                PhysicalSize::new(1, 1),
+                working_format.texture_format(),
+                wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
+                "Surgeist C09 GPU vector parent",
+            );
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            c09_clear_vector_texture(
+                encoder,
+                &view,
+                draw.parent,
+                "Surgeist C09 GPU vector parent clear",
+            );
+            view
+        });
+    let clip = draw.has_clip_coverage.then(|| {
+        let texture = c09_vector_texture(
+            &ready.device,
+            PhysicalSize::new(1, 1),
+            wgpu::TextureFormat::Rgba8Unorm,
+            wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
+            "Surgeist C09 GPU vector clip coverage",
+        );
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        c09_clear_vector_texture(
+            encoder,
+            &view,
+            [1.0, 0.25, 0.75, draw.clip_alpha],
+            "Surgeist C09 GPU vector clip clear",
+        );
+        view
+    });
+    let output = c09_vector_texture(
+        &ready.device,
+        PhysicalSize::new(1, 1),
+        working_format.texture_format(),
+        wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::COPY_SRC),
+        "Surgeist C09 GPU vector output",
+    );
+    let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
+    let base = if draw.path == super::shader::ShaderCompositePathKey::Normal {
+        draw.parent
+    } else {
+        [0.125, 0.25, 0.375, 0.5]
+    };
+    c09_clear_vector_texture(
+        encoder,
+        &output_view,
+        base,
+        "Surgeist C09 GPU vector output clear",
+    );
+    C09VectorDrawTextures {
+        source,
+        parent,
+        clip,
+        output,
+        output_view,
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_vector_parameter_bytes(
+    mask: Option<&C09GpuMaskTextureForTest<'_>>,
+    draw: C09GpuVectorDrawForTest,
+) -> Result<[u8; 112]> {
+    let mask_bounds = mask.map_or([0.0, 0.0, 1.0, 1.0], |mask| {
+        [
+            mask.bounds.x(),
+            mask.bounds.y(),
+            mask.bounds.width(),
+            mask.bounds.height(),
+        ]
+    });
+    let mask_dimensions = mask.map_or([1, 1], |mask| [mask.size.width(), mask.size.height()]);
+    super::shader::composite_parameter_bytes_for_gpu_vector_for_test(
+        super::shader::CompositeParameterGpuVectorFactsForTest {
+            layer_point: [draw.layer_point.x(), draw.layer_point.y()],
+            mask_bounds,
+            mask_dimensions,
+            quality: draw.quality,
+            extend: draw.extend,
+            opacity: draw.opacity,
+            blend: draw.blend,
+            has_clip: draw.has_clip_coverage,
+            has_mask: draw.has_alpha_mask,
+        },
+    )
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+fn c09_encode_vector_draw(
+    context: &C09VectorDrawEncodingContext<'_>,
+    update: &mut ProvisionalDevicePassCacheUpdate,
+    encoder: &mut wgpu::CommandEncoder,
+    textures: &C09VectorDrawTextures,
+    draw: C09GpuVectorDrawForTest,
+) -> Result<()> {
+    let keys = context
+        .requests
+        .composite_pass(draw.path, draw.has_clip_coverage, draw.has_alpha_mask)
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C09 GPU vector draw has no exact composite pipeline keys",
+            )
+        })?;
+    let spatial = c09_vector_uniform_buffer(
+        &context.ready.device,
+        &context.ready.queue,
+        context.spatial_bytes,
+        "Surgeist C09 GPU vector spatial uniform",
+    );
+    let parameters = c09_vector_parameter_bytes(context.mask, draw)?;
+    let parameters = c09_vector_uniform_buffer(
+        &context.ready.device,
+        &context.ready.queue,
+        &parameters,
+        "Surgeist C09 GPU vector composite parameters",
+    );
+    let objects = update.realize_composite_pass(
+        &context.ready.device,
+        &context.ready.pass_cache,
+        keys.samplers(),
+        keys.layout(),
+        keys.shader(),
+        keys.pipeline(),
+    )?;
+    objects.require_encoding_ready()?;
+    let mut entries = vec![
+        wgpu::BindGroupEntry {
+            binding: 0,
+            resource: wgpu::BindingResource::TextureView(&textures.source),
+        },
+        wgpu::BindGroupEntry {
+            binding: 1,
+            resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
+        },
+    ];
+    for (binding, view) in [(2, textures.parent.as_ref()), (3, textures.clip.as_ref())] {
+        if let Some(view) = view {
+            entries.push(wgpu::BindGroupEntry {
+                binding,
+                resource: wgpu::BindingResource::TextureView(view),
+            });
+        }
+    }
+    if draw.has_alpha_mask {
+        entries.push(wgpu::BindGroupEntry {
+            binding: 4,
+            resource: wgpu::BindingResource::TextureView(context.mask_view.ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "C09 GPU mask draw has no uploaded mask texture",
+                )
+            })?),
+        });
+    }
+    entries.extend([
+        wgpu::BindGroupEntry {
+            binding: 5,
+            resource: spatial.as_entire_binding(),
+        },
+        wgpu::BindGroupEntry {
+            binding: 6,
+            resource: parameters.as_entire_binding(),
+        },
+    ]);
+    let bindings = context
+        .ready
+        .device
+        .create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C09 GPU vector bindings"),
+            layout: objects.bind_group_layout(),
+            entries: &entries,
+        });
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some("Surgeist C09 GPU vector composite"),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: &textures.output_view,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Load,
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        occlusion_query_set: None,
+        timestamp_writes: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(objects.render_pipeline());
+    pass.set_bind_group(0, &bindings, &[]);
+    pass.draw(0..3, 0..1);
+    Ok(())
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
 fn encode_c09_gpu_vectors_for_test(
     ready: &ReadyDeviceState,
     requests: &C09CompositeCacheRequestsForTest,
@@ -834,57 +1134,7 @@ fn encode_c09_gpu_vectors_for_test(
             "C09 GPU vector execution requires at least one draw",
         ));
     }
-    let mask_texture = if let Some(mask) = &mask {
-        let expected_len = usize::try_from(mask.size.width())
-            .ok()
-            .and_then(|width| {
-                usize::try_from(mask.size.height())
-                    .ok()
-                    .and_then(|height| width.checked_mul(height))
-            })
-            .and_then(|pixels| pixels.checked_mul(4))
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "C09 GPU mask vector byte length overflowed",
-                )
-            })?;
-        if mask.rgba.len() != expected_len || mask.size.width() == 0 || mask.size.height() == 0 {
-            return Err(Error::new(
-                BackendErrorCode::RenderFailed,
-                "C09 GPU mask vector bytes do not match a positive RGBA8 extent",
-            ));
-        }
-        let texture = c09_vector_texture(
-            &ready.device,
-            mask.size,
-            wgpu::TextureFormat::Rgba8Unorm,
-            wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST),
-            "Surgeist C09 GPU vector mask",
-        );
-        ready.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            mask.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(mask.size.width() * 4),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width: mask.size.width(),
-                height: mask.size.height(),
-                depth_or_array_layers: 1,
-            },
-        );
-        Some(texture)
-    } else {
-        None
-    };
+    let mask_texture = c09_upload_vector_mask(ready, mask.as_ref())?;
     let mask_view = mask_texture
         .as_ref()
         .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -905,205 +1155,29 @@ fn encode_c09_gpu_vectors_for_test(
         });
     let mut outputs = Vec::with_capacity(draws.len());
     let mut pass_cache_update = ready.pass_cache.provisional_update();
+    let context = C09VectorDrawEncodingContext {
+        ready,
+        requests,
+        mask_view: mask_view.as_ref(),
+        mask: mask.as_ref(),
+        spatial_bytes: &spatial_bytes,
+    };
     for draw in draws.iter().copied() {
-        let keys = requests
-            .composite_pass(draw.path, draw.has_clip_coverage, draw.has_alpha_mask)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "C09 GPU vector draw has no exact composite pipeline keys",
-                )
-            })?;
-        let source = c09_vector_texture(
-            &ready.device,
+        let draw_textures = c09_prepare_vector_draw_textures(
+            ready,
+            &mut encoder,
+            working_format,
             vector_source_size,
-            working_format.texture_format(),
-            wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
-            "Surgeist C09 GPU vector source",
+            draw,
         );
-        let source_view = source.create_view(&wgpu::TextureViewDescriptor::default());
-        c09_clear_vector_texture(
+        c09_encode_vector_draw(
+            &context,
+            &mut pass_cache_update,
             &mut encoder,
-            &source_view,
-            draw.source,
-            "Surgeist C09 GPU vector source clear",
-        );
-        let parent = (draw.path == super::shader::ShaderCompositePathKey::DestinationSampling)
-            .then(|| {
-                c09_vector_texture(
-                    &ready.device,
-                    PhysicalSize::new(1, 1),
-                    working_format.texture_format(),
-                    wgpu::TextureUsages::RENDER_ATTACHMENT
-                        .union(wgpu::TextureUsages::TEXTURE_BINDING),
-                    "Surgeist C09 GPU vector parent",
-                )
-            });
-        let parent_view = parent
-            .as_ref()
-            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
-        if let Some(parent_view) = &parent_view {
-            c09_clear_vector_texture(
-                &mut encoder,
-                parent_view,
-                draw.parent,
-                "Surgeist C09 GPU vector parent clear",
-            );
-        }
-        let clip = draw.has_clip_coverage.then(|| {
-            c09_vector_texture(
-                &ready.device,
-                PhysicalSize::new(1, 1),
-                wgpu::TextureFormat::Rgba8Unorm,
-                wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
-                "Surgeist C09 GPU vector clip coverage",
-            )
-        });
-        let clip_view = clip
-            .as_ref()
-            .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
-        if let Some(clip_view) = &clip_view {
-            c09_clear_vector_texture(
-                &mut encoder,
-                clip_view,
-                [1.0, 0.25, 0.75, draw.clip_alpha],
-                "Surgeist C09 GPU vector clip clear",
-            );
-        }
-        let output = c09_vector_texture(
-            &ready.device,
-            PhysicalSize::new(1, 1),
-            working_format.texture_format(),
-            wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::COPY_SRC),
-            "Surgeist C09 GPU vector output",
-        );
-        let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
-        let output_base = if draw.path == super::shader::ShaderCompositePathKey::Normal {
-            draw.parent
-        } else {
-            [0.125, 0.25, 0.375, 0.5]
-        };
-        c09_clear_vector_texture(
-            &mut encoder,
-            &output_view,
-            output_base,
-            "Surgeist C09 GPU vector output clear",
-        );
-        let mask_bounds = mask.as_ref().map_or([0.0, 0.0, 1.0, 1.0], |mask| {
-            [
-                mask.bounds.x(),
-                mask.bounds.y(),
-                mask.bounds.width(),
-                mask.bounds.height(),
-            ]
-        });
-        let mask_dimensions = mask
-            .as_ref()
-            .map_or([1, 1], |mask| [mask.size.width(), mask.size.height()]);
-        let parameters = super::shader::composite_parameter_bytes_for_gpu_vector_for_test(
-            super::shader::CompositeParameterGpuVectorFactsForTest {
-                layer_point: [draw.layer_point.x(), draw.layer_point.y()],
-                mask_bounds,
-                mask_dimensions,
-                quality: draw.quality,
-                extend: draw.extend,
-                opacity: draw.opacity,
-                blend: draw.blend,
-                has_clip: draw.has_clip_coverage,
-                has_mask: draw.has_alpha_mask,
-            },
+            &draw_textures,
+            draw,
         )?;
-        let spatial_buffer = c09_vector_uniform_buffer(
-            &ready.device,
-            &ready.queue,
-            &spatial_bytes,
-            "Surgeist C09 GPU vector spatial uniform",
-        );
-        let parameter_buffer = c09_vector_uniform_buffer(
-            &ready.device,
-            &ready.queue,
-            &parameters,
-            "Surgeist C09 GPU vector composite parameters",
-        );
-        let objects = pass_cache_update.realize_composite_pass(
-            &ready.device,
-            &ready.pass_cache,
-            keys.samplers(),
-            keys.layout(),
-            keys.shader(),
-            keys.pipeline(),
-        )?;
-        objects.require_encoding_ready()?;
-        let mut entries = vec![
-            wgpu::BindGroupEntry {
-                binding: 0,
-                resource: wgpu::BindingResource::TextureView(&source_view),
-            },
-            wgpu::BindGroupEntry {
-                binding: 1,
-                resource: wgpu::BindingResource::Sampler(objects.source_sampler()),
-            },
-        ];
-        if let Some(parent_view) = &parent_view {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 2,
-                resource: wgpu::BindingResource::TextureView(parent_view),
-            });
-        }
-        if let Some(clip_view) = &clip_view {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 3,
-                resource: wgpu::BindingResource::TextureView(clip_view),
-            });
-        }
-        if draw.has_alpha_mask {
-            entries.push(wgpu::BindGroupEntry {
-                binding: 4,
-                resource: wgpu::BindingResource::TextureView(mask_view.as_ref().ok_or_else(
-                    || {
-                        Error::new(
-                            BackendErrorCode::RenderFailed,
-                            "C09 GPU mask draw has no uploaded mask texture",
-                        )
-                    },
-                )?),
-            });
-        }
-        entries.push(wgpu::BindGroupEntry {
-            binding: 5,
-            resource: spatial_buffer.as_entire_binding(),
-        });
-        entries.push(wgpu::BindGroupEntry {
-            binding: 6,
-            resource: parameter_buffer.as_entire_binding(),
-        });
-        let bind_group = ready.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C09 GPU vector bindings"),
-            layout: objects.bind_group_layout(),
-            entries: &entries,
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Surgeist C09 GPU vector composite"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &output_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                occlusion_query_set: None,
-                timestamp_writes: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(objects.render_pipeline());
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        outputs.push(output);
+        outputs.push(draw_textures.output);
     }
     Ok(C09PreparedGpuVectorsForTest {
         device: ready.device.clone(),
@@ -1112,6 +1186,177 @@ fn encode_c09_gpu_vectors_for_test(
         encoder,
         outputs,
         pass_cache_update,
+    })
+}
+
+#[cfg(test)]
+fn c10_limit_error_is_exact(rejection: Option<Error>) -> bool {
+    rejection.is_some_and(|error| {
+        error.code() == ErrorCode::InvalidInput
+            && error.invalid_value_diagnostic().is_some_and(|invalid| {
+                invalid.field() == "color filter operation buffer byte length"
+            })
+    })
+}
+
+#[cfg(test)]
+fn c09_ordered_encoding_observation(
+    summary: &super::pass::C08CustomSpineEncodingSummary,
+) -> C09OrderedGraphEncodingObservationForTest {
+    C09OrderedGraphEncodingObservationForTest {
+        encodes_clip_mask_opacity_and_blend_in_authored_order: summary
+            .encodes_custom_passes_in_order
+            && summary.layer_composites_bind_exact_resources_and_parameters
+            && summary.layer_composites_preserve_signed_mapping
+            && summary.advances_every_pass_once,
+        normal_uses_fixed_premultiplied_blend: summary.normal_composite_count > 0
+            && summary.normal_composites_use_fixed_premultiplied_blend,
+        normal_omits_parent_sample: summary.normal_composite_count > 0
+            && summary.normal_composites_omit_parent_sample,
+        destination_copies_full_parent: summary.destination_composites_copy_full_parent
+            && summary.destination_composite_count > 0,
+        destination_avoids_read_write_alias: summary.destination_composites_avoid_read_write_alias
+            && summary.destination_composite_count > 0,
+        composite_count: summary.layer_composite_count,
+        one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
+        transaction_committed: false,
+    }
+}
+
+#[cfg(test)]
+fn c08_custom_spine_observation(
+    summary: super::pass::C08CustomSpineEncodingSummary,
+    capture_count: usize,
+    captures_are_exact: bool,
+    cache_before: DevicePassCacheCountsForTest,
+    cache_after: DevicePassCacheCountsForTest,
+) -> C08CustomSpineEncodingObservationForTest {
+    C08CustomSpineEncodingObservationForTest {
+        encodes_custom_passes_in_order: summary.encodes_custom_passes_in_order,
+        clears_full_root_once: summary.clears_full_root_once,
+        uses_exact_prepared_spatial_mapping: summary.uses_exact_prepared_spatial_mapping,
+        presents_to_exact_external_output: summary.presents_to_exact_external_output,
+        exposes_bounded_capture_handoff: summary.exposes_bounded_capture_handoff
+            && capture_count > 0
+            && captures_are_exact,
+        validates_checked_capture_completion: summary.validates_checked_capture_completion,
+        completes_custom_passes_after_encoding: summary.completes_custom_passes_after_encoding,
+        parent_and_result_are_distinct: summary.parent_and_result_are_distinct,
+        copies_full_parent_before_bounded_source_render: summary
+            .copies_full_parent_before_bounded_source_render,
+        samples_only_source_with_fixed_premultiplied_blend: summary
+            .samples_only_source_with_fixed_premultiplied_blend,
+        preserves_signed_source_origin: summary.preserves_signed_source_origin,
+        keeps_cache_update_provisional: summary.keeps_cache_update_provisional
+            && cache_after == cache_before,
+        encodes_without_submission_or_sync: true,
+    }
+}
+
+#[cfg(test)]
+async fn observe_c08_two_capture_encoding_failure(
+    prepared: &mut PreparedGraph<'_>,
+    device: &wgpu::Device,
+    output: &wgpu::TextureView,
+    extent: PhysicalSize,
+    failure: C08TwoCaptureFailureForTest,
+) -> Result<(usize, bool, bool, bool)> {
+    match failure {
+        C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
+            prepared.fail_capture_encoding_after_for_test(1);
+        }
+        C08TwoCaptureFailureForTest::SharedScopeResolution => {
+            prepared.fail_scope_resolution_for_test();
+        }
+    }
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist C08 two-capture failure encoder"),
+    });
+    let result = prepared
+        .encode_c08_custom_spine(
+            &mut encoder,
+            C08ExternalOutputView::try_new(output, Format::Rgba8, extent)?,
+        )
+        .await;
+    let acquired = prepared.acquired_capture_lease_count_for_test();
+    let (reported, no_commit) = match result {
+        Ok(pending) => {
+            drop(pending);
+            (false, false)
+        }
+        Err(error) => (
+            match failure {
+                C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
+                    error.message() == "injected C08 Vello capture encoding failure"
+                }
+                C08TwoCaptureFailureForTest::SharedScopeResolution => {
+                    error.message() == "checked internal Vello resource or command encoding failed"
+                }
+            },
+            true,
+        ),
+    };
+    let mut retry = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist C08 forbidden two-capture retry encoder"),
+    });
+    let retry_rejected = prepared
+        .encode_c08_custom_spine(
+            &mut retry,
+            C08ExternalOutputView::try_new(output, Format::Rgba8, extent)?,
+        )
+        .await
+        .is_err_and(|error| {
+            error.message()
+                == "the C08 custom encoding is one-shot; discard this prepared graph and its encoder"
+        });
+    drop(retry.finish());
+    drop(encoder.finish());
+    Ok((acquired, reported, no_commit, retry_rejected))
+}
+
+#[cfg(test)]
+fn c08_test_output_texture(
+    device: &wgpu::Device,
+    output_extent: PhysicalSize,
+    output_format: Format,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: output_extent.width(),
+            height: output_extent.height(),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::from(output_format),
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    })
+}
+
+#[cfg(test)]
+fn internal_vello_test_target(
+    device: &wgpu::Device,
+    target_extent: PhysicalSize,
+    target_usage: wgpu::TextureUsages,
+    label: &'static str,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some(label),
+        size: wgpu::Extent3d {
+            width: target_extent.width(),
+            height: target_extent.height(),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: target_usage,
+        view_formats: &[],
     })
 }
 
@@ -2319,20 +2564,12 @@ impl Backend {
         let target_usage = wgpu::TextureUsages::STORAGE_BINDING
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC;
-        let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("T6 cancellation-owned internal Vello target"),
-            size: wgpu::Extent3d {
-                width: target_extent.width(),
-                height: target_extent.height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: target_usage,
-            view_formats: &[],
-        });
+        let target = internal_vello_test_target(
+            device,
+            target_extent,
+            target_usage,
+            "T6 cancellation-owned internal Vello target",
+        );
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("T6 cancellation-owned internal Vello encoder"),
@@ -2827,129 +3064,16 @@ impl Backend {
                 requests,
             );
 
-        let transaction = self.begin_gpu_operation(
-            identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (reused_update, reused_provision) = {
-            let ready = self.ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C09 compositor cache reuse lost its ready device",
-            )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
-        };
-        let reused_existing_entries = reused_update.is_empty_for_test();
-        transaction
-            .finish(RuntimeOperation::EffectRendering)
+        let reuses_exact_committed_entries = self
+            .c09_reuses_committed_entries_for_test(identity, requests, committed_counts)
             .await?;
-        self.commit_checked_pass_cache_update(
-            identity,
-            Some(reused_update),
-            RuntimeOperation::EffectRendering,
-        )?;
-        let reused_counts = self
-            .ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C09 reused compositor cache disappeared",
-            )?
-            .pass_cache
-            .counts_for_test();
-        let reuses_exact_committed_entries = reused_existing_entries
-            && reused_provision.encoding_ready
-            && reused_counts == committed_counts;
 
-        let validation_identity = self.add_device_slot_for_test().await?;
-        let validation_transaction = self.begin_gpu_operation(
-            validation_identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let validation_update = {
-            let ready = self.ready_state_mut(
-                validation_identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C09 validation probe lost its ready device",
-            )?;
-            provision_c09_composite_requests_for_test(ready, requests, true)?.0
-        };
-        let validation_error = validation_transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await;
-        drop(validation_update);
-        let failed_validation_publishes_none = validation_error
-            .as_ref()
-            .is_err_and(|error| error.code() == ErrorCode::RenderFailed)
-            && self
-                .device_states
-                .get(validation_identity.slot())
-                .and_then(DeviceState::ready)
-                .map(|ready| ready.pass_cache.counts_for_test())
-                .is_some_and(DevicePassCacheCountsForTest::is_empty);
-
-        let cancellation_identity = self.add_device_slot_for_test().await?;
-        let cancellation_transaction = self.begin_gpu_operation(
-            cancellation_identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (canceled_update, canceled_provision) = {
-            let ready = self.ready_state_mut(
-                cancellation_identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C09 cancellation probe lost its ready device",
-            )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
-        };
-        let cancellation_cache_before_drop = self
-            .device_states
-            .get(cancellation_identity.slot())
-            .and_then(DeviceState::ready)
-            .map(|ready| ready.pass_cache.counts_for_test())
-            .is_some_and(DevicePassCacheCountsForTest::is_empty);
-        drop(canceled_update);
-        drop(cancellation_transaction);
-        let cancellation_publishes_none = canceled_provision.encoding_ready
-            && cancellation_cache_before_drop
-            && self
-                .device_states
-                .get(cancellation_identity.slot())
-                .and_then(DeviceState::ready)
-                .map(|ready| ready.pass_cache.counts_for_test())
-                .is_some_and(DevicePassCacheCountsForTest::is_empty)
-            && self
-                .device_states
-                .get(cancellation_identity.slot())
-                .is_some_and(|state| state.signal.active_generation_for_test().is_none());
-
-        let transition_transaction = self.begin_gpu_operation(
-            cancellation_identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (transition_update, transition_provision) = {
-            let ready = self.ready_state_mut(
-                cancellation_identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C09 transition probe lost its ready device",
-            )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
-        };
-        self.signal_loss_for_test(cancellation_identity, DeviceLossReason::Destroyed);
-        let transition_error = transition_transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await;
-        drop(transition_update);
-        let device_transition_publishes_none = transition_provision.encoding_ready
-            && transition_error.is_err()
-            && self.renderer_released_for_test(cancellation_identity);
+        let failed_validation_publishes_none = self
+            .c09_validation_publishes_none_for_test(requests)
+            .await?;
+        let (cancellation_publishes_none, device_transition_publishes_none) = self
+            .c09_cancellation_publishes_none_for_test(requests)
+            .await?;
 
         Ok(C09CompositeCacheRealizationObservationForTest {
             realizes_normal_and_destination_programs,
@@ -2963,6 +3087,143 @@ impl Backend {
             cancellation_publishes_none,
             device_transition_publishes_none,
         })
+    }
+
+    #[cfg(test)]
+    async fn c09_reuses_committed_entries_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        requests: &C09CompositeCacheRequestsForTest,
+        committed: DevicePassCacheCountsForTest,
+    ) -> Result<bool> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, provision) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 compositor cache reuse lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        let reused_existing = update.is_empty_for_test();
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 reused compositor cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        Ok(reused_existing && provision.encoding_ready && counts == committed)
+    }
+
+    #[cfg(test)]
+    async fn c09_validation_publishes_none_for_test(
+        &mut self,
+        requests: &C09CompositeCacheRequestsForTest,
+    ) -> Result<bool> {
+        let identity = self.add_device_slot_for_test().await?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let update = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 validation probe lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, true)?.0
+        };
+        let error = transaction.finish(RuntimeOperation::EffectRendering).await;
+        drop(update);
+        Ok(error
+            .as_ref()
+            .is_err_and(|error| error.code() == ErrorCode::RenderFailed)
+            && self
+                .device_states
+                .get(identity.slot())
+                .and_then(DeviceState::ready)
+                .map(|ready| ready.pass_cache.counts_for_test())
+                .is_some_and(DevicePassCacheCountsForTest::is_empty))
+    }
+
+    #[cfg(test)]
+    async fn c09_cancellation_publishes_none_for_test(
+        &mut self,
+        requests: &C09CompositeCacheRequestsForTest,
+    ) -> Result<(bool, bool)> {
+        let identity = self.add_device_slot_for_test().await?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, provision) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 cancellation probe lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        let cache_empty = self
+            .device_states
+            .get(identity.slot())
+            .and_then(DeviceState::ready)
+            .map(|ready| ready.pass_cache.counts_for_test())
+            .is_some_and(DevicePassCacheCountsForTest::is_empty);
+        drop(update);
+        drop(transaction);
+        let canceled = provision.encoding_ready
+            && cache_empty
+            && self
+                .device_states
+                .get(identity.slot())
+                .and_then(DeviceState::ready)
+                .map(|ready| ready.pass_cache.counts_for_test())
+                .is_some_and(DevicePassCacheCountsForTest::is_empty)
+            && self
+                .device_states
+                .get(identity.slot())
+                .is_some_and(|state| state.signal.active_generation_for_test().is_none());
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, provision) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C09 transition probe lost its ready device",
+            )?;
+            provision_c09_composite_requests_for_test(ready, requests, false)?
+        };
+        self.signal_loss_for_test(identity, DeviceLossReason::Destroyed);
+        let error = transaction.finish(RuntimeOperation::EffectRendering).await;
+        drop(update);
+        let transitioned =
+            provision.encoding_ready && error.is_err() && self.renderer_released_for_test(identity);
+        Ok((canceled, transitioned))
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -3133,182 +3394,21 @@ impl Backend {
                 rgba_requests,
             );
 
-        let transaction = self.begin_gpu_operation(
-            identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (reused_update, reused_handles_ready) = {
-            let ready = self.ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 cache reuse lost its ready device",
-            )?;
-            provision_c08_requests_for_test(ready, rgba_requests, false)?
-        };
-        let exact_existing_entries_reused =
-            reused_update.is_empty_for_test() && reused_handles_ready;
-        transaction
-            .finish(RuntimeOperation::EffectRendering)
+        let reuses_exact_committed_entries = self
+            .c08_reuses_committed_entries_for_test(identity, rgba_requests, rgba_counts)
             .await?;
-        self.commit_checked_pass_cache_update(
-            identity,
-            Some(reused_update),
-            RuntimeOperation::EffectRendering,
-        )?;
-        let reused_counts = self
-            .ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 reused cache disappeared",
-            )?
-            .pass_cache
-            .counts_for_test();
-        let reuses_exact_committed_entries =
-            exact_existing_entries_reused && reused_counts == rgba_counts;
 
-        let validation_transaction = self.begin_gpu_operation(
-            identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let validation_update = {
-            let ready = self.ready_state_mut(
+        let (failed_validation_publishes_none, specializes_rgba_and_bgra_outputs) = self
+            .c08_validation_and_specialization_for_test(
                 identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 validation probe lost its ready device",
-            )?;
-            provision_c08_requests_for_test(ready, bgra_requests, true)?.0
-        };
-        let validation_error = validation_transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await;
-        drop(validation_update);
-        let after_validation_counts = self
-            .ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 validation probe lost its persistent cache",
-            )?
-            .pass_cache
-            .counts_for_test();
-        let failed_validation_publishes_none = validation_error
-            .as_ref()
-            .is_err_and(|error| error.code() == ErrorCode::RenderFailed)
-            && after_validation_counts == rgba_counts;
-
-        let transaction = self.begin_gpu_operation(
-            identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (bgra_update, bgra_handles_ready) = {
-            let ready = self.ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 BGRA specialization lost its ready device",
-            )?;
-            provision_c08_requests_for_test(ready, bgra_requests, false)?
-        };
-        transaction
-            .finish(RuntimeOperation::EffectRendering)
+                rgba_requests,
+                bgra_requests,
+                rgba_counts,
+            )
             .await?;
-        self.commit_checked_pass_cache_update(
-            identity,
-            Some(bgra_update),
-            RuntimeOperation::EffectRendering,
-        )?;
-        let specialized_counts = self
-            .ready_state_mut(
-                identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 specialized cache disappeared",
-            )?
-            .pass_cache
-            .counts_for_test();
-        let specializes_rgba_and_bgra_outputs =
-            bgra_handles_ready && specialized_counts != rgba_counts && {
-                let ready = self.ready_state_mut(
-                    identity,
-                    RuntimeOperation::EffectRendering,
-                    BackendErrorCode::RenderFailed,
-                    "C08 specialized programs disappeared",
-                )?;
-                c08_requests_are_cached_for_test(&ready.pass_cache, rgba_requests)
-                    && c08_requests_are_cached_for_test(&ready.pass_cache, bgra_requests)
-            };
-
-        let cancellation_identity = self.add_device_slot_for_test().await?;
-        let cancellation_transaction = self.begin_gpu_operation(
-            cancellation_identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (canceled_update, canceled_handles_ready) = {
-            let ready = self.ready_state_mut(
-                cancellation_identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 cancellation probe lost its ready device",
-            )?;
-            provision_c08_requests_for_test(ready, rgba_requests, false)?
-        };
-        let cancellation_cache_before_drop = self
-            .device_states
-            .get(cancellation_identity.slot())
-            .and_then(DeviceState::ready)
-            .map(|ready| ready.pass_cache.counts_for_test())
-            .is_some_and(DevicePassCacheCountsForTest::is_empty);
-        drop(canceled_update);
-        drop(cancellation_transaction);
-        let cancellation_publishes_none = canceled_handles_ready
-            && cancellation_cache_before_drop
-            && self
-                .device_states
-                .get(cancellation_identity.slot())
-                .and_then(DeviceState::ready)
-                .map(|ready| ready.pass_cache.counts_for_test())
-                .is_some_and(DevicePassCacheCountsForTest::is_empty)
-            && self
-                .device_states
-                .get(cancellation_identity.slot())
-                .is_some_and(|state| state.signal.active_generation_for_test().is_none());
-
-        let transition_transaction = self.begin_gpu_operation(
-            cancellation_identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let (transition_update, transition_handles_ready) = {
-            let ready = self.ready_state_mut(
-                cancellation_identity,
-                RuntimeOperation::EffectRendering,
-                BackendErrorCode::RenderFailed,
-                "C08 transition probe lost its ready device",
-            )?;
-            provision_c08_requests_for_test(ready, rgba_requests, false)?
-        };
-        self.signal_loss_for_test(cancellation_identity, DeviceLossReason::Destroyed);
-        let transition_cache_before_finish = self
-            .device_states
-            .get(cancellation_identity.slot())
-            .and_then(DeviceState::ready)
-            .map(|ready| ready.pass_cache.counts_for_test())
-            .is_some_and(DevicePassCacheCountsForTest::is_empty);
-        let transition_error = transition_transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await;
-        drop(transition_update);
-        let device_transition_publishes_none = transition_handles_ready
-            && transition_cache_before_finish
-            && transition_error.is_err()
-            && self.renderer_released_for_test(cancellation_identity);
+        let (cancellation_publishes_none, device_transition_publishes_none) = self
+            .c08_cancellation_publishes_none_for_test(rgba_requests)
+            .await?;
 
         Ok(C08ShaderCacheRealizationObservationForTest {
             realizes_all_checked_programs,
@@ -3321,6 +3421,191 @@ impl Backend {
             device_transition_publishes_none,
             specializes_rgba_and_bgra_outputs,
         })
+    }
+
+    #[cfg(test)]
+    async fn c08_reuses_committed_entries_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        requests: &C08PassCacheRequestsForTest,
+        committed: DevicePassCacheCountsForTest,
+    ) -> Result<bool> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, handles_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 cache reuse lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, requests, false)?
+        };
+        let exact_existing = update.is_empty_for_test() && handles_ready;
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let counts = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 reused cache disappeared",
+            )?
+            .pass_cache
+            .counts_for_test();
+        Ok(exact_existing && counts == committed)
+    }
+
+    #[cfg(test)]
+    async fn c08_validation_and_specialization_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        rgba: &C08PassCacheRequestsForTest,
+        bgra: &C08PassCacheRequestsForTest,
+        rgba_counts: DevicePassCacheCountsForTest,
+    ) -> Result<(bool, bool)> {
+        let validation = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let update = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 validation probe lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, bgra, true)?.0
+        };
+        let error = validation.finish(RuntimeOperation::EffectRendering).await;
+        drop(update);
+        let after_validation = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 validation probe lost its persistent cache",
+            )?
+            .pass_cache
+            .counts_for_test();
+        let failed = error
+            .as_ref()
+            .is_err_and(|error| error.code() == ErrorCode::RenderFailed)
+            && after_validation == rgba_counts;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, handles_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 BGRA specialization lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, bgra, false)?
+        };
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        self.commit_checked_pass_cache_update(
+            identity,
+            Some(update),
+            RuntimeOperation::EffectRendering,
+        )?;
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::EffectRendering,
+            BackendErrorCode::RenderFailed,
+            "C08 specialized programs disappeared",
+        )?;
+        let counts = ready.pass_cache.counts_for_test();
+        let specialized = handles_ready
+            && counts != rgba_counts
+            && c08_requests_are_cached_for_test(&ready.pass_cache, rgba)
+            && c08_requests_are_cached_for_test(&ready.pass_cache, bgra);
+        Ok((failed, specialized))
+    }
+
+    #[cfg(test)]
+    async fn c08_cancellation_publishes_none_for_test(
+        &mut self,
+        requests: &C08PassCacheRequestsForTest,
+    ) -> Result<(bool, bool)> {
+        let identity = self.add_device_slot_for_test().await?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, handles_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 cancellation probe lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, requests, false)?
+        };
+        let cache_empty = self
+            .device_states
+            .get(identity.slot())
+            .and_then(DeviceState::ready)
+            .map(|ready| ready.pass_cache.counts_for_test())
+            .is_some_and(DevicePassCacheCountsForTest::is_empty);
+        drop(update);
+        drop(transaction);
+        let canceled = handles_ready
+            && cache_empty
+            && self
+                .device_states
+                .get(identity.slot())
+                .and_then(DeviceState::ready)
+                .map(|ready| ready.pass_cache.counts_for_test())
+                .is_some_and(DevicePassCacheCountsForTest::is_empty)
+            && self
+                .device_states
+                .get(identity.slot())
+                .is_some_and(|state| state.signal.active_generation_for_test().is_none());
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (update, handles_ready) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C08 transition probe lost its ready device",
+            )?;
+            provision_c08_requests_for_test(ready, requests, false)?
+        };
+        self.signal_loss_for_test(identity, DeviceLossReason::Destroyed);
+        let cache_empty = self
+            .device_states
+            .get(identity.slot())
+            .and_then(DeviceState::ready)
+            .map(|ready| ready.pass_cache.counts_for_test())
+            .is_some_and(DevicePassCacheCountsForTest::is_empty);
+        let error = transaction.finish(RuntimeOperation::EffectRendering).await;
+        drop(update);
+        let transitioned = handles_ready
+            && cache_empty
+            && error.is_err()
+            && self.renderer_released_for_test(identity);
+        Ok((canceled, transitioned))
     }
 
     #[cfg(test)]
@@ -3371,20 +3656,12 @@ impl Backend {
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         let output_extent = prepared.output_extent()?;
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Surgeist C08 external output observation"),
-            size: wgpu::Extent3d {
-                width: output_extent.width(),
-                height: output_extent.height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::from(output_format),
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let output_texture = c08_test_output_texture(
+            &device,
+            output_extent,
+            output_format,
+            "Surgeist C08 external output observation",
+        );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let output = C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3421,26 +3698,13 @@ impl Backend {
             .pass_cache
             .counts_for_test();
 
-        Ok(C08CustomSpineEncodingObservationForTest {
-            encodes_custom_passes_in_order: summary.encodes_custom_passes_in_order,
-            clears_full_root_once: summary.clears_full_root_once,
-            uses_exact_prepared_spatial_mapping: summary.uses_exact_prepared_spatial_mapping,
-            presents_to_exact_external_output: summary.presents_to_exact_external_output,
-            exposes_bounded_capture_handoff: summary.exposes_bounded_capture_handoff
-                && capture_handoff_count > 0
-                && capture_handoffs_are_exact,
-            validates_checked_capture_completion: summary.validates_checked_capture_completion,
-            completes_custom_passes_after_encoding: summary.completes_custom_passes_after_encoding,
-            parent_and_result_are_distinct: summary.parent_and_result_are_distinct,
-            copies_full_parent_before_bounded_source_render: summary
-                .copies_full_parent_before_bounded_source_render,
-            samples_only_source_with_fixed_premultiplied_blend: summary
-                .samples_only_source_with_fixed_premultiplied_blend,
-            preserves_signed_source_origin: summary.preserves_signed_source_origin,
-            keeps_cache_update_provisional: summary.keeps_cache_update_provisional
-                && pass_cache_after == pass_cache_before,
-            encodes_without_submission_or_sync: true,
-        })
+        Ok(c08_custom_spine_observation(
+            summary,
+            capture_handoff_count,
+            capture_handoffs_are_exact,
+            pass_cache_before,
+            pass_cache_after,
+        ))
     }
 
     #[cfg(test)]
@@ -3645,12 +3909,7 @@ impl Backend {
                 ready.pass_cache.counts_for_test(),
             )
         };
-        let returns_exact_limit_error = rejection.is_some_and(|error| {
-            error.code() == ErrorCode::InvalidInput
-                && error.invalid_value_diagnostic().is_some_and(|invalid| {
-                    invalid.field() == "color filter operation buffer byte length"
-                })
-        });
+        let returns_exact_limit_error = c10_limit_error_is_exact(rejection);
         Ok(C10OversizedBufferPreservationObservationForTest {
             returns_exact_limit_error,
             resources_are_unchanged: resources_after == resources_before,
@@ -3727,25 +3986,7 @@ impl Backend {
             }
         };
         let summary = pending.summary_for_test();
-        let mut observed = C09OrderedGraphEncodingObservationForTest {
-            encodes_clip_mask_opacity_and_blend_in_authored_order: summary
-                .encodes_custom_passes_in_order
-                && summary.layer_composites_bind_exact_resources_and_parameters
-                && summary.layer_composites_preserve_signed_mapping
-                && summary.advances_every_pass_once,
-            normal_uses_fixed_premultiplied_blend: summary.normal_composite_count > 0
-                && summary.normal_composites_use_fixed_premultiplied_blend,
-            normal_omits_parent_sample: summary.normal_composite_count > 0
-                && summary.normal_composites_omit_parent_sample,
-            destination_copies_full_parent: summary.destination_composites_copy_full_parent
-                && summary.destination_composite_count > 0,
-            destination_avoids_read_write_alias: summary
-                .destination_composites_avoid_read_write_alias
-                && summary.destination_composite_count > 0,
-            composite_count: summary.layer_composite_count,
-            one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
-            transaction_committed: false,
-        };
+        let mut observed = c09_ordered_encoding_observation(summary);
         let prepared_submission = prepared.finish_c08_submission(pending)?;
         drop(output_view);
         let payload = C08GraphSubmissionPayload::new(
@@ -3814,20 +4055,12 @@ impl Backend {
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered.clone(), policy)?;
         let output_extent = prepared.output_extent()?;
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Surgeist C08 multiple-capture output"),
-            size: wgpu::Extent3d {
-                width: output_extent.width(),
-                height: output_extent.height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let output_texture = c08_test_output_texture(
+            &device,
+            output_extent,
+            Format::Rgba8,
+            "Surgeist C08 multiple-capture output",
+        );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 multiple-capture graph encoder"),
@@ -3860,38 +4093,16 @@ impl Backend {
             })?
             .internal_resource_manager_observation_for_test();
 
-        let abort_transaction = self.begin_gpu_operation(
-            identity,
-            GpuOperationStage::Render,
-            RuntimeOperation::EffectRendering,
-        )?;
-        let mut abort_prepared = self.prepare_graph_resources(identity, lowered, policy)?;
-        let mut abort_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 multiple-capture aggregate-abort encoder"),
-        });
-        let abort_encoded = abort_prepared
-            .encode_c08_custom_spine(
-                &mut abort_encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+        let (aborted_lease_count, after_abort) = self
+            .c08_multiple_capture_abort_for_test(
+                identity,
+                lowered,
+                policy,
+                &device,
+                &output_view,
+                output_extent,
             )
             .await?;
-        let (_, abort_resources) = abort_encoded.into_summary_and_resources();
-        let aborted_lease_count = abort_resources.lease_count_for_test();
-        drop(abort_encoder.finish());
-        drop(abort_prepared);
-        drop(abort_resources);
-        abort_transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await?;
-        let after_abort = self
-            .ready_device_state_borrow_for_test(identity)
-            .ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "multiple C08 capture abort lost its resource manager",
-                )
-            })?
-            .internal_resource_manager_observation_for_test();
 
         Ok(C08MultipleVelloCaptureEncodingObservationForTest {
             exact_capture_count: summary.capture_count == 2
@@ -3907,6 +4118,51 @@ impl Backend {
                 && after_abort.leased_count == 0
                 && after_abort.recovery_outcome_for_test() == Some(VelloAtlasOutcome::Recreate),
         })
+    }
+
+    #[cfg(test)]
+    async fn c08_multiple_capture_abort_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        device: &wgpu::Device,
+        output: &wgpu::TextureView,
+        extent: PhysicalSize,
+    ) -> Result<(usize, ResourceManagerObservationForTest)> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C08 multiple-capture aggregate-abort encoder"),
+        });
+        let encoded = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(output, Format::Rgba8, extent)?,
+            )
+            .await?;
+        let (_, resources) = encoded.into_summary_and_resources();
+        let count = resources.lease_count_for_test();
+        drop(encoder.finish());
+        drop(prepared);
+        drop(resources);
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        let observation = self
+            .ready_device_state_borrow_for_test(identity)
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "multiple C08 capture abort lost its resource manager",
+                )
+            })?
+            .internal_resource_manager_observation_for_test();
+        Ok((count, observation))
     }
 
     #[cfg(test)]
@@ -3957,77 +4213,26 @@ impl Backend {
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         let output_extent = prepared.output_extent()?;
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Surgeist C08 two-capture failure output"),
-            size: wgpu::Extent3d {
-                width: output_extent.width(),
-                height: output_extent.height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let output_texture = c08_test_output_texture(
+            &device,
+            output_extent,
+            Format::Rgba8,
+            "Surgeist C08 two-capture failure output",
+        );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        match failure {
-            C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
-                prepared.fail_capture_encoding_after_for_test(1);
-            }
-            C08TwoCaptureFailureForTest::SharedScopeResolution => {
-                prepared.fail_scope_resolution_for_test();
-            }
-        }
-
-        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 two-capture failure encoder"),
-        });
-        let encoding_result = prepared
-            .encode_c08_custom_spine(
-                &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
-            )
-            .await;
-        let acquired_capture_lease_count = prepared.acquired_capture_lease_count_for_test();
-        let (failure_is_reported, produces_no_pending_commit) = match encoding_result {
-            Ok(pending) => {
-                drop(pending);
-                (false, false)
-            }
-            Err(error) => (
-                match failure {
-                    C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
-                        error.message() == "injected C08 Vello capture encoding failure"
-                    }
-                    C08TwoCaptureFailureForTest::SharedScopeResolution => {
-                        error.message()
-                            == "checked internal Vello resource or command encoding failed"
-                    }
-                },
-                true,
-            ),
-        };
-        let mut retry_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 forbidden two-capture retry encoder"),
-        });
-        let retry_is_rejected = prepared
-            .encode_c08_custom_spine(
-                &mut retry_encoder,
-                C08ExternalOutputView::try_new(
-                    &output_view,
-                    Format::Rgba8,
-                    output_extent,
-                )?,
-            )
-            .await
-            .is_err_and(|error| {
-                error.message()
-                    == "the C08 custom encoding is one-shot; discard this prepared graph and its encoder"
-            });
-        drop(retry_encoder.finish());
-        drop(encoder.finish());
+        let (
+            acquired_capture_lease_count,
+            failure_is_reported,
+            produces_no_pending_commit,
+            retry_is_rejected,
+        ) = observe_c08_two_capture_encoding_failure(
+            &mut prepared,
+            &device,
+            &output_view,
+            output_extent,
+            failure,
+        )
+        .await?;
         drop(prepared);
         transaction
             .finish(RuntimeOperation::EffectRendering)
@@ -4190,20 +4395,12 @@ impl Backend {
 
         let mut first = self.prepare_graph_resources(identity, lowered.clone(), policy)?;
         let output_extent = first.output_extent()?;
-        let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Surgeist C08 capture-failure external output observation"),
-            size: wgpu::Extent3d {
-                width: output_extent.width(),
-                height: output_extent.height(),
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::from(output_format),
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-            view_formats: &[],
-        });
+        let output_texture = c08_test_output_texture(
+            &device,
+            output_extent,
+            output_format,
+            "Surgeist C08 capture-failure external output observation",
+        );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut first_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 failed-capture first encoder observation"),
@@ -4696,44 +4893,8 @@ pub(crate) async fn render_exact_headless_graph_surface(
     surface: &Surface,
     graph: ExactSurfaceGraph,
 ) -> Result<SurfaceFrameCommit> {
-    let selected_working_format = graph.working_format();
-    let graph_output_format = graph.output_format();
-    let known_output_extent = graph.known_output_extent()?;
-    let (device_identity, physical_size) = match &surface.backend {
-        SurfaceBackend::Headless {
-            device_identity,
-            physical_size,
-            ..
-        } => (*device_identity, *physical_size),
-        SurfaceBackend::ContractOnly { .. } => {
-            return Err(Error::runtime_unavailable(
-                RuntimeOperation::SurfaceRendering,
-                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "the exact graph executor requires a device-backed headless surface",
-            ));
-        }
-        #[cfg(any(
-            feature = "render-window",
-            all(feature = "render-web", target_arch = "wasm32")
-        ))]
-        SurfaceBackend::Presented { .. } => {
-            return Err(Error::new(
-                BackendErrorCode::UnsupportedBackend,
-                "presented exact graph execution requires the presented executor",
-            ));
-        }
-    };
-    if physical_size.width() == 0
-        || physical_size.height() == 0
-        || surface.options.format != Format::Rgba8
-        || graph_output_format != surface.options.format
-        || known_output_extent.is_some_and(|extent| extent != physical_size)
-    {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "the headless draft differs from the exact eligible graph output",
-        ));
-    }
+    let (device_identity, physical_size, selected_working_format) =
+        exact_headless_graph_target(surface, &graph)?;
     let capabilities = backend
         .device_capabilities(device_identity)
         .ok_or_else(|| {
@@ -4832,6 +4993,51 @@ pub(crate) async fn render_exact_headless_graph_surface(
     ))
 }
 
+fn exact_headless_graph_target(
+    surface: &Surface,
+    graph: &ExactSurfaceGraph,
+) -> Result<(DeviceSlotIdentity, PhysicalSize, WorkingFormat)> {
+    let selected_working_format = graph.working_format();
+    let graph_output_format = graph.output_format();
+    let known_output_extent = graph.known_output_extent()?;
+    let (device_identity, physical_size) = match &surface.backend {
+        SurfaceBackend::Headless {
+            device_identity,
+            physical_size,
+            ..
+        } => (*device_identity, *physical_size),
+        SurfaceBackend::ContractOnly { .. } => {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the exact graph executor requires a device-backed headless surface",
+            ));
+        }
+        #[cfg(any(
+            feature = "render-window",
+            all(feature = "render-web", target_arch = "wasm32")
+        ))]
+        SurfaceBackend::Presented { .. } => {
+            return Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "presented exact graph execution requires the presented executor",
+            ));
+        }
+    };
+    if physical_size.width() == 0
+        || physical_size.height() == 0
+        || surface.options.format != Format::Rgba8
+        || graph_output_format != surface.options.format
+        || known_output_extent.is_some_and(|extent| extent != physical_size)
+    {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "the headless draft differs from the exact eligible graph output",
+        ));
+    }
+    Ok((device_identity, physical_size, selected_working_format))
+}
+
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -4841,6 +5047,103 @@ pub(crate) async fn render_exact_presented_graph_surface(
     surface: &mut Surface,
     graph: ExactSurfaceGraph,
 ) -> Result<SurfaceFrameCommit> {
+    let (device_identity, physical_size, output_format, selected_working_format) =
+        exact_presented_graph_target(surface, &graph)?;
+    let capabilities = backend
+        .device_capabilities(device_identity)
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "the presented exact graph executor lost immutable device capabilities",
+            )
+        })?;
+    capabilities.validate_supported_working_format(selected_working_format)?;
+
+    let transaction = backend.begin_gpu_operation(
+        device_identity,
+        GpuOperationStage::Render,
+        RuntimeOperation::SurfaceRendering,
+    )?;
+    let (device, queue) = {
+        let ready = backend.ready_state_mut(
+            device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "the presented exact graph lost its ready device before preparation",
+        )?;
+        (ready.device.clone(), ready.queue.clone())
+    };
+    let render_start = Instant::now();
+    let prepared = backend.prepare_exact_surface_graph_resources(device_identity, graph)?;
+    if prepared.output_extent()? != physical_size
+        || prepared.output_format() != output_format
+        || prepared.working_format() != selected_working_format
+    {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            "prepared presented exact graph output changed after eligibility validation",
+        ));
+    }
+
+    let present_start = Instant::now();
+    let acquired =
+        acquire_exact_presented_graph_texture(surface, &device, prepared, transaction).await?;
+    let (acquired, mut prepared, transaction) = acquired;
+    let output_view = acquired.create_view();
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist exact presented graph encoder"),
+    });
+    let pending_encoding = prepared
+        .encode_c08_custom_spine(
+            &mut encoder,
+            C08ExternalOutputView::try_new(&output_view, output_format, physical_size)?,
+        )
+        .await?;
+    let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
+    drop(output_view);
+    let payload =
+        C08GraphSubmissionPayload::presented(encoder.finish(), prepared_submission, acquired);
+    let clean = {
+        let ready = backend.ready_state_mut(
+            device_identity,
+            RuntimeOperation::SurfaceRendering,
+            BackendErrorCode::RenderFailed,
+            "the presented exact graph lost its ready device before submission",
+        )?;
+        transaction
+            .submit_c08_graph(
+                &device,
+                &queue,
+                &mut ready.pass_cache,
+                payload,
+                RuntimeOperation::SurfaceRendering,
+            )
+            .await?
+    };
+    let (output, frame_cleanup) = clean.into_parts();
+    if !matches!(output, C08GraphOutputCommit::Presented) {
+        return Err(Error::new(
+            BackendErrorCode::PresentFailed,
+            "the presented exact graph transaction returned a headless publication",
+        ));
+    }
+    Ok(SurfaceFrameCommit::presented_graph(
+        frame_cleanup,
+        RenderTimings {
+            render_time: present_start.duration_since(render_start),
+            present_time: present_start.elapsed(),
+        },
+    ))
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+fn exact_presented_graph_target(
+    surface: &Surface,
+    graph: &ExactSurfaceGraph,
+) -> Result<(DeviceSlotIdentity, PhysicalSize, Format, WorkingFormat)> {
     let selected_working_format = graph.working_format();
     let graph_output_format = graph.output_format();
     let known_output_extent = graph.known_output_extent()?;
@@ -4930,167 +5233,183 @@ pub(crate) async fn render_exact_presented_graph_surface(
             "the presented graph differs from the exact eligible output",
         ));
     }
-    let capabilities = backend
-        .device_capabilities(device_identity)
-        .ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "the presented exact graph executor lost immutable device capabilities",
-            )
-        })?;
-    capabilities.validate_supported_working_format(selected_working_format)?;
-
-    let transaction = backend.begin_gpu_operation(
+    Ok((
         device_identity,
-        GpuOperationStage::Render,
-        RuntimeOperation::SurfaceRendering,
-    )?;
-    let (device, queue) = {
-        let ready = backend.ready_state_mut(
-            device_identity,
-            RuntimeOperation::SurfaceRendering,
-            BackendErrorCode::RenderFailed,
-            "the presented exact graph lost its ready device before preparation",
-        )?;
-        (ready.device.clone(), ready.queue.clone())
-    };
-    let render_start = Instant::now();
-    let mut prepared = backend.prepare_exact_surface_graph_resources(device_identity, graph)?;
-    if prepared.output_extent()? != physical_size
-        || prepared.output_format() != output_format
-        || prepared.working_format() != selected_working_format
-    {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "prepared presented exact graph output changed after eligibility validation",
-        ));
-    }
+        physical_size,
+        output_format,
+        selected_working_format,
+    ))
+}
 
-    let present_start = Instant::now();
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+enum PresentedAcquireFailure {
+    Suboptimal,
+    Outdated,
+    Occluded,
+    Timeout,
+    Lost,
+    Validation,
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+async fn finish_presented_acquire_failure(
+    transaction: GpuOperationTransaction,
+    state: &mut PresentedSurfaceState,
+    failure: PresentedAcquireFailure,
+) -> Result<Error> {
+    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+    match failure {
+        PresentedAcquireFailure::Suboptimal | PresentedAcquireFailure::Outdated => {
+            state.mark_configuration_pending();
+        }
+        PresentedAcquireFailure::Occluded => state.mark_occluded(),
+        PresentedAcquireFailure::Lost => state.mark_lost(),
+        PresentedAcquireFailure::Timeout | PresentedAcquireFailure::Validation => {}
+    }
+    scope_result?;
+    Ok(match failure {
+        PresentedAcquireFailure::Suboptimal => Error::new(
+            BackendErrorCode::SurfaceOutdated,
+            "surface is suboptimal and requires reconfiguration",
+        ),
+        PresentedAcquireFailure::Outdated => Error::new(
+            BackendErrorCode::SurfaceOutdated,
+            "surface is outdated and requires reconfiguration",
+        ),
+        PresentedAcquireFailure::Occluded => Error::runtime_unavailable(
+            RuntimeOperation::SurfaceRendering,
+            RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                state: RenderSurfaceAvailability::Occluded,
+            },
+            "surface is occluded",
+        ),
+        PresentedAcquireFailure::Timeout => Error::new(
+            BackendErrorCode::SurfaceTimeout,
+            "timed out acquiring surface texture",
+        ),
+        PresentedAcquireFailure::Lost => Error::runtime_unavailable(
+            RuntimeOperation::SurfaceRendering,
+            RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
+                state: RenderSurfaceAvailability::Lost,
+            },
+            "surface was lost",
+        ),
+        PresentedAcquireFailure::Validation => Error::new(
+            BackendErrorCode::PresentFailed,
+            "surface texture validation failed",
+        ),
+    })
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+async fn acquire_exact_presented_graph_texture<'a>(
+    surface: &mut Surface,
+    device: &wgpu::Device,
+    prepared: PreparedGraph<'a>,
+    transaction: GpuOperationTransaction,
+) -> Result<(
+    AcquiredPresentedSurfaceTexture,
+    PreparedGraph<'a>,
+    GpuOperationTransaction,
+)> {
+    let mut prepared = Some(prepared);
+    let mut transaction = Some(transaction);
     let acquired = match &mut surface.backend {
         SurfaceBackend::Presented {
             surface: native,
             state,
             ..
-        } => match native.acquire_texture(&device) {
+        } => match native.acquire_texture(device) {
             PresentedSurfaceAcquire::Success(acquired) => acquired,
             PresentedSurfaceAcquire::Suboptimal(acquired) => {
                 drop(acquired);
-                drop(prepared);
-                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                state.mark_configuration_pending();
-                scope_result?;
-                return Err(Error::new(
-                    BackendErrorCode::SurfaceOutdated,
-                    "surface is suboptimal and requires reconfiguration",
-                ));
+                drop(prepared.take());
+                return Err(finish_presented_acquire_failure(
+                    transaction
+                        .take()
+                        .expect("presented transaction must remain available"),
+                    state,
+                    PresentedAcquireFailure::Suboptimal,
+                )
+                .await?);
             }
             PresentedSurfaceAcquire::Outdated => {
-                drop(prepared);
-                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                state.mark_configuration_pending();
-                scope_result?;
-                return Err(Error::new(
-                    BackendErrorCode::SurfaceOutdated,
-                    "surface is outdated and requires reconfiguration",
-                ));
+                drop(prepared.take());
+                return Err(finish_presented_acquire_failure(
+                    transaction
+                        .take()
+                        .expect("presented transaction must remain available"),
+                    state,
+                    PresentedAcquireFailure::Outdated,
+                )
+                .await?);
             }
             PresentedSurfaceAcquire::Occluded => {
-                drop(prepared);
-                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                state.mark_occluded();
-                scope_result?;
-                return Err(Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                        state: RenderSurfaceAvailability::Occluded,
-                    },
-                    "surface is occluded",
-                ));
+                drop(prepared.take());
+                return Err(finish_presented_acquire_failure(
+                    transaction
+                        .take()
+                        .expect("presented transaction must remain available"),
+                    state,
+                    PresentedAcquireFailure::Occluded,
+                )
+                .await?);
             }
             PresentedSurfaceAcquire::Timeout => {
-                drop(prepared);
-                transaction
-                    .finish(RuntimeOperation::SurfaceRendering)
-                    .await?;
-                return Err(Error::new(
-                    BackendErrorCode::SurfaceTimeout,
-                    "timed out acquiring surface texture",
-                ));
+                drop(prepared.take());
+                return Err(finish_presented_acquire_failure(
+                    transaction
+                        .take()
+                        .expect("presented transaction must remain available"),
+                    state,
+                    PresentedAcquireFailure::Timeout,
+                )
+                .await?);
             }
             PresentedSurfaceAcquire::Lost => {
-                drop(prepared);
-                let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                state.mark_lost();
-                scope_result?;
-                return Err(Error::runtime_unavailable(
-                    RuntimeOperation::SurfaceRendering,
-                    RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                        state: RenderSurfaceAvailability::Lost,
-                    },
-                    "surface was lost",
-                ));
+                drop(prepared.take());
+                return Err(finish_presented_acquire_failure(
+                    transaction
+                        .take()
+                        .expect("presented transaction must remain available"),
+                    state,
+                    PresentedAcquireFailure::Lost,
+                )
+                .await?);
             }
             PresentedSurfaceAcquire::Validation => {
-                drop(prepared);
-                transaction
-                    .finish(RuntimeOperation::SurfaceRendering)
-                    .await?;
-                return Err(Error::new(
-                    BackendErrorCode::PresentFailed,
-                    "surface texture validation failed",
-                ));
+                drop(prepared.take());
+                return Err(finish_presented_acquire_failure(
+                    transaction
+                        .take()
+                        .expect("presented transaction must remain available"),
+                    state,
+                    PresentedAcquireFailure::Validation,
+                )
+                .await?);
             }
         },
         SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
             unreachable!("presented exact graph output changed after eligibility validation")
         }
     };
-
-    let output_view = acquired.create_view();
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist exact presented graph encoder"),
-    });
-    let pending_encoding = prepared
-        .encode_c08_custom_spine(
-            &mut encoder,
-            C08ExternalOutputView::try_new(&output_view, output_format, physical_size)?,
-        )
-        .await?;
-    let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
-    drop(output_view);
-    let payload =
-        C08GraphSubmissionPayload::presented(encoder.finish(), prepared_submission, acquired);
-    let clean = {
-        let ready = backend.ready_state_mut(
-            device_identity,
-            RuntimeOperation::SurfaceRendering,
-            BackendErrorCode::RenderFailed,
-            "the presented exact graph lost its ready device before submission",
-        )?;
+    Ok((
+        acquired,
+        prepared
+            .take()
+            .expect("prepared graph must remain available after successful acquire"),
         transaction
-            .submit_c08_graph(
-                &device,
-                &queue,
-                &mut ready.pass_cache,
-                payload,
-                RuntimeOperation::SurfaceRendering,
-            )
-            .await?
-    };
-    let (output, frame_cleanup) = clean.into_parts();
-    if !matches!(output, C08GraphOutputCommit::Presented) {
-        return Err(Error::new(
-            BackendErrorCode::PresentFailed,
-            "the presented exact graph transaction returned a headless publication",
-        ));
-    }
-    Ok(SurfaceFrameCommit::presented_graph(
-        frame_cleanup,
-        RenderTimings {
-            render_time: present_start.duration_since(render_start),
-            present_time: present_start.elapsed(),
-        },
+            .take()
+            .expect("presented transaction must remain available after successful acquire"),
     ))
 }
 
@@ -5102,6 +5421,11 @@ pub(crate) async fn render_internal_vello_surface(
     parameters: Parameters,
     antialiasing: Antialiasing,
 ) -> Result<SurfaceFrameCommit> {
+    let frame = InternalVelloFrameParameters {
+        scene,
+        parameters,
+        antialiasing,
+    };
     match &mut surface.backend {
         SurfaceBackend::ContractOnly { .. } => Ok(
             SurfaceFrameCommit::without_headless_publication(RenderTimings::default()),
@@ -5111,41 +5435,15 @@ pub(crate) async fn render_internal_vello_surface(
             physical_size,
             ..
         } => {
-            if physical_size.width() == 0 || physical_size.height() == 0 {
-                return Ok(SurfaceFrameCommit::without_headless_publication(
-                    RenderTimings::default(),
-                ));
-            }
-            let (texture, view) = backend.create_headless_surface_texture(
+            render_internal_vello_headless(
+                backend,
+                transaction,
                 *device_identity,
                 *physical_size,
                 surface.options.format,
-            )?;
-            let render_start = Instant::now();
-            backend
-                .render_internal_vello_to_texture(
-                    transaction,
-                    InternalVelloRenderRequest {
-                        identity: *device_identity,
-                        operation: RuntimeOperation::SurfaceRendering,
-                        scene,
-                        target: &view,
-                        target_extent: *physical_size,
-                        base_color: parameters.base_color,
-                        antialiasing,
-                        target_usage: wgpu::TextureUsages::STORAGE_BINDING
-                            | wgpu::TextureUsages::TEXTURE_BINDING
-                            | wgpu::TextureUsages::COPY_SRC,
-                    },
-                )
-                .await?;
-            Ok(SurfaceFrameCommit::headless(
-                HeadlessPublication::new(texture),
-                RenderTimings {
-                    render_time: render_start.elapsed(),
-                    present_time: Duration::ZERO,
-                },
-            ))
+                frame,
+            )
+            .await
         }
         #[cfg(any(
             feature = "render-window",
@@ -5156,144 +5454,255 @@ pub(crate) async fn render_internal_vello_surface(
             device_identity,
             state,
         } => {
-            match state.lifecycle() {
-                PresentedLifecycle::NonRenderable { .. } | PresentedLifecycle::Lost => {
-                    return Ok(SurfaceFrameCommit::without_headless_publication(
-                        RenderTimings::default(),
-                    ));
-                }
-                PresentedLifecycle::ResizePending { .. } => {
-                    return Err(Error::new(
-                        BackendErrorCode::SurfaceConfigureFailed,
-                        "presented rendering started before configuration committed",
-                    ));
-                }
-                PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
-            }
-
-            let resources = native.committed().ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::SurfaceConfigureFailed,
-                    "ready presented lifecycle has no committed target resources",
-                )
-            })?;
-            let _ = &resources.target_texture;
-            let render_start = Instant::now();
-            backend
-                .render_internal_vello_to_texture(
-                    transaction,
-                    InternalVelloRenderRequest {
-                        identity: *device_identity,
-                        operation: RuntimeOperation::SurfaceRendering,
-                        scene,
-                        target: &resources.target_view,
-                        target_extent: PhysicalSize::new(
-                            resources.config.width,
-                            resources.config.height,
-                        ),
-                        base_color: parameters.base_color,
-                        antialiasing,
-                        target_usage: wgpu::TextureUsages::STORAGE_BINDING
-                            | wgpu::TextureUsages::TEXTURE_BINDING,
-                    },
-                )
-                .await?;
-            let render_time = render_start.elapsed();
-
-            let present_start = Instant::now();
-            let transaction = backend.begin_gpu_operation(
+            render_internal_vello_presented(
+                backend,
+                transaction,
+                native,
                 *device_identity,
-                GpuOperationStage::Present,
-                RuntimeOperation::SurfaceRendering,
-            )?;
-            let (device, queue) = backend.present_device_queue(*device_identity)?;
-            let surface_texture = match native.acquire_texture(device) {
-                PresentedSurfaceAcquire::Success(surface_texture) => surface_texture,
-                PresentedSurfaceAcquire::Suboptimal(surface_texture) => {
-                    drop(surface_texture);
-                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                    state.mark_configuration_pending();
-                    scope_result?;
-                    return Err(Error::new(
-                        BackendErrorCode::SurfaceOutdated,
-                        "surface is suboptimal and requires reconfiguration",
-                    ));
-                }
-                PresentedSurfaceAcquire::Outdated => {
-                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                    state.mark_configuration_pending();
-                    scope_result?;
-                    return Err(Error::new(
-                        BackendErrorCode::SurfaceOutdated,
-                        "surface is outdated and requires reconfiguration",
-                    ));
-                }
-                PresentedSurfaceAcquire::Occluded => {
-                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                    state.mark_occluded();
-                    scope_result?;
-                    return Err(Error::runtime_unavailable(
-                        RuntimeOperation::SurfaceRendering,
-                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                            state: RenderSurfaceAvailability::Occluded,
-                        },
-                        "surface is occluded",
-                    ));
-                }
-                PresentedSurfaceAcquire::Timeout => {
-                    transaction
-                        .finish(RuntimeOperation::SurfaceRendering)
-                        .await?;
-                    return Err(Error::new(
-                        BackendErrorCode::SurfaceTimeout,
-                        "timed out acquiring surface texture",
-                    ));
-                }
-                PresentedSurfaceAcquire::Lost => {
-                    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-                    state.mark_lost();
-                    scope_result?;
-                    return Err(Error::runtime_unavailable(
-                        RuntimeOperation::SurfaceRendering,
-                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                            state: RenderSurfaceAvailability::Lost,
-                        },
-                        "surface was lost",
-                    ));
-                }
-                PresentedSurfaceAcquire::Validation => {
-                    transaction
-                        .finish(RuntimeOperation::SurfaceRendering)
-                        .await?;
-                    return Err(Error::new(
-                        BackendErrorCode::PresentFailed,
-                        "surface texture validation failed",
-                    ));
-                }
-            };
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("Surgeist surface blit"),
-            });
-            let surface_view = surface_texture.create_view();
-            resources
-                .blitter
-                .copy(device, &mut encoder, &resources.target_view, &surface_view);
-            transaction
-                .submit_command_buffer_with_host_effect(
-                    queue,
-                    encoder.finish(),
-                    || surface_texture.present(),
-                    RuntimeOperation::SurfaceRendering,
-                )
-                .await?;
-            Ok(SurfaceFrameCommit::without_headless_publication(
-                RenderTimings {
-                    render_time,
-                    present_time: present_start.elapsed(),
-                },
-            ))
+                state,
+                frame,
+            )
+            .await
         }
     }
+}
+
+#[derive(Clone, Copy)]
+struct InternalVelloFrameParameters<'a> {
+    scene: &'a VelloScene,
+    parameters: Parameters,
+    antialiasing: Antialiasing,
+}
+
+async fn render_internal_vello_headless(
+    backend: &mut Backend,
+    transaction: GpuOperationTransaction,
+    device_identity: DeviceSlotIdentity,
+    physical_size: PhysicalSize,
+    format: Format,
+    frame: InternalVelloFrameParameters<'_>,
+) -> Result<SurfaceFrameCommit> {
+    if physical_size.width() == 0 || physical_size.height() == 0 {
+        return Ok(SurfaceFrameCommit::without_headless_publication(
+            RenderTimings::default(),
+        ));
+    }
+    let (texture, view) =
+        backend.create_headless_surface_texture(device_identity, physical_size, format)?;
+    let render_start = Instant::now();
+    backend
+        .render_internal_vello_to_texture(
+            transaction,
+            InternalVelloRenderRequest {
+                identity: device_identity,
+                operation: RuntimeOperation::SurfaceRendering,
+                scene: frame.scene,
+                target: &view,
+                target_extent: physical_size,
+                base_color: frame.parameters.base_color,
+                antialiasing: frame.antialiasing,
+                target_usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+            },
+        )
+        .await?;
+    Ok(SurfaceFrameCommit::headless(
+        HeadlessPublication::new(texture),
+        RenderTimings {
+            render_time: render_start.elapsed(),
+            present_time: Duration::ZERO,
+        },
+    ))
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+async fn render_internal_vello_presented(
+    backend: &mut Backend,
+    transaction: GpuOperationTransaction,
+    native: &mut PresentedSurface,
+    device_identity: DeviceSlotIdentity,
+    state: &mut PresentedSurfaceState,
+    frame: InternalVelloFrameParameters<'_>,
+) -> Result<SurfaceFrameCommit> {
+    match state.lifecycle() {
+        PresentedLifecycle::NonRenderable { .. } | PresentedLifecycle::Lost => {
+            return Ok(SurfaceFrameCommit::without_headless_publication(
+                RenderTimings::default(),
+            ));
+        }
+        PresentedLifecycle::ResizePending { .. } => {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceConfigureFailed,
+                "presented rendering started before configuration committed",
+            ));
+        }
+        PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
+    }
+    let resources = native.committed().ok_or_else(|| {
+        Error::new(
+            BackendErrorCode::SurfaceConfigureFailed,
+            "ready presented lifecycle has no committed target resources",
+        )
+    })?;
+    let _ = &resources.target_texture;
+    let render_start = Instant::now();
+    backend
+        .render_internal_vello_to_texture(
+            transaction,
+            InternalVelloRenderRequest {
+                identity: device_identity,
+                operation: RuntimeOperation::SurfaceRendering,
+                scene: frame.scene,
+                target: &resources.target_view,
+                target_extent: PhysicalSize::new(resources.config.width, resources.config.height),
+                base_color: frame.parameters.base_color,
+                antialiasing: frame.antialiasing,
+                target_usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING,
+            },
+        )
+        .await?;
+    let render_time = render_start.elapsed();
+    present_internal_vello_target(
+        backend,
+        native,
+        device_identity,
+        state,
+        resources,
+        render_time,
+    )
+    .await
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+async fn present_internal_vello_target(
+    backend: &mut Backend,
+    native: &PresentedSurface,
+    device_identity: DeviceSlotIdentity,
+    state: &mut PresentedSurfaceState,
+    resources: &PresentedResourceBundle,
+    render_time: Duration,
+) -> Result<SurfaceFrameCommit> {
+    let present_start = Instant::now();
+    let transaction = backend.begin_gpu_operation(
+        device_identity,
+        GpuOperationStage::Present,
+        RuntimeOperation::SurfaceRendering,
+    )?;
+    let (device, queue) = backend.present_device_queue(device_identity)?;
+    let (surface_texture, transaction) =
+        acquire_internal_vello_surface_texture(native, device, state, transaction).await?;
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist surface blit"),
+    });
+    let surface_view = surface_texture.create_view();
+    resources
+        .blitter
+        .copy(device, &mut encoder, &resources.target_view, &surface_view);
+    transaction
+        .submit_command_buffer_with_host_effect(
+            queue,
+            encoder.finish(),
+            || surface_texture.present(),
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await?;
+    Ok(SurfaceFrameCommit::without_headless_publication(
+        RenderTimings {
+            render_time,
+            present_time: present_start.elapsed(),
+        },
+    ))
+}
+
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+async fn acquire_internal_vello_surface_texture(
+    native: &PresentedSurface,
+    device: &wgpu::Device,
+    state: &mut PresentedSurfaceState,
+    transaction: GpuOperationTransaction,
+) -> Result<(AcquiredPresentedSurfaceTexture, GpuOperationTransaction)> {
+    let mut transaction = Some(transaction);
+    let surface_texture = match native.acquire_texture(device) {
+        PresentedSurfaceAcquire::Success(surface_texture) => surface_texture,
+        PresentedSurfaceAcquire::Suboptimal(surface_texture) => {
+            drop(surface_texture);
+            return Err(finish_presented_acquire_failure(
+                transaction
+                    .take()
+                    .expect("present transaction must remain available"),
+                state,
+                PresentedAcquireFailure::Suboptimal,
+            )
+            .await?);
+        }
+        PresentedSurfaceAcquire::Outdated => {
+            return Err(finish_presented_acquire_failure(
+                transaction
+                    .take()
+                    .expect("present transaction must remain available"),
+                state,
+                PresentedAcquireFailure::Outdated,
+            )
+            .await?);
+        }
+        PresentedSurfaceAcquire::Occluded => {
+            return Err(finish_presented_acquire_failure(
+                transaction
+                    .take()
+                    .expect("present transaction must remain available"),
+                state,
+                PresentedAcquireFailure::Occluded,
+            )
+            .await?);
+        }
+        PresentedSurfaceAcquire::Timeout => {
+            return Err(finish_presented_acquire_failure(
+                transaction
+                    .take()
+                    .expect("present transaction must remain available"),
+                state,
+                PresentedAcquireFailure::Timeout,
+            )
+            .await?);
+        }
+        PresentedSurfaceAcquire::Lost => {
+            return Err(finish_presented_acquire_failure(
+                transaction
+                    .take()
+                    .expect("present transaction must remain available"),
+                state,
+                PresentedAcquireFailure::Lost,
+            )
+            .await?);
+        }
+        PresentedSurfaceAcquire::Validation => {
+            return Err(finish_presented_acquire_failure(
+                transaction
+                    .take()
+                    .expect("present transaction must remain available"),
+                state,
+                PresentedAcquireFailure::Validation,
+            )
+            .await?);
+        }
+    };
+    Ok((
+        surface_texture,
+        transaction
+            .take()
+            .expect("present transaction must remain available after successful acquire"),
+    ))
 }
 
 pub(crate) fn create_headless_texture(

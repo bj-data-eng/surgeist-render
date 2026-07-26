@@ -628,123 +628,11 @@ impl SemanticSourceContribution {
         local_to_surface: Transform,
     ) -> Result<SemanticCommandContribution> {
         match command {
-            RenderCommand::TextRun {
-                font,
-                size,
-                transform,
-                paint,
-                glyphs,
-                bounds,
-            } => {
-                let source_bounds =
-                    if glyphs.is_empty() || bounds.kind() == TextRunBoundsKind::Empty {
-                        SemanticSourceBounds::exactly_empty()
-                            .try_transform(transform, "text source transform")?
-                    } else if bounds.kind() == TextRunBoundsKind::Unspecified {
-                        SemanticSourceBounds::wholly_unresolved()
-                            .try_transform(transform, "text source transform")?
-                    } else {
-                        let ink_bounds = bounds.ink_rect().ok_or_else(|| {
-                            Error::invalid_value(
-                                "text source bounds",
-                                "missing ink rectangle",
-                                "must carry an ink rectangle when the bounds kind is ink",
-                            )
-                        })?;
-                        SemanticSourceBounds::try_from_rect(ink_bounds)?
-                            .try_transform(transform, "text source transform")?
-                    };
-                SemanticCommandContribution::try_new(
-                    RenderCommand::TextRun {
-                        font,
-                        size,
-                        transform,
-                        paint,
-                        glyphs,
-                        bounds,
-                    },
-                    source_bounds,
-                    current_parent,
-                )
+            command @ RenderCommand::TextRun { .. } => {
+                Self::try_from_text_run(command, current_parent)
             }
-            RenderCommand::Layer {
-                mut layer,
-                children,
-            } => {
-                let layer_to_surface = layer.transform.then(local_to_surface)?;
-                let children = Self::try_from_commands(
-                    children,
-                    SemanticSourceBounds::exactly_empty(),
-                    SemanticContributionDomain::LocalUnbounded,
-                    context,
-                    layer_to_surface,
-                )?;
-                let mut source_bounds = children.current_parent;
-
-                if let Some(backdrop) = layer.backdrop.as_deref() {
-                    let algorithm_filter_plan =
-                        AlgorithmFilterPlan::from_filter_list(backdrop.filters());
-                    let capture_bounds = LogicalBounds::try_from_rect(
-                        backdrop.capture_bounds().rect(),
-                        "backdrop capture bounds",
-                    )?;
-                    let resolved_filter_plan = context.plan_filter_list(
-                        capture_bounds,
-                        layer_to_surface,
-                        backdrop.filters(),
-                        FilterSourceRole::Backdrop,
-                    )?;
-                    let mut backdrop_contribution = match resolved_filter_plan {
-                        ResolvedFrameFilterPlan::Empty(_) => SemanticSourceBounds::exactly_empty(),
-                        ResolvedFrameFilterPlan::NonEmpty(plan) => {
-                            SemanticSourceBounds::exact_known(plan.final_bounds)
-                        }
-                    };
-                    if let Some(clip) = backdrop.clip() {
-                        let clip_bounds = SemanticSourceBounds::try_for_clip(clip)?;
-                        backdrop_contribution = backdrop_contribution
-                            .try_intersect(clip_bounds, "post-filter backdrop clip intersection")?;
-                    }
-                    let captured_parent = current_parent.try_intersect(
-                        SemanticSourceBounds::from_logical_bounds(capture_bounds),
-                        "backdrop current-parent intersection",
-                    )?;
-                    if captured_parent.is_exactly_empty()
-                        || algorithm_filter_plan.output_is_always_transparent()
-                        || backdrop_contribution.is_exactly_empty()
-                    {
-                        layer.backdrop = None;
-                    } else {
-                        source_bounds = source_bounds.try_union(backdrop_contribution)?;
-                    }
-                }
-
-                if let Some(clip) = layer.clip.as_ref() {
-                    source_bounds = source_bounds.try_intersect(
-                        SemanticSourceBounds::try_for_clip(clip)?,
-                        "layer clip intersection",
-                    )?;
-                }
-                if layer
-                    .mask
-                    .as_ref()
-                    .is_some_and(RenderLayerMask::annihilates_source)
-                {
-                    source_bounds = SemanticSourceBounds::exactly_empty();
-                }
-                if layer.opacity <= 0.0 {
-                    source_bounds = SemanticSourceBounds::exactly_empty();
-                }
-                source_bounds = source_bounds
-                    .try_transform(layer.transform, "semantic layer source transform")?;
-                SemanticCommandContribution::try_new(
-                    RenderCommand::Layer {
-                        layer,
-                        children: children.commands,
-                    },
-                    source_bounds,
-                    current_parent,
-                )
+            command @ RenderCommand::Layer { .. } => {
+                Self::try_from_layer(command, current_parent, context, local_to_surface)
             }
             command @ (RenderCommand::Fill { .. }
             | RenderCommand::Stroke { .. }
@@ -754,6 +642,141 @@ impl SemanticSourceContribution {
                 SemanticCommandContribution::try_new(command, bounds, current_parent)
             }
         }
+    }
+
+    fn try_from_text_run(
+        command: RenderCommand,
+        current_parent: SemanticSourceBounds,
+    ) -> Result<SemanticCommandContribution> {
+        let RenderCommand::TextRun {
+            transform,
+            ref glyphs,
+            bounds,
+            ..
+        } = command
+        else {
+            unreachable!("text contribution helper received a non-text command");
+        };
+        let source_bounds = if glyphs.is_empty() || bounds.kind() == TextRunBoundsKind::Empty {
+            SemanticSourceBounds::exactly_empty()
+                .try_transform(transform, "text source transform")?
+        } else if bounds.kind() == TextRunBoundsKind::Unspecified {
+            SemanticSourceBounds::wholly_unresolved()
+                .try_transform(transform, "text source transform")?
+        } else {
+            let ink_bounds = bounds.ink_rect().ok_or_else(|| {
+                Error::invalid_value(
+                    "text source bounds",
+                    "missing ink rectangle",
+                    "must carry an ink rectangle when the bounds kind is ink",
+                )
+            })?;
+            SemanticSourceBounds::try_from_rect(ink_bounds)?
+                .try_transform(transform, "text source transform")?
+        };
+        SemanticCommandContribution::try_new(command, source_bounds, current_parent)
+    }
+
+    fn try_from_layer(
+        command: RenderCommand,
+        current_parent: SemanticSourceBounds,
+        context: FrameContext,
+        local_to_surface: Transform,
+    ) -> Result<SemanticCommandContribution> {
+        let RenderCommand::Layer {
+            mut layer,
+            children,
+        } = command
+        else {
+            unreachable!("layer contribution helper received a non-layer command");
+        };
+        let layer_to_surface = layer.transform.then(local_to_surface)?;
+        let children = Self::try_from_commands(
+            children,
+            SemanticSourceBounds::exactly_empty(),
+            SemanticContributionDomain::LocalUnbounded,
+            context,
+            layer_to_surface,
+        )?;
+        let mut source_bounds = children.current_parent;
+        source_bounds = Self::include_backdrop_contribution(
+            source_bounds,
+            current_parent,
+            &mut layer,
+            context,
+            layer_to_surface,
+        )?;
+        if let Some(clip) = layer.clip.as_ref() {
+            source_bounds = source_bounds.try_intersect(
+                SemanticSourceBounds::try_for_clip(clip)?,
+                "layer clip intersection",
+            )?;
+        }
+        if layer
+            .mask
+            .as_ref()
+            .is_some_and(RenderLayerMask::annihilates_source)
+            || layer.opacity <= 0.0
+        {
+            source_bounds = SemanticSourceBounds::exactly_empty();
+        }
+        source_bounds =
+            source_bounds.try_transform(layer.transform, "semantic layer source transform")?;
+        SemanticCommandContribution::try_new(
+            RenderCommand::Layer {
+                layer,
+                children: children.commands,
+            },
+            source_bounds,
+            current_parent,
+        )
+    }
+
+    fn include_backdrop_contribution(
+        mut source_bounds: SemanticSourceBounds,
+        current_parent: SemanticSourceBounds,
+        layer: &mut NormalizedLayer,
+        context: FrameContext,
+        layer_to_surface: Transform,
+    ) -> Result<SemanticSourceBounds> {
+        let Some(backdrop) = layer.backdrop.as_deref() else {
+            return Ok(source_bounds);
+        };
+        let algorithm_filter_plan = AlgorithmFilterPlan::from_filter_list(backdrop.filters());
+        let capture_bounds = LogicalBounds::try_from_rect(
+            backdrop.capture_bounds().rect(),
+            "backdrop capture bounds",
+        )?;
+        let resolved_filter_plan = context.plan_filter_list(
+            capture_bounds,
+            layer_to_surface,
+            backdrop.filters(),
+            FilterSourceRole::Backdrop,
+        )?;
+        let mut backdrop_contribution = match resolved_filter_plan {
+            ResolvedFrameFilterPlan::Empty(_) => SemanticSourceBounds::exactly_empty(),
+            ResolvedFrameFilterPlan::NonEmpty(plan) => {
+                SemanticSourceBounds::exact_known(plan.final_bounds)
+            }
+        };
+        if let Some(clip) = backdrop.clip() {
+            let clip_bounds = SemanticSourceBounds::try_for_clip(clip)?;
+            backdrop_contribution = backdrop_contribution
+                .try_intersect(clip_bounds, "post-filter backdrop clip intersection")?;
+        }
+        let captured_parent = current_parent.try_intersect(
+            SemanticSourceBounds::from_logical_bounds(capture_bounds),
+            "backdrop current-parent intersection",
+        )?;
+        if captured_parent.is_exactly_empty()
+            || algorithm_filter_plan.output_is_always_transparent()
+            || backdrop_contribution.is_exactly_empty()
+        {
+            layer.backdrop = None;
+        } else {
+            source_bounds = source_bounds.try_union(backdrop_contribution)?;
+        }
+        Ok(source_bounds)
     }
 }
 
@@ -2492,45 +2515,8 @@ impl SemanticGraphBuilder {
         }
         let id = SemanticPassId::new(self.generation, PassIndex::try_from_len(self.passes.len())?);
 
-        let mut seen_dependencies = Vec::with_capacity(dependencies.len());
-        for dependency in &dependencies {
-            if seen_dependencies.contains(dependency) {
-                return Err(GraphValidationError::DuplicateDependency(*dependency));
-            }
-            self.validate_recorded_dependency(*dependency)?;
-            seen_dependencies.push(*dependency);
-        }
-
-        let mut read_indices = Vec::with_capacity(reads.len());
-        let mut seen_reads = Vec::with_capacity(reads.len());
-        for resource in &reads {
-            if seen_reads.contains(resource) {
-                return Err(GraphValidationError::DuplicateRead(*resource));
-            }
-            let resource_index = self.validate_resource_id(*resource)?;
-            let graph_resource = self
-                .resources
-                .get(resource_index)
-                .ok_or(GraphValidationError::UnknownResource(*resource))?;
-            match graph_resource.producer {
-                Some(SemanticResourceProducer::Imported) => {}
-                Some(SemanticResourceProducer::Pass(producer)) => {
-                    if !dependencies.contains(&producer) {
-                        return Err(GraphValidationError::MissingProducerDependency {
-                            resource: *resource,
-                            producer,
-                        });
-                    }
-                }
-                None => return Err(GraphValidationError::ForwardRead(*resource)),
-            }
-            graph_resource
-                .recorded_reads
-                .checked_add(1)
-                .ok_or(GraphValidationError::ReadCountOverflow(*resource))?;
-            seen_reads.push(*resource);
-            read_indices.push(resource_index);
-        }
+        self.validate_recorded_dependencies(&dependencies)?;
+        let read_indices = self.validate_recorded_reads(&dependencies, &reads)?;
 
         let result_index = match result {
             SemanticPassResult::Empty => None,
@@ -2598,6 +2584,60 @@ impl SemanticGraphBuilder {
         Ok(id)
     }
 
+    fn validate_recorded_dependencies(
+        &self,
+        dependencies: &[SemanticPassId],
+    ) -> GraphBuildResult<()> {
+        let mut seen = Vec::with_capacity(dependencies.len());
+        for dependency in dependencies {
+            if seen.contains(dependency) {
+                return Err(GraphValidationError::DuplicateDependency(*dependency));
+            }
+            self.validate_recorded_dependency(*dependency)?;
+            seen.push(*dependency);
+        }
+        Ok(())
+    }
+
+    fn validate_recorded_reads(
+        &self,
+        dependencies: &[SemanticPassId],
+        reads: &[SemanticResourceId],
+    ) -> GraphBuildResult<Vec<usize>> {
+        let mut indices = Vec::with_capacity(reads.len());
+        let mut seen = Vec::with_capacity(reads.len());
+        for resource in reads {
+            if seen.contains(resource) {
+                return Err(GraphValidationError::DuplicateRead(*resource));
+            }
+            let resource_index = self.validate_resource_id(*resource)?;
+            let graph_resource = self
+                .resources
+                .get(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*resource))?;
+            match graph_resource.producer {
+                Some(SemanticResourceProducer::Imported) => {}
+                Some(SemanticResourceProducer::Pass(producer))
+                    if !dependencies.contains(&producer) =>
+                {
+                    return Err(GraphValidationError::MissingProducerDependency {
+                        resource: *resource,
+                        producer,
+                    });
+                }
+                Some(SemanticResourceProducer::Pass(_)) => {}
+                None => return Err(GraphValidationError::ForwardRead(*resource)),
+            }
+            graph_resource
+                .recorded_reads
+                .checked_add(1)
+                .ok_or(GraphValidationError::ReadCountOverflow(*resource))?;
+            seen.push(*resource);
+            indices.push(resource_index);
+        }
+        Ok(indices)
+    }
+
     fn validate_pass_shape(
         &self,
         intent: SemanticPassIntent,
@@ -2607,62 +2647,10 @@ impl SemanticGraphBuilder {
     ) -> GraphBuildResult<()> {
         match intent {
             SemanticPassIntent::ClearRoot { initialization } => {
-                if matches!(
-                    initialization,
-                    WorkingImageInitialization::SurfaceBaseColor(_)
-                ) && self.surface_base_initializations != 0
-                {
-                    return Err(GraphValidationError::RepeatedSurfaceBaseInitialization);
-                }
-                if !dependencies.is_empty() || !reads.is_empty() {
-                    return Err(GraphValidationError::InvalidClearRootResult);
-                }
-                let SemanticPassResult::Resource(resource) = result else {
-                    return Err(GraphValidationError::InvalidClearRootResult);
-                };
-                let resource_index = self.validate_resource_id(resource)?;
-                let Some(resource) = self.resources.get(resource_index) else {
-                    return Err(GraphValidationError::InvalidClearRootResult);
-                };
-                match (initialization, resource.descriptor.role) {
-                    (
-                        WorkingImageInitialization::SurfaceBaseColor(_),
-                        SemanticResourceRole::RootWorkingImage,
-                    )
-                    | (
-                        WorkingImageInitialization::Transparent,
-                        SemanticResourceRole::IsolationWorkingImage,
-                    ) => {}
-                    (WorkingImageInitialization::Transparent, _)
-                    | (
-                        WorkingImageInitialization::SurfaceBaseColor(_),
-                        SemanticResourceRole::IsolationWorkingImage,
-                    ) => return Err(GraphValidationError::RootMustUseSurfaceBase),
-                    (WorkingImageInitialization::SurfaceBaseColor(_), _) => {
-                        return Err(GraphValidationError::InvalidClearRootResult);
-                    }
-                }
+                self.validate_clear_root_shape(initialization, dependencies, reads, result)?
             }
             SemanticPassIntent::VelloCapture { initialization } => {
-                if initialization != WorkingImageInitialization::Transparent {
-                    return Err(GraphValidationError::NonTransparentCaptureBase);
-                }
-                if !reads.is_empty() {
-                    return Err(GraphValidationError::InvalidCaptureResult);
-                }
-                if let SemanticPassResult::Resource(resource) = result {
-                    let resource_index = self.validate_resource_id(resource)?;
-                    if self.resources.get(resource_index).is_none_or(|resource| {
-                        !matches!(
-                            resource.descriptor.role,
-                            SemanticResourceRole::CaptureWorkingImage
-                                | SemanticResourceRole::ClipCoverage
-                                | SemanticResourceRole::IsolationWorkingImage
-                        )
-                    }) {
-                        return Err(GraphValidationError::InvalidCaptureResult);
-                    }
-                }
+                self.validate_capture_shape(initialization, reads, result)?;
             }
             SemanticPassIntent::Present => {
                 if self.final_present.is_some() {
@@ -2679,45 +2667,122 @@ impl SemanticGraphBuilder {
             | SemanticPassIntent::BlurVertical { .. }
             | SemanticPassIntent::DropShadowColorize
             | SemanticPassIntent::Composite => {
-                let SemanticPassResult::Resource(resource) = result else {
-                    if reads.is_empty() {
-                        return Ok(());
-                    }
-                    return Err(GraphValidationError::InvalidPassArity);
-                };
-                let reads_are_valid = if intent == SemanticPassIntent::Composite {
-                    reads.len() >= 2
-                } else {
-                    reads.len() == 1
-                };
-                if !reads_are_valid {
-                    return Err(GraphValidationError::InvalidPassArity);
-                }
-                let expected_role = match intent {
-                    SemanticPassIntent::CopyBackdrop => SemanticResourceRole::BackdropCopy,
-                    SemanticPassIntent::DropShadowColorize => SemanticResourceRole::ShadowImage,
-                    SemanticPassIntent::Composite => SemanticResourceRole::CompositeResult,
-                    SemanticPassIntent::CanonicalizeCapture
-                    | SemanticPassIntent::ColorFilter
-                    | SemanticPassIntent::BlurHorizontal { .. }
-                    | SemanticPassIntent::BlurVertical { .. } => {
-                        SemanticResourceRole::FilterIntermediate
-                    }
-                    SemanticPassIntent::ClearRoot { .. }
-                    | SemanticPassIntent::VelloCapture { .. }
-                    | SemanticPassIntent::Present => {
-                        return Err(GraphValidationError::InvalidPassResultRole);
-                    }
-                };
-                let resource_index = self.validate_resource_id(resource)?;
-                if self
-                    .resources
-                    .get(resource_index)
-                    .is_none_or(|resource| resource.descriptor.role != expected_role)
-                {
-                    return Err(GraphValidationError::InvalidPassResultRole);
-                }
+                self.validate_transform_pass_shape(intent, reads, result)?;
             }
+        }
+        Ok(())
+    }
+
+    fn validate_clear_root_shape(
+        &self,
+        initialization: WorkingImageInitialization,
+        dependencies: &[SemanticPassId],
+        reads: &[SemanticResourceId],
+        result: SemanticPassResult,
+    ) -> GraphBuildResult<()> {
+        if matches!(
+            initialization,
+            WorkingImageInitialization::SurfaceBaseColor(_)
+        ) && self.surface_base_initializations != 0
+        {
+            return Err(GraphValidationError::RepeatedSurfaceBaseInitialization);
+        }
+        if !dependencies.is_empty() || !reads.is_empty() {
+            return Err(GraphValidationError::InvalidClearRootResult);
+        }
+        let SemanticPassResult::Resource(resource) = result else {
+            return Err(GraphValidationError::InvalidClearRootResult);
+        };
+        let resource_index = self.validate_resource_id(resource)?;
+        let Some(resource) = self.resources.get(resource_index) else {
+            return Err(GraphValidationError::InvalidClearRootResult);
+        };
+        match (initialization, resource.descriptor.role) {
+            (
+                WorkingImageInitialization::SurfaceBaseColor(_),
+                SemanticResourceRole::RootWorkingImage,
+            )
+            | (
+                WorkingImageInitialization::Transparent,
+                SemanticResourceRole::IsolationWorkingImage,
+            ) => Ok(()),
+            (WorkingImageInitialization::Transparent, _)
+            | (
+                WorkingImageInitialization::SurfaceBaseColor(_),
+                SemanticResourceRole::IsolationWorkingImage,
+            ) => Err(GraphValidationError::RootMustUseSurfaceBase),
+            (WorkingImageInitialization::SurfaceBaseColor(_), _) => {
+                Err(GraphValidationError::InvalidClearRootResult)
+            }
+        }
+    }
+
+    fn validate_capture_shape(
+        &self,
+        initialization: WorkingImageInitialization,
+        reads: &[SemanticResourceId],
+        result: SemanticPassResult,
+    ) -> GraphBuildResult<()> {
+        if initialization != WorkingImageInitialization::Transparent {
+            return Err(GraphValidationError::NonTransparentCaptureBase);
+        }
+        if !reads.is_empty() {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        }
+        if let SemanticPassResult::Resource(resource) = result {
+            let resource_index = self.validate_resource_id(resource)?;
+            if self.resources.get(resource_index).is_none_or(|resource| {
+                !matches!(
+                    resource.descriptor.role,
+                    SemanticResourceRole::CaptureWorkingImage
+                        | SemanticResourceRole::ClipCoverage
+                        | SemanticResourceRole::IsolationWorkingImage
+                )
+            }) {
+                return Err(GraphValidationError::InvalidCaptureResult);
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_transform_pass_shape(
+        &self,
+        intent: SemanticPassIntent,
+        reads: &[SemanticResourceId],
+        result: SemanticPassResult,
+    ) -> GraphBuildResult<()> {
+        let SemanticPassResult::Resource(resource) = result else {
+            return if reads.is_empty() {
+                Ok(())
+            } else {
+                Err(GraphValidationError::InvalidPassArity)
+            };
+        };
+        let reads_are_valid = if intent == SemanticPassIntent::Composite {
+            reads.len() >= 2
+        } else {
+            reads.len() == 1
+        };
+        if !reads_are_valid {
+            return Err(GraphValidationError::InvalidPassArity);
+        }
+        let expected_role = match intent {
+            SemanticPassIntent::CopyBackdrop => SemanticResourceRole::BackdropCopy,
+            SemanticPassIntent::DropShadowColorize => SemanticResourceRole::ShadowImage,
+            SemanticPassIntent::Composite => SemanticResourceRole::CompositeResult,
+            SemanticPassIntent::CanonicalizeCapture
+            | SemanticPassIntent::ColorFilter
+            | SemanticPassIntent::BlurHorizontal { .. }
+            | SemanticPassIntent::BlurVertical { .. } => SemanticResourceRole::FilterIntermediate,
+            _ => return Err(GraphValidationError::InvalidPassResultRole),
+        };
+        let resource_index = self.validate_resource_id(resource)?;
+        if self
+            .resources
+            .get(resource_index)
+            .is_none_or(|resource| resource.descriptor.role != expected_role)
+        {
+            return Err(GraphValidationError::InvalidPassResultRole);
         }
         Ok(())
     }
@@ -2803,28 +2868,7 @@ impl SemanticGraphBuilder {
         }
         let is_present = pass.intent == SemanticPassIntent::Present;
         if is_present {
-            if let Some(unscheduled) = self
-                .passes
-                .iter()
-                .find(|candidate| candidate.id != id && !candidate.scheduled)
-            {
-                return Err(GraphValidationError::PresentScheduledBeforeOtherPasses(
-                    unscheduled.id,
-                ));
-            }
-            for resource in &self.resources {
-                let required_by_present = u32::from(pass.reads.contains(&resource.id));
-                match resource.remaining_reads {
-                    Some(remaining) if remaining == required_by_present => {}
-                    Some(remaining) => {
-                        return Err(GraphValidationError::UnscheduledReads {
-                            resource: resource.id,
-                            remaining,
-                        });
-                    }
-                    None => return Err(GraphValidationError::ConsumersNotSealed),
-                }
-            }
+            self.validate_present_schedule(id, &pass.reads)?;
         }
         for dependency in &pass.dependencies {
             let dependency_index = self.validate_existing_pass_id(*dependency)?;
@@ -2840,8 +2884,71 @@ impl SemanticGraphBuilder {
             }
         }
 
-        let mut read_indices = Vec::with_capacity(pass.reads.len());
-        for resource in &pass.reads {
+        let read_indices = self.validate_scheduled_reads(&pass.reads)?;
+
+        let mut resources = self.resources.clone();
+        for (resource, resource_index) in pass.reads.iter().zip(read_indices) {
+            let graph_resource = resources
+                .get_mut(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*resource))?;
+            let remaining = graph_resource
+                .remaining_reads
+                .and_then(|remaining| remaining.checked_sub(1))
+                .ok_or(GraphValidationError::ReleasedResource(*resource))?;
+            graph_resource.remaining_reads = Some(remaining);
+            if remaining == 0 {
+                graph_resource.releasable_after = Some(id);
+            }
+        }
+        let mut passes = self.passes.clone();
+        let scheduled_pass = passes
+            .get_mut(pass_index)
+            .ok_or(GraphValidationError::UnknownPass(id))?;
+        scheduled_pass.scheduled = true;
+        self.resources = resources;
+        self.passes = passes;
+        if is_present {
+            self.phase = GraphBuildPhase::FinalPresentScheduled;
+        }
+        Ok(())
+    }
+
+    fn validate_present_schedule(
+        &self,
+        id: SemanticPassId,
+        present_reads: &[SemanticResourceId],
+    ) -> GraphBuildResult<()> {
+        if let Some(unscheduled) = self
+            .passes
+            .iter()
+            .find(|candidate| candidate.id != id && !candidate.scheduled)
+        {
+            return Err(GraphValidationError::PresentScheduledBeforeOtherPasses(
+                unscheduled.id,
+            ));
+        }
+        for resource in &self.resources {
+            let required_by_present = u32::from(present_reads.contains(&resource.id));
+            match resource.remaining_reads {
+                Some(remaining) if remaining == required_by_present => {}
+                Some(remaining) => {
+                    return Err(GraphValidationError::UnscheduledReads {
+                        resource: resource.id,
+                        remaining,
+                    });
+                }
+                None => return Err(GraphValidationError::ConsumersNotSealed),
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_scheduled_reads(
+        &self,
+        reads: &[SemanticResourceId],
+    ) -> GraphBuildResult<Vec<usize>> {
+        let mut indices = Vec::with_capacity(reads.len());
+        for resource in reads {
             let resource_index = self.validate_resource_id(*resource)?;
             let graph_resource = self
                 .resources
@@ -2869,34 +2976,9 @@ impl SemanticGraphBuilder {
                 Some(_) => {}
                 None => return Err(GraphValidationError::ConsumersNotSealed),
             }
-            read_indices.push(resource_index);
+            indices.push(resource_index);
         }
-
-        let mut resources = self.resources.clone();
-        for (resource, resource_index) in pass.reads.iter().zip(read_indices) {
-            let graph_resource = resources
-                .get_mut(resource_index)
-                .ok_or(GraphValidationError::UnknownResource(*resource))?;
-            let remaining = graph_resource
-                .remaining_reads
-                .and_then(|remaining| remaining.checked_sub(1))
-                .ok_or(GraphValidationError::ReleasedResource(*resource))?;
-            graph_resource.remaining_reads = Some(remaining);
-            if remaining == 0 {
-                graph_resource.releasable_after = Some(id);
-            }
-        }
-        let mut passes = self.passes.clone();
-        let scheduled_pass = passes
-            .get_mut(pass_index)
-            .ok_or(GraphValidationError::UnknownPass(id))?;
-        scheduled_pass.scheduled = true;
-        self.resources = resources;
-        self.passes = passes;
-        if is_present {
-            self.phase = GraphBuildPhase::FinalPresentScheduled;
-        }
-        Ok(())
+        Ok(indices)
     }
 
     fn ensure_resource_readable(&self, resource: SemanticResourceId) -> GraphBuildResult<()> {
@@ -3307,6 +3389,14 @@ impl SemanticFrameGraphPlanner {
             },
             true,
         )?;
+        Self::finish_authored_filter_fixture(planner, parent)
+    }
+
+    #[cfg(test)]
+    fn finish_authored_filter_fixture(
+        mut planner: Self,
+        parent: PlannedGraphParent,
+    ) -> Result<GpuRenderGraph> {
         let present = graph_build(planner.builder.declare_pass(
             SemanticPassIntent::Present,
             dependencies_for(&[parent.current]),
@@ -4072,6 +4162,19 @@ fn graph_build<T>(result: GraphBuildResult<T>) -> Result<T> {
 }
 
 fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
+    validate_vello_span_metadata(graph)?;
+    validate_clip_coverage_metadata(graph)?;
+    validate_backdrop_metadata(graph)?;
+    validate_import_metadata(graph)?;
+    if graph.passes.iter().any(|pass| {
+        matches!(pass.intent, SemanticPassIntent::VelloCapture { .. }) && !pass.reads.is_empty()
+    }) {
+        return Err(GraphValidationError::InvalidCaptureResult);
+    }
+    Ok(())
+}
+
+fn validate_vello_span_metadata(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     for span in &graph.vello_spans {
         let pass = graph
             .passes
@@ -4103,6 +4206,10 @@ fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()>
             return Err(GraphValidationError::InvalidCaptureResult);
         }
     }
+    Ok(())
+}
+
+fn validate_clip_coverage_metadata(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     for coverage in &graph.clip_coverages {
         let pass = graph
             .passes
@@ -4149,6 +4256,10 @@ fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()>
             return Err(GraphValidationError::InvalidCaptureResult);
         }
     }
+    Ok(())
+}
+
+fn validate_backdrop_metadata(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     for backdrop in &graph.backdrop_reads {
         let pass = graph
             .passes
@@ -4161,6 +4272,10 @@ fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()>
             return Err(GraphValidationError::InvalidPassArity);
         }
     }
+    Ok(())
+}
+
+fn validate_import_metadata(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     for import in &graph.imports {
         let resource = graph
             .resources
@@ -4172,11 +4287,6 @@ fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()>
         {
             return Err(GraphValidationError::InvalidImportedResourceRole);
         }
-    }
-    if graph.passes.iter().any(|pass| {
-        matches!(pass.intent, SemanticPassIntent::VelloCapture { .. }) && !pass.reads.is_empty()
-    }) {
-        return Err(GraphValidationError::InvalidCaptureResult);
     }
     Ok(())
 }
@@ -4192,6 +4302,14 @@ fn validate_graph_for_lowering(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
 
     let mut actual_reads = vec![0_u32; graph.resources.len()];
     let mut last_reads = vec![None; graph.resources.len()];
+    validate_lowering_resources(graph)?;
+    validate_lowering_imports(graph)?;
+    validate_lowering_passes(graph, &mut actual_reads, &mut last_reads)?;
+    validate_lowering_lifetimes(graph, &actual_reads, &last_reads)?;
+    validate_lowering_anchors(graph)
+}
+
+fn validate_lowering_resources(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     for (index, resource) in graph.resources.iter().enumerate() {
         let expected_id =
             SemanticResourceId::new(graph.generation, ResourceIndex::try_from_len(index)?);
@@ -4239,6 +4357,10 @@ fn validate_graph_for_lowering(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
             None => return Err(GraphValidationError::ResourceWithoutProducer(resource.id)),
         }
     }
+    Ok(())
+}
+
+fn validate_lowering_imports(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     for import in &graph.imports {
         let index = validate_graph_resource_id(graph, import.resource)?;
         let resource = graph
@@ -4257,7 +4379,14 @@ fn validate_graph_for_lowering(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
             return Err(GraphValidationError::InvalidImportedResourceRole);
         }
     }
+    Ok(())
+}
 
+fn validate_lowering_passes(
+    graph: &GpuRenderGraph,
+    actual_reads: &mut [u32],
+    last_reads: &mut [Option<SemanticPassId>],
+) -> GraphBuildResult<()> {
     for (index, pass) in graph.passes.iter().enumerate() {
         let expected_id = SemanticPassId::new(graph.generation, PassIndex::try_from_len(index)?);
         if pass.id != expected_id {
@@ -4331,7 +4460,14 @@ fn validate_graph_for_lowering(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
         graph_lowering_pass_kind(graph, pass)?;
         graph_lowering_read_bindings(graph, pass)?;
     }
+    Ok(())
+}
 
+fn validate_lowering_lifetimes(
+    graph: &GpuRenderGraph,
+    actual_reads: &[u32],
+    last_reads: &[Option<SemanticPassId>],
+) -> GraphBuildResult<()> {
     for (index, resource) in graph.resources.iter().enumerate() {
         if resource.descriptor.expected_reads != actual_reads[index]
             || resource.recorded_reads != actual_reads[index]
@@ -4352,7 +4488,10 @@ fn validate_graph_for_lowering(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
             });
         }
     }
+    Ok(())
+}
 
+fn validate_lowering_anchors(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     let root_index = validate_graph_resource_id(graph, graph.root_working_image)?;
     if graph
         .resources
@@ -4423,35 +4562,7 @@ fn graph_lowering_pass_kind(
                 color,
             })
         }
-        SemanticPassIntent::VelloCapture { .. } => {
-            let spans = graph
-                .vello_spans
-                .iter()
-                .filter(|span| span.capture_pass == pass.id)
-                .collect::<Vec<_>>();
-            let coverages = graph
-                .clip_coverages
-                .iter()
-                .filter(|coverage| coverage.capture_pass == pass.id)
-                .collect::<Vec<_>>();
-            let work = match pass.result {
-                SemanticPassResult::Empty if spans.is_empty() && coverages.is_empty() => None,
-                SemanticPassResult::Resource(_) if spans.len() == 1 && coverages.is_empty() => {
-                    Some(GraphLoweringVelloCapture::Span(graph_lowering_vello_span(
-                        spans[0],
-                    )))
-                }
-                SemanticPassResult::Resource(_) if spans.is_empty() && coverages.len() == 1 => {
-                    Some(GraphLoweringVelloCapture::ClipCoverage(
-                        graph_lowering_clip_coverage(coverages[0]),
-                    ))
-                }
-                SemanticPassResult::Empty | SemanticPassResult::Resource(_) => {
-                    return Err(GraphValidationError::InvalidCaptureResult);
-                }
-            };
-            Ok(GraphLoweringPassKind::VelloCapture(work))
-        }
+        SemanticPassIntent::VelloCapture { .. } => graph_lowering_vello_capture(graph, pass),
         SemanticPassIntent::CanonicalizeCapture => {
             reject_unexpected_filter_metadata(graph, pass.id)?;
             Ok(GraphLoweringPassKind::CanonicalizeCapture)
@@ -4470,99 +4581,148 @@ fn graph_lowering_pass_kind(
             reject_unexpected_filter_metadata(graph, pass.id)?;
             Ok(GraphLoweringPassKind::CopyBackdrop)
         }
-        SemanticPassIntent::ColorFilter => {
-            let step = filter_step_for_pass(graph, pass)?;
-            let filter = match (pass.result, step) {
-                (SemanticPassResult::Empty, None) => None,
-                (SemanticPassResult::Resource(_), Some(step)) => {
-                    let ResolvedFilterOperationIntent::ColorRun(run) = &step.step.operation_intent
-                    else {
-                        return Err(GraphValidationError::InvalidPassArity);
-                    };
-                    if step.passes != [pass.id] {
-                        return Err(GraphValidationError::InvalidPassArity);
-                    }
-                    Some(GraphLoweringColorFilter {
-                        operations: run
-                            .operations()
-                            .iter()
-                            .copied()
-                            .map(|operation| GraphLoweringColorOperation {
-                                operation: operation.operation(),
-                                clamp_boundary: operation.clamp_boundary(),
-                            })
-                            .collect(),
-                        spatial: graph_lowering_filter_spatial(step.step.spatial_mapping),
-                        edge: graph_lowering_edge(step.step.edge_policy),
-                    })
-                }
-                (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
-                    return Err(GraphValidationError::InvalidPassArity);
-                }
-            };
-            Ok(GraphLoweringPassKind::ColorFilter(filter))
-        }
+        SemanticPassIntent::ColorFilter => graph_lowering_color_filter(graph, pass),
         SemanticPassIntent::BlurHorizontal { input }
         | SemanticPassIntent::BlurVertical { input } => {
-            let step = filter_step_for_pass(graph, pass)?;
-            let blur = match (pass.result, step) {
-                (SemanticPassResult::Empty, None) => None,
-                (SemanticPassResult::Resource(_), Some(step)) => {
-                    Some(graph_lowering_blur(pass, input, step)?)
-                }
-                (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
-                    return Err(GraphValidationError::InvalidPassArity);
-                }
-            };
-            if matches!(pass.intent, SemanticPassIntent::BlurHorizontal { .. }) {
-                Ok(GraphLoweringPassKind::BlurHorizontal(blur))
-            } else {
-                Ok(GraphLoweringPassKind::BlurVertical(blur))
-            }
+            graph_lowering_blur_pass(graph, pass, input)
         }
-        SemanticPassIntent::DropShadowColorize => {
-            let step = filter_step_for_pass(graph, pass)?;
-            let shadow = match (pass.result, step) {
-                (SemanticPassResult::Empty, None) => None,
-                (SemanticPassResult::Resource(_), Some(step)) => {
-                    Some(graph_lowering_drop_shadow(step)?)
-                }
-                (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
-                    return Err(GraphValidationError::InvalidPassArity);
-                }
-            };
-            Ok(GraphLoweringPassKind::DropShadowColorize(shadow))
-        }
-        SemanticPassIntent::Composite => {
-            let composites = graph
-                .composites
-                .iter()
-                .filter(|composite| composite.pass == pass.id)
-                .collect::<Vec<_>>();
-            let composite = match pass.result {
-                SemanticPassResult::Empty if composites.is_empty() => None,
-                SemanticPassResult::Resource(_) if composites.len() == 1 => {
-                    let composite = composites[0];
-                    if composite.kind == SemanticCompositeKind::DropShadow {
-                        let step = filter_step_for_pass(graph, pass)?
-                            .ok_or(GraphValidationError::InvalidPassArity)?;
-                        graph_lowering_drop_shadow(step)?;
-                    } else {
-                        reject_unexpected_filter_metadata(graph, pass.id)?;
-                    }
-                    Some(graph_lowering_composite(composite))
-                }
-                SemanticPassResult::Empty | SemanticPassResult::Resource(_) => {
-                    return Err(GraphValidationError::InvalidPassArity);
-                }
-            };
-            Ok(GraphLoweringPassKind::Composite(composite))
-        }
+        SemanticPassIntent::DropShadowColorize => graph_lowering_drop_shadow_pass(graph, pass),
+        SemanticPassIntent::Composite => graph_lowering_composite_pass(graph, pass),
         SemanticPassIntent::Present => {
             reject_unexpected_filter_metadata(graph, pass.id)?;
             Ok(GraphLoweringPassKind::Present)
         }
     }
+}
+
+fn graph_lowering_vello_capture(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
+) -> GraphBuildResult<GraphLoweringPassKind> {
+    let spans = graph
+        .vello_spans
+        .iter()
+        .filter(|span| span.capture_pass == pass.id)
+        .collect::<Vec<_>>();
+    let coverages = graph
+        .clip_coverages
+        .iter()
+        .filter(|coverage| coverage.capture_pass == pass.id)
+        .collect::<Vec<_>>();
+    let work = match pass.result {
+        SemanticPassResult::Empty if spans.is_empty() && coverages.is_empty() => None,
+        SemanticPassResult::Resource(_) if spans.len() == 1 && coverages.is_empty() => Some(
+            GraphLoweringVelloCapture::Span(graph_lowering_vello_span(spans[0])),
+        ),
+        SemanticPassResult::Resource(_) if spans.is_empty() && coverages.len() == 1 => Some(
+            GraphLoweringVelloCapture::ClipCoverage(graph_lowering_clip_coverage(coverages[0])),
+        ),
+        SemanticPassResult::Empty | SemanticPassResult::Resource(_) => {
+            return Err(GraphValidationError::InvalidCaptureResult);
+        }
+    };
+    Ok(GraphLoweringPassKind::VelloCapture(work))
+}
+
+fn graph_lowering_color_filter(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
+) -> GraphBuildResult<GraphLoweringPassKind> {
+    let step = filter_step_for_pass(graph, pass)?;
+    let filter = match (pass.result, step) {
+        (SemanticPassResult::Empty, None) => None,
+        (SemanticPassResult::Resource(_), Some(step)) => {
+            let ResolvedFilterOperationIntent::ColorRun(run) = &step.step.operation_intent else {
+                return Err(GraphValidationError::InvalidPassArity);
+            };
+            if step.passes != [pass.id] {
+                return Err(GraphValidationError::InvalidPassArity);
+            }
+            Some(GraphLoweringColorFilter {
+                operations: run
+                    .operations()
+                    .iter()
+                    .copied()
+                    .map(|operation| GraphLoweringColorOperation {
+                        operation: operation.operation(),
+                        clamp_boundary: operation.clamp_boundary(),
+                    })
+                    .collect(),
+                spatial: graph_lowering_filter_spatial(step.step.spatial_mapping),
+                edge: graph_lowering_edge(step.step.edge_policy),
+            })
+        }
+        (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
+            return Err(GraphValidationError::InvalidPassArity);
+        }
+    };
+    Ok(GraphLoweringPassKind::ColorFilter(filter))
+}
+
+fn graph_lowering_blur_pass(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
+    input: BlurInput,
+) -> GraphBuildResult<GraphLoweringPassKind> {
+    let step = filter_step_for_pass(graph, pass)?;
+    let blur = match (pass.result, step) {
+        (SemanticPassResult::Empty, None) => None,
+        (SemanticPassResult::Resource(_), Some(step)) => {
+            Some(graph_lowering_blur(pass, input, step)?)
+        }
+        (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
+            return Err(GraphValidationError::InvalidPassArity);
+        }
+    };
+    if matches!(pass.intent, SemanticPassIntent::BlurHorizontal { .. }) {
+        Ok(GraphLoweringPassKind::BlurHorizontal(blur))
+    } else {
+        Ok(GraphLoweringPassKind::BlurVertical(blur))
+    }
+}
+
+fn graph_lowering_drop_shadow_pass(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
+) -> GraphBuildResult<GraphLoweringPassKind> {
+    let step = filter_step_for_pass(graph, pass)?;
+    let shadow = match (pass.result, step) {
+        (SemanticPassResult::Empty, None) => None,
+        (SemanticPassResult::Resource(_), Some(step)) => Some(graph_lowering_drop_shadow(step)?),
+        (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
+            return Err(GraphValidationError::InvalidPassArity);
+        }
+    };
+    Ok(GraphLoweringPassKind::DropShadowColorize(shadow))
+}
+
+fn graph_lowering_composite_pass(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
+) -> GraphBuildResult<GraphLoweringPassKind> {
+    let composites = graph
+        .composites
+        .iter()
+        .filter(|composite| composite.pass == pass.id)
+        .collect::<Vec<_>>();
+    let composite = match pass.result {
+        SemanticPassResult::Empty if composites.is_empty() => None,
+        SemanticPassResult::Resource(_) if composites.len() == 1 => {
+            let composite = composites[0];
+            if composite.kind == SemanticCompositeKind::DropShadow {
+                let step = filter_step_for_pass(graph, pass)?
+                    .ok_or(GraphValidationError::InvalidPassArity)?;
+                graph_lowering_drop_shadow(step)?;
+            } else {
+                reject_unexpected_filter_metadata(graph, pass.id)?;
+            }
+            Some(graph_lowering_composite(composite))
+        }
+        SemanticPassResult::Empty | SemanticPassResult::Resource(_) => {
+            return Err(GraphValidationError::InvalidPassArity);
+        }
+    };
+    Ok(GraphLoweringPassKind::Composite(composite))
 }
 
 fn graph_lowering_vello_span(span: &SemanticVelloSpan) -> GraphLoweringVelloSpan {
@@ -4837,83 +4997,9 @@ fn graph_lowering_read_bindings(
             }
             Vec::new()
         }
-        GraphLoweringPassKind::Composite(Some(composite)) => match composite.kind() {
-            GraphLoweringCompositeKind::SpanSourceOver => vec![
-                make(
-                    0,
-                    GraphLoweringReadRole::CompositeParent,
-                    GraphLoweringSamplingFilter::Linear,
-                    GraphLoweringSamplingEdge::ClampToExtent,
-                )?,
-                make(
-                    1,
-                    GraphLoweringReadRole::CompositeSource,
-                    GraphLoweringSamplingFilter::Linear,
-                    GraphLoweringSamplingEdge::TransparentBlack,
-                )?,
-            ],
-            GraphLoweringCompositeKind::Layer {
-                clip_coverage,
-                alpha_mask,
-                ..
-            } => {
-                let mut bindings = vec![
-                    make(
-                        0,
-                        GraphLoweringReadRole::CompositeParent,
-                        GraphLoweringSamplingFilter::Linear,
-                        GraphLoweringSamplingEdge::ClampToExtent,
-                    )?,
-                    make(
-                        1,
-                        GraphLoweringReadRole::CompositeSource,
-                        GraphLoweringSamplingFilter::Linear,
-                        GraphLoweringSamplingEdge::TransparentBlack,
-                    )?,
-                ];
-                let mut next_read = 2;
-                if let Some(clip_coverage) = clip_coverage {
-                    let binding = make(
-                        next_read,
-                        GraphLoweringReadRole::ClipCoverage,
-                        GraphLoweringSamplingFilter::Linear,
-                        GraphLoweringSamplingEdge::TransparentBlack,
-                    )?;
-                    if binding.resource != *clip_coverage {
-                        return Err(GraphValidationError::InvalidPassArity);
-                    }
-                    bindings.push(binding);
-                    next_read += 1;
-                }
-                if let Some(alpha_mask) = alpha_mask {
-                    let binding = make(
-                        next_read,
-                        GraphLoweringReadRole::AlphaMask,
-                        GraphLoweringSamplingFilter::ImportedMask,
-                        GraphLoweringSamplingEdge::ClampToExtent,
-                    )?;
-                    if binding.resource != alpha_mask.resource() {
-                        return Err(GraphValidationError::InvalidPassArity);
-                    }
-                    bindings.push(binding);
-                }
-                bindings
-            }
-            GraphLoweringCompositeKind::DropShadow => vec![
-                make(
-                    0,
-                    GraphLoweringReadRole::CompositeSource,
-                    GraphLoweringSamplingFilter::Linear,
-                    GraphLoweringSamplingEdge::TransparentBlack,
-                )?,
-                make(
-                    1,
-                    GraphLoweringReadRole::Shadow,
-                    GraphLoweringSamplingFilter::Linear,
-                    GraphLoweringSamplingEdge::TransparentBlack,
-                )?,
-            ],
-        },
+        GraphLoweringPassKind::Composite(Some(composite)) => {
+            graph_lowering_composite_read_bindings(pass, &composite)?
+        }
         GraphLoweringPassKind::Present => vec![make(
             0,
             GraphLoweringReadRole::FinalWorkingImage,
@@ -4925,6 +5011,91 @@ fn graph_lowering_read_bindings(
         return Err(GraphValidationError::InvalidPassArity);
     }
     Ok(bindings)
+}
+
+fn graph_lowering_composite_read_bindings(
+    pass: &SemanticGraphPass,
+    composite: &GraphLoweringComposite,
+) -> GraphBuildResult<Vec<GraphLoweringReadBinding>> {
+    let make = |index: usize,
+                role: GraphLoweringReadRole,
+                sampling_filter: GraphLoweringSamplingFilter,
+                sampling_edge: GraphLoweringSamplingEdge|
+     -> GraphBuildResult<GraphLoweringReadBinding> {
+        let resource = pass
+            .reads
+            .get(index)
+            .copied()
+            .ok_or(GraphValidationError::InvalidPassArity)?;
+        Ok(GraphLoweringReadBinding {
+            role,
+            resource: GraphLoweringResourceId::from_semantic(resource),
+            sampling_filter,
+            sampling_edge,
+        })
+    };
+    let parent = || {
+        make(
+            0,
+            GraphLoweringReadRole::CompositeParent,
+            GraphLoweringSamplingFilter::Linear,
+            GraphLoweringSamplingEdge::ClampToExtent,
+        )
+    };
+    let source = |index| {
+        make(
+            index,
+            GraphLoweringReadRole::CompositeSource,
+            GraphLoweringSamplingFilter::Linear,
+            GraphLoweringSamplingEdge::TransparentBlack,
+        )
+    };
+    match composite.kind() {
+        GraphLoweringCompositeKind::SpanSourceOver => Ok(vec![parent()?, source(1)?]),
+        GraphLoweringCompositeKind::Layer {
+            clip_coverage,
+            alpha_mask,
+            ..
+        } => {
+            let mut bindings = vec![parent()?, source(1)?];
+            let mut next_read = 2;
+            if let Some(clip_coverage) = clip_coverage {
+                let binding = make(
+                    next_read,
+                    GraphLoweringReadRole::ClipCoverage,
+                    GraphLoweringSamplingFilter::Linear,
+                    GraphLoweringSamplingEdge::TransparentBlack,
+                )?;
+                if binding.resource != *clip_coverage {
+                    return Err(GraphValidationError::InvalidPassArity);
+                }
+                bindings.push(binding);
+                next_read += 1;
+            }
+            if let Some(alpha_mask) = alpha_mask {
+                let binding = make(
+                    next_read,
+                    GraphLoweringReadRole::AlphaMask,
+                    GraphLoweringSamplingFilter::ImportedMask,
+                    GraphLoweringSamplingEdge::ClampToExtent,
+                )?;
+                if binding.resource != alpha_mask.resource() {
+                    return Err(GraphValidationError::InvalidPassArity);
+                }
+                bindings.push(binding);
+            }
+            Ok(bindings)
+        }
+        GraphLoweringCompositeKind::DropShadow => Ok(vec![
+            source(0)?,
+            make(
+                1,
+                GraphLoweringReadRole::Shadow,
+                GraphLoweringSamplingFilter::Linear,
+                GraphLoweringSamplingEdge::TransparentBlack,
+            )?,
+        ]),
+    }
 }
 
 fn sampling_edge_for_filter(edge: GraphLoweringEdgePolicy) -> GraphLoweringSamplingEdge {
@@ -5925,22 +6096,7 @@ pub(crate) fn invalid_semantic_graph_state_for_test(
 ) -> SemanticGraphProbeResult<GraphFailureObservation> {
     match state {
         InvalidSemanticGraphStateForTest::StaleResourceIdentity => {
-            let mut first = graph_probe_builder()?;
-            let stale = graph_probe_value(first.declare_resource(graph_probe_descriptor(
-                SemanticResourceRole::FilterIntermediate,
-                1,
-            )?))?;
-            let mut second = graph_probe_builder()?;
-            let result = graph_probe_value(second.declare_resource(graph_probe_descriptor(
-                SemanticResourceRole::FilterIntermediate,
-                1,
-            )?))?;
-            graph_probe_failure(second.declare_pass(
-                SemanticPassIntent::ColorFilter,
-                Vec::new(),
-                vec![stale],
-                SemanticPassResult::Resource(result),
-            ))
+            invalid_stale_resource_identity_for_test()
         }
         InvalidSemanticGraphStateForTest::StalePassIdentity => {
             let mut first = graph_probe_builder()?;
@@ -6029,6 +6185,35 @@ pub(crate) fn invalid_semantic_graph_state_for_test(
                 SemanticPassResult::Resource(root),
             ))
         }
+        _ => invalid_semantic_graph_structure_state_for_test(state),
+    }
+}
+
+#[cfg(test)]
+fn invalid_stale_resource_identity_for_test() -> SemanticGraphProbeResult<GraphFailureObservation> {
+    let mut first = graph_probe_builder()?;
+    let stale = graph_probe_value(first.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::FilterIntermediate,
+        1,
+    )?))?;
+    let mut second = graph_probe_builder()?;
+    let result = graph_probe_value(second.declare_resource(graph_probe_descriptor(
+        SemanticResourceRole::FilterIntermediate,
+        1,
+    )?))?;
+    graph_probe_failure(second.declare_pass(
+        SemanticPassIntent::ColorFilter,
+        Vec::new(),
+        vec![stale],
+        SemanticPassResult::Resource(result),
+    ))
+}
+
+#[cfg(test)]
+fn invalid_semantic_graph_structure_state_for_test(
+    state: InvalidSemanticGraphStateForTest,
+) -> SemanticGraphProbeResult<GraphFailureObservation> {
+    match state {
         InvalidSemanticGraphStateForTest::DuplicateProducer => {
             let mut builder = graph_probe_builder()?;
             let (capture, _) =
@@ -6087,6 +6272,15 @@ pub(crate) fn invalid_semantic_graph_state_for_test(
                 SemanticPassResult::Empty,
             ))
         }
+        _ => invalid_semantic_graph_lifecycle_state_for_test(state),
+    }
+}
+
+#[cfg(test)]
+fn invalid_semantic_graph_lifecycle_state_for_test(
+    state: InvalidSemanticGraphStateForTest,
+) -> SemanticGraphProbeResult<GraphFailureObservation> {
+    match state {
         InvalidSemanticGraphStateForTest::NonTransparentCaptureBase => {
             let mut builder = graph_probe_builder()?;
             let capture = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
@@ -6151,6 +6345,7 @@ pub(crate) fn invalid_semantic_graph_state_for_test(
                 SemanticPassResult::Empty,
             ))
         }
+        _ => unreachable!("identity and structural graph states use earlier probe groups"),
     }
 }
 
@@ -6165,6 +6360,23 @@ struct CompletedDropShadowGraphProbe {
     remaining_before_source_over: u32,
     remaining_after_source_over: u32,
     post_release_read_rejected: bool,
+}
+
+#[cfg(test)]
+struct DropShadowGraphSchedule {
+    builder: SemanticGraphBuilder,
+    source: SemanticResourceId,
+    clear_root: SemanticPassId,
+    capture: SemanticPassId,
+    canonical_capture: SemanticPassId,
+    canonicalize: SemanticPassId,
+    copy_backdrop: SemanticPassId,
+    rgba_blur: SemanticPassId,
+    blur_horizontal: SemanticPassId,
+    blur_vertical: SemanticPassId,
+    colorize: SemanticPassId,
+    source_over: SemanticPassId,
+    present: SemanticPassId,
 }
 
 #[cfg(test)]
@@ -6183,19 +6395,8 @@ fn remaining_reads_for_probe(
 #[cfg(test)]
 fn build_drop_shadow_graph_probe() -> SemanticGraphProbeResult<CompletedDropShadowGraphProbe> {
     let mut builder = graph_probe_builder()?;
-    let (root, clear_root) = declare_probe_root(&mut builder, 1)?;
-    graph_probe_value(builder.declare_pass(
-        SemanticPassIntent::VelloCapture {
-            initialization: WorkingImageInitialization::Transparent,
-        },
-        Vec::new(),
-        Vec::new(),
-        SemanticPassResult::Empty,
-    ))?;
-    let (source, capture) =
-        declare_probe_capture(&mut builder, SemanticResourceRole::IsolationWorkingImage, 2)?;
-    let (canonical_source, canonical_capture) =
-        declare_probe_capture(&mut builder, SemanticResourceRole::CaptureWorkingImage, 1)?;
+    let (root, clear_root, source, capture, canonical_source, canonical_capture) =
+        declare_drop_shadow_probe_inputs(&mut builder)?;
     let canonical = graph_probe_value(builder.declare_resource(graph_probe_descriptor(
         SemanticResourceRole::FilterIntermediate,
         1,
@@ -6278,6 +6479,76 @@ fn build_drop_shadow_graph_probe() -> SemanticGraphProbeResult<CompletedDropShad
     ))?;
     let present = declare_probe_present(&mut builder, composed, source_over)?;
 
+    finish_drop_shadow_graph_probe(DropShadowGraphSchedule {
+        builder,
+        source,
+        clear_root,
+        capture,
+        canonical_capture,
+        canonicalize,
+        copy_backdrop,
+        rgba_blur,
+        blur_horizontal,
+        blur_vertical,
+        colorize,
+        source_over,
+        present,
+    })
+}
+
+#[cfg(test)]
+fn declare_drop_shadow_probe_inputs(
+    builder: &mut SemanticGraphBuilder,
+) -> SemanticGraphProbeResult<(
+    SemanticResourceId,
+    SemanticPassId,
+    SemanticResourceId,
+    SemanticPassId,
+    SemanticResourceId,
+    SemanticPassId,
+)> {
+    let (root, clear_root) = declare_probe_root(builder, 1)?;
+    graph_probe_value(builder.declare_pass(
+        SemanticPassIntent::VelloCapture {
+            initialization: WorkingImageInitialization::Transparent,
+        },
+        Vec::new(),
+        Vec::new(),
+        SemanticPassResult::Empty,
+    ))?;
+    let (source, capture) =
+        declare_probe_capture(builder, SemanticResourceRole::IsolationWorkingImage, 2)?;
+    let (canonical_source, canonical_capture) =
+        declare_probe_capture(builder, SemanticResourceRole::CaptureWorkingImage, 1)?;
+    Ok((
+        root,
+        clear_root,
+        source,
+        capture,
+        canonical_source,
+        canonical_capture,
+    ))
+}
+
+#[cfg(test)]
+fn finish_drop_shadow_graph_probe(
+    schedule: DropShadowGraphSchedule,
+) -> SemanticGraphProbeResult<CompletedDropShadowGraphProbe> {
+    let DropShadowGraphSchedule {
+        mut builder,
+        source,
+        clear_root,
+        capture,
+        canonical_capture,
+        canonicalize,
+        copy_backdrop,
+        rgba_blur,
+        blur_horizontal,
+        blur_vertical,
+        colorize,
+        source_over,
+        present,
+    } = schedule;
     graph_probe_value(builder.begin_scheduling())?;
     let source_expected_reads = builder
         .resources
@@ -6459,15 +6730,7 @@ pub(crate) fn semantic_graph_base_initialization_observation_for_test(
         .iter()
         .filter(|resource| resource.descriptor.role == SemanticResourceRole::IsolationWorkingImage)
         .count();
-    let captures_are_transparent = probe.graph.passes.iter().all(|pass| {
-        !matches!(pass.intent, SemanticPassIntent::VelloCapture { .. })
-            || matches!(
-                pass.intent,
-                SemanticPassIntent::VelloCapture {
-                    initialization: WorkingImageInitialization::Transparent
-                }
-            )
-    });
+    let captures_are_transparent = graph_probe_captures_are_transparent(&probe.graph);
     let pass_resource_results = probe
         .graph
         .passes
@@ -6489,22 +6752,7 @@ pub(crate) fn semantic_graph_base_initialization_observation_for_test(
     let empty_results_have_no_descriptor = empty_result_count > 1
         && probe.graph.resources.len() == pass_resource_results + imported_resources;
     let resource_descriptors_are_spatially_complete =
-        probe.graph.resources.iter().all(|resource| {
-            let logical = resource.descriptor.logical_bounds.rect();
-            let mapped_first_texel = resource
-                .descriptor
-                .texel_center_mapping
-                .point_for(0, 0)
-                .ok();
-            logical == Rect::new(-2.0, 3.0, 8.0, 6.0)
-                && resource.descriptor.device_origin == SignedDeviceOrigin::new(-4, 6)
-                && resource.descriptor.device_extent
-                    == PositiveDeviceExtent {
-                        width: 16,
-                        height: 12,
-                    }
-                && mapped_first_texel == Some(Point::new(-1.75, 3.25))
-        });
+        graph_probe_resources_are_spatially_complete(&probe.graph);
 
     Ok(GraphBaseInitializationObservation {
         observes_bounded_offscreen_pass: pass_plan.requires_offscreen_texture()
@@ -6517,6 +6765,39 @@ pub(crate) fn semantic_graph_base_initialization_observation_for_test(
         captures_are_transparent,
         empty_results_have_no_descriptor,
         resource_descriptors_are_spatially_complete,
+    })
+}
+
+#[cfg(test)]
+fn graph_probe_resources_are_spatially_complete(graph: &GpuRenderGraph) -> bool {
+    graph.resources.iter().all(|resource| {
+        let logical = resource.descriptor.logical_bounds.rect();
+        let mapped_first_texel = resource
+            .descriptor
+            .texel_center_mapping
+            .point_for(0, 0)
+            .ok();
+        logical == Rect::new(-2.0, 3.0, 8.0, 6.0)
+            && resource.descriptor.device_origin == SignedDeviceOrigin::new(-4, 6)
+            && resource.descriptor.device_extent
+                == PositiveDeviceExtent {
+                    width: 16,
+                    height: 12,
+                }
+            && mapped_first_texel == Some(Point::new(-1.75, 3.25))
+    })
+}
+
+#[cfg(test)]
+fn graph_probe_captures_are_transparent(graph: &GpuRenderGraph) -> bool {
+    graph.passes.iter().all(|pass| {
+        !matches!(pass.intent, SemanticPassIntent::VelloCapture { .. })
+            || matches!(
+                pass.intent,
+                SemanticPassIntent::VelloCapture {
+                    initialization: WorkingImageInitialization::Transparent
+                }
+            )
     })
 }
 
@@ -6695,22 +6976,7 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
             }
         })
         .collect();
-    let resolved_alpha_mask_device_extents = graph
-        .imports
-        .iter()
-        .filter_map(|import| match &import.kind {
-            SemanticImportKind::ResolvedAlphaMask { .. } => graph
-                .resources
-                .iter()
-                .find(|resource| resource.id == import.resource)
-                .map(|resource| {
-                    (
-                        resource.descriptor.device_extent.width,
-                        resource.descriptor.device_extent.height,
-                    )
-                }),
-        })
-        .collect();
+    let resolved_alpha_mask_device_extents = graph_resolved_alpha_mask_device_extents(&graph);
     let vello_spans = graph
         .vello_spans
         .iter()
@@ -6736,32 +7002,8 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
             SemanticCompositeKind::SpanSourceOver | SemanticCompositeKind::DropShadow => None,
         })
         .collect();
-    let complete = graph.passes.iter().all(|pass| pass.scheduled)
-        && graph.resources.iter().all(|resource| {
-            resource.producer.is_some()
-                && resource.remaining_reads == Some(0)
-                && resource.releasable_after.is_some()
-        })
-        && graph
-            .passes
-            .last()
-            .is_some_and(|pass| pass.id == graph.final_present)
-        && validate_semantic_frame_graph(&graph).is_ok();
-    let finite = graph
-        .resources
-        .iter()
-        .all(|resource| semantic_resource_descriptor_is_finite(resource.descriptor))
-        && graph.vello_spans.iter().all(|span| {
-            span.capture_transform
-                .as_array()
-                .into_iter()
-                .all(f64::is_finite)
-                && span
-                    .parent_to_surface
-                    .as_array()
-                    .into_iter()
-                    .all(f64::is_finite)
-        });
+    let complete = graph_frame_plan_is_complete(&graph);
+    let finite = graph_frame_plan_is_finite(&graph);
     let graph_to_vello_reentry = graph.passes.iter().any(|pass| {
         matches!(pass.intent, SemanticPassIntent::VelloCapture { .. }) && !pass.reads.is_empty()
     });
@@ -6779,12 +7021,7 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
             .iter()
             .all(|composite| composite.source_captured_before_outer_semantics);
     let antialiasing = graph.vello_spans.first().map(|span| span.antialiasing);
-    let base_color = graph.passes.iter().find_map(|pass| match pass.intent {
-        SemanticPassIntent::ClearRoot {
-            initialization: WorkingImageInitialization::SurfaceBaseColor(color),
-        } => Some(color),
-        _ => None,
-    });
+    let base_color = graph_base_color(&graph);
 
     FramePlanObservation {
         route: FramePlanRouteObservation::GpuGraph,
@@ -6819,6 +7056,70 @@ fn observe_graph_frame_plan(graph: GpuRenderGraph) -> FramePlanObservation {
         resource_count: graph.resources.len(),
         pass_count: graph.passes.len(),
     }
+}
+
+#[cfg(test)]
+fn graph_base_color(graph: &GpuRenderGraph) -> Option<Color> {
+    graph.passes.iter().find_map(|pass| match pass.intent {
+        SemanticPassIntent::ClearRoot {
+            initialization: WorkingImageInitialization::SurfaceBaseColor(color),
+        } => Some(color),
+        _ => None,
+    })
+}
+
+#[cfg(test)]
+fn graph_resolved_alpha_mask_device_extents(graph: &GpuRenderGraph) -> Vec<(u32, u32)> {
+    graph
+        .imports
+        .iter()
+        .filter_map(|import| match &import.kind {
+            SemanticImportKind::ResolvedAlphaMask { .. } => graph
+                .resources
+                .iter()
+                .find(|resource| resource.id == import.resource)
+                .map(|resource| {
+                    (
+                        resource.descriptor.device_extent.width,
+                        resource.descriptor.device_extent.height,
+                    )
+                }),
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn graph_frame_plan_is_complete(graph: &GpuRenderGraph) -> bool {
+    graph.passes.iter().all(|pass| pass.scheduled)
+        && graph.resources.iter().all(|resource| {
+            resource.producer.is_some()
+                && resource.remaining_reads == Some(0)
+                && resource.releasable_after.is_some()
+        })
+        && graph
+            .passes
+            .last()
+            .is_some_and(|pass| pass.id == graph.final_present)
+        && validate_semantic_frame_graph(graph).is_ok()
+}
+
+#[cfg(test)]
+fn graph_frame_plan_is_finite(graph: &GpuRenderGraph) -> bool {
+    graph
+        .resources
+        .iter()
+        .all(|resource| semantic_resource_descriptor_is_finite(resource.descriptor))
+        && graph.vello_spans.iter().all(|span| {
+            span.capture_transform
+                .as_array()
+                .into_iter()
+                .all(f64::is_finite)
+                && span
+                    .parent_to_surface
+                    .as_array()
+                    .into_iter()
+                    .all(f64::is_finite)
+        })
 }
 
 #[cfg(test)]
