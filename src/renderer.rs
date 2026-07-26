@@ -80,6 +80,7 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) exact_c08_graph_routes: usize,
     pub(crate) exact_c09_graph_routes: usize,
     pub(crate) exact_c10_fixture_routes: usize,
+    pub(crate) exact_c11_fixture_routes: usize,
     pub(crate) future_pass_rejections: usize,
 }
 
@@ -938,6 +939,10 @@ impl Renderer {
             working_format,
             capabilities,
         )?;
+        self.dispatch_observation.exact_c11_fixture_routes = self
+            .dispatch_observation
+            .exact_c11_fixture_routes
+            .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
             ExactSurfaceGraph::C11(preparable),
         )))

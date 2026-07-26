@@ -12421,6 +12421,448 @@ fn nonuniform_scale_and_skew_preserve_local_blur_shape() {
     }
 }
 
+fn c11_mixed_filter_fixture_for_test() -> (Scene, Vec<FilterList>, PhysicalSize, Vec<u8>) {
+    let size = PhysicalSize::new(15, 13);
+    let source = c11_reference_buffer_for_test(
+        size,
+        &[
+            (5, 5, PremultipliedRgba8::try_new(224, 64, 16, 255).unwrap()),
+            (6, 5, PremultipliedRgba8::try_new(32, 192, 96, 255).unwrap()),
+            (6, 6, PremultipliedRgba8::try_new(48, 80, 240, 255).unwrap()),
+        ],
+    );
+    let blur = FilterBlur::try_new(0.75).unwrap();
+    let shadow = FilterDropShadow::try_new(
+        Point::new(-1.25, 0.5),
+        FilterBlur::try_new(0.5).unwrap(),
+        Color::try_rgba(0.25, 0.5, 0.75, 0.625).unwrap(),
+    )
+    .unwrap();
+    let invert = UnitFilterAmount::try_new(0.25).unwrap();
+    let opacity = UnitFilterAmount::try_new(0.8).unwrap();
+    let expected = source
+        .apply_color_filter_pipeline(&color_filter_pipeline([ColorFilterOp::Invert(invert)]))
+        .and_then(|buffer| buffer.apply_blur(blur, BlurPolicy::css_filter_default()))
+        .and_then(|buffer| {
+            buffer.apply_fractional_drop_shadow_for_gpu_oracle(
+                &shadow,
+                BlurPolicy::css_filter_default(),
+            )
+        })
+        .and_then(|buffer| {
+            buffer.apply_color_filter_pipeline(&color_filter_pipeline([ColorFilterOp::Opacity(
+                opacity,
+            )]))
+        })
+        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .unwrap();
+    let scene = c11_image_scene_for_test(
+        size,
+        c09_reference_straight_bytes_for_test(&source),
+        Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
+    );
+    let filters = vec![
+        FilterList::try_ops(vec![
+            FilterOp::invert(invert),
+            FilterOp::blur(blur),
+            FilterOp::drop_shadow(shadow),
+            FilterOp::opacity(opacity),
+        ])
+        .unwrap(),
+    ];
+    (scene, filters, size, expected)
+}
+
+fn c11_public_spatial_graph_diagnostic_for_test(
+    scene: &Scene,
+    operation: FilterOp,
+    size: PhysicalSize,
+) -> Option<UnsupportedPrimitive> {
+    let commands = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the public C11 diagnostic fixture must normalize capture input");
+    let context = super::frame::FrameContext::try_new(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    )
+    .expect("the public C11 diagnostic fixture must form a frame context");
+    let graph = super::frame::authored_c10_color_graph_for_test(
+        c11_filter_list_for_test(operation),
+        commands,
+        context,
+    )
+    .expect("the public C11 diagnostic fixture must form an authored graph");
+    super::renderer::future_graph_diagnostic_for_test(
+        &graph,
+        Format::Rgba8,
+        &DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .expect("the retained public dispatch classifier must diagnose a C11 graph")
+}
+
+fn c11_repeated_fixture_resources_are_stable_for_test(
+    scene: &Scene,
+    filters: &[FilterList],
+    size: PhysicalSize,
+    expected: &[u8],
+) -> bool {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("C11 retained-resource coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("C11 retained-resource coverage requires a surface");
+    for _ in 0..2 {
+        pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+            &mut surface,
+            scene,
+            filters.to_vec(),
+            Parameters::default(),
+            WorkingFormat::ReducedPrecision,
+        ))
+        .expect("C11 retained-resource warm-up must succeed");
+    }
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("C11 retained-resource warm-up must keep its device");
+    let warmed_resources = ready.internal_resource_manager_observation_for_test();
+    let warmed_cache = ready.device_pass_cache_counts_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let mut resources = Vec::new();
+    let mut caches = Vec::new();
+    for _ in 0..3 {
+        pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+            &mut surface,
+            scene,
+            filters.to_vec(),
+            Parameters::default(),
+            WorkingFormat::ReducedPrecision,
+        ))
+        .expect("repeated C11 retained-resource frames must succeed");
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("repeated C11 frames must keep their device");
+        resources.push(ready.internal_resource_manager_observation_for_test());
+        caches.push(ready.device_pass_cache_counts_for_test());
+    }
+    let prepared = graph_submission.prepared_frame_resource_identity_history_for_test();
+    let retention = graph_submission.resource_retention_history_for_test();
+    let one_submission_per_frame = submission.queue_submission_count_for_test() == 3
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 3
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated C11 publication must remain readable");
+
+    c10_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
+        && resources.iter().all(|actual| {
+            actual.gaussian_kernel_count_for_test()
+                == warmed_resources.gaussian_kernel_count_for_test()
+        })
+        && warmed_resources.gaussian_kernel_count_for_test() > 0
+        && warmed_resources.effect_texture_count_for_test() > 0
+        && c10_prepared_resource_identities_are_stable_for_test(&prepared)
+        && retention == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3]
+        && warmed_cache.has_render_pipelines()
+        && caches.iter().all(|actual| *actual == warmed_cache)
+        && one_submission_per_frame
+        && c11_maximum_error_for_test(output.rgba(), expected, WorkingFormat::ReducedPrecision)
+            <= (4, 4)
+}
+
+fn c11_zero_budget_releases_all_frame_resources_for_test(
+    scene: &Scene,
+    filters: &[FilterList],
+    size: PhysicalSize,
+    expected: &[u8],
+) -> bool {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("C11 zero-budget coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("C11 zero-budget coverage requires a surface");
+    pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+        &mut surface,
+        scene,
+        filters.to_vec(),
+        Parameters::default(),
+        WorkingFormat::ReducedPrecision,
+    ))
+    .expect("the first C11 zero-budget frame must succeed");
+    let first = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the first C11 zero-budget publication must be readable");
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the first C11 zero-budget frame must keep its device")
+        .device_pass_cache_counts_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+        &mut surface,
+        scene,
+        filters.to_vec(),
+        Parameters::default(),
+        WorkingFormat::ReducedPrecision,
+    ))
+    .expect("the repeated C11 zero-budget frame must succeed");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the repeated C11 zero-budget frame must keep its device");
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let retention = graph_submission.resource_retention_history_for_test();
+    let one_submission = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let second = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated C11 zero-budget publication must be readable");
+
+    resources.leased_count == 0
+        && resources.idle_count == 0
+        && resources.active_frame_count == 0
+        && resources.resolved_lease_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
+        && resources.accounted_entry_bytes == Some(0)
+        && resources.committed_transient_buffer_count_for_test() == 0
+        && resources.committed_transient_image_count_for_test() == 0
+        && resources.effect_texture_count_for_test() == 0
+        && resources.gaussian_kernel_count_for_test() == 0
+        && retention == [C08GraphResourceRetentionForTest::ReleasedAllIdle]
+        && cache_before == cache_after
+        && cache_after.has_render_pipelines()
+        && one_submission
+        && first.rgba() == second.rgba()
+        && c11_maximum_error_for_test(second.rgba(), expected, WorkingFormat::ReducedPrecision)
+            <= (4, 4)
+}
+
+#[test]
+fn c11_fixture_executes_spatial_filters_while_public_capabilities_remain_diagnostic() {
+    let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
+    let (mut renderer, mut surface) =
+        c11_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let frame = render_c11_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        &scene,
+        filters.clone(),
+        WorkingFormat::ReducedPrecision,
+    );
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the executed C11 fixture must retain its ready device");
+    let resources_before = ready.internal_resource_manager_observation_for_test();
+    let cache_before = ready.device_pass_cache_counts_for_test();
+    let publication_before = surface.headless_publication_count_for_test();
+    let blur = c11_public_spatial_graph_diagnostic_for_test(
+        &scene,
+        FilterOp::blur(FilterBlur::try_new(0.75).unwrap()),
+        size,
+    );
+    let shadow = c11_public_spatial_graph_diagnostic_for_test(
+        &scene,
+        FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(-1.25, 0.5),
+                FilterBlur::try_new(0.5).unwrap(),
+                Color::BLACK,
+            )
+            .unwrap(),
+        ),
+        size,
+    );
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("public C11 diagnostics must retain the ready device");
+    let resources_after = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    drop(ready);
+    let dispatch_after = renderer.dispatch_observation_for_test();
+
+    assert!(
+        c11_frame_has_exact_execution_for_test(&frame, size, WorkingFormat::ReducedPrecision)
+            && c11_pixels_match_oracle_for_test(&frame, &expected)
+            && blur
+                == Some(UnsupportedPrimitive::new(
+                    PrimitiveFamily::Filters,
+                    PrimitiveOperation::GpuBlurFilterExecution,
+                ))
+            && shadow
+                == Some(UnsupportedPrimitive::new(
+                    PrimitiveFamily::Filters,
+                    PrimitiveOperation::GpuDropShadowFilterExecution,
+                ))
+            && c10_retained_public_filter_diagnostics_are_exact_for_test()
+            && c11_repeated_fixture_resources_are_stable_for_test(
+                &scene, &filters, size, &expected,
+            )
+            && c11_zero_budget_releases_all_frame_resources_for_test(
+                &scene, &filters, size, &expected,
+            )
+            && resources_after == resources_before
+            && cache_after == cache_before
+            && surface.headless_publication_count_for_test() == publication_before
+            && dispatch_after.exact_c11_fixture_routes
+                == dispatch_before.exact_c11_fixture_routes.saturating_add(1),
+        "C11 fixture did not execute while public spatial-filter capabilities remained diagnostic"
+    );
+}
+
+#[cfg(feature = "render-window")]
+#[test]
+fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
+    let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("presented C11 coverage requires a renderer: {error}"));
+    let mut surface = display_free_presented_surface_for_test(
+        &mut renderer,
+        SurfaceOptions {
+            size: Size::new(f64::from(size.width()), f64::from(size.height())),
+            format: Format::Rgba8,
+            ..SurfaceOptions::default()
+        },
+    );
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .unwrap_or_else(|error| panic!("presented C11 coverage must configure: {error}"));
+    let presentation = presented_observation_handle_for_test(&surface);
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let rendered = pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+        &mut surface,
+        &scene,
+        filters,
+        Parameters::default(),
+        WorkingFormat::ReducedPrecision,
+    ));
+    let submitted_once = submission.queue_submission_count_for_test() == 1
+        && submission.readback_queue_submission_count_for_test() == 0
+        && graph_submission.queue_submission_count_for_test() == 1
+        && graph_submission.presentation_scopes_resolved_for_test()
+        && graph_submission.presented_host_effect_applied_for_test()
+        && direct_submission.queue_submission_count_for_test() == 0;
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    let presented = take_last_presented_texture_for_test(&mut surface)
+        .and_then(|texture| {
+            pollster::block_on(renderer.read_render_texture_for_test(&texture, size)).ok()
+        })
+        .map(|image| image.into_rgba());
+    let presentation = presentation.snapshot_for_test();
+    let dispatch_after = renderer.dispatch_observation_for_test();
+    let pixels_match = presented.as_deref().is_some_and(|actual| {
+        c11_maximum_error_for_test(actual, &expected, WorkingFormat::ReducedPrecision) <= (4, 4)
+    });
+
+    assert!(
+        rendered.as_ref().is_ok_and(|frame| {
+            frame.working_format == WorkingFormat::ReducedPrecision
+                && frame.output_extent == size
+                && frame.stats == renderer.stats()
+        }) && submitted_once
+            && presentation.acquire_count_for_test() == 1
+            && presentation.present_count_for_test() == 1
+            && presentation.discarded_count_for_test() == 0
+            && pixels_match
+            && dispatch_after.exact_c11_fixture_routes
+                == dispatch_before.exact_c11_fixture_routes.saturating_add(1),
+        "presented C11 fixture did not execute Gaussian blur and drop shadow atomically"
+    );
+}
+
+#[test]
+fn public_dispatch_retains_c09_boundary_while_c11_fixture_uses_shared_executor() {
+    let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
+    let (mut renderer, mut c11_surface) =
+        c11_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
+    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
+    let dispatch_before = renderer.dispatch_observation_for_test();
+    let c11 = render_c11_fixture_for_test(
+        &mut renderer,
+        &mut c11_surface,
+        &scene,
+        filters,
+        WorkingFormat::ReducedPrecision,
+    );
+    let (c09_scene, c09_size, _, _) = c09_reuse_scene_and_oracle_for_test();
+    let mut c09_surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(c09_size.width()), f64::from(c09_size.height())),
+        1.0,
+    ))
+    .expect("C09 boundary coverage requires a surface");
+    let c09 =
+        pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
+    let future_scene = c10_future_backdrop_scene_for_test();
+    let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("future C12 boundary coverage requires a surface");
+    let future = pollster::block_on(renderer.render(
+        &mut future_surface,
+        &future_scene,
+        Parameters::default(),
+    ));
+    let dispatch_after = renderer.dispatch_observation_for_test();
+    let expected_backdrop = UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
+    );
+
+    assert!(
+        c11_pixels_match_oracle_for_test(&c11, &expected)
+            && c09.is_ok()
+            && future
+                .as_ref()
+                .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
+            && future_surface.headless_publication_count_for_test() == 0
+            && dispatch_after.boundary_invocations
+                == dispatch_before.boundary_invocations.saturating_add(3)
+            && dispatch_after.exact_c09_graph_routes
+                == dispatch_before.exact_c09_graph_routes.saturating_add(1)
+            && dispatch_after.exact_c11_fixture_routes
+                == dispatch_before.exact_c11_fixture_routes.saturating_add(1)
+            && dispatch_after.future_pass_rejections
+                == dispatch_before.future_pass_rejections.saturating_add(1),
+        "public dispatch crossed the C09 boundary or the C11 fixture bypassed the shared executor"
+    );
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
