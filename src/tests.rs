@@ -11793,6 +11793,25 @@ fn c11_drop_shadow_cache_realizes_checked_colorize_and_merge_programs() {
     );
 }
 
+#[test]
+fn c11_prepared_spatial_filter_objects_expose_exact_encoding_handles() {
+    fn require_blur_handles(objects: &super::shader::ProvisionalBlurPassObjects<'_>) {
+        let _: &wgpu::Sampler = objects.source_sampler();
+        let _: &wgpu::BindGroupLayout = objects.bind_group_layout();
+        let _: &wgpu::RenderPipeline = objects.render_pipeline();
+    }
+
+    fn require_drop_shadow_handles(
+        objects: &super::shader::ProvisionalDropShadowColorizePassObjects<'_>,
+    ) {
+        let _: &wgpu::Sampler = objects.source_sampler();
+        let _: &wgpu::BindGroupLayout = objects.bind_group_layout();
+        let _: &wgpu::RenderPipeline = objects.render_pipeline();
+    }
+
+    let _ = (require_blur_handles, require_drop_shadow_handles);
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))

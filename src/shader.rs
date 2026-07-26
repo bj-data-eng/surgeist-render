@@ -2148,12 +2148,24 @@ impl ProvisionalBlurPassObjects<'_> {
     pub(crate) fn require_encoding_ready(&self) -> Result<()> {
         let _ = (
             self.description,
-            self.source_sampler,
-            self.layout,
+            self.source_sampler(),
+            self.bind_group_layout(),
             self.shader,
-            self.pipeline,
+            self.render_pipeline(),
         );
         Ok(())
+    }
+
+    pub(crate) const fn source_sampler(&self) -> &wgpu::Sampler {
+        self.source_sampler
+    }
+
+    pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        self.layout
+    }
+
+    pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline
     }
 }
 
@@ -2161,12 +2173,24 @@ impl ProvisionalDropShadowColorizePassObjects<'_> {
     pub(crate) fn require_encoding_ready(&self) -> Result<()> {
         let _ = (
             self.description,
-            self.source_sampler,
-            self.layout,
+            self.source_sampler(),
+            self.bind_group_layout(),
             self.shader,
-            self.pipeline,
+            self.render_pipeline(),
         );
         Ok(())
+    }
+
+    pub(crate) const fn source_sampler(&self) -> &wgpu::Sampler {
+        self.source_sampler
+    }
+
+    pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        self.layout
+    }
+
+    pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline
     }
 }
 
