@@ -366,8 +366,14 @@ pub(crate) enum ShaderProgramKey {
     CanonicalizeCapture,
     CopyBackdrop,
     ColorFilter,
-    BlurHorizontal { source_alpha: bool },
-    BlurVertical { source_alpha: bool },
+    BlurHorizontal {
+        source_alpha: bool,
+        edge: ShaderSamplingEdgeKey,
+    },
+    BlurVertical {
+        source_alpha: bool,
+        edge: ShaderSamplingEdgeKey,
+    },
     DropShadowColorize,
     Composite(ShaderCompositeKey),
     Present,
@@ -512,6 +518,7 @@ pub(crate) enum ShaderDataBindingKey {
     SpatialUniform,
     ColorFilterOperations,
     GaussianKernel,
+    BlurEdgeParameters,
     DropShadowParameters,
     CompositeParameters,
     PresentParameters,
@@ -721,6 +728,7 @@ enum BlurInput {
 struct BlurPassDescription {
     axis: BlurAxis,
     input: BlurInput,
+    edge: ShaderSamplingEdgeKey,
     working_format: ShaderTextureFormatKey,
 }
 
@@ -1097,6 +1105,29 @@ impl DevicePassCache {
                 key.binding_role == ShaderBindingRoleKey::FilterSource
                     && key.filter == ShaderSamplingFilterKey::Linear
                     && key.edge == ShaderSamplingEdgeKey::TransparentBlack
+                    && key.resolved_mask_sampling.is_none()
+            })
+            && self.layouts.keys().all(|key| is_blur_program(key.program))
+            && self.shaders.keys().all(|key| is_blur_program(key.program))
+            && self.pipelines.keys().all(|key| {
+                is_blur_program(key.shader.program) && is_blur_program(key.layout.program)
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_only_sixteen_edge_blur_passes_for_test(&self) -> bool {
+        self.samplers.len() == 4
+            && self.layouts.len() == 16
+            && self.shaders.len() == 16
+            && self.pipelines.len() == 16
+            && self.samplers.keys().all(|key| {
+                key.binding_role == ShaderBindingRoleKey::FilterSource
+                    && key.filter == ShaderSamplingFilterKey::Linear
+                    && matches!(
+                        key.edge,
+                        ShaderSamplingEdgeKey::TransparentBlack
+                            | ShaderSamplingEdgeKey::SemanticBorderMirror
+                    )
                     && key.resolved_mask_sampling.is_none()
             })
             && self.layouts.keys().all(|key| is_blur_program(key.program))
@@ -1631,14 +1662,16 @@ impl ProvisionalDevicePassCacheUpdate {
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
-            self.layouts
-                .insert(keys.layout.clone(), create_blur_bind_group_layout(device));
+            self.layouts.insert(
+                keys.layout.clone(),
+                create_blur_bind_group_layout(device, description.edge),
+            );
         }
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
             self.shaders.insert(
                 keys.shader.clone(),
                 device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Surgeist C11 Gaussian blur shader"),
+                    label: Some("Surgeist checked Gaussian blur shader"),
                     source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLUR_WGSL)),
                 }),
             );
@@ -1657,7 +1690,7 @@ impl ProvisionalDevicePassCacheUpdate {
                 .or_else(|| cache.shaders.get(keys.shader))
                 .ok_or_else(|| blur_cache_error("blur shader-module realization was lost"))?;
             let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Surgeist C11 Gaussian blur pipeline layout"),
+                label: Some("Surgeist checked Gaussian blur pipeline layout"),
                 bind_group_layouts: &[Some(layout_handle)],
                 immediate_size: 0,
             });
@@ -1667,7 +1700,7 @@ impl ProvisionalDevicePassCacheUpdate {
                 write_mask: wgpu::ColorWrites::ALL,
             };
             let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Surgeist C11 Gaussian blur pipeline"),
+                label: Some("Surgeist checked Gaussian blur pipeline"),
                 layout: Some(&pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: shader_handle,
@@ -2662,18 +2695,30 @@ fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescript
             "a blur pass must bind exactly one source sampler",
         ));
     };
-    let (axis, input) = blur_program_facts(keys.layout.program)
+    let (axis, input, edge) = blur_program_facts(keys.layout.program)
         .ok_or_else(|| blur_cache_error("a non-blur program reached C11 blur realization"))?;
     let Some(working_format) = keys.shader.working_format else {
         return Err(blur_cache_error(
             "a blur shader key has no selected working format",
         ));
     };
-    if keys.layout.data_bindings.as_slice()
-        != [
+    let expected_data_bindings = match edge {
+        ShaderSamplingEdgeKey::TransparentBlack => vec![
             ShaderDataBindingKey::SpatialUniform,
             ShaderDataBindingKey::GaussianKernel,
-        ]
+        ],
+        ShaderSamplingEdgeKey::SemanticBorderMirror => vec![
+            ShaderDataBindingKey::SpatialUniform,
+            ShaderDataBindingKey::GaussianKernel,
+            ShaderDataBindingKey::BlurEdgeParameters,
+        ],
+        ShaderSamplingEdgeKey::ClampToExtent => {
+            return Err(blur_cache_error(
+                "a Gaussian blur program has no clamp-to-extent edge policy",
+            ));
+        }
+    };
+    if keys.layout.data_bindings != expected_data_bindings
         || keys.shader.program != keys.layout.program
         || &keys.shader.layout != keys.layout
         || keys.shader.samplers.as_slice() != keys.samplers
@@ -2688,7 +2733,7 @@ fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescript
         || sampler.binding_role != ShaderBindingRoleKey::FilterSource
         || sampler.source_format != working_format
         || sampler.filter != ShaderSamplingFilterKey::Linear
-        || sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
+        || sampler.edge != edge
         || sampler.resolved_mask_sampling.is_some()
     {
         return Err(blur_cache_error(
@@ -2698,6 +2743,7 @@ fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescript
     Ok(BlurPassDescription {
         axis,
         input,
+        edge,
         working_format,
     })
 }
@@ -2750,23 +2796,27 @@ fn validate_drop_shadow_colorize_pass_keys(
     Ok(DropShadowColorizePassDescription { working_format })
 }
 
-const fn blur_program_facts(program: ShaderProgramKey) -> Option<(BlurAxis, BlurInput)> {
+const fn blur_program_facts(
+    program: ShaderProgramKey,
+) -> Option<(BlurAxis, BlurInput, ShaderSamplingEdgeKey)> {
     match program {
-        ShaderProgramKey::BlurHorizontal { source_alpha } => Some((
+        ShaderProgramKey::BlurHorizontal { source_alpha, edge } => Some((
             BlurAxis::Horizontal,
             if source_alpha {
                 BlurInput::SourceAlpha
             } else {
                 BlurInput::Rgba
             },
+            edge,
         )),
-        ShaderProgramKey::BlurVertical { source_alpha } => Some((
+        ShaderProgramKey::BlurVertical { source_alpha, edge } => Some((
             BlurAxis::Vertical,
             if source_alpha {
                 BlurInput::SourceAlpha
             } else {
                 BlurInput::Rgba
             },
+            edge,
         )),
         _ => None,
     }
@@ -3127,8 +3177,11 @@ fn create_color_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGro
     })
 }
 
-fn create_blur_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let entries = [
+fn create_blur_bind_group_layout(
+    device: &wgpu::Device,
+    edge: ShaderSamplingEdgeKey,
+) -> wgpu::BindGroupLayout {
+    let mut entries = vec![
         wgpu::BindGroupLayoutEntry {
             binding: 0,
             visibility: wgpu::ShaderStages::FRAGMENT,
@@ -3166,8 +3219,20 @@ fn create_blur_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
             count: None,
         },
     ];
+    if edge == ShaderSamplingEdgeKey::SemanticBorderMirror {
+        entries.push(wgpu::BindGroupLayoutEntry {
+            binding: 4,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(16),
+            },
+            count: None,
+        });
+    }
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C11 Gaussian blur bindings"),
+        label: Some("Surgeist checked Gaussian blur bindings"),
         entries: &entries,
     })
 }
@@ -3218,11 +3283,36 @@ fn create_drop_shadow_colorize_bind_group_layout(device: &wgpu::Device) -> wgpu:
 }
 
 const fn blur_fragment_entry(description: BlurPassDescription) -> &'static str {
-    match (description.axis, description.input) {
-        (BlurAxis::Horizontal, BlurInput::Rgba) => "fragment_horizontal_rgba",
-        (BlurAxis::Vertical, BlurInput::Rgba) => "fragment_vertical_rgba",
-        (BlurAxis::Horizontal, BlurInput::SourceAlpha) => "fragment_horizontal_source_alpha",
-        (BlurAxis::Vertical, BlurInput::SourceAlpha) => "fragment_vertical_source_alpha",
+    match (description.axis, description.input, description.edge) {
+        (BlurAxis::Horizontal, BlurInput::Rgba, ShaderSamplingEdgeKey::TransparentBlack) => {
+            "fragment_horizontal_rgba"
+        }
+        (BlurAxis::Vertical, BlurInput::Rgba, ShaderSamplingEdgeKey::TransparentBlack) => {
+            "fragment_vertical_rgba"
+        }
+        (BlurAxis::Horizontal, BlurInput::SourceAlpha, ShaderSamplingEdgeKey::TransparentBlack) => {
+            "fragment_horizontal_source_alpha"
+        }
+        (BlurAxis::Vertical, BlurInput::SourceAlpha, ShaderSamplingEdgeKey::TransparentBlack) => {
+            "fragment_vertical_source_alpha"
+        }
+        (BlurAxis::Horizontal, BlurInput::Rgba, ShaderSamplingEdgeKey::SemanticBorderMirror) => {
+            "fragment_horizontal_rgba_mirror"
+        }
+        (BlurAxis::Vertical, BlurInput::Rgba, ShaderSamplingEdgeKey::SemanticBorderMirror) => {
+            "fragment_vertical_rgba_mirror"
+        }
+        (
+            BlurAxis::Horizontal,
+            BlurInput::SourceAlpha,
+            ShaderSamplingEdgeKey::SemanticBorderMirror,
+        ) => "fragment_horizontal_source_alpha_mirror",
+        (
+            BlurAxis::Vertical,
+            BlurInput::SourceAlpha,
+            ShaderSamplingEdgeKey::SemanticBorderMirror,
+        ) => "fragment_vertical_source_alpha_mirror",
+        (_, _, ShaderSamplingEdgeKey::ClampToExtent) => "invalid_blur_edge_policy",
     }
 }
 
@@ -3623,6 +3713,78 @@ pub(crate) fn c11_blur_pass_key_facts_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C12BackdropBlurPassKeyFactsForTest {
+    pub(crate) horizontal: bool,
+    pub(crate) source_alpha: bool,
+    pub(crate) source_role: ShaderBindingRoleKey,
+    pub(crate) source_format: ShaderTextureFormatKey,
+    pub(crate) working_format: ShaderTextureFormatKey,
+    pub(crate) target_format: ShaderTextureFormatKey,
+    pub(crate) has_only_linear_mirror_sampler: bool,
+    pub(crate) has_exact_data_bindings: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c12_backdrop_blur_pass_key_facts_for_test(
+    samplers: &[SamplerKey],
+    layout: &BindGroupLayoutKey,
+    shader: &ShaderModuleKey,
+    pipeline: &RenderPipelineKey,
+) -> Option<C12BackdropBlurPassKeyFactsForTest> {
+    let [sampled_texture] = layout.sampled_textures.as_slice() else {
+        return None;
+    };
+    let description = validate_blur_pass_keys(BlurPassKeyRefs {
+        samplers,
+        layout,
+        shader,
+        pipeline,
+    })
+    .ok()?;
+    Some(C12BackdropBlurPassKeyFactsForTest {
+        horizontal: description.axis == BlurAxis::Horizontal,
+        source_alpha: description.input == BlurInput::SourceAlpha,
+        source_role: sampled_texture.binding_role,
+        source_format: sampled_texture.source_format,
+        working_format: description.working_format,
+        target_format: pipeline.target_format,
+        has_only_linear_mirror_sampler: matches!(
+            samplers,
+            [SamplerKey {
+                binding_role: ShaderBindingRoleKey::FilterSource,
+                filter: ShaderSamplingFilterKey::Linear,
+                edge: ShaderSamplingEdgeKey::SemanticBorderMirror,
+                resolved_mask_sampling: None,
+                ..
+            }]
+        ),
+        has_exact_data_bindings: layout.data_bindings.as_slice()
+            == [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::GaussianKernel,
+                ShaderDataBindingKey::BlurEdgeParameters,
+            ],
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn c12_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test() -> bool {
+    BLUR_WGSL.contains("let logical_sample = destination_point(destination_position)")
+        && BLUR_WGSL.contains("+ axis * offset / spatial.source_origin_scale.z;")
+        && BLUR_WGSL.contains("let mirrored_sample = mirror_logical_point(logical_sample);")
+        && BLUR_WGSL.contains(
+            "return (mirrored_sample - spatial.source_origin_scale.xy)\n        * spatial.source_origin_scale.z;",
+        )
+        && BLUR_WGSL.contains("let bounds = blur_edge.semantic_minimum_maximum;")
+        && BLUR_WGSL.contains("fn fragment_horizontal_rgba_mirror(")
+        && BLUR_WGSL.contains("fn fragment_vertical_rgba_mirror(")
+        && BLUR_WGSL.contains("fn fragment_horizontal_source_alpha_mirror(")
+        && BLUR_WGSL.contains("fn fragment_vertical_source_alpha_mirror(")
+        && BLUR_WGSL.contains("sample_transparent_black(center + axis * sample.offset)")
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct C11DropShadowColorizeKeyFactsForTest {
     pub(crate) source_role: ShaderBindingRoleKey,
     pub(crate) source_format: ShaderTextureFormatKey,
@@ -3746,6 +3908,47 @@ impl PassSpatialUniformBytes {
     #[must_use]
     pub(crate) const fn into_bytes_for_test(self) -> [u8; 48] {
         self.0
+    }
+}
+
+/// Exact semantic backdrop mirror rectangle in logical coordinates.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct BlurEdgeParameterBytes([u8; 16]);
+
+impl BlurEdgeParameterBytes {
+    pub(crate) fn try_from_semantic_bounds(bounds: super::Rect) -> Result<Self> {
+        let minimum_x = narrow_spatial_scalar("blur semantic mirror minimum x", bounds.x())?;
+        let minimum_y = narrow_spatial_scalar("blur semantic mirror minimum y", bounds.y())?;
+        let maximum_x = narrow_spatial_scalar(
+            "blur semantic mirror maximum x",
+            bounds.x() + bounds.width(),
+        )?;
+        let maximum_y = narrow_spatial_scalar(
+            "blur semantic mirror maximum y",
+            bounds.y() + bounds.height(),
+        )?;
+        if maximum_x <= minimum_x || maximum_y <= minimum_y {
+            return Err(Error::invalid_value(
+                "blur semantic mirror bounds",
+                format!("{bounds:?}"),
+                "must narrow to a finite positive logical rectangle",
+            ));
+        }
+        let mut bytes = [0_u8; 16];
+        for (index, value) in [minimum_x, minimum_y, maximum_x, maximum_y]
+            .into_iter()
+            .enumerate()
+        {
+            let offset = index * 4;
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        Ok(Self(bytes))
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn as_bytes(&self) -> &[u8; 16] {
+        &self.0
     }
 }
 

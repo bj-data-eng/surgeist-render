@@ -11791,6 +11791,88 @@ fn c12_copy_backdrop_cache_realizes_checked_working_format_programs() {
 }
 
 #[test]
+fn c12_blur_cache_separates_transparent_and_mirrored_edge_programs() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap_or_panic_for_test("C12 checked blur realization requires backend selection")
+        .unwrap_or_panic_for_test("C12 checked blur realization requires a host adapter");
+    let ready = backend
+        .ready_device_state_borrow_for_test(identity)
+        .unwrap_or_panic_for_test("C12 checked blur realization requires a ready device");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let observed = pollster::block_on(
+        super::pass::c12_blur_cache_realization_observation_for_test(
+            ready.device_for_test(),
+            c11_authored_filter_steps_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c12_bounded_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+            capabilities,
+        ),
+    )
+    .unwrap_or_panic_for_test("C12 transparent and mirrored blur programs must reach realization");
+
+    assert!(
+        observed.realizes_all_transparent_and_mirrored_programs
+            && observed.checked_scope_is_clean
+            && observed.publishes_exact_edge_programs
+            && observed.edge_program_keys_are_distinct,
+        "the checked blur cache does not distinguish transparent and mirrored edge programs"
+    );
+}
+
+#[test]
+fn c12_backdrop_blur_layout_carries_semantic_mirror_bounds() {
+    let observed = super::pass::c12_backdrop_blur_layout_observation_for_test(
+        c12_bounded_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.realizes_all_axis_input_precision_and_edge_keys
+            && observed.binds_exact_working_source
+            && observed.binds_only_one_linear_mirror_sampler
+            && observed.binds_spatial_kernel_and_semantic_bounds
+            && observed.targets_only_the_working_format
+            && observed.semantic_bounds_match_every_mirrored_read
+            && observed.shader_mirrors_logical_bounds_before_texture_mapping,
+        "the backdrop blur layout omits exact semantic mirror bounds or program facts"
+    );
+}
+
+#[test]
+fn c12_backdrop_filter_chain_preserves_authored_order_and_clamp_boundaries() {
+    use super::pass::C11FilterPassTagForTest as Tag;
+
+    let observed = super::pass::c12_backdrop_filter_chain_observation_for_test(
+        c12_bounded_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.pass_order
+            == [
+                Tag::Color,
+                Tag::BlurHorizontalRgba,
+                Tag::BlurVerticalRgba,
+                Tag::BlurHorizontalSourceAlpha,
+                Tag::BlurVerticalSourceAlpha,
+                Tag::DropShadowColorize,
+                Tag::DropShadowMerge,
+            ]
+            && observed.every_backdrop_blur_uses_mirror
+            && observed.source_alpha_blur_uses_mirror
+            && observed.every_color_operation_retains_one_clamp
+            && observed.semantic_bounds_are_exact
+            && observed.every_mirrored_stage_is_realizable,
+        "the authored backdrop filter chain contains unrealizable mirrored stages"
+    );
+}
+
+#[test]
 fn copy_backdrop_maps_signed_bounds_and_transparent_surface_edges() {
     let source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/shaders/copy_backdrop.wgsl"),

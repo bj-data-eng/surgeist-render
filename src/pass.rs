@@ -36,13 +36,14 @@ use super::{
         ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
     },
     shader::{
-        BindGroupLayoutKey, ColorFilterOperationBufferLimits, ColorFilterOperationBytes,
-        CompositeParameterBytes, DevicePassCache, DropShadowParameterBytes,
-        PassSpatialUniformBytes, ProvisionalC08PassObjects, ProvisionalColorFilterPassObjects,
-        ProvisionalCompositePassObjects, ProvisionalDevicePassCacheUpdate, RenderPipelineKey,
-        SamplerKey, ShaderBindingRoleKey, ShaderCompositeKey, ShaderCompositePathKey,
-        ShaderDataBindingKey, ShaderMaskQualityKey, ShaderMaskSamplingKey, ShaderModuleKey,
-        ShaderProgramKey, ShaderSamplingEdgeKey, ShaderSamplingFilterKey, ShaderTextureFormatKey,
+        BindGroupLayoutKey, BlurEdgeParameterBytes, ColorFilterOperationBufferLimits,
+        ColorFilterOperationBytes, CompositeParameterBytes, DevicePassCache,
+        DropShadowParameterBytes, PassSpatialUniformBytes, ProvisionalC08PassObjects,
+        ProvisionalColorFilterPassObjects, ProvisionalCompositePassObjects,
+        ProvisionalDevicePassCacheUpdate, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey,
+        ShaderCompositeKey, ShaderCompositePathKey, ShaderDataBindingKey, ShaderMaskQualityKey,
+        ShaderMaskSamplingKey, ShaderModuleKey, ShaderProgramKey, ShaderSamplingEdgeKey,
+        ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
     style::ColorFilterOp,
     texture::EffectTextureDescriptor,
@@ -367,6 +368,38 @@ pub(crate) struct C12CopyBackdropCacheRealizationObservationForTest {
     pub(crate) checked_scope_is_clean: bool,
     pub(crate) publishes_only_copy_backdrop_entries: bool,
     pub(crate) rejects_unsupported_format_before_publication: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12BlurCacheRealizationObservationForTest {
+    pub(crate) realizes_all_transparent_and_mirrored_programs: bool,
+    pub(crate) checked_scope_is_clean: bool,
+    pub(crate) publishes_exact_edge_programs: bool,
+    pub(crate) edge_program_keys_are_distinct: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12BackdropBlurLayoutObservationForTest {
+    pub(crate) realizes_all_axis_input_precision_and_edge_keys: bool,
+    pub(crate) binds_exact_working_source: bool,
+    pub(crate) binds_only_one_linear_mirror_sampler: bool,
+    pub(crate) binds_spatial_kernel_and_semantic_bounds: bool,
+    pub(crate) targets_only_the_working_format: bool,
+    pub(crate) semantic_bounds_match_every_mirrored_read: bool,
+    pub(crate) shader_mirrors_logical_bounds_before_texture_mapping: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12BackdropFilterChainObservationForTest {
+    pub(crate) pass_order: Vec<C11FilterPassTagForTest>,
+    pub(crate) every_backdrop_blur_uses_mirror: bool,
+    pub(crate) source_alpha_blur_uses_mirror: bool,
+    pub(crate) every_color_operation_retains_one_clamp: bool,
+    pub(crate) semantic_bounds_are_exact: bool,
+    pub(crate) every_mirrored_stage_is_realizable: bool,
 }
 
 #[cfg(test)]
@@ -931,6 +964,110 @@ pub(crate) async fn c11_blur_cache_realization_observation_for_test(
         publishes_only_blur_entries: all_requests_are_cached
             && cache.contains_only_eight_blur_passes_for_test(),
     })
+}
+
+#[cfg(test)]
+pub(crate) async fn c12_blur_cache_realization_observation_for_test(
+    device: &wgpu::Device,
+    ordinary_filters: Vec<super::FilterList>,
+    ordinary_commands: RenderCommands,
+    backdrop_commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C12BlurCacheRealizationObservationForTest> {
+    capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
+    capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
+    let mut transparent = Vec::with_capacity(8);
+    let mut mirrored = Vec::with_capacity(8);
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        transparent.extend(c11_blur_cache_requests_for_test(
+            ordinary_filters.clone(),
+            ordinary_commands.clone(),
+            context,
+            capabilities,
+            working_format,
+        )?);
+        mirrored.extend(
+            c12_backdrop_blur_cache_requests_for_test(
+                backdrop_commands.clone(),
+                context,
+                capabilities,
+                working_format,
+            )?
+            .into_iter()
+            .map(|request| request.keys),
+        );
+    }
+    let edge_program_keys_are_distinct = transparent.iter().all(|ordinary| {
+        mirrored
+            .iter()
+            .all(|backdrop| ordinary.shader() != backdrop.shader())
+    });
+    let mut cache = DevicePassCache::new();
+    let mut update = cache.provisional_update();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let realization = (|| -> Result<usize> {
+        let mut count = 0_usize;
+        for keys in transparent.iter().chain(&mirrored) {
+            update
+                .realize_blur_pass(
+                    device,
+                    &cache,
+                    keys.samplers(),
+                    keys.layout(),
+                    keys.shader(),
+                    keys.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            count = count.saturating_add(1);
+        }
+        Ok(count)
+    })();
+    let scope_error = error_scope.pop().await;
+    let realized_count = realization?;
+    if let Some(error) = scope_error {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            format!("C12 checked edge-aware blur realization failed validation: {error}"),
+        ));
+    }
+    update.commit(&mut cache)?;
+    let all_requests_are_cached = transparent.iter().chain(&mirrored).all(|keys| {
+        cache.contains_blur_pass_for_test(
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        )
+    });
+    Ok(C12BlurCacheRealizationObservationForTest {
+        realizes_all_transparent_and_mirrored_programs: realized_count == 16,
+        checked_scope_is_clean: true,
+        publishes_exact_edge_programs: all_requests_are_cached
+            && cache.contains_only_sixteen_edge_blur_passes_for_test(),
+        edge_program_keys_are_distinct,
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn c12_backdrop_blur_layout_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C12BackdropBlurLayoutObservationForTest {
+    c12_backdrop_blur_layout_observation(commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c12_backdrop_filter_chain_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C12BackdropFilterChainObservationForTest {
+    c12_backdrop_filter_chain_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -1539,6 +1676,156 @@ fn c11_blur_cache_requests_for_test(
         ));
     }
     Ok(passes)
+}
+
+#[cfg(test)]
+struct C12BackdropBlurCacheRequestForTest {
+    keys: RuntimePassCacheKeys,
+    horizontal: bool,
+    source_alpha: bool,
+    semantic_bounds: Rect,
+    read_edge: RuntimeSamplingEdge,
+    edge_parameters: BlurEdgeParameterBytes,
+}
+
+#[cfg(test)]
+fn c12_backdrop_blur_cache_requests_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> Result<Vec<C12BackdropBlurCacheRequestForTest>> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+        return Err(lowering_error(
+            "the C12 backdrop blur cache fixture did not produce a GPU graph",
+        ));
+    };
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let PrePreparationGraphClassification::ExactC12(preparable) =
+        PrePreparationGraphClassification::classify(lowered)
+    else {
+        return Err(lowering_error(
+            "the C12 backdrop blur fixture is outside the exact bounded graph",
+        ));
+    };
+    let mut requests = Vec::with_capacity(4);
+    for pass in &preparable.closed.lowered.passes {
+        let blur = match &pass.kind {
+            RuntimePassKind::BlurHorizontal(Some(blur))
+            | RuntimePassKind::BlurVertical(Some(blur)) => blur,
+            _ => continue,
+        };
+        let RuntimeSamplingEdge::SemanticBorderMirror(bounds) = blur.edge else {
+            continue;
+        };
+        let [read] = pass.reads.as_slice() else {
+            return Err(lowering_error(
+                "a C12 mirrored blur must read one filter source",
+            ));
+        };
+        requests.push(C12BackdropBlurCacheRequestForTest {
+            keys: pass
+                .cache_keys
+                .clone()
+                .ok_or_else(|| lowering_error("a C12 mirrored blur has no checked cache keys"))?,
+            horizontal: blur.axis == RuntimeBlurAxis::Horizontal,
+            source_alpha: blur.input == RuntimeBlurInput::SourceAlpha,
+            semantic_bounds: bounds,
+            read_edge: read.sampling_edge,
+            edge_parameters: BlurEdgeParameterBytes::try_from_semantic_bounds(bounds)?,
+        });
+    }
+    if requests.len() != 4 {
+        return Err(lowering_error(
+            "the C12 backdrop blur fixture must contain four mirrored axis/input requests",
+        ));
+    }
+    Ok(requests)
+}
+
+#[cfg(test)]
+fn c12_backdrop_blur_layout_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C12BackdropBlurLayoutObservationForTest> {
+    let mut requests = Vec::with_capacity(8);
+    let mut facts = Vec::with_capacity(8);
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        for request in c12_backdrop_blur_cache_requests_for_test(
+            commands.clone(),
+            context,
+            capabilities,
+            working_format,
+        )? {
+            let Some(observed) = super::shader::c12_backdrop_blur_pass_key_facts_for_test(
+                request.keys.samplers(),
+                request.keys.layout(),
+                request.keys.shader(),
+                request.keys.pipeline(),
+            ) else {
+                return Ok(C12BackdropBlurLayoutObservationForTest::default());
+            };
+            requests.push(request);
+            facts.push(observed);
+        }
+    }
+    let realizes_all_axis_input_precision_and_edge_keys = facts.len() == 8
+        && requests.iter().zip(&facts).all(|(request, facts)| {
+            request.horizontal == facts.horizontal && request.source_alpha == facts.source_alpha
+        })
+        && [
+            ShaderTextureFormatKey::working(WorkingFormat::HighPrecision),
+            ShaderTextureFormatKey::working(WorkingFormat::ReducedPrecision),
+        ]
+        .into_iter()
+        .all(|format| {
+            [true, false].into_iter().all(|horizontal| {
+                [true, false].into_iter().all(|source_alpha| {
+                    facts
+                        .iter()
+                        .filter(|facts| {
+                            facts.working_format == format
+                                && facts.horizontal == horizontal
+                                && facts.source_alpha == source_alpha
+                        })
+                        .count()
+                        == 1
+                })
+            })
+        });
+    let semantic_bounds_match_every_mirrored_read = requests.iter().all(|request| {
+        request.read_edge == RuntimeSamplingEdge::SemanticBorderMirror(request.semantic_bounds)
+            && BlurEdgeParameterBytes::try_from_semantic_bounds(request.semantic_bounds)
+                .is_ok_and(|expected| request.edge_parameters == expected)
+    });
+    Ok(C12BackdropBlurLayoutObservationForTest {
+        realizes_all_axis_input_precision_and_edge_keys,
+        binds_exact_working_source: facts.iter().all(|facts| {
+            facts.source_role == ShaderBindingRoleKey::FilterSource
+                && facts.source_format == facts.working_format
+        }),
+        binds_only_one_linear_mirror_sampler: facts
+            .iter()
+            .all(|facts| facts.has_only_linear_mirror_sampler),
+        binds_spatial_kernel_and_semantic_bounds: facts
+            .iter()
+            .all(|facts| facts.has_exact_data_bindings),
+        targets_only_the_working_format: facts
+            .iter()
+            .all(|facts| facts.target_format == facts.working_format),
+        semantic_bounds_match_every_mirrored_read,
+        shader_mirrors_logical_bounds_before_texture_mapping:
+            super::shader::c12_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test(),
+    })
 }
 
 #[cfg(test)]
@@ -7816,6 +8103,109 @@ fn c12_backdrop_graph_observation(
 }
 
 #[cfg(test)]
+fn c12_backdrop_filter_chain_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<C12BackdropFilterChainObservationForTest> {
+    let FramePlan::GpuGraph(graph) = commands.clone().plan_for(context).ok()? else {
+        return None;
+    };
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok()?;
+    let PrePreparationGraphClassification::ExactC12(preparable) =
+        PrePreparationGraphClassification::classify(lowered)
+    else {
+        return None;
+    };
+    let facts = &preparable.closed.facts;
+    let pass_by_id = preparable
+        .closed
+        .lowered
+        .passes
+        .iter()
+        .map(|pass| (pass.id, pass))
+        .collect::<BTreeMap<_, _>>();
+    let blur_edges = facts
+        .blurs
+        .iter()
+        .map(|blur| (blur.horizontal, blur.vertical, blur.blur.edge))
+        .chain(
+            facts
+                .drop_shadows
+                .iter()
+                .map(|shadow| (shadow.horizontal, shadow.vertical, shadow.blur.edge)),
+        )
+        .collect::<Vec<_>>();
+    let semantic_bounds_are_exact = !blur_edges.is_empty()
+        && blur_edges.iter().all(|(horizontal, vertical, edge)| {
+            let RuntimeSamplingEdge::SemanticBorderMirror(bounds) = edge else {
+                return false;
+            };
+            BlurEdgeParameterBytes::try_from_semantic_bounds(*bounds).is_ok()
+                && [horizontal, vertical].into_iter().all(|pass| {
+                    pass_by_id.get(pass).is_some_and(|pass| {
+                        matches!(
+                            pass.reads.as_slice(),
+                            [RuntimeReadBinding {
+                                sampling_edge:
+                                    RuntimeSamplingEdge::SemanticBorderMirror(read_bounds),
+                                ..
+                            }] if read_bounds == bounds
+                        )
+                    })
+                })
+        });
+    let requests = c12_backdrop_blur_cache_requests_for_test(
+        commands,
+        context,
+        capabilities,
+        WorkingFormat::HighPrecision,
+    )
+    .ok()?;
+    let every_mirrored_stage_is_realizable = requests.iter().all(|request| {
+        super::shader::c12_backdrop_blur_pass_key_facts_for_test(
+            request.keys.samplers(),
+            request.keys.layout(),
+            request.keys.shader(),
+            request.keys.pipeline(),
+        )
+        .is_some_and(|facts| facts.has_only_linear_mirror_sampler && facts.has_exact_data_bindings)
+    });
+    Some(C12BackdropFilterChainObservationForTest {
+        pass_order: c11_filter_pass_tags(facts),
+        every_backdrop_blur_uses_mirror: !facts.blurs.is_empty()
+            && facts
+                .blurs
+                .iter()
+                .all(|blur| matches!(blur.blur.edge, RuntimeSamplingEdge::SemanticBorderMirror(_))),
+        source_alpha_blur_uses_mirror: !facts.drop_shadows.is_empty()
+            && facts.drop_shadows.iter().all(|shadow| {
+                shadow.blur.input == RuntimeBlurInput::SourceAlpha
+                    && matches!(
+                        shadow.blur.edge,
+                        RuntimeSamplingEdge::SemanticBorderMirror(_)
+                    )
+            }),
+        every_color_operation_retains_one_clamp: !facts.color_filters.is_empty()
+            && facts.color_filters.iter().all(|filter| {
+                !filter.filter.operations.is_empty()
+                    && filter.filter.operations.iter().all(|operation| {
+                        operation.clamp_boundary
+                            == RuntimeColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply
+                    })
+            }),
+        semantic_bounds_are_exact,
+        every_mirrored_stage_is_realizable,
+    })
+}
+
+#[cfg(test)]
 fn backdrop_filter_passes(steps: &[ExecutableFilterStepFacts]) -> Vec<RuntimePassId> {
     steps
         .iter()
@@ -8773,6 +9163,7 @@ struct RuntimeKernelPreparationRequest {
 struct RuntimePassPreparationRequest {
     runtime: RuntimePass,
     spatial_uniform: Option<PassSpatialUniformBytes>,
+    blur_edge_parameters: Option<BlurEdgeParameterBytes>,
     color_filter_operations: Option<ColorFilterOperationBytes>,
     drop_shadow_parameters: Option<DropShadowParameterBytes>,
     composite_parameters: Option<CompositeParameterBytes>,
@@ -9290,6 +9681,7 @@ fn prepare_runtime_pass_requests(
         .map(|pass| {
             let spatial_uniform =
                 prepared_pass_spatial_uniform(pass, resources, lowered.root_working_image)?;
+            let blur_edge_parameters = prepare_blur_edge_parameters(pass)?;
             let color_filter_operations =
                 prepare_color_filter_operations(pass, color_filter_limits)?;
             let drop_shadow_parameters = prepare_drop_shadow_parameters(pass)?;
@@ -9302,6 +9694,7 @@ fn prepare_runtime_pass_requests(
             Ok(RuntimePassPreparationRequest {
                 runtime: pass.clone(),
                 spatial_uniform,
+                blur_edge_parameters,
                 color_filter_operations,
                 drop_shadow_parameters,
                 composite_parameters,
@@ -9311,6 +9704,24 @@ fn prepare_runtime_pass_requests(
             })
         })
         .collect()
+}
+
+fn prepare_blur_edge_parameters(pass: &RuntimePass) -> Result<Option<BlurEdgeParameterBytes>> {
+    let blur = match &pass.kind {
+        RuntimePassKind::BlurHorizontal(Some(blur)) | RuntimePassKind::BlurVertical(Some(blur)) => {
+            blur
+        }
+        _ => return Ok(None),
+    };
+    match blur.edge {
+        RuntimeSamplingEdge::SemanticBorderMirror(bounds) => {
+            BlurEdgeParameterBytes::try_from_semantic_bounds(bounds).map(Some)
+        }
+        RuntimeSamplingEdge::TransparentBlack => Ok(None),
+        RuntimeSamplingEdge::ClampToExtent => Err(preparation_error(
+            "a Gaussian blur cannot use clamp-to-extent edge semantics",
+        )),
+    }
 }
 
 fn prepare_drop_shadow_parameters(pass: &RuntimePass) -> Result<Option<DropShadowParameterBytes>> {
@@ -10516,6 +10927,7 @@ struct C08PreparedPassEncodingRequest {
     reads: Vec<RuntimeReadBinding>,
     result: RuntimeResultBinding,
     spatial_uniform: Option<PassSpatialUniformBytes>,
+    blur_edge_parameters: Option<BlurEdgeParameterBytes>,
     color_filter_operations: Option<ColorFilterOperationBytes>,
     drop_shadow_parameters: Option<DropShadowParameterBytes>,
     composite_parameters: Option<CompositeParameterBytes>,
@@ -10532,6 +10944,7 @@ impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
             reads: request.runtime.reads.clone(),
             result: request.runtime.result,
             spatial_uniform: request.spatial_uniform.clone(),
+            blur_edge_parameters: request.blur_edge_parameters.clone(),
             color_filter_operations: request.color_filter_operations.clone(),
             drop_shadow_parameters: request.drop_shadow_parameters.clone(),
             composite_parameters: request.composite_parameters.clone(),
@@ -13123,6 +13536,7 @@ impl<'device> PreparedGraph<'device> {
             || keys.samplers() != [source.sampler_key()]
             || source.sampling_filter() != RuntimeSamplingFilter::Linear
             || source.sampling_edge() != RuntimeSamplingEdge::TransparentBlack
+            || request.blur_edge_parameters.is_some()
             || self.resource_request(source.resource())?.format
                 != RuntimeResourceFormat::Working(self.plan.working_format)
             || self.resource_request(target)?.format
@@ -14453,6 +14867,19 @@ fn prepared_pass_view_is_consistent(pass: &PreparedPassView<'_>) -> bool {
             .is_some_and(|bytes| bytes.as_bytes().len() == 48)
             == pass.cache_keys().is_some()
         && pass
+            .blur_edge_parameters()
+            .is_some_and(|bytes| bytes.as_bytes().len() == 16)
+            == matches!(
+                pass.kind(),
+                RuntimePassKind::BlurHorizontal(Some(RuntimeBlur {
+                    edge: RuntimeSamplingEdge::SemanticBorderMirror(_),
+                    ..
+                })) | RuntimePassKind::BlurVertical(Some(RuntimeBlur {
+                    edge: RuntimeSamplingEdge::SemanticBorderMirror(_),
+                    ..
+                }))
+            )
+        && pass
             .composite_parameters()
             .is_some_and(|bytes| bytes.as_bytes().len() == 112)
             == matches!(
@@ -14509,6 +14936,10 @@ impl PreparedPassView<'_> {
 
     pub(crate) const fn spatial_uniform(&self) -> Option<&PassSpatialUniformBytes> {
         self.request.spatial_uniform.as_ref()
+    }
+
+    pub(crate) const fn blur_edge_parameters(&self) -> Option<&BlurEdgeParameterBytes> {
+        self.request.blur_edge_parameters.as_ref()
     }
 
     pub(crate) const fn composite_parameters(&self) -> Option<&CompositeParameterBytes> {
@@ -15161,9 +15592,11 @@ fn shader_program(kind: &RuntimePassKind) -> Result<ShaderProgramKey> {
         RuntimePassKind::ColorFilter(Some(_)) => Ok(ShaderProgramKey::ColorFilter),
         RuntimePassKind::BlurHorizontal(Some(blur)) => Ok(ShaderProgramKey::BlurHorizontal {
             source_alpha: blur.input == RuntimeBlurInput::SourceAlpha,
+            edge: shader_sampling_edge(blur.edge),
         }),
         RuntimePassKind::BlurVertical(Some(blur)) => Ok(ShaderProgramKey::BlurVertical {
             source_alpha: blur.input == RuntimeBlurInput::SourceAlpha,
+            edge: shader_sampling_edge(blur.edge),
         }),
         RuntimePassKind::DropShadowColorize(Some(_)) => Ok(ShaderProgramKey::DropShadowColorize),
         RuntimePassKind::Composite(Some(composite)) => Ok(ShaderProgramKey::Composite(
@@ -15211,10 +15644,16 @@ fn shader_data_bindings(kind: &RuntimePassKind) -> Vec<ShaderDataBindingKey> {
             ShaderDataBindingKey::SpatialUniform,
             ShaderDataBindingKey::ColorFilterOperations,
         ],
-        RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_)) => vec![
-            ShaderDataBindingKey::SpatialUniform,
-            ShaderDataBindingKey::GaussianKernel,
-        ],
+        RuntimePassKind::BlurHorizontal(Some(blur)) | RuntimePassKind::BlurVertical(Some(blur)) => {
+            let mut bindings = vec![
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::GaussianKernel,
+            ];
+            if matches!(blur.edge, RuntimeSamplingEdge::SemanticBorderMirror(_)) {
+                bindings.push(ShaderDataBindingKey::BlurEdgeParameters);
+            }
+            bindings
+        }
         RuntimePassKind::DropShadowColorize(Some(_)) => vec![
             ShaderDataBindingKey::SpatialUniform,
             ShaderDataBindingKey::DropShadowParameters,
