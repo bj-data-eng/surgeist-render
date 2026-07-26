@@ -197,9 +197,9 @@ impl Capabilities {
         filters: FilterCapabilities {
             layer_filters: false,
             ordered_filter_lists: true,
-            gpu_color_filter_execution: false,
-            gpu_blur_filter_execution: false,
-            gpu_drop_shadow_filter_execution: false,
+            gpu_color_filter_execution: true,
+            gpu_blur_filter_execution: true,
+            gpu_drop_shadow_filter_execution: true,
             filter_region_planning: true,
         },
         masks_clips: MaskClipCapabilities {

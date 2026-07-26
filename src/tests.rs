@@ -6517,9 +6517,9 @@ fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_e
     let capabilities = Capabilities::CURRENT;
 
     assert!(capabilities.filters().supports_ordered_filter_lists());
-    assert!(!capabilities.filters().supports_gpu_blur_filter_execution());
+    assert!(capabilities.filters().supports_gpu_blur_filter_execution());
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_gpu_drop_shadow_filter_execution()
     );
@@ -6854,7 +6854,7 @@ fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
     let capabilities = Capabilities::CURRENT;
 
     assert!(capabilities.filters().supports_ordered_filter_lists());
-    assert!(!capabilities.filters().supports_gpu_color_filter_execution());
+    assert!(capabilities.filters().supports_gpu_color_filter_execution());
     assert!(
         capabilities
             .image_sampling()
@@ -20326,9 +20326,9 @@ fn sequence12_capabilities_claim_only_implemented_mask_clip_and_no_broad_backdro
     assert!(!offscreen.supports_layer_filter_execution());
     assert!(!offscreen.supports_broad_backdrop_execution());
 
-    assert!(!capabilities.filters().supports_gpu_blur_filter_execution());
+    assert!(capabilities.filters().supports_gpu_blur_filter_execution());
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_gpu_drop_shadow_filter_execution()
     );
@@ -22429,11 +22429,854 @@ fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution
     assert!(!capabilities.supports_mask_composite_modes());
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedPrimaryProbe {
+    Capability(bool),
+    Operation(UnsupportedPrimitive),
+    DiagnosticSurface(SupportedDiagnosticSurface),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SupportedDiagnosticSurface {
+    UnsupportedPrimitive,
+    UnresolvedResource,
+    InvalidValue,
+    DegradedQuality,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DiagnosticPrimaryProbe {
+    UnsupportedPrimitive(UnsupportedPrimitive),
+    UnresolvedResource(UnresolvedResourceKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalPrimaryDisposition {
+    Supported(SupportedPrimaryProbe),
+    Diagnostic(DiagnosticPrimaryProbe),
+    Root(&'static str),
+    OracleOnly(&'static str),
+    FutureRender,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalPrimitiveInventoryRow {
+    id: &'static str,
+    disposition: FinalPrimaryDisposition,
+}
+
+const fn supported_capability(id: &'static str, supported: bool) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::Supported(SupportedPrimaryProbe::Capability(
+            supported,
+        )),
+    }
+}
+
+const fn supported_operation(
+    id: &'static str,
+    family: PrimitiveFamily,
+    operation: PrimitiveOperation,
+) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::Supported(SupportedPrimaryProbe::Operation(
+            UnsupportedPrimitive::new(family, operation),
+        )),
+    }
+}
+
+const fn supported_diagnostic(
+    id: &'static str,
+    surface: SupportedDiagnosticSurface,
+) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::Supported(SupportedPrimaryProbe::DiagnosticSurface(
+            surface,
+        )),
+    }
+}
+
+const fn diagnostic_operation(
+    id: &'static str,
+    family: PrimitiveFamily,
+    operation: PrimitiveOperation,
+) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::Diagnostic(
+            DiagnosticPrimaryProbe::UnsupportedPrimitive(UnsupportedPrimitive::new(
+                family, operation,
+            )),
+        ),
+    }
+}
+
+const fn diagnostic_resource(
+    id: &'static str,
+    kind: UnresolvedResourceKind,
+) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::Diagnostic(
+            DiagnosticPrimaryProbe::UnresolvedResource(kind),
+        ),
+    }
+}
+
+const fn root(id: &'static str, operation_identity: &'static str) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::Root(operation_identity),
+    }
+}
+
+const fn oracle_only(
+    id: &'static str,
+    production_identity: &'static str,
+) -> FinalPrimitiveInventoryRow {
+    FinalPrimitiveInventoryRow {
+        id,
+        disposition: FinalPrimaryDisposition::OracleOnly(production_identity),
+    }
+}
+
+const FINAL_PRIMITIVE_IDS: [&str; 101] = [
+    "PNT-01", "PNT-02", "PNT-03", "PNT-04", "PNT-05", "PNT-06", "PNT-07", "PNT-08", "PNT-09",
+    "GEO-01", "GEO-02", "GEO-03", "GEO-04", "GEO-05", "GEO-06", "GEO-07", "GEO-08", "IMG-01",
+    "IMG-02", "IMG-03", "IMG-04", "IMG-05", "IMG-06", "IMG-07", "IMG-08", "IMG-09", "IMG-10",
+    "BOX-01", "BOX-02", "BOX-03", "BOX-04", "BOX-05", "BOX-06", "BOX-07", "BOX-08", "BOX-09",
+    "BOX-10", "SHD-01", "SHD-02", "SHD-03", "SHD-04", "SHD-05", "SHD-06", "FLT-01", "FLT-02",
+    "FLT-03", "FLT-04", "FLT-05", "FLT-06", "FLT-07", "FLT-08", "FLT-09", "FLT-10", "FLT-11",
+    "FLT-12", "FLT-13", "FLT-14", "BDP-01", "BDP-02", "BDP-03", "BDP-04", "MSK-01", "MSK-02",
+    "MSK-03", "MSK-04", "MSK-05", "MSK-06", "MSK-07", "MSK-08", "CMP-01", "CMP-02", "CMP-03",
+    "CMP-04", "CMP-05", "XFM-01", "XFM-02", "XFM-03", "XFM-04", "XFM-05", "TXT-01", "TXT-02",
+    "TXT-03", "TXT-04", "TXT-05", "RES-01", "RES-02", "RES-03", "RES-04", "DIA-01", "DIA-02",
+    "DIA-03", "DIA-04", "DIA-05", "BEP-01", "BEP-02", "BEP-03", "BEP-04", "BEP-05", "BEP-06",
+    "BEP-07", "BEP-08",
+];
+
+const FINAL_PRIMITIVE_INVENTORY: [FinalPrimitiveInventoryRow; 101] = [
+    supported_capability(
+        "PNT-01",
+        Capabilities::CURRENT.paint_sources().supports_solid_rgba(),
+    ),
+    root("PNT-02", "SymbolicColorToken"),
+    diagnostic_operation(
+        "PNT-03",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::UnsupportedColorSpace,
+    ),
+    supported_capability(
+        "PNT-04",
+        Capabilities::CURRENT.paint_sources().supports_gradients(),
+    ),
+    supported_capability(
+        "PNT-05",
+        Capabilities::CURRENT.paint_sources().supports_gradients(),
+    ),
+    supported_capability(
+        "PNT-06",
+        Capabilities::CURRENT.paint_sources().supports_gradients(),
+    ),
+    diagnostic_operation(
+        "PNT-07",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::RepeatingGradient,
+    ),
+    supported_capability(
+        "PNT-08",
+        Capabilities::CURRENT.paint_sources().supports_image_paint(),
+    ),
+    diagnostic_operation(
+        "PNT-09",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::FilteredImagePaint,
+    ),
+    supported_capability(
+        "GEO-01",
+        Capabilities::CURRENT
+            .geometry_targets()
+            .supports_rect_fill_stroke(),
+    ),
+    supported_capability(
+        "GEO-02",
+        Capabilities::CURRENT
+            .geometry_targets()
+            .supports_rounded_rect_fill_stroke(),
+    ),
+    supported_capability(
+        "GEO-03",
+        Capabilities::CURRENT
+            .geometry_targets()
+            .supports_circle_ellipse_fill_stroke(),
+    ),
+    supported_capability(
+        "GEO-04",
+        Capabilities::CURRENT
+            .geometry_targets()
+            .supports_arbitrary_path_fill(),
+    ),
+    supported_capability(
+        "GEO-05",
+        Capabilities::CURRENT
+            .geometry_targets()
+            .supports_arbitrary_path_centered_stroke(),
+    ),
+    diagnostic_operation(
+        "GEO-06",
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+    ),
+    diagnostic_operation(
+        "GEO-07",
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryBooleanOperation,
+    ),
+    root("GEO-08", "HitTestGeometry"),
+    supported_capability(
+        "IMG-01",
+        Capabilities::CURRENT.image_sampling().supports_image_fit(),
+    ),
+    supported_capability(
+        "IMG-02",
+        Capabilities::CURRENT
+            .image_sampling()
+            .supports_background_position(),
+    ),
+    supported_capability(
+        "IMG-03",
+        Capabilities::CURRENT
+            .image_sampling()
+            .supports_background_size(),
+    ),
+    supported_capability(
+        "IMG-04",
+        Capabilities::CURRENT.image_sampling().supports_repeat_xy(),
+    ),
+    diagnostic_operation(
+        "IMG-05",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::BackgroundRepeatRound,
+    ),
+    diagnostic_operation(
+        "IMG-06",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::BackgroundRepeatSpace,
+    ),
+    supported_capability(
+        "IMG-07",
+        Capabilities::CURRENT
+            .image_sampling()
+            .supports_background_position(),
+    ),
+    supported_operation(
+        "IMG-08",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ShapeClip,
+    ),
+    supported_capability(
+        "IMG-09",
+        Capabilities::CURRENT
+            .transform_coordinate_spaces()
+            .supports_coordinate_space_tags(),
+    ),
+    supported_capability(
+        "IMG-10",
+        Capabilities::CURRENT.paint_sources().supports_image_paint(),
+    ),
+    supported_capability(
+        "BOX-01",
+        Capabilities::CURRENT.paint_sources().supports_image_paint(),
+    ),
+    supported_capability(
+        "BOX-02",
+        Capabilities::CURRENT
+            .box_decorations()
+            .supports_border_solid_style(),
+    ),
+    supported_capability(
+        "BOX-03",
+        Capabilities::CURRENT
+            .box_decorations()
+            .supports_border_none_hidden_styles(),
+    ),
+    supported_capability(
+        "BOX-04",
+        Capabilities::CURRENT
+            .box_decorations()
+            .supports_border_dashed_dotted_styles(),
+    ),
+    supported_capability(
+        "BOX-05",
+        Capabilities::CURRENT
+            .box_decorations()
+            .supports_border_double_style(),
+    ),
+    diagnostic_operation(
+        "BOX-06",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderGrooveStyle,
+    ),
+    supported_capability(
+        "BOX-07",
+        Capabilities::CURRENT
+            .box_decorations()
+            .supports_border_radii(),
+    ),
+    supported_capability(
+        "BOX-08",
+        Capabilities::CURRENT.box_decorations().supports_outlines(),
+    ),
+    diagnostic_operation(
+        "BOX-09",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::OutlineDoubleStyle,
+    ),
+    supported_capability(
+        "BOX-10",
+        Capabilities::CURRENT.box_decorations().supports_fragments(),
+    ),
+    supported_capability(
+        "SHD-01",
+        Capabilities::CURRENT
+            .shadows()
+            .supports_rect_rounded_circle_shadows(),
+    ),
+    diagnostic_operation(
+        "SHD-02",
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::InsetBoxShadow,
+    ),
+    supported_capability(
+        "SHD-03",
+        Capabilities::CURRENT
+            .shadows()
+            .supports_rect_rounded_circle_shadows(),
+    ),
+    supported_operation(
+        "SHD-04",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuDropShadowFilterExecution,
+    ),
+    diagnostic_operation(
+        "SHD-05",
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::TextShadow,
+    ),
+    diagnostic_operation(
+        "SHD-06",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::NonSolidShadowPaint,
+    ),
+    supported_operation(
+        "FLT-01",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::OrderedFilterList,
+    ),
+    supported_operation(
+        "FLT-02",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuBlurFilterExecution,
+    ),
+    supported_operation(
+        "FLT-03",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-04",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-05",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-06",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-07",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-08",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-09",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-10",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    diagnostic_resource("FLT-11", UnresolvedResourceKind::Filter),
+    supported_operation(
+        "FLT-12",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuColorFilterExecution,
+    ),
+    supported_operation(
+        "FLT-13",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::FilterRegionPlanning,
+    ),
+    oracle_only("FLT-14", "CpuReferenceBlurFallback"),
+    supported_operation(
+        "BDP-01",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropCapture,
+    ),
+    supported_operation(
+        "BDP-02",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
+    ),
+    diagnostic_operation(
+        "BDP-03",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropIsolationComposition,
+    ),
+    diagnostic_operation(
+        "BDP-04",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::RootBackdropPolicy,
+    ),
+    supported_operation(
+        "MSK-01",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ShapeClip,
+    ),
+    supported_operation(
+        "MSK-02",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ShapeClip,
+    ),
+    diagnostic_operation(
+        "MSK-03",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ClipReferenceExecution,
+    ),
+    supported_operation(
+        "MSK-04",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ShapeClip,
+    ),
+    supported_operation(
+        "MSK-05",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ResolvedAlphaMaskExecution,
+    ),
+    diagnostic_operation(
+        "MSK-06",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LuminanceMaskMode,
+    ),
+    diagnostic_operation(
+        "MSK-07",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::MultiLayerMaskComposition,
+    ),
+    diagnostic_operation(
+        "MSK-08",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::MaskCompositeMode,
+    ),
+    supported_capability(
+        "CMP-01",
+        Capabilities::CURRENT.compositing().supports_layer_opacity(),
+    ),
+    supported_capability(
+        "CMP-02",
+        Capabilities::CURRENT.compositing().supports_blend_modes(),
+    ),
+    diagnostic_operation(
+        "CMP-03",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::BackgroundBlendMode,
+    ),
+    supported_capability(
+        "CMP-04",
+        Capabilities::CURRENT
+            .offscreen_pipeline()
+            .supports_direct_vello_opacity_isolation(),
+    ),
+    diagnostic_operation(
+        "CMP-05",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::PorterDuffCompositeMode,
+    ),
+    supported_capability(
+        "XFM-01",
+        Capabilities::CURRENT
+            .transform_coordinate_spaces()
+            .supports_affine_2d(),
+    ),
+    supported_capability(
+        "XFM-02",
+        Capabilities::CURRENT
+            .transform_coordinate_spaces()
+            .supports_transform_origin(),
+    ),
+    supported_capability(
+        "XFM-03",
+        Capabilities::CURRENT
+            .transform_coordinate_spaces()
+            .supports_skew(),
+    ),
+    diagnostic_operation(
+        "XFM-04",
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::Matrix3dTransform,
+    ),
+    supported_capability(
+        "XFM-05",
+        Capabilities::CURRENT
+            .transform_coordinate_spaces()
+            .supports_coordinate_space_tags(),
+    ),
+    supported_capability(
+        "TXT-01",
+        Capabilities::CURRENT.paint_sources().supports_solid_rgba(),
+    ),
+    supported_capability(
+        "TXT-02",
+        Capabilities::CURRENT.paint_sources().supports_solid_rgba(),
+    ),
+    diagnostic_operation(
+        "TXT-03",
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::TextShadow,
+    ),
+    root("TXT-04", "SelectionPaintBucket"),
+    root("TXT-05", "GeneratedContentPaintBucket"),
+    supported_capability(
+        "RES-01",
+        Capabilities::CURRENT.paint_sources().supports_image_paint(),
+    ),
+    supported_capability(
+        "RES-02",
+        Capabilities::CURRENT.image_sampling().supports_image_fit(),
+    ),
+    root("RES-03", "ImageOrientationAndColorProfile"),
+    root("RES-04", "AnimatedImageFrame"),
+    supported_diagnostic("DIA-01", SupportedDiagnosticSurface::UnsupportedPrimitive),
+    supported_capability(
+        "DIA-02",
+        Capabilities::CURRENT
+            .surfaces()
+            .supports_headless_surfaces(),
+    ),
+    supported_diagnostic("DIA-03", SupportedDiagnosticSurface::UnresolvedResource),
+    supported_diagnostic("DIA-04", SupportedDiagnosticSurface::InvalidValue),
+    supported_diagnostic("DIA-05", SupportedDiagnosticSurface::DegradedQuality),
+    supported_operation(
+        "BEP-01",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedVelloCapture,
+    ),
+    supported_operation(
+        "BEP-02",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::PersistentEffectResources,
+    ),
+    supported_operation(
+        "BEP-03",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedVelloCapture,
+    ),
+    supported_operation(
+        "BEP-04",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::ImagePassExecution,
+    ),
+    supported_operation(
+        "BEP-05",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::GpuBlurFilterExecution,
+    ),
+    diagnostic_operation(
+        "BEP-06",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::MaskExecution,
+    ),
+    supported_operation(
+        "BEP-07",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
+    ),
+    oracle_only("BEP-08", "CpuReferencePath"),
+];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FinalPrimitiveInventoryTotals {
+    supported: usize,
+    diagnostic: usize,
+    root: usize,
+    oracle_only: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum FinalPrimitiveInventoryError {
+    WrongRowCount(usize),
+    UnknownId(&'static str),
+    DuplicateId(&'static str),
+    FutureRender(&'static str),
+    FailedProbes(Vec<&'static str>),
+}
+
+fn supported_primary_probe_succeeds(probe: SupportedPrimaryProbe) -> bool {
+    match probe {
+        SupportedPrimaryProbe::Capability(supported) => supported,
+        SupportedPrimaryProbe::Operation(operation) => {
+            Capabilities::CURRENT.ensure_supported(operation).is_ok()
+        }
+        SupportedPrimaryProbe::DiagnosticSurface(surface) => {
+            supported_diagnostic_surface_succeeds(surface)
+        }
+    }
+}
+
+fn supported_diagnostic_surface_succeeds(surface: SupportedDiagnosticSurface) -> bool {
+    match surface {
+        SupportedDiagnosticSurface::UnsupportedPrimitive => {
+            let expected = UnsupportedPrimitive::new(
+                PrimitiveFamily::GeometryTargets,
+                PrimitiveOperation::GeometryBooleanOperation,
+            );
+            let error = Error::unsupported_render_primitive(expected);
+            error.code() == ErrorCode::UnsupportedPrimitive
+                && error.unsupported_primitive() == Some(expected)
+        }
+        SupportedDiagnosticSurface::UnresolvedResource => {
+            let expected = UnresolvedResource::new(UnresolvedResourceKind::Image, "inventory");
+            let error = Error::unresolved_resource(expected.clone());
+            error.code() == ErrorCode::UnresolvedResource
+                && error.unresolved_resource_diagnostic() == Some(&expected)
+        }
+        SupportedDiagnosticSurface::InvalidValue => {
+            let error = Error::invalid_value("inventory", "invalid", "must be valid");
+            error.code() == ErrorCode::InvalidInput && error.invalid_value_diagnostic().is_some()
+        }
+        SupportedDiagnosticSurface::DegradedQuality => {
+            let expected =
+                DegradedQuality::new(DegradedQualityKind::ReducedIntermediatePrecision, "rgba8");
+            let error = Error::degraded_quality(expected.clone());
+            error.code() == ErrorCode::DegradedQuality
+                && error.degraded_quality_diagnostic() == Some(&expected)
+        }
+    }
+}
+
+fn diagnostic_primary_probe_is_exact(id: &'static str, probe: DiagnosticPrimaryProbe) -> bool {
+    match probe {
+        DiagnosticPrimaryProbe::UnsupportedPrimitive(expected) => Capabilities::CURRENT
+            .ensure_supported(expected)
+            .is_err_and(|error| {
+                error.code() == ErrorCode::UnsupportedPrimitive
+                    && error.unsupported_primitive() == Some(expected)
+            }),
+        DiagnosticPrimaryProbe::UnresolvedResource(kind) => {
+            let expected = UnresolvedResource::new(kind, id);
+            let error = Error::unresolved_resource(expected.clone());
+            error.code() == ErrorCode::UnresolvedResource
+                && error.unresolved_resource_diagnostic() == Some(&expected)
+        }
+    }
+}
+
+fn root_primary_operation_is_absent(operation_identity: &str) -> bool {
+    !include_str!("error.rs").contains(operation_identity)
+}
+
+fn oracle_primary_surface_is_production_absent(production_identity: &str) -> bool {
+    let production_sources = [
+        include_str!("capability.rs"),
+        include_str!("error.rs"),
+        include_str!("filter.rs"),
+        include_str!("image.rs"),
+        include_str!("lib.rs"),
+        include_str!("renderer.rs"),
+    ];
+    production_sources
+        .iter()
+        .all(|source| !source.contains(production_identity))
+        && include_str!("lib.rs").contains("#[cfg(test)]\nmod reference;")
+}
+
+fn validate_final_primitive_inventory(
+    rows: &[FinalPrimitiveInventoryRow],
+) -> std::result::Result<FinalPrimitiveInventoryTotals, FinalPrimitiveInventoryError> {
+    if rows.len() != FINAL_PRIMITIVE_IDS.len() {
+        return Err(FinalPrimitiveInventoryError::WrongRowCount(rows.len()));
+    }
+    let mut ids = std::collections::BTreeSet::new();
+    for row in rows {
+        if !FINAL_PRIMITIVE_IDS.contains(&row.id) {
+            return Err(FinalPrimitiveInventoryError::UnknownId(row.id));
+        }
+        if !ids.insert(row.id) {
+            return Err(FinalPrimitiveInventoryError::DuplicateId(row.id));
+        }
+        if row.disposition == FinalPrimaryDisposition::FutureRender {
+            return Err(FinalPrimitiveInventoryError::FutureRender(row.id));
+        }
+    }
+
+    let mut totals = FinalPrimitiveInventoryTotals::default();
+    let mut failed_probes = Vec::new();
+    for row in rows {
+        let succeeded = match row.disposition {
+            FinalPrimaryDisposition::Supported(probe) => {
+                totals.supported += 1;
+                supported_primary_probe_succeeds(probe)
+            }
+            FinalPrimaryDisposition::Diagnostic(probe) => {
+                totals.diagnostic += 1;
+                diagnostic_primary_probe_is_exact(row.id, probe)
+            }
+            FinalPrimaryDisposition::Root(operation_identity) => {
+                totals.root += 1;
+                root_primary_operation_is_absent(operation_identity)
+            }
+            FinalPrimaryDisposition::OracleOnly(production_identity) => {
+                totals.oracle_only += 1;
+                oracle_primary_surface_is_production_absent(production_identity)
+            }
+            FinalPrimaryDisposition::FutureRender => false,
+        };
+        if !succeeded {
+            failed_probes.push(row.id);
+        }
+    }
+    if failed_probes.is_empty() {
+        Ok(totals)
+    } else {
+        Err(FinalPrimitiveInventoryError::FailedProbes(failed_probes))
+    }
+}
+
+#[test]
+fn final_primitive_inventory_has_101_unique_capability_consistent_rows() {
+    let totals = validate_final_primitive_inventory(&FINAL_PRIMITIVE_INVENTORY)
+        .expect("the final primitive inventory must pass every typed primary probe");
+    assert_eq!(
+        totals,
+        FinalPrimitiveInventoryTotals {
+            supported: 69,
+            diagnostic: 24,
+            root: 6,
+            oracle_only: 2,
+        }
+    );
+
+    let mut unknown = FINAL_PRIMITIVE_INVENTORY;
+    unknown[0].id = "UNKNOWN-00";
+    assert_eq!(
+        validate_final_primitive_inventory(&unknown),
+        Err(FinalPrimitiveInventoryError::UnknownId("UNKNOWN-00"))
+    );
+
+    let mut duplicate = FINAL_PRIMITIVE_INVENTORY;
+    duplicate[1].id = duplicate[0].id;
+    assert_eq!(
+        validate_final_primitive_inventory(&duplicate),
+        Err(FinalPrimitiveInventoryError::DuplicateId("PNT-01"))
+    );
+
+    let mut future = FINAL_PRIMITIVE_INVENTORY;
+    future[0].disposition = FinalPrimaryDisposition::FutureRender;
+    assert_eq!(
+        validate_final_primitive_inventory(&future),
+        Err(FinalPrimitiveInventoryError::FutureRender("PNT-01"))
+    );
+}
+
+#[test]
+fn c13_semantic_capabilities_match_final_gpu_only_contract() {
+    let capabilities = Capabilities::CURRENT;
+    let filters = capabilities.filters();
+    assert_eq!(
+        [
+            (
+                "supports_gpu_color_filter_execution",
+                filters.supports_gpu_color_filter_execution(),
+            ),
+            (
+                "supports_gpu_blur_filter_execution",
+                filters.supports_gpu_blur_filter_execution(),
+            ),
+            (
+                "supports_gpu_drop_shadow_filter_execution",
+                filters.supports_gpu_drop_shadow_filter_execution(),
+            ),
+        ],
+        [
+            ("supports_gpu_color_filter_execution", true),
+            ("supports_gpu_blur_filter_execution", true),
+            ("supports_gpu_drop_shadow_filter_execution", true),
+        ],
+        "the delivered GPU filter routes must publish their final semantic truths"
+    );
+
+    assert!(!filters.supports_layer_filters());
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_layer_filter_execution()
+    );
+    assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_broad_backdrop_execution()
+    );
+    assert!(
+        !capabilities
+            .offscreen_pipeline()
+            .supports_backdrop_isolation_composition()
+    );
+    assert!(
+        capabilities
+            .image_sampling()
+            .supports_color_filtered_image_paint(),
+        "T02 owns the remaining materialized filtered-image overclaim"
+    );
+}
+
 #[test]
 fn affected_capability_queries_map_one_to_one_to_primitive_operations() {
     let capabilities = Capabilities::CURRENT;
     let offscreen = capabilities.offscreen_pipeline();
     let cases = [
+        (
+            capabilities.filters().supports_gpu_color_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
+        ),
+        (
+            capabilities.filters().supports_gpu_blur_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+        ),
+        (
+            capabilities
+                .filters()
+                .supports_gpu_drop_shadow_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+        ),
         (
             capabilities
                 .masks_clips()
@@ -22474,7 +23317,7 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
     let capabilities = Capabilities::CURRENT;
 
     assert!(capabilities.filters().supports_ordered_filter_lists());
-    assert!(!capabilities.filters().supports_gpu_color_filter_execution());
+    assert!(capabilities.filters().supports_gpu_color_filter_execution());
     assert!(!capabilities.filters().supports_layer_filters());
     assert!(
         !capabilities
@@ -22498,9 +23341,9 @@ fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() 
     let capabilities = Capabilities::CURRENT;
 
     assert!(capabilities.filters().supports_ordered_filter_lists());
-    assert!(!capabilities.filters().supports_gpu_blur_filter_execution());
+    assert!(capabilities.filters().supports_gpu_blur_filter_execution());
     assert!(
-        !capabilities
+        capabilities
             .filters()
             .supports_gpu_drop_shadow_filter_execution()
     );
@@ -22522,12 +23365,7 @@ fn pixel_moving_filter_capability_names_advertise_materialized_execution_only() 
 
 #[test]
 fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
-    let supported_cases = [(
-        PrimitiveFamily::Filters,
-        PrimitiveOperation::FilterRegionPlanning,
-        "filter-region planning",
-    )];
-    let unsupported_cases = [
+    let supported_cases = [
         (
             PrimitiveFamily::Filters,
             PrimitiveOperation::GpuBlurFilterExecution,
@@ -22538,6 +23376,13 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
             PrimitiveOperation::GpuDropShadowFilterExecution,
             "GPU drop-shadow filter execution",
         ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::FilterRegionPlanning,
+            "filter-region planning",
+        ),
+    ];
+    let unsupported_cases = [
         (
             PrimitiveFamily::Shadows,
             PrimitiveOperation::InsetBoxShadow,
@@ -22555,7 +23400,7 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
         assert_eq!(supported.label(), label);
         assert!(
             Capabilities::CURRENT.ensure_supported(supported).is_ok(),
-            "filter-region planning remains available before GPU execution"
+            "delivered GPU filter behavior and region planning must stay supported"
         );
     }
 
@@ -33942,7 +34787,7 @@ fn c10_public_color_graph_diagnostic_for_test(
 
 fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
     let capabilities = Capabilities::CURRENT;
-    let unsupported = [
+    let supported = [
         (
             PrimitiveFamily::Filters,
             PrimitiveOperation::GpuColorFilterExecution,
@@ -33955,6 +34800,8 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
             PrimitiveFamily::Filters,
             PrimitiveOperation::GpuDropShadowFilterExecution,
         ),
+    ];
+    let unsupported = [
         (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
         (
             PrimitiveFamily::ImageSampling,
@@ -33969,6 +34816,11 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
             PrimitiveOperation::BroadBackdropExecution,
         ),
     ];
+    let supported_are_exact = supported.into_iter().all(|(family, operation)| {
+        capabilities
+            .ensure_supported(UnsupportedPrimitive::new(family, operation))
+            .is_ok()
+    });
     let unsupported_are_exact = unsupported.into_iter().all(|(family, operation)| {
         let expected = UnsupportedPrimitive::new(family, operation);
         capabilities
@@ -33977,10 +34829,11 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
     });
     let reference = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#c10-reference");
     let reference_error = Error::unresolved_resource(reference.clone());
-    unsupported_are_exact
-        && !capabilities.filters().supports_gpu_color_filter_execution()
-        && !capabilities.filters().supports_gpu_blur_filter_execution()
-        && !capabilities
+    supported_are_exact
+        && unsupported_are_exact
+        && capabilities.filters().supports_gpu_color_filter_execution()
+        && capabilities.filters().supports_gpu_blur_filter_execution()
+        && capabilities
             .filters()
             .supports_gpu_drop_shadow_filter_execution()
         && !capabilities.filters().supports_layer_filters()
@@ -35584,8 +36437,23 @@ fn c09_supported_capability_rows(
     filters: FilterCapabilities,
     masks: MaskClipCapabilities,
     offscreen: OffscreenPipelineCapabilities,
-) -> [CapabilityRowForTest; 10] {
+) -> [CapabilityRowForTest; 13] {
     [
+        (
+            filters.supports_gpu_color_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
+        ),
+        (
+            filters.supports_gpu_blur_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+        ),
+        (
+            filters.supports_gpu_drop_shadow_filter_execution(),
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+        ),
         (
             masks.supports_resolved_alpha_mask_execution(),
             PrimitiveFamily::MasksAndClips,
@@ -35640,26 +36508,11 @@ fn c09_supported_capability_rows(
 }
 
 fn c09_rejected_capability_rows(
-    filters: FilterCapabilities,
+    _filters: FilterCapabilities,
     masks: MaskClipCapabilities,
     offscreen: OffscreenPipelineCapabilities,
-) -> [CapabilityRowForTest; 12] {
+) -> [CapabilityRowForTest; 9] {
     [
-        (
-            filters.supports_gpu_color_filter_execution(),
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuColorFilterExecution,
-        ),
-        (
-            filters.supports_gpu_blur_filter_execution(),
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuBlurFilterExecution,
-        ),
-        (
-            filters.supports_gpu_drop_shadow_filter_execution(),
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuDropShadowFilterExecution,
-        ),
         (
             offscreen.supports_layer_filter_execution(),
             PrimitiveFamily::OffscreenPipeline,
