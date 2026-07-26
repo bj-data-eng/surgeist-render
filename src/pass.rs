@@ -4197,6 +4197,51 @@ impl C12PreparableGraph {
                 .proves_exact_facts_for(&self.closed.lowered)
     }
 
+    #[cfg(test)]
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.closed.facts.working_format
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn output_format(&self) -> Format {
+        self.closed.facts.output_format
+    }
+
+    #[cfg(test)]
+    pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
+        self.closed
+            .lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == self.closed.lowered.root_working_image)
+            .map(|resource| resource.spatial.device_extent)
+            .ok_or_else(|| preparation_error("the C12 root output resource is missing"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn backdrop_spatial_for_test(
+        &self,
+    ) -> Option<(
+        C10ColorSpatialObservationForTest,
+        C10ColorSpatialObservationForTest,
+    )> {
+        let [backdrop] = self.closed.facts.backdrops.as_slice() else {
+            return None;
+        };
+        let spatial = |id| {
+            self.closed
+                .lowered
+                .resources
+                .iter()
+                .find(|resource| resource.id == id)
+                .map(|resource| c10_spatial_observation(resource.spatial))
+        };
+        Some((
+            spatial(backdrop.completed_parent)?,
+            spatial(backdrop.copied)?,
+        ))
+    }
+
     fn into_closed(self) -> ClosedExecutableGraph {
         self.closed
     }
@@ -10131,6 +10176,38 @@ pub(crate) fn c11_preparable_graph_from_graph_for_test(
     c11_preparable_graph_for_test(lowered)
 }
 
+#[cfg(test)]
+pub(crate) fn c12_preparable_graph_from_graph_for_test(
+    graph: &GpuRenderGraph,
+    output_format: Format,
+    working_format: WorkingFormat,
+    capabilities: &DeviceCapabilities,
+) -> Result<C12PreparableGraph> {
+    capabilities.validate_supported_working_format(working_format)?;
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        graph,
+        working_format,
+        output_format,
+        capabilities,
+    )?;
+    match PrePreparationGraphClassification::classify(lowered) {
+        PrePreparationGraphClassification::ExactC12(preparable)
+            if preparable.proves_closed_backdrop_facts() =>
+        {
+            Ok(preparable)
+        }
+        PrePreparationGraphClassification::ExactC08(_)
+        | PrePreparationGraphClassification::ExactC09(_)
+        | PrePreparationGraphClassification::ExactC10(_)
+        | PrePreparationGraphClassification::ExactC11(_)
+        | PrePreparationGraphClassification::ExactC12(_)
+        | PrePreparationGraphClassification::FuturePasses
+        | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
+            "the authored C12 fixture is outside the exact bounded backdrop graph",
+        )),
+    }
+}
+
 impl PrePreparationGraphClassification {
     fn classify(lowered: LoweredGraphPlan) -> Self {
         let closed = match ClosedExecutableGraph::try_from_lowered(lowered) {
@@ -12203,7 +12280,7 @@ impl<'device> PreparedGraph<'device> {
         Ok(prepared)
     }
 
-    fn try_prepare_c12(
+    pub(crate) fn try_prepare_c12(
         preparable: C12PreparableGraph,
         selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,

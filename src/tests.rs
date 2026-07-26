@@ -11633,7 +11633,7 @@ fn c11_blur_and_drop_shadow_graph_preserve_order_edges_and_lifetimes() {
     );
 }
 
-fn c12_bounded_graph_commands_for_test() -> command::RenderCommands {
+fn c12_bounded_scene_for_test() -> Scene {
     let filters = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
         FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
@@ -11677,8 +11677,506 @@ fn c12_bounded_graph_commands_for_test() -> command::RenderCommands {
             Color::try_rgba(0.0, 1.0, 0.0, 0.75).unwrap(),
         );
     scene
+}
+
+fn c12_bounded_graph_commands_for_test() -> command::RenderCommands {
+    c12_bounded_scene_for_test()
         .normalize(Capabilities::CURRENT)
         .expect("the exact C12 bounded backdrop fixture must normalize")
+}
+
+struct C12ProductionFrameForTest {
+    output: ImageBuffer,
+    result: super::renderer::C12BackdropRenderResultForTest,
+    queue_submissions: usize,
+    graph_submissions: usize,
+    direct_submissions: usize,
+    publication_count: usize,
+}
+
+fn render_c12_fixture_for_test(
+    scene: &Scene,
+    size: PhysicalSize,
+    parameters: Parameters,
+    working_format: WorkingFormat,
+) -> C12ProductionFrameForTest {
+    let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+    let publication_before = surface.headless_publication_count_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let result = pollster::block_on(renderer.render_c12_backdrop_fixture_for_test(
+        &mut surface,
+        scene,
+        parameters,
+        working_format,
+    ))
+    .unwrap_or_else(|error| panic!("the C12 fixture must use the production graph: {error}"));
+    let frame = C12ProductionFrameForTest {
+        output: pollster::block_on(renderer.read_headless(&surface))
+            .unwrap_or_else(|error| panic!("the published C12 fixture must be readable: {error}")),
+        result,
+        queue_submissions: submission.queue_submission_count_for_test(),
+        graph_submissions: graph_submission.queue_submission_count_for_test(),
+        direct_submissions: direct_submission.queue_submission_count_for_test(),
+        publication_count: surface
+            .headless_publication_count_for_test()
+            .saturating_sub(publication_before),
+    };
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    frame
+}
+
+fn c12_reference_rect_for_test(
+    size: PhysicalSize,
+    rect: (u32, u32, u32, u32),
+    straight: [u8; 4],
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut buffer = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
+    for y in rect.1..rect.1 + rect.3 {
+        for x in rect.0..rect.0 + rect.2 {
+            buffer
+                .set_pixel(x, y, c09_premultiplied_pixel_for_test(straight))
+                .unwrap();
+        }
+    }
+    buffer
+}
+
+fn c12_capture_reference_for_test(
+    source: &ReferencePremultipliedRgba8Buffer,
+    origin: (i32, i32),
+    extent: PhysicalSize,
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut capture = ReferencePremultipliedRgba8Buffer::try_new(extent).unwrap();
+    for y in 0..extent.height() {
+        for x in 0..extent.width() {
+            let source_x = origin.0 + i32::try_from(x).unwrap();
+            let source_y = origin.1 + i32::try_from(y).unwrap();
+            if source_x >= 0
+                && source_y >= 0
+                && source_x < i32::try_from(source.physical_size().width()).unwrap()
+                && source_y < i32::try_from(source.physical_size().height()).unwrap()
+            {
+                capture
+                    .set_pixel(
+                        x,
+                        y,
+                        source
+                            .pixel(
+                                u32::try_from(source_x).unwrap(),
+                                u32::try_from(source_y).unwrap(),
+                            )
+                            .unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    capture
+}
+
+fn c12_place_capture_for_test(
+    capture: &ReferencePremultipliedRgba8Buffer,
+    origin: (i32, i32),
+    output_size: PhysicalSize,
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut placed = ReferencePremultipliedRgba8Buffer::try_new(output_size).unwrap();
+    for y in 0..capture.physical_size().height() {
+        for x in 0..capture.physical_size().width() {
+            let output_x = origin.0 + i32::try_from(x).unwrap();
+            let output_y = origin.1 + i32::try_from(y).unwrap();
+            if output_x >= 0
+                && output_y >= 0
+                && output_x < i32::try_from(output_size.width()).unwrap()
+                && output_y < i32::try_from(output_size.height()).unwrap()
+            {
+                placed
+                    .set_pixel(
+                        u32::try_from(output_x).unwrap(),
+                        u32::try_from(output_y).unwrap(),
+                        capture.pixel(x, y).unwrap(),
+                    )
+                    .unwrap();
+            }
+        }
+    }
+    placed
+}
+
+fn c12_clip_reference_for_test(
+    source: &ReferencePremultipliedRgba8Buffer,
+    rect: (u32, u32, u32, u32),
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut clipped = ReferencePremultipliedRgba8Buffer::try_new(source.physical_size()).unwrap();
+    for y in rect.1..rect.1 + rect.3 {
+        for x in rect.0..rect.0 + rect.2 {
+            clipped
+                .set_pixel(x, y, source.pixel(x, y).unwrap())
+                .unwrap();
+        }
+    }
+    clipped
+}
+
+fn c12_frame_matches_for_test(
+    frame: &C12ProductionFrameForTest,
+    expected: &ReferencePremultipliedRgba8Buffer,
+    origin: (i32, i32),
+    extent: PhysicalSize,
+    tolerance: u8,
+) -> bool {
+    let expected_size = expected.physical_size();
+    let expected = c09_reference_straight_bytes_for_test(expected);
+    let energy_tolerance = match frame.result.working_format {
+        WorkingFormat::HighPrecision => 0.015,
+        WorkingFormat::ReducedPrecision => 0.025,
+    };
+    frame.result.output_extent == expected_size
+        && frame.output.size() == frame.result.output_extent
+        && frame.result.parent_spatial.device_origin == (0, 0)
+        && frame.result.parent_spatial.device_extent == frame.result.output_extent
+        && frame.result.parent_spatial.texel_origin == Point::new(0.0, 0.0)
+        && frame.result.parent_spatial.raster_scale == 1.0
+        && frame.result.capture_spatial.device_origin == origin
+        && frame.result.capture_spatial.device_extent == extent
+        && frame.result.capture_spatial.texel_origin
+            == Point::new(f64::from(origin.0), f64::from(origin.1))
+        && frame.result.capture_spatial.logical_bounds
+            == [
+                f64::from(origin.0),
+                f64::from(origin.1),
+                f64::from(extent.width()),
+                f64::from(extent.height()),
+            ]
+        && frame.result.capture_spatial.raster_scale == 1.0
+        && frame.result.stats.layers == 1
+        && frame.queue_submissions == 1
+        && frame.graph_submissions == 1
+        && frame.direct_submissions == 0
+        && frame.publication_count == 1
+        && c11_alpha_energy_error_for_test(frame.output.rgba(), &expected) <= energy_tolerance
+        && c09_pixels_match_for_test(
+            frame.output.rgba(),
+            &expected,
+            frame.result.working_format,
+            tolerance,
+        )
+}
+
+#[test]
+fn backdrop_blur_mirrors_at_semantic_bounds_not_allocation_padding() {
+    let size = PhysicalSize::new(8, 6);
+    let origin = (2, 1);
+    let extent = PhysicalSize::new(4, 4);
+    let base = [32, 64, 96, 255];
+    let blur = FilterBlur::try_new(1.0).unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(2.0, 1.0, 1.0, 4.0),
+            c09_color_for_test([240, 32, 16, 255]),
+        )
+        .fill(
+            Rect::new(3.0, 1.0, 3.0, 4.0),
+            c09_color_for_test([16, 80, 224, 255]),
+        )
+        .layer(
+            Layer::new()
+                .try_backdrop_filter(
+                    BackdropFilterInput::try_new(
+                        c11_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
+                        BackdropCaptureBounds::try_new(Rect::new(2.0, 1.0, 4.0, 4.0)).unwrap(),
+                        Some(
+                            ClipInput::try_shape(Shape::rect(Rect::new(2.0, 1.0, 4.0, 4.0)))
+                                .unwrap(),
+                        ),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            |_| {},
+        );
+    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = c12_reference_rect_for_test(size, (2, 1, 1, 4), [240, 32, 16, 255])
+        .source_over(&parent)
+        .unwrap();
+    let parent = c12_reference_rect_for_test(size, (3, 1, 3, 4), [16, 80, 224, 255])
+        .source_over(&parent)
+        .unwrap();
+    let filtered = c12_capture_reference_for_test(&parent, origin, extent)
+        .apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
+        .unwrap();
+    let expected = c12_place_capture_for_test(&filtered, origin, size)
+        .source_over(&parent)
+        .unwrap();
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let frame = render_c12_fixture_for_test(
+            &scene,
+            size,
+            Parameters {
+                base_color: c09_color_for_test(base),
+                ..Parameters::default()
+            },
+            working_format,
+        );
+        assert!(
+            c12_frame_matches_for_test(&frame, &expected, origin, extent, 4),
+            "semantic-edge backdrop blur differs from its mirrored oracle: format={working_format:?}"
+        );
+    }
+}
+
+#[test]
+fn backdrop_reads_only_completed_prior_content_and_base_once() {
+    let size = PhysicalSize::new(8, 6);
+    let origin = (-1, 1);
+    let extent = PhysicalSize::new(7, 4);
+    let base = [32, 64, 96, 255];
+    let prior = [224, 48, 24, 255];
+    let later = [32, 224, 80, 160];
+    let operations = [
+        ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap()),
+        ColorFilterOp::Brightness(FilterAmount::try_new(0.5).unwrap()),
+    ];
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 1.0, 3.0, 4.0), c09_color_for_test(prior))
+        .layer(
+            Layer::new()
+                .try_backdrop_filter(
+                    BackdropFilterInput::try_new(
+                        color_filter_list(operations),
+                        BackdropCaptureBounds::try_new(Rect::new(-1.0, 1.0, 7.0, 4.0)).unwrap(),
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            |_| {},
+        )
+        .fill(Rect::new(4.0, 2.0, 3.0, 2.0), c09_color_for_test(later));
+    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = c12_reference_rect_for_test(size, (0, 1, 3, 4), prior)
+        .source_over(&parent)
+        .unwrap();
+    let filtered = c12_capture_reference_for_test(&parent, origin, extent)
+        .apply_color_filter_pipeline(&color_filter_pipeline(operations))
+        .unwrap();
+    let completed = c12_place_capture_for_test(&filtered, origin, size)
+        .source_over(&parent)
+        .unwrap();
+    let expected = c12_reference_rect_for_test(size, (4, 2, 3, 2), later)
+        .source_over(&completed)
+        .unwrap();
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let frame = render_c12_fixture_for_test(
+            &scene,
+            size,
+            Parameters {
+                base_color: c09_color_for_test(base),
+                ..Parameters::default()
+            },
+            working_format,
+        );
+        assert!(
+            c12_frame_matches_for_test(&frame, &expected, origin, extent, 2),
+            "C12 captured a later sibling, omitted a prior sibling, or changed the signed base mapping: format={working_format:?}"
+        );
+    }
+}
+
+#[test]
+fn backdrop_foreground_is_not_filtered_and_composites_above_backdrop() {
+    let size = PhysicalSize::new(8, 6);
+    let origin = (0, 0);
+    let base = [32, 64, 192, 255];
+    let foreground = [240, 32, 16, 255];
+    let blur = FilterBlur::try_new(1.25).unwrap();
+    let mut scene = Scene::new();
+    scene.layer(
+        Layer::new()
+            .try_backdrop_filter(
+                BackdropFilterInput::try_new(
+                    c11_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
+                    BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                    None,
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        |scene| {
+            scene.fill(
+                Rect::new(3.0, 2.0, 2.0, 2.0),
+                c09_color_for_test(foreground),
+            );
+        },
+    );
+    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let filtered = parent
+        .apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
+        .unwrap();
+    let group = c12_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
+        .source_over(&filtered)
+        .unwrap();
+    let expected = group.source_over(&parent).unwrap();
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let frame = render_c12_fixture_for_test(
+            &scene,
+            size,
+            Parameters {
+                base_color: c09_color_for_test(base),
+                ..Parameters::default()
+            },
+            working_format,
+        );
+        assert!(
+            c12_frame_matches_for_test(&frame, &expected, origin, size, 4),
+            "C12 filtered or under-composited its foreground: format={working_format:?}"
+        );
+    }
+}
+
+#[test]
+fn later_siblings_observe_completed_backdrop_group() {
+    let size = PhysicalSize::new(8, 6);
+    let origin = (0, 0);
+    let base = [40, 80, 160, 255];
+    let foreground = [224, 32, 48, 255];
+    let later = [32, 224, 96, 160];
+    let invert = ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap());
+    let mut scene = Scene::new();
+    scene
+        .layer(
+            Layer::new()
+                .try_backdrop_filter(
+                    BackdropFilterInput::try_new(
+                        color_filter_list([invert]),
+                        BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                        None,
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            |scene| {
+                scene.fill(
+                    Rect::new(2.0, 2.0, 2.0, 2.0),
+                    c09_color_for_test(foreground),
+                );
+            },
+        )
+        .fill(Rect::new(3.0, 1.0, 3.0, 4.0), c09_color_for_test(later));
+    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let filtered = parent
+        .apply_color_filter_pipeline(&color_filter_pipeline([invert]))
+        .unwrap();
+    let group = c12_reference_rect_for_test(size, (2, 2, 2, 2), foreground)
+        .source_over(&filtered)
+        .unwrap();
+    let completed = group.source_over(&parent).unwrap();
+    let expected = c12_reference_rect_for_test(size, (3, 1, 3, 4), later)
+        .source_over(&completed)
+        .unwrap();
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let frame = render_c12_fixture_for_test(
+            &scene,
+            size,
+            Parameters {
+                base_color: c09_color_for_test(base),
+                ..Parameters::default()
+            },
+            working_format,
+        );
+        assert!(
+            c12_frame_matches_for_test(&frame, &expected, origin, size, 2),
+            "a later sibling failed to observe the complete C12 group: format={working_format:?}"
+        );
+    }
+}
+
+#[test]
+fn outer_clip_precedes_mask_and_opacity_but_follows_filter() {
+    let size = PhysicalSize::new(8, 6);
+    let base = [32, 64, 192, 255];
+    let prior = [240, 32, 16, 255];
+    let blur = FilterBlur::try_new(1.0).unwrap();
+    let mask_alpha = 128_u8;
+    let mask = c09_mask_image_from_alpha_for_test(
+        PhysicalSize::new(1, 1),
+        &[mask_alpha],
+        ImageQuality::Low,
+        Extend::Pad,
+    );
+    let layer = Layer::new()
+        .try_clip(Shape::rect(Rect::new(2.0, 1.0, 4.0, 4.0)))
+        .unwrap()
+        .try_opacity(0.5)
+        .unwrap()
+        .with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(mask, Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+        )
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                c11_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(1.0, 0.0, 1.0, 6.0), c09_color_for_test(prior))
+        .layer(layer, |_| {});
+    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = c12_reference_rect_for_test(size, (1, 0, 1, 6), prior)
+        .source_over(&parent)
+        .unwrap();
+    let filtered = parent
+        .apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
+        .unwrap();
+    let clipped = c12_clip_reference_for_test(&filtered, (2, 1, 4, 4));
+    let masked = clipped
+        .apply_opacity(f32::from(mask_alpha) / 255.0)
+        .unwrap()
+        .apply_opacity(0.5)
+        .unwrap();
+    let expected = masked.source_over(&parent).unwrap();
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let frame = render_c12_fixture_for_test(
+            &scene,
+            size,
+            Parameters {
+                base_color: c09_color_for_test(base),
+                ..Parameters::default()
+            },
+            working_format,
+        );
+        assert!(
+            c12_frame_matches_for_test(&frame, &expected, (0, 0), size, 4),
+            "C12 outer clip, mask, opacity, or filter order differs from the oracle: format={working_format:?}"
+        );
+    }
 }
 
 #[test]

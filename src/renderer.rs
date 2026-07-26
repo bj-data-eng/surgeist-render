@@ -81,6 +81,7 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) exact_c09_graph_routes: usize,
     pub(crate) exact_c10_fixture_routes: usize,
     pub(crate) exact_c11_fixture_routes: usize,
+    pub(crate) exact_c12_fixture_routes: usize,
     pub(crate) future_pass_rejections: usize,
 }
 
@@ -267,6 +268,16 @@ pub(crate) struct C11SpatialFilterRenderResultForTest {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct C12BackdropRenderResultForTest {
+    pub(crate) stats: Stats,
+    pub(crate) working_format: WorkingFormat,
+    pub(crate) output_extent: PhysicalSize,
+    pub(crate) parent_spatial: super::pass::C10ColorSpatialObservationForTest,
+    pub(crate) capture_spatial: super::pass::C10ColorSpatialObservationForTest,
+}
+
+#[cfg(test)]
 struct C10ColorFilterFixturePreparationForTest {
     device_identity: DeviceSlotIdentity,
     frame_start: Instant,
@@ -287,6 +298,18 @@ struct C11SpatialFilterFixturePreparationForTest {
     output_extent: PhysicalSize,
     source_spatial: super::pass::C10ColorSpatialObservationForTest,
     result_spatial: super::pass::C10ColorSpatialObservationForTest,
+}
+
+#[cfg(test)]
+struct C12BackdropFixturePreparationForTest {
+    device_identity: DeviceSlotIdentity,
+    frame_start: Instant,
+    encode_start: Instant,
+    normalized: RenderCommands,
+    graph: ExactSurfaceGraph,
+    output_extent: PhysicalSize,
+    parent_spatial: super::pass::C10ColorSpatialObservationForTest,
+    capture_spatial: super::pass::C10ColorSpatialObservationForTest,
 }
 
 struct RenderPublication {
@@ -958,6 +981,33 @@ impl Renderer {
         )))
     }
 
+    #[cfg(test)]
+    fn classify_c12_fixture_dispatch(
+        &mut self,
+        graph: &GpuRenderGraph,
+        output_format: Format,
+        working_format: WorkingFormat,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<RendererFrameDispatch> {
+        self.dispatch_observation.boundary_invocations = self
+            .dispatch_observation
+            .boundary_invocations
+            .saturating_add(1);
+        let preparable = super::pass::c12_preparable_graph_from_graph_for_test(
+            graph,
+            output_format,
+            working_format,
+            capabilities,
+        )?;
+        self.dispatch_observation.exact_c12_fixture_routes = self
+            .dispatch_observation
+            .exact_c12_fixture_routes
+            .saturating_add(1);
+        Ok(RendererFrameDispatch::ExactGraph(Box::new(
+            ExactSurfaceGraph::C12(preparable),
+        )))
+    }
+
     /// Submits one render operation for an available surface.
     ///
     /// Awaiting this future returns render statistics after scene validation and
@@ -1388,7 +1438,8 @@ impl Renderer {
                 ExactSurfaceGraph::C08(preparable) => preparable,
                 ExactSurfaceGraph::C09(_)
                 | ExactSurfaceGraph::C10(_)
-                | ExactSurfaceGraph::C11(_) => {
+                | ExactSurfaceGraph::C11(_)
+                | ExactSurfaceGraph::C12(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private forced graph is outside the exact executable C08 subset",
@@ -1608,7 +1659,8 @@ impl Renderer {
                 ExactSurfaceGraph::C10(preparable) => preparable,
                 ExactSurfaceGraph::C08(_)
                 | ExactSurfaceGraph::C09(_)
-                | ExactSurfaceGraph::C11(_) => {
+                | ExactSurfaceGraph::C11(_)
+                | ExactSurfaceGraph::C12(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private C10 fixture left its exact renderer dispatch route",
@@ -1762,7 +1814,8 @@ impl Renderer {
                 ExactSurfaceGraph::C11(preparable) => preparable,
                 ExactSurfaceGraph::C08(_)
                 | ExactSurfaceGraph::C09(_)
-                | ExactSurfaceGraph::C10(_) => {
+                | ExactSurfaceGraph::C10(_)
+                | ExactSurfaceGraph::C12(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private C11 fixture left its exact renderer dispatch route",
@@ -1793,6 +1846,140 @@ impl Renderer {
             output_extent,
             source_spatial,
             result_spatial,
+        })
+    }
+
+    /// Private C12 bounded-backdrop ingress into the shared exact graph executor.
+    #[cfg(test)]
+    pub(crate) async fn render_c12_backdrop_fixture_for_test(
+        &mut self,
+        surface: &mut Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C12BackdropRenderResultForTest> {
+        let prepared =
+            self.prepare_c12_backdrop_fixture_for_test(surface, scene, parameters, working_format)?;
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
+        let mut stats = Stats {
+            encode_time: prepared.encode_start.elapsed(),
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(
+            &prepared.normalized.commands,
+            &mut stats,
+            &mut uploaded_images,
+        );
+        let frame = {
+            let backend = self
+                .backend
+                .as_mut()
+                .expect("C12 fixture preflight confirmed the renderer backend is available");
+            render_exact_headless_graph_surface(backend, surface, prepared.graph).await
+        };
+        if frame.is_err()
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.observe_device_terminal(prepared.device_identity);
+        }
+        let frame = frame?;
+        let stats = self.publish_clean_render_frame(
+            surface,
+            prepared.device_identity,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+            prepared.frame_start,
+        )?;
+        Ok(C12BackdropRenderResultForTest {
+            stats,
+            working_format,
+            output_extent: prepared.output_extent,
+            parent_spatial: prepared.parent_spatial,
+            capture_spatial: prepared.capture_spatial,
+        })
+    }
+
+    #[cfg(test)]
+    fn prepare_c12_backdrop_fixture_for_test(
+        &mut self,
+        surface: &Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C12BackdropFixturePreparationForTest> {
+        let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
+        let frame_start = Instant::now();
+        let encode_start = Instant::now();
+        let normalized = scene.normalize(self.capabilities())?;
+        let context = FrameContext::try_new(
+            surface.size(),
+            surface.scale(),
+            self.options.antialiasing(),
+            parameters.base_color,
+        )?;
+        let FramePlan::GpuGraph(graph) = normalized.clone().plan_for(context)? else {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "the private C12 fixture did not produce a bounded backdrop graph",
+            ));
+        };
+        let capabilities = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.device_capabilities(device_identity))
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C12 fixture lost immutable device capabilities",
+                )
+            })?;
+        let preparable = match self.classify_c12_fixture_dispatch(
+            &graph,
+            runtime_surface_format(surface),
+            working_format,
+            &capabilities,
+        )? {
+            RendererFrameDispatch::ExactGraph(graph) => match *graph {
+                ExactSurfaceGraph::C12(preparable) => preparable,
+                _ => {
+                    return Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "the private C12 fixture left its exact renderer dispatch route",
+                    ));
+                }
+            },
+            RendererFrameDispatch::DirectVello(_) => {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C12 fixture left its exact renderer dispatch route",
+                ));
+            }
+        };
+        let output_extent = preparable.output_extent()?;
+        let (parent_spatial, capture_spatial) =
+            preparable.backdrop_spatial_for_test().ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C12 fixture lost its exact backdrop mapping",
+                )
+            })?;
+        Ok(C12BackdropFixturePreparationForTest {
+            device_identity,
+            frame_start,
+            encode_start,
+            normalized,
+            graph: ExactSurfaceGraph::C12(preparable),
+            output_extent,
+            parent_spatial,
+            capture_spatial,
         })
     }
 

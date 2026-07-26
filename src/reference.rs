@@ -705,6 +705,42 @@ impl ReferencePremultipliedRgba8Buffer {
     }
 
     #[cfg(test)]
+    pub(crate) fn apply_mirrored_blur_for_gpu_oracle(
+        &self,
+        blur: FilterBlur,
+        policy: BlurPolicy,
+    ) -> Result<Self> {
+        let Some(kernel) = BlurKernel::from_policy(blur, policy)? else {
+            return Ok(self.clone());
+        };
+        let width = usize::try_from(self.physical_size.width())
+            .expect("validated reference width must fit addressable memory");
+        let height = usize::try_from(self.physical_size.height())
+            .expect("validated reference height must fit addressable memory");
+        let mut horizontal = vec![FloatingPremultipliedRgba8::default(); self.pixels.len()];
+        for y in 0..height {
+            for x in 0..width {
+                for (offset, weight) in kernel.offset_weights() {
+                    let sample_x = mirrored_offset_index(x, offset, width);
+                    horizontal[y * width + x].add_pixel(self.pixels[y * width + sample_x], weight);
+                }
+            }
+        }
+        let mut pixels = Vec::with_capacity(self.pixels.len());
+        for y in 0..height {
+            for x in 0..width {
+                let mut pixel = FloatingPremultipliedRgba8::default();
+                for (offset, weight) in kernel.offset_weights() {
+                    let sample_y = mirrored_offset_index(y, offset, height);
+                    pixel.add_float(horizontal[sample_y * width + x], weight);
+                }
+                pixels.push(pixel.to_pixel());
+            }
+        }
+        Self::from_pixels(self.physical_size, pixels)
+    }
+
+    #[cfg(test)]
     pub(crate) fn apply_blur_to_high_precision_straight_rgba8_for_gpu_oracle(
         &self,
         blur: FilterBlur,
@@ -1299,6 +1335,23 @@ fn offset_index(index: usize, offset: i32, len: usize) -> Option<usize> {
         return None;
     }
     usize::try_from(sample).ok()
+}
+
+#[cfg(test)]
+fn mirrored_offset_index(index: usize, offset: i32, len: usize) -> usize {
+    let len = i64::try_from(len).expect("validated mirrored extent must fit i64");
+    let period = len
+        .checked_mul(2)
+        .expect("validated mirrored extent period must fit i64");
+    let sample = (i64::try_from(index).expect("validated mirrored index must fit i64")
+        + i64::from(offset))
+    .rem_euclid(period);
+    let mirrored = if sample < len {
+        sample
+    } else {
+        period - sample - 1
+    };
+    usize::try_from(mirrored).expect("mirrored index must fit usize")
 }
 
 fn sample_resolved_mask_alpha(mask: &Image, bounds: Rect, x: f64, y: f64) -> f64 {
