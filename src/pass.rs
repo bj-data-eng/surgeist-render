@@ -37,8 +37,8 @@ use super::{
     },
     shader::{
         BindGroupLayoutKey, ColorFilterOperationBufferLimits, ColorFilterOperationBytes,
-        CompositeParameterBytes, DevicePassCache, PassSpatialUniformBytes,
-        ProvisionalC08PassObjects, ProvisionalColorFilterPassObjects,
+        CompositeParameterBytes, DevicePassCache, DropShadowParameterBytes,
+        PassSpatialUniformBytes, ProvisionalC08PassObjects, ProvisionalColorFilterPassObjects,
         ProvisionalCompositePassObjects, ProvisionalDevicePassCacheUpdate, RenderPipelineKey,
         SamplerKey, ShaderBindingRoleKey, ShaderCompositeKey, ShaderCompositePathKey,
         ShaderDataBindingKey, ShaderMaskQualityKey, ShaderMaskSamplingKey, ShaderModuleKey,
@@ -240,6 +240,27 @@ pub(crate) struct C11BlurCacheRealizationObservationForTest {
     pub(crate) realizes_all_eight_programs: bool,
     pub(crate) checked_scope_is_clean: bool,
     pub(crate) publishes_only_blur_entries: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11DropShadowLayoutObservationForTest {
+    pub(crate) realizes_both_working_formats: bool,
+    pub(crate) binds_exact_blurred_source_alpha: bool,
+    pub(crate) binds_only_one_linear_transparent_sampler: bool,
+    pub(crate) binds_spatial_and_parameters: bool,
+    pub(crate) targets_only_the_working_format: bool,
+    pub(crate) contains_no_dummy_binding: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11DropShadowCacheRealizationObservationForTest {
+    pub(crate) realizes_checked_colorize_and_merge_programs: bool,
+    pub(crate) checked_scope_is_clean: bool,
+    pub(crate) merge_uses_fixed_premultiplied_source_over: bool,
+    pub(crate) merge_omits_destination_sample: bool,
+    pub(crate) publishes_only_drop_shadow_entries: bool,
 }
 
 #[cfg(test)]
@@ -754,6 +775,119 @@ pub(crate) async fn c11_blur_cache_realization_observation_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn c11_drop_shadow_layout_observation_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C11DropShadowLayoutObservationForTest {
+    c11_drop_shadow_layout_observation(filters, commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
+    device: &wgpu::Device,
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C11DropShadowCacheRealizationObservationForTest> {
+    capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
+    capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
+    let high = c11_drop_shadow_cache_requests_for_test(
+        filters.clone(),
+        commands.clone(),
+        context,
+        capabilities,
+        WorkingFormat::HighPrecision,
+    )?;
+    let reduced = c11_drop_shadow_cache_requests_for_test(
+        filters,
+        commands,
+        context,
+        capabilities,
+        WorkingFormat::ReducedPrecision,
+    )?;
+    let mut cache = DevicePassCache::new();
+    let mut update = cache.provisional_update();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let realization = (|| -> Result<usize> {
+        let mut count = 0_usize;
+        for requests in [&high, &reduced] {
+            update
+                .realize_drop_shadow_colorize_pass(
+                    device,
+                    &cache,
+                    requests.colorize.samplers(),
+                    requests.colorize.layout(),
+                    requests.colorize.shader(),
+                    requests.colorize.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            update
+                .realize_c08_pass(
+                    device,
+                    &cache,
+                    requests.merge.samplers(),
+                    requests.merge.layout(),
+                    requests.merge.shader(),
+                    requests.merge.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            count += 2;
+        }
+        Ok(count)
+    })();
+    let scope_error = error_scope.pop().await;
+    let realized_count = realization?;
+    if let Some(error) = scope_error {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            format!("C11 checked drop-shadow realization failed validation: {error}"),
+        ));
+    }
+    update.commit(&mut cache)?;
+    let all_requests_are_cached = [&high, &reduced].into_iter().all(|requests| {
+        cache.contains_drop_shadow_colorize_pass_for_test(
+            requests.colorize.samplers(),
+            requests.colorize.layout(),
+            requests.colorize.shader(),
+            requests.colorize.pipeline(),
+        ) && cache.contains_c08_pass_for_test(
+            requests.merge.samplers(),
+            requests.merge.layout(),
+            requests.merge.shader(),
+            requests.merge.pipeline(),
+        )
+    });
+    let merge_facts = [&high, &reduced]
+        .into_iter()
+        .filter_map(|requests| {
+            super::shader::c08_pass_key_facts_for_test(
+                requests.merge.samplers(),
+                requests.merge.layout(),
+                requests.merge.shader(),
+                requests.merge.pipeline(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(C11DropShadowCacheRealizationObservationForTest {
+        realizes_checked_colorize_and_merge_programs: realized_count == 4,
+        checked_scope_is_clean: true,
+        merge_uses_fixed_premultiplied_source_over: merge_facts.iter().all(|facts| {
+            facts.program == super::shader::C08ProgramForTest::DropShadowMerge
+                && facts.has_fixed_source_over_blend
+        }),
+        merge_omits_destination_sample: merge_facts.iter().all(|facts| {
+            facts.source_role == ShaderBindingRoleKey::CompositeSource
+                && facts.has_only_spatial_uniform
+        }),
+        publishes_only_drop_shadow_entries: all_requests_are_cached
+            && cache.contains_only_four_drop_shadow_passes_for_test(),
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn runtime_color_filter_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
@@ -1191,6 +1325,140 @@ fn c11_blur_layout_observation(
             && binds_exact_working_source
             && binds_only_one_linear_sampler
             && binds_spatial_and_read_only_kernel,
+    })
+}
+
+#[cfg(test)]
+struct C11DropShadowCacheRequestsForTest {
+    colorize: RuntimePassCacheKeys,
+    merge: RuntimePassCacheKeys,
+}
+
+#[cfg(test)]
+fn c11_drop_shadow_cache_requests_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> Result<C11DropShadowCacheRequestsForTest> {
+    let (_, lowered) = lower_authored_c10_graph_for_test(
+        filters,
+        commands,
+        context,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok_or_else(|| lowering_error("the C11 drop-shadow fixture did not produce a GPU graph"))?;
+    let preparable = c11_preparable_graph_for_test(lowered)?;
+    let mut colorize = None;
+    let mut merge = None;
+    for pass in &preparable.closed.lowered.passes {
+        match &pass.kind {
+            RuntimePassKind::DropShadowColorize(Some(_)) => {
+                set_unique_drop_shadow_cache_keys(
+                    &mut colorize,
+                    pass.cache_keys.clone(),
+                    "the C11 fixture contains more than one drop-shadow colorize request",
+                )?;
+            }
+            RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::DropShadow,
+                ..
+            })) => {
+                set_unique_drop_shadow_cache_keys(
+                    &mut merge,
+                    pass.cache_keys.clone(),
+                    "the C11 fixture contains more than one drop-shadow merge request",
+                )?;
+            }
+            _ => {}
+        }
+    }
+    let colorize = colorize
+        .flatten()
+        .ok_or_else(|| lowering_error("the C11 fixture lost its drop-shadow colorize keys"))?;
+    let merge = merge
+        .flatten()
+        .ok_or_else(|| lowering_error("the C11 fixture lost its drop-shadow merge keys"))?;
+    Ok(C11DropShadowCacheRequestsForTest { colorize, merge })
+}
+
+#[cfg(test)]
+fn set_unique_drop_shadow_cache_keys(
+    slot: &mut Option<Option<RuntimePassCacheKeys>>,
+    keys: Option<RuntimePassCacheKeys>,
+    duplicate_message: &'static str,
+) -> Result<()> {
+    if slot.replace(keys).is_some() {
+        return Err(lowering_error(duplicate_message));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+fn c11_drop_shadow_layout_observation(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C11DropShadowLayoutObservationForTest> {
+    let mut facts = Vec::with_capacity(2);
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let requests = c11_drop_shadow_cache_requests_for_test(
+            filters.clone(),
+            commands.clone(),
+            context,
+            capabilities,
+            working_format,
+        )?;
+        let Some(observed) = super::shader::c11_drop_shadow_colorize_key_facts_for_test(
+            requests.colorize.samplers(),
+            requests.colorize.layout(),
+            requests.colorize.shader(),
+            requests.colorize.pipeline(),
+        ) else {
+            return Ok(C11DropShadowLayoutObservationForTest::default());
+        };
+        facts.push(observed);
+    }
+    let expected_formats = [
+        ShaderTextureFormatKey::working(WorkingFormat::HighPrecision),
+        ShaderTextureFormatKey::working(WorkingFormat::ReducedPrecision),
+    ];
+    let realizes_both_working_formats = facts.len() == 2
+        && expected_formats.into_iter().all(|format| {
+            facts
+                .iter()
+                .filter(|facts| facts.working_format == format)
+                .count()
+                == 1
+        });
+    let binds_exact_blurred_source_alpha = facts.iter().all(|facts| {
+        facts.source_role == ShaderBindingRoleKey::BlurredSourceAlpha
+            && facts.source_format == facts.working_format
+    });
+    let binds_only_one_linear_transparent_sampler = facts
+        .iter()
+        .all(|facts| facts.has_only_linear_transparent_sampler);
+    let binds_spatial_and_parameters = facts.iter().all(|facts| facts.has_exact_data_bindings);
+    let targets_only_the_working_format = facts
+        .iter()
+        .all(|facts| facts.target_format == facts.working_format);
+    Ok(C11DropShadowLayoutObservationForTest {
+        realizes_both_working_formats,
+        binds_exact_blurred_source_alpha,
+        binds_only_one_linear_transparent_sampler,
+        binds_spatial_and_parameters,
+        targets_only_the_working_format,
+        contains_no_dummy_binding: realizes_both_working_formats
+            && binds_exact_blurred_source_alpha
+            && binds_only_one_linear_transparent_sampler
+            && binds_spatial_and_parameters,
     })
 }
 
@@ -7470,6 +7738,7 @@ struct RuntimePassPreparationRequest {
     runtime: RuntimePass,
     spatial_uniform: Option<PassSpatialUniformBytes>,
     color_filter_operations: Option<ColorFilterOperationBytes>,
+    drop_shadow_parameters: Option<DropShadowParameterBytes>,
     composite_parameters: Option<CompositeParameterBytes>,
     cache_keys: Option<RuntimePassCacheKeys>,
     kernel: Option<GaussianKernelKey>,
@@ -7987,6 +8256,7 @@ fn prepare_runtime_pass_requests(
                 prepared_pass_spatial_uniform(pass, resources, lowered.root_working_image)?;
             let color_filter_operations =
                 prepare_color_filter_operations(pass, color_filter_limits)?;
+            let drop_shadow_parameters = prepare_drop_shadow_parameters(pass)?;
             let composite_parameters = prepared_pass_composite_parameters(pass)?;
             if spatial_uniform.is_some() != pass.cache_keys.is_some() {
                 return Err(preparation_error(
@@ -7997,6 +8267,7 @@ fn prepare_runtime_pass_requests(
                 runtime: pass.clone(),
                 spatial_uniform,
                 color_filter_operations,
+                drop_shadow_parameters,
                 composite_parameters,
                 cache_keys: pass.cache_keys.clone(),
                 kernel: facts.kernel_by_pass.get(&pass.id).copied(),
@@ -8004,6 +8275,19 @@ fn prepare_runtime_pass_requests(
             })
         })
         .collect()
+}
+
+fn prepare_drop_shadow_parameters(pass: &RuntimePass) -> Result<Option<DropShadowParameterBytes>> {
+    let RuntimePassKind::DropShadowColorize(Some(shadow)) = &pass.kind else {
+        return Ok(None);
+    };
+    let bytes = DropShadowParameterBytes::try_new(shadow.offset, shadow.color)?;
+    if bytes.as_bytes().len() != 32 {
+        return Err(preparation_error(
+            "drop-shadow parameter serialization changed its exact WGSL byte length",
+        ));
+    }
+    Ok(Some(bytes))
 }
 
 fn prepare_color_filter_operations(
@@ -9716,6 +10000,16 @@ fn realize_prepared_graph_pass(
                 keys.pipeline(),
             )?
             .require_encoding_ready(),
+        RuntimePassKind::DropShadowColorize(Some(_)) => update
+            .realize_drop_shadow_colorize_pass(
+                device,
+                pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+            .require_encoding_ready(),
         RuntimePassKind::Composite(Some(RuntimeComposite {
             kind: RuntimeCompositeKind::Layer { .. },
             ..
@@ -9731,7 +10025,7 @@ fn realize_prepared_graph_pass(
             .require_encoding_ready(),
         RuntimePassKind::CanonicalizeCapture
         | RuntimePassKind::Composite(Some(RuntimeComposite {
-            kind: RuntimeCompositeKind::SpanSourceOver,
+            kind: RuntimeCompositeKind::SpanSourceOver | RuntimeCompositeKind::DropShadow,
             ..
         }))
         | RuntimePassKind::Present => update
@@ -9750,12 +10044,8 @@ fn realize_prepared_graph_pass(
         | RuntimePassKind::ColorFilter(None)
         | RuntimePassKind::BlurHorizontal(None)
         | RuntimePassKind::BlurVertical(None)
-        | RuntimePassKind::DropShadowColorize(_)
-        | RuntimePassKind::Composite(None)
-        | RuntimePassKind::Composite(Some(RuntimeComposite {
-            kind: RuntimeCompositeKind::DropShadow,
-            ..
-        })) => Err(preparation_error(
+        | RuntimePassKind::DropShadowColorize(None)
+        | RuntimePassKind::Composite(None) => Err(preparation_error(
             "checked pass realization reached an unsupported graph pass",
         )),
     }
@@ -12286,6 +12576,10 @@ fn prepared_pass_view_is_consistent(pass: &PreparedPassView<'_>) -> bool {
                     ..
                 }))
             )
+        && pass
+            .drop_shadow_parameters()
+            .is_some_and(|bytes| bytes.as_bytes().len() == 32)
+            == matches!(pass.kind(), RuntimePassKind::DropShadowColorize(Some(_)))
 }
 
 #[cfg_attr(
@@ -12333,6 +12627,10 @@ impl PreparedPassView<'_> {
 
     pub(crate) const fn composite_parameters(&self) -> Option<&CompositeParameterBytes> {
         self.request.composite_parameters.as_ref()
+    }
+
+    pub(crate) const fn drop_shadow_parameters(&self) -> Option<&DropShadowParameterBytes> {
+        self.request.drop_shadow_parameters.as_ref()
     }
 
     pub(crate) const fn cache_keys(&self) -> Option<&RuntimePassCacheKeys> {
@@ -12870,6 +13168,19 @@ const fn runtime_read_uses_shader_sampler(kind: &RuntimePassKind, role: RuntimeR
     }
 }
 
+const fn runtime_read_uses_shader_texture(kind: &RuntimePassKind, role: RuntimeReadRole) -> bool {
+    !matches!(
+        (kind, role),
+        (
+            RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::DropShadow,
+                ..
+            })),
+            RuntimeReadRole::Shadow
+        )
+    )
+}
+
 fn runtime_pass_cache_keys(
     kind: &RuntimePassKind,
     reads: &[RuntimeReadBinding],
@@ -12896,14 +13207,15 @@ fn runtime_pass_cache_keys(
     let sampled_reads = reads
         .iter()
         .filter(|read| {
-            read.role != RuntimeReadRole::CompositeParent
-                || (!matches!(
-                    kind,
-                    RuntimePassKind::Composite(Some(RuntimeComposite {
-                        kind: RuntimeCompositeKind::SpanSourceOver,
-                        ..
-                    }))
-                ) && composite_samples_parent)
+            runtime_read_uses_shader_texture(kind, read.role)
+                && (read.role != RuntimeReadRole::CompositeParent
+                    || (!matches!(
+                        kind,
+                        RuntimePassKind::Composite(Some(RuntimeComposite {
+                            kind: RuntimeCompositeKind::SpanSourceOver,
+                            ..
+                        }))
+                    ) && composite_samples_parent))
         })
         .collect::<Vec<_>>();
     let sampled_textures = sampled_reads
@@ -13022,7 +13334,7 @@ fn shader_data_bindings(kind: &RuntimePassKind) -> Vec<ShaderDataBindingKey> {
             ShaderDataBindingKey::DropShadowParameters,
         ],
         RuntimePassKind::Composite(Some(RuntimeComposite {
-            kind: RuntimeCompositeKind::SpanSourceOver,
+            kind: RuntimeCompositeKind::SpanSourceOver | RuntimeCompositeKind::DropShadow,
             ..
         })) => vec![ShaderDataBindingKey::SpatialUniform],
         RuntimePassKind::Composite(Some(_)) => vec![

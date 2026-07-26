@@ -11715,6 +11715,84 @@ fn c11_blur_cache_realizes_checked_axis_input_and_precision_programs() {
     );
 }
 
+#[test]
+fn drop_shadow_parameter_bytes_preserve_fractional_offset_and_solid_color() {
+    let bytes = super::shader::drop_shadow_parameter_bytes_for_test(
+        Point::new(-1.5, 0.75),
+        Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+    )
+    .unwrap();
+    let scalar = |offset| f32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap());
+
+    assert!(
+        scalar(0).to_bits() == (-1.5_f32).to_bits()
+            && scalar(4).to_bits() == 0.75_f32.to_bits()
+            && bytes[8..16] == [0; 8]
+            && scalar(16).to_bits() == 0.125_f32.to_bits()
+            && scalar(20).to_bits() == 0.25_f32.to_bits()
+            && scalar(24).to_bits() == 0.375_f32.to_bits()
+            && scalar(28).to_bits() == 0.5_f32.to_bits()
+            && super::shader::drop_shadow_parameter_bytes_for_test(
+                Point::new(f64::NAN, 0.0),
+                Color::BLACK,
+            )
+            .is_err(),
+        "drop-shadow parameters lost a fractional offset, finite layout, or solid premultiplied color"
+    );
+}
+
+#[test]
+fn c11_drop_shadow_layout_binds_blurred_alpha_spatial_and_parameters() {
+    let observed = super::pass::c11_drop_shadow_layout_observation_for_test(
+        c11_authored_filter_steps_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.realizes_both_working_formats
+            && observed.binds_exact_blurred_source_alpha
+            && observed.binds_only_one_linear_transparent_sampler
+            && observed.binds_spatial_and_parameters
+            && observed.targets_only_the_working_format
+            && observed.contains_no_dummy_binding,
+        "the C11 drop-shadow colorize layout has a missing or dummy binding"
+    );
+}
+
+#[test]
+fn c11_drop_shadow_cache_realizes_checked_colorize_and_merge_programs() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap_or_panic_for_test("C11 checked drop-shadow realization requires backend selection")
+        .unwrap_or_panic_for_test("C11 checked drop-shadow realization requires a host adapter");
+    let ready = backend
+        .ready_device_state_borrow_for_test(identity)
+        .unwrap_or_panic_for_test("C11 checked drop-shadow realization requires a ready device");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let observed = pollster::block_on(
+        super::pass::c11_drop_shadow_cache_realization_observation_for_test(
+            ready.device_for_test(),
+            c11_authored_filter_steps_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+            capabilities,
+        ),
+    )
+    .unwrap_or_panic_for_test("the C11 checked drop-shadow programs must reach WGPU realization");
+
+    assert!(
+        observed.realizes_checked_colorize_and_merge_programs
+            && observed.checked_scope_is_clean
+            && observed.merge_uses_fixed_premultiplied_source_over
+            && observed.merge_omits_destination_sample
+            && observed.publishes_only_drop_shadow_entries,
+        "the C11 checked drop-shadow colorize or merge programs are unrealized"
+    );
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
@@ -14546,6 +14624,7 @@ fn c07_contains_no_placeholder_custom_shader_program() {
         "blur.wgsl".to_owned(),
         "canonicalize_capture.wgsl".to_owned(),
         "color_filter.wgsl".to_owned(),
+        "drop_shadow.wgsl".to_owned(),
         "layer_composite.wgsl".to_owned(),
         "present.wgsl".to_owned(),
         "span_source_over.wgsl".to_owned(),

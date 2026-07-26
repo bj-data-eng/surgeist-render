@@ -17,9 +17,75 @@ const PRESENT_WGSL: &str = include_str!("shaders/present.wgsl");
 const LAYER_COMPOSITE_WGSL: &str = include_str!("shaders/layer_composite.wgsl");
 const COLOR_FILTER_WGSL: &str = include_str!("shaders/color_filter.wgsl");
 const BLUR_WGSL: &str = include_str!("shaders/blur.wgsl");
+const DROP_SHADOW_WGSL: &str = include_str!("shaders/drop_shadow.wgsl");
 
 const COLOR_FILTER_OPERATION_HEADER_BYTE_LEN: u64 = 16;
 const COLOR_FILTER_OPERATION_RECORD_BYTE_LEN: u64 = 32;
+
+/// Exact 32-byte WGSL drop-shadow parameter block.
+///
+/// Bytes `0..8` retain the continuous logical offset, bytes `8..16` are zero
+/// alignment, and bytes `16..32` contain the finite solid premultiplied color.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DropShadowParameterBytes([u8; 32]);
+
+impl DropShadowParameterBytes {
+    pub(crate) fn try_new(offset: super::Point, color: super::Color) -> Result<Self> {
+        let offset_x = narrow_drop_shadow_scalar("drop shadow offset x", offset.x())?;
+        let offset_y = narrow_drop_shadow_scalar("drop shadow offset y", offset.y())?;
+        let channels = [color.r(), color.g(), color.b(), color.a()];
+        if channels
+            .into_iter()
+            .any(|value| !value.is_finite() || !(0.0..=1.0).contains(&value))
+        {
+            return Err(drop_shadow_parameter_error(
+                "drop shadow solid color",
+                "must contain finite unit-interval channels",
+            ));
+        }
+        let premultiplied = [
+            color.r() * color.a(),
+            color.g() * color.a(),
+            color.b() * color.a(),
+            color.a(),
+        ];
+        let mut bytes = [0_u8; 32];
+        bytes[0..4].copy_from_slice(&offset_x.to_le_bytes());
+        bytes[4..8].copy_from_slice(&offset_y.to_le_bytes());
+        for (index, value) in premultiplied.into_iter().enumerate() {
+            bytes[16 + index * 4..20 + index * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        Ok(Self(bytes))
+    }
+
+    #[must_use]
+    pub(crate) const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn drop_shadow_parameter_bytes_for_test(
+    offset: super::Point,
+    color: super::Color,
+) -> Result<[u8; 32]> {
+    DropShadowParameterBytes::try_new(offset, color).map(|bytes| bytes.0)
+}
+
+fn narrow_drop_shadow_scalar(field: &'static str, value: f64) -> Result<f32> {
+    let narrowed = value as f32;
+    if !narrowed.is_finite() {
+        return Err(drop_shadow_parameter_error(
+            field,
+            "must remain finite after f64-to-f32 narrowing",
+        ));
+    }
+    Ok(narrowed)
+}
+
+fn drop_shadow_parameter_error(field: &'static str, invariant: &'static str) -> Error {
+    Error::invalid_value(field, "runtime drop shadow", invariant)
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct ColorFilterOperationBufferLimits {
@@ -578,6 +644,7 @@ pub(crate) struct RenderPipelineKey {
 enum C08Program {
     CanonicalizeCapture,
     SpanSourceOver,
+    DropShadowMerge,
     Present,
 }
 
@@ -651,6 +718,19 @@ struct BlurPassKeyRefs<'a> {
     pipeline: &'a RenderPipelineKey,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct DropShadowColorizePassDescription {
+    working_format: ShaderTextureFormatKey,
+}
+
+#[derive(Clone, Copy)]
+struct DropShadowColorizePassKeyRefs<'a> {
+    samplers: &'a [SamplerKey],
+    layout: &'a BindGroupLayoutKey,
+    shader: &'a ShaderModuleKey,
+    pipeline: &'a RenderPipelineKey,
+}
+
 /// Non-clone handles created inside one checked GPU-operation scope. New entries
 /// remain private to this phase until the caller explicitly commits after the
 /// owning transaction resolves cleanly.
@@ -696,6 +776,15 @@ pub(crate) struct ProvisionalColorFilterPassObjects<'a> {
 /// Borrowed C11 blur objects selected entirely by checked cache-key facts.
 pub(crate) struct ProvisionalBlurPassObjects<'a> {
     description: BlurPassDescription,
+    source_sampler: &'a wgpu::Sampler,
+    layout: &'a wgpu::BindGroupLayout,
+    shader: &'a wgpu::ShaderModule,
+    pipeline: &'a wgpu::RenderPipeline,
+}
+
+/// Borrowed C11 drop-shadow colorize objects selected by checked key facts.
+pub(crate) struct ProvisionalDropShadowColorizePassObjects<'a> {
+    description: DropShadowColorizePassDescription,
     source_sampler: &'a wgpu::Sampler,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
@@ -946,6 +1035,65 @@ impl DevicePassCache {
                 is_blur_program(key.shader.program) && is_blur_program(key.layout.program)
             })
     }
+
+    #[cfg(test)]
+    pub(crate) fn contains_drop_shadow_colorize_pass_for_test(
+        &self,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> bool {
+        validate_drop_shadow_colorize_pass_keys(DropShadowColorizePassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        })
+        .is_ok()
+            && samplers.iter().all(|key| self.samplers.contains_key(key))
+            && self.layouts.contains_key(layout)
+            && self.shaders.contains_key(shader)
+            && self.pipelines.contains_key(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_only_four_drop_shadow_passes_for_test(&self) -> bool {
+        self.samplers.len() == 4
+            && self.layouts.len() == 4
+            && self.shaders.len() == 4
+            && self.pipelines.len() == 4
+            && self.samplers.keys().all(|key| {
+                matches!(
+                    key.binding_role,
+                    ShaderBindingRoleKey::BlurredSourceAlpha
+                        | ShaderBindingRoleKey::CompositeSource
+                ) && key.filter == ShaderSamplingFilterKey::Linear
+                    && key.edge == ShaderSamplingEdgeKey::TransparentBlack
+                    && key.resolved_mask_sampling.is_none()
+            })
+            && self.layouts.keys().all(|key| {
+                matches!(
+                    key.program,
+                    ShaderProgramKey::DropShadowColorize
+                        | ShaderProgramKey::Composite(ShaderCompositeKey::DropShadow)
+                )
+            })
+            && self.shaders.keys().all(|key| {
+                matches!(
+                    key.program,
+                    ShaderProgramKey::DropShadowColorize
+                        | ShaderProgramKey::Composite(ShaderCompositeKey::DropShadow)
+                )
+            })
+            && self.pipelines.keys().all(|key| {
+                matches!(
+                    key.shader.program,
+                    ShaderProgramKey::DropShadowColorize
+                        | ShaderProgramKey::Composite(ShaderCompositeKey::DropShadow)
+                ) && key.shader.program == key.layout.program
+            })
+    }
 }
 
 impl ProvisionalDevicePassCacheUpdate {
@@ -1044,8 +1192,11 @@ impl ProvisionalDevicePassCacheUpdate {
                 bind_group_layouts: &[Some(layout_handle)],
                 immediate_size: 0,
             });
-            let blend = (description.program == C08Program::SpanSourceOver)
-                .then_some(span_source_over_blend());
+            let blend = matches!(
+                description.program,
+                C08Program::SpanSourceOver | C08Program::DropShadowMerge
+            )
+            .then_some(span_source_over_blend());
             let target = wgpu::ColorTargetState {
                 format: texture_format(description.target_format)?,
                 blend,
@@ -1352,6 +1503,158 @@ impl ProvisionalDevicePassCacheUpdate {
             self.pipelines.insert(keys.pipeline.clone(), created);
         }
         self.blur_pass_objects(cache, keys)
+    }
+
+    pub(crate) fn realize_drop_shadow_colorize_pass<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalDropShadowColorizePassObjects<'a>> {
+        if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
+            return Err(drop_shadow_cache_error(
+                "provisional drop-shadow objects belong to another device cache",
+            ));
+        }
+        let keys = DropShadowColorizePassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        };
+        let description = validate_drop_shadow_colorize_pass_keys(keys)?;
+        for sampler_key in keys.samplers {
+            if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
+            {
+                self.samplers.insert(
+                    *sampler_key,
+                    device.create_sampler(&sampler_descriptor(*sampler_key)),
+                );
+            }
+        }
+        if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
+            self.layouts.insert(
+                keys.layout.clone(),
+                create_drop_shadow_colorize_bind_group_layout(device),
+            );
+        }
+        if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
+            self.shaders.insert(
+                keys.shader.clone(),
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Surgeist C11 drop-shadow colorize shader"),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DROP_SHADOW_WGSL)),
+                }),
+            );
+        }
+        if !cache.pipelines.contains_key(keys.pipeline)
+            && !self.pipelines.contains_key(keys.pipeline)
+        {
+            let layout_handle = self
+                .layouts
+                .get(keys.layout)
+                .or_else(|| cache.layouts.get(keys.layout))
+                .ok_or_else(|| {
+                    drop_shadow_cache_error(
+                        "drop-shadow colorize bind-group layout realization was lost",
+                    )
+                })?;
+            let shader_handle = self
+                .shaders
+                .get(keys.shader)
+                .or_else(|| cache.shaders.get(keys.shader))
+                .ok_or_else(|| {
+                    drop_shadow_cache_error(
+                        "drop-shadow colorize shader-module realization was lost",
+                    )
+                })?;
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Surgeist C11 drop-shadow colorize pipeline layout"),
+                bind_group_layouts: &[Some(layout_handle)],
+                immediate_size: 0,
+            });
+            let target = wgpu::ColorTargetState {
+                format: texture_format(description.working_format)?,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            };
+            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Surgeist C11 drop-shadow colorize pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader_handle,
+                    entry_point: Some("vertex_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: shader_handle,
+                    entry_point: Some("fragment_main"),
+                    targets: &[Some(target)],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.pipelines.insert(keys.pipeline.clone(), created);
+        }
+        self.drop_shadow_colorize_pass_objects(cache, keys)
+    }
+
+    fn drop_shadow_colorize_pass_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        keys: DropShadowColorizePassKeyRefs<'_>,
+    ) -> Result<ProvisionalDropShadowColorizePassObjects<'a>> {
+        let [source_sampler_key] = keys.samplers else {
+            return Err(drop_shadow_cache_error(
+                "drop-shadow colorize realization requires one source sampler",
+            ));
+        };
+        let source_sampler = self
+            .samplers
+            .get(source_sampler_key)
+            .or_else(|| cache.samplers.get(source_sampler_key))
+            .ok_or_else(|| {
+                drop_shadow_cache_error("drop-shadow colorize sampler realization was lost")
+            })?;
+        let layout = self
+            .layouts
+            .get(keys.layout)
+            .or_else(|| cache.layouts.get(keys.layout))
+            .ok_or_else(|| {
+                drop_shadow_cache_error("drop-shadow colorize layout realization was lost")
+            })?;
+        let shader = self
+            .shaders
+            .get(keys.shader)
+            .or_else(|| cache.shaders.get(keys.shader))
+            .ok_or_else(|| {
+                drop_shadow_cache_error("drop-shadow colorize shader realization was lost")
+            })?;
+        let pipeline = self
+            .pipelines
+            .get(keys.pipeline)
+            .or_else(|| cache.pipelines.get(keys.pipeline))
+            .ok_or_else(|| {
+                drop_shadow_cache_error("drop-shadow colorize pipeline realization was lost")
+            })?;
+        Ok(ProvisionalDropShadowColorizePassObjects {
+            description: validate_drop_shadow_colorize_pass_keys(keys)?,
+            source_sampler,
+            layout,
+            shader,
+            pipeline,
+        })
     }
 
     fn blur_pass_objects<'a>(
@@ -1756,7 +2059,10 @@ impl ProvisionalC08PassObjects<'_> {
     }
 
     pub(crate) const fn uses_fixed_source_over_blend(&self) -> bool {
-        matches!(self.program, C08Program::SpanSourceOver)
+        matches!(
+            self.program,
+            C08Program::SpanSourceOver | C08Program::DropShadowMerge
+        )
     }
 
     #[cfg(test)]
@@ -1839,6 +2145,19 @@ impl ProvisionalColorFilterPassObjects<'_> {
 }
 
 impl ProvisionalBlurPassObjects<'_> {
+    pub(crate) fn require_encoding_ready(&self) -> Result<()> {
+        let _ = (
+            self.description,
+            self.source_sampler,
+            self.layout,
+            self.shader,
+            self.pipeline,
+        );
+        Ok(())
+    }
+}
+
+impl ProvisionalDropShadowColorizePassObjects<'_> {
     pub(crate) fn require_encoding_ready(&self) -> Result<()> {
         let _ = (
             self.description,
@@ -1940,6 +2259,12 @@ fn c08_program_sampling(
             ShaderSamplingFilterKey::Linear,
             ShaderSamplingEdgeKey::TransparentBlack,
         ),
+        ShaderProgramKey::Composite(ShaderCompositeKey::DropShadow) => (
+            C08Program::DropShadowMerge,
+            ShaderBindingRoleKey::CompositeSource,
+            ShaderSamplingFilterKey::Linear,
+            ShaderSamplingEdgeKey::TransparentBlack,
+        ),
         ShaderProgramKey::Present => (
             C08Program::Present,
             ShaderBindingRoleKey::FinalWorkingImage,
@@ -1951,9 +2276,7 @@ fn c08_program_sampling(
         | ShaderProgramKey::BlurHorizontal { .. }
         | ShaderProgramKey::BlurVertical { .. }
         | ShaderProgramKey::DropShadowColorize
-        | ShaderProgramKey::Composite(
-            ShaderCompositeKey::Layer { .. } | ShaderCompositeKey::DropShadow,
-        ) => {
+        | ShaderProgramKey::Composite(ShaderCompositeKey::Layer { .. }) => {
             return Err(c08_cache_error(
                 "a later-cycle shader program reached C08 pass realization",
             ));
@@ -1980,7 +2303,7 @@ fn c08_target_format(
             }
             working_format
         }
-        C08Program::SpanSourceOver => {
+        C08Program::SpanSourceOver | C08Program::DropShadowMerge => {
             if sampled_texture.source_format != working_format
                 || keys.shader.output_format.is_some()
                 || keys.pipeline.target_format != working_format
@@ -2106,6 +2429,54 @@ fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescript
         input,
         working_format,
     })
+}
+
+fn validate_drop_shadow_colorize_pass_keys(
+    keys: DropShadowColorizePassKeyRefs<'_>,
+) -> Result<DropShadowColorizePassDescription> {
+    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
+        return Err(drop_shadow_cache_error(
+            "a drop-shadow colorize layout must bind exactly one sampled texture",
+        ));
+    };
+    let [sampler] = keys.samplers else {
+        return Err(drop_shadow_cache_error(
+            "a drop-shadow colorize pass must bind exactly one source sampler",
+        ));
+    };
+    let Some(working_format) = keys.shader.working_format else {
+        return Err(drop_shadow_cache_error(
+            "a drop-shadow colorize shader key has no selected working format",
+        ));
+    };
+    if keys.layout.program != ShaderProgramKey::DropShadowColorize
+        || keys.layout.data_bindings.as_slice()
+            != [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::DropShadowParameters,
+            ]
+        || keys.shader.program != ShaderProgramKey::DropShadowColorize
+        || &keys.shader.layout != keys.layout
+        || keys.shader.samplers.as_slice() != keys.samplers
+        || keys.shader.output_format.is_some()
+        || &keys.pipeline.shader != keys.shader
+        || &keys.pipeline.layout != keys.layout
+        || keys.pipeline.samplers.as_slice() != keys.samplers
+        || !is_working_format(working_format)
+        || keys.pipeline.target_format != working_format
+        || sampled_texture.binding_role != ShaderBindingRoleKey::BlurredSourceAlpha
+        || sampled_texture.source_format != working_format
+        || sampler.binding_role != ShaderBindingRoleKey::BlurredSourceAlpha
+        || sampler.source_format != working_format
+        || sampler.filter != ShaderSamplingFilterKey::Linear
+        || sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
+        || sampler.resolved_mask_sampling.is_some()
+    {
+        return Err(drop_shadow_cache_error(
+            "drop-shadow colorize keys disagree across source, layout, shader, or target",
+        ));
+    }
+    Ok(DropShadowColorizePassDescription { working_format })
 }
 
 const fn blur_program_facts(program: ShaderProgramKey) -> Option<(BlurAxis, BlurInput)> {
@@ -2451,6 +2822,51 @@ fn create_blur_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout
     })
 }
 
+fn create_drop_shadow_colorize_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let entries = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(48),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(32),
+            },
+            count: None,
+        },
+    ];
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Surgeist C11 drop-shadow colorize bindings"),
+        entries: &entries,
+    })
+}
+
 const fn blur_fragment_entry(description: BlurPassDescription) -> &'static str {
     match (description.axis, description.input) {
         (BlurAxis::Horizontal, BlurInput::Rgba) => "fragment_horizontal_rgba",
@@ -2482,7 +2898,7 @@ const fn composite_fragment_entry(description: CompositePassDescription) -> &'st
 const fn c08_shader_source(program: C08Program) -> &'static str {
     match program {
         C08Program::CanonicalizeCapture => CANONICALIZE_CAPTURE_WGSL,
-        C08Program::SpanSourceOver => SPAN_SOURCE_OVER_WGSL,
+        C08Program::SpanSourceOver | C08Program::DropShadowMerge => SPAN_SOURCE_OVER_WGSL,
         C08Program::Present => PRESENT_WGSL,
     }
 }
@@ -2491,6 +2907,7 @@ const fn c08_shader_label(program: C08Program) -> &'static str {
     match program {
         C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture shader",
         C08Program::SpanSourceOver => "Surgeist C08 span source-over shader",
+        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge shader",
         C08Program::Present => "Surgeist C08 present shader",
     }
 }
@@ -2499,6 +2916,7 @@ const fn c08_bind_group_layout_label(program: C08Program) -> &'static str {
     match program {
         C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture bindings",
         C08Program::SpanSourceOver => "Surgeist C08 span source-over bindings",
+        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge bindings",
         C08Program::Present => "Surgeist C08 present bindings",
     }
 }
@@ -2507,6 +2925,7 @@ const fn c08_pipeline_layout_label(program: C08Program) -> &'static str {
     match program {
         C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture pipeline layout",
         C08Program::SpanSourceOver => "Surgeist C08 span source-over pipeline layout",
+        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge pipeline layout",
         C08Program::Present => "Surgeist C08 present pipeline layout",
     }
 }
@@ -2515,6 +2934,7 @@ const fn c08_pipeline_label(program: C08Program) -> &'static str {
     match program {
         C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture pipeline",
         C08Program::SpanSourceOver => "Surgeist C08 span source-over pipeline",
+        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge pipeline",
         C08Program::Present => "Surgeist C08 present pipeline",
     }
 }
@@ -2557,11 +2977,16 @@ fn blur_cache_error(message: &'static str) -> Error {
     Error::new(super::BackendErrorCode::RenderFailed, message)
 }
 
+fn drop_shadow_cache_error(message: &'static str) -> Error {
+    Error::new(super::BackendErrorCode::RenderFailed, message)
+}
+
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum C08ProgramForTest {
     CanonicalizeCapture,
     SpanSourceOver,
+    DropShadowMerge,
     Present,
 }
 
@@ -2599,6 +3024,7 @@ pub(crate) fn c08_pass_key_facts_for_test(
         program: match description.program {
             C08Program::CanonicalizeCapture => C08ProgramForTest::CanonicalizeCapture,
             C08Program::SpanSourceOver => C08ProgramForTest::SpanSourceOver,
+            C08Program::DropShadowMerge => C08ProgramForTest::DropShadowMerge,
             C08Program::Present => C08ProgramForTest::Present,
         },
         source_role: sampled_texture.binding_role,
@@ -2608,20 +3034,22 @@ pub(crate) fn c08_pass_key_facts_for_test(
         target_format: pipeline.target_format,
         has_only_spatial_uniform: layout.data_bindings.as_slice()
             == [ShaderDataBindingKey::SpatialUniform],
-        has_fixed_source_over_blend: description.program != C08Program::SpanSourceOver
-            || span_source_over_blend()
-                == wgpu::BlendState {
-                    color: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
-                    alpha: wgpu::BlendComponent {
-                        src_factor: wgpu::BlendFactor::One,
-                        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-                        operation: wgpu::BlendOperation::Add,
-                    },
+        has_fixed_source_over_blend: !matches!(
+            description.program,
+            C08Program::SpanSourceOver | C08Program::DropShadowMerge
+        ) || span_source_over_blend()
+            == wgpu::BlendState {
+                color: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
                 },
+                alpha: wgpu::BlendComponent {
+                    src_factor: wgpu::BlendFactor::One,
+                    dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                    operation: wgpu::BlendOperation::Add,
+                },
+            },
     })
 }
 
@@ -2787,6 +3215,57 @@ pub(crate) fn c11_blur_pass_key_facts_for_test(
             == [
                 ShaderDataBindingKey::SpatialUniform,
                 ShaderDataBindingKey::GaussianKernel,
+            ],
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C11DropShadowColorizeKeyFactsForTest {
+    pub(crate) source_role: ShaderBindingRoleKey,
+    pub(crate) source_format: ShaderTextureFormatKey,
+    pub(crate) working_format: ShaderTextureFormatKey,
+    pub(crate) target_format: ShaderTextureFormatKey,
+    pub(crate) has_only_linear_transparent_sampler: bool,
+    pub(crate) has_exact_data_bindings: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c11_drop_shadow_colorize_key_facts_for_test(
+    samplers: &[SamplerKey],
+    layout: &BindGroupLayoutKey,
+    shader: &ShaderModuleKey,
+    pipeline: &RenderPipelineKey,
+) -> Option<C11DropShadowColorizeKeyFactsForTest> {
+    let [sampled_texture] = layout.sampled_textures.as_slice() else {
+        return None;
+    };
+    let description = validate_drop_shadow_colorize_pass_keys(DropShadowColorizePassKeyRefs {
+        samplers,
+        layout,
+        shader,
+        pipeline,
+    })
+    .ok()?;
+    Some(C11DropShadowColorizeKeyFactsForTest {
+        source_role: sampled_texture.binding_role,
+        source_format: sampled_texture.source_format,
+        working_format: description.working_format,
+        target_format: pipeline.target_format,
+        has_only_linear_transparent_sampler: matches!(
+            samplers,
+            [SamplerKey {
+                binding_role: ShaderBindingRoleKey::BlurredSourceAlpha,
+                filter: ShaderSamplingFilterKey::Linear,
+                edge: ShaderSamplingEdgeKey::TransparentBlack,
+                resolved_mask_sampling: None,
+                ..
+            }]
+        ),
+        has_exact_data_bindings: layout.data_bindings.as_slice()
+            == [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::DropShadowParameters,
             ],
     })
 }
