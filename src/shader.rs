@@ -2371,12 +2371,24 @@ impl ProvisionalCopyBackdropPassObjects<'_> {
     pub(crate) fn require_encoding_ready(&self) -> Result<()> {
         let _ = (
             self.description,
-            self.parent_sampler,
-            self.layout,
+            self.parent_sampler(),
+            self.bind_group_layout(),
             self.shader,
-            self.pipeline,
+            self.render_pipeline(),
         );
         Ok(())
+    }
+
+    pub(crate) const fn parent_sampler(&self) -> &wgpu::Sampler {
+        self.parent_sampler
+    }
+
+    pub(crate) const fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
+        self.layout
+    }
+
+    pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
+        self.pipeline
     }
 }
 

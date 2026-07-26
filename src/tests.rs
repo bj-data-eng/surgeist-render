@@ -11791,6 +11791,17 @@ fn c12_copy_backdrop_cache_realizes_checked_working_format_programs() {
 }
 
 #[test]
+fn c12_prepared_copy_backdrop_objects_expose_exact_encoding_handles() {
+    fn require_copy_handles(objects: &super::shader::ProvisionalCopyBackdropPassObjects<'_>) {
+        let _: &wgpu::Sampler = objects.parent_sampler();
+        let _: &wgpu::BindGroupLayout = objects.bind_group_layout();
+        let _: &wgpu::RenderPipeline = objects.render_pipeline();
+    }
+
+    let _ = require_copy_handles;
+}
+
+#[test]
 fn c12_blur_cache_separates_transparent_and_mirrored_edge_programs() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
