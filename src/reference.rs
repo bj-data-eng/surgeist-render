@@ -1,7 +1,7 @@
 #![cfg_attr(not(test), allow(dead_code))]
 
 use super::{
-    Error, Extend, Image, ImageQuality, PhysicalSize, Rect, Result,
+    Error, Extend, Image, ImageQuality, PhysicalSize, Point, Rect, Result,
     filter::{
         BlurPolicy, CompiledColorFilterPipeline, CompiledColorFilterStep, StraightColorTransform,
         TransparentEdgeSamplingPolicy,
@@ -704,6 +704,48 @@ impl ReferencePremultipliedRgba8Buffer {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn apply_blur_to_high_precision_straight_rgba8_for_gpu_oracle(
+        &self,
+        blur: FilterBlur,
+        policy: BlurPolicy,
+    ) -> Result<Vec<u8>> {
+        let pixels = floating_gaussian_blur(&self.pixels, self.physical_size, blur, policy)?;
+        Ok(floating_straight_rgba8(&pixels))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_fractional_drop_shadow_to_high_precision_straight_rgba8_for_gpu_oracle(
+        &self,
+        shadow: &FilterDropShadow,
+        policy: BlurPolicy,
+    ) -> Result<Vec<u8>> {
+        let source = self
+            .pixels
+            .iter()
+            .copied()
+            .map(FloatingPremultipliedRgba8::from_pixel)
+            .collect::<Vec<_>>();
+        let alpha_pixels = self
+            .pixels
+            .iter()
+            .copied()
+            .map(|pixel| PremultipliedRgba8::try_new(0, 0, 0, pixel.alpha()).unwrap())
+            .collect::<Vec<_>>();
+        let blurred =
+            floating_gaussian_blur(&alpha_pixels, self.physical_size, shadow.blur(), policy)?;
+        let shadow_pixels = floating_fractional_shadow(
+            &blurred,
+            self.physical_size,
+            shadow.offset(),
+            shadow.color(),
+        );
+        Ok(floating_straight_rgba8(&floating_source_over(
+            &source,
+            &shadow_pixels,
+        )))
+    }
+
     pub(crate) fn apply_drop_shadow(
         &self,
         shadow: &FilterDropShadow,
@@ -713,6 +755,75 @@ impl ReferencePremultipliedRgba8Buffer {
         let blurred_alpha = shifted_alpha.apply_blur(shadow.blur(), policy)?;
         let shadow = blurred_alpha.colorize_alpha_mask(shadow.color())?;
         self.source_over(&shadow)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn apply_fractional_drop_shadow_for_gpu_oracle(
+        &self,
+        shadow: &FilterDropShadow,
+        policy: BlurPolicy,
+    ) -> Result<Self> {
+        let source_alpha =
+            self.map_pixels(|pixel| PremultipliedRgba8::try_new(0, 0, 0, pixel.alpha()))?;
+        let blurred_alpha = source_alpha.apply_blur(shadow.blur(), policy)?;
+        let shifted_alpha = blurred_alpha.sample_alpha_at_fractional_offset(shadow.offset())?;
+        let colored_shadow = shifted_alpha.colorize_alpha_mask(shadow.color())?;
+        self.source_over(&colored_shadow)
+    }
+
+    #[cfg(test)]
+    fn sample_alpha_at_fractional_offset(&self, offset: Point) -> Result<Self> {
+        let mut sampled = Self::try_new(self.physical_size)?;
+        for y in 0..self.physical_size.height() {
+            for x in 0..self.physical_size.width() {
+                let alpha =
+                    self.bilinear_alpha(f64::from(x) - offset.x(), f64::from(y) - offset.y());
+                sampled.set_pixel(
+                    x,
+                    y,
+                    PremultipliedRgba8::try_new(0, 0, 0, round_byte(alpha))?,
+                )?;
+            }
+        }
+        Ok(sampled)
+    }
+
+    #[cfg(test)]
+    fn bilinear_alpha(&self, x: f64, y: f64) -> f64 {
+        let x0 = x.floor();
+        let y0 = y.floor();
+        let fraction_x = x - x0;
+        let fraction_y = y - y0;
+        [
+            (x0, y0, (1.0 - fraction_x) * (1.0 - fraction_y)),
+            (x0 + 1.0, y0, fraction_x * (1.0 - fraction_y)),
+            (x0, y0 + 1.0, (1.0 - fraction_x) * fraction_y),
+            (x0 + 1.0, y0 + 1.0, fraction_x * fraction_y),
+        ]
+        .into_iter()
+        .map(|(sample_x, sample_y, weight)| {
+            self.alpha_if_in_bounds(sample_x as i64, sample_y as i64) * weight
+        })
+        .sum()
+    }
+
+    #[cfg(test)]
+    fn alpha_if_in_bounds(&self, x: i64, y: i64) -> f64 {
+        if x < 0
+            || y < 0
+            || x >= i64::from(self.physical_size.width())
+            || y >= i64::from(self.physical_size.height())
+        {
+            return 0.0;
+        }
+        let index = usize::try_from(y)
+            .expect("nonnegative reference y must fit usize")
+            .saturating_mul(
+                usize::try_from(self.physical_size.width())
+                    .expect("validated reference width must fit usize"),
+            )
+            .saturating_add(usize::try_from(x).expect("nonnegative reference x must fit usize"));
+        f64::from(self.pixels[index].alpha())
     }
 
     fn offset_alpha_mask(&self, shadow: &FilterDropShadow) -> Result<Self> {
@@ -1004,6 +1115,15 @@ struct FloatingPremultipliedRgba8 {
 }
 
 impl FloatingPremultipliedRgba8 {
+    fn from_pixel(pixel: PremultipliedRgba8) -> Self {
+        Self {
+            red: f64::from(pixel.red()),
+            green: f64::from(pixel.green()),
+            blue: f64::from(pixel.blue()),
+            alpha: f64::from(pixel.alpha()),
+        }
+    }
+
     fn add_pixel(&mut self, pixel: PremultipliedRgba8, weight: f64) {
         self.red += f64::from(pixel.red()) * weight;
         self.green += f64::from(pixel.green()) * weight;
@@ -1028,6 +1148,149 @@ impl FloatingPremultipliedRgba8 {
         )
         .expect("weighted premultiplied blur output should stay premultiplied")
     }
+}
+
+#[cfg(test)]
+fn floating_gaussian_blur(
+    pixels: &[PremultipliedRgba8],
+    size: PhysicalSize,
+    blur: FilterBlur,
+    policy: BlurPolicy,
+) -> Result<Vec<FloatingPremultipliedRgba8>> {
+    let Some(kernel) = BlurKernel::from_policy(blur, policy)? else {
+        return Ok(pixels
+            .iter()
+            .copied()
+            .map(FloatingPremultipliedRgba8::from_pixel)
+            .collect());
+    };
+    let width = usize::try_from(size.width()).expect("validated width must fit usize");
+    let height = usize::try_from(size.height()).expect("validated height must fit usize");
+    let mut horizontal = vec![FloatingPremultipliedRgba8::default(); pixels.len()];
+    for y in 0..height {
+        for x in 0..width {
+            for (offset, weight) in kernel.offset_weights() {
+                if let Some(sample_x) = offset_index(x, offset, width) {
+                    horizontal[y * width + x].add_pixel(pixels[y * width + sample_x], weight);
+                }
+            }
+        }
+    }
+    Ok(floating_vertical_blur(&horizontal, width, height, &kernel))
+}
+
+#[cfg(test)]
+fn floating_vertical_blur(
+    horizontal: &[FloatingPremultipliedRgba8],
+    width: usize,
+    height: usize,
+    kernel: &BlurKernel,
+) -> Vec<FloatingPremultipliedRgba8> {
+    let mut output = vec![FloatingPremultipliedRgba8::default(); horizontal.len()];
+    for y in 0..height {
+        for x in 0..width {
+            for (offset, weight) in kernel.offset_weights() {
+                if let Some(sample_y) = offset_index(y, offset, height) {
+                    output[y * width + x].add_float(horizontal[sample_y * width + x], weight);
+                }
+            }
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+fn floating_fractional_shadow(
+    blurred_alpha: &[FloatingPremultipliedRgba8],
+    size: PhysicalSize,
+    offset: Point,
+    color: super::Color,
+) -> Vec<FloatingPremultipliedRgba8> {
+    let width = usize::try_from(size.width()).expect("validated width must fit usize");
+    let height = usize::try_from(size.height()).expect("validated height must fit usize");
+    let mut output = Vec::with_capacity(blurred_alpha.len());
+    for y in 0..height {
+        for x in 0..width {
+            let alpha = floating_bilinear_alpha(
+                blurred_alpha,
+                width,
+                height,
+                x as f64 - offset.x(),
+                y as f64 - offset.y(),
+            ) * f64::from(color.a());
+            output.push(FloatingPremultipliedRgba8 {
+                red: f64::from(color.r()) * alpha,
+                green: f64::from(color.g()) * alpha,
+                blue: f64::from(color.b()) * alpha,
+                alpha,
+            });
+        }
+    }
+    output
+}
+
+#[cfg(test)]
+fn floating_bilinear_alpha(
+    pixels: &[FloatingPremultipliedRgba8],
+    width: usize,
+    height: usize,
+    x: f64,
+    y: f64,
+) -> f64 {
+    let x0 = x.floor();
+    let y0 = y.floor();
+    let fraction_x = x - x0;
+    let fraction_y = y - y0;
+    [
+        (x0, y0, (1.0 - fraction_x) * (1.0 - fraction_y)),
+        (x0 + 1.0, y0, fraction_x * (1.0 - fraction_y)),
+        (x0, y0 + 1.0, (1.0 - fraction_x) * fraction_y),
+        (x0 + 1.0, y0 + 1.0, fraction_x * fraction_y),
+    ]
+    .into_iter()
+    .filter(|(x, y, _)| *x >= 0.0 && *y >= 0.0 && *x < width as f64 && *y < height as f64)
+    .map(|(x, y, weight)| pixels[y as usize * width + x as usize].alpha * weight)
+    .sum()
+}
+
+#[cfg(test)]
+fn floating_source_over(
+    source: &[FloatingPremultipliedRgba8],
+    destination: &[FloatingPremultipliedRgba8],
+) -> Vec<FloatingPremultipliedRgba8> {
+    source
+        .iter()
+        .copied()
+        .zip(destination.iter().copied())
+        .map(|(source, destination)| {
+            let retained = 1.0 - source.alpha / 255.0;
+            FloatingPremultipliedRgba8 {
+                red: source.red + destination.red * retained,
+                green: source.green + destination.green * retained,
+                blue: source.blue + destination.blue * retained,
+                alpha: source.alpha + destination.alpha * retained,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn floating_straight_rgba8(pixels: &[FloatingPremultipliedRgba8]) -> Vec<u8> {
+    pixels
+        .iter()
+        .flat_map(|pixel| {
+            let alpha = round_byte(pixel.alpha);
+            if alpha == 0 || pixel.alpha <= 0.0 {
+                return [0, 0, 0, 0];
+            }
+            [
+                round_byte(pixel.red * 255.0 / pixel.alpha),
+                round_byte(pixel.green * 255.0 / pixel.alpha),
+                round_byte(pixel.blue * 255.0 / pixel.alpha),
+                alpha,
+            ]
+        })
+        .collect()
 }
 
 fn offset_index(index: usize, offset: i32, len: usize) -> Option<usize> {

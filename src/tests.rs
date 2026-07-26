@@ -11939,6 +11939,488 @@ fn c11_encode_failure_preserves_resources_cache_and_publication() {
     );
 }
 
+struct C11ProductionFrameForTest {
+    output: ImageBuffer,
+    result: super::renderer::C11SpatialFilterRenderResultForTest,
+    queue_submissions: usize,
+    graph_submissions: usize,
+    direct_submissions: usize,
+    publication_count: usize,
+}
+
+fn c11_filter_list_for_test(operation: FilterOp) -> Vec<FilterList> {
+    vec![FilterList::try_ops(vec![operation]).expect("the C11 operation must form one filter")]
+}
+
+fn c11_pixel_renderer_for_test(
+    working_format: WorkingFormat,
+    size: PhysicalSize,
+) -> (Renderer, Surface) {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| panic!("C11 pixel execution requires a real renderer: {error}"));
+    assert!(
+        c08_supported_working_formats_for_test(&mut renderer).contains(&working_format),
+        "C11 pixel execution requires the requested real working format"
+    );
+    let surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .unwrap_or_else(|error| panic!("C11 pixel execution requires a headless surface: {error}"));
+    (renderer, surface)
+}
+
+fn render_c11_fixture_for_test(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+    scene: &Scene,
+    filters: Vec<FilterList>,
+    working_format: WorkingFormat,
+) -> C11ProductionFrameForTest {
+    let publication_before = surface.headless_publication_count_for_test();
+    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_submission = graph_scope.observation_for_test();
+    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
+    let direct_submission = direct_scope.observation_for_test();
+    let result = pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+        surface,
+        scene,
+        filters,
+        Parameters::default(),
+        working_format,
+    ))
+    .unwrap_or_else(|error| panic!("the C11 fixture must use the production graph: {error}"));
+    let frame = C11ProductionFrameForTest {
+        output: pollster::block_on(renderer.read_headless(surface))
+            .unwrap_or_else(|error| panic!("the published C11 fixture must be readable: {error}")),
+        result,
+        queue_submissions: submission.queue_submission_count_for_test(),
+        graph_submissions: graph_submission.queue_submission_count_for_test(),
+        direct_submissions: direct_submission.queue_submission_count_for_test(),
+        publication_count: surface
+            .headless_publication_count_for_test()
+            .saturating_sub(publication_before),
+    };
+    drop(direct_scope);
+    drop(graph_scope);
+    drop(submission_scope);
+    frame
+}
+
+fn c11_reference_buffer_for_test(
+    size: PhysicalSize,
+    opaque_pixels: &[(u32, u32, PremultipliedRgba8)],
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut source = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
+    for &(x, y, pixel) in opaque_pixels {
+        source.set_pixel(x, y, pixel).unwrap();
+    }
+    source
+}
+
+fn c11_image_scene_for_test(size: PhysicalSize, pixels: Vec<u8>, destination: Rect) -> Scene {
+    let image = Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        Arc::<[u8]>::from(pixels),
+    )
+    .expect("the C11 source-readable fixture must form one RGBA image");
+    let mut scene = Scene::new();
+    scene.image(image, destination, ImageFit::Stretch);
+    scene
+}
+
+fn c11_maximum_error_for_test(
+    actual: &[u8],
+    expected: &[u8],
+    working_format: WorkingFormat,
+) -> (u8, u8) {
+    match working_format {
+        WorkingFormat::HighPrecision => (
+            c10_high_terminal_error_for_test(actual, expected).unwrap_or(u8::MAX),
+            0,
+        ),
+        WorkingFormat::ReducedPrecision => {
+            c10_reduced_error_for_test(actual, expected).unwrap_or((u8::MAX, u8::MAX))
+        }
+    }
+}
+
+fn c11_alpha_energy_error_for_test(actual: &[u8], expected: &[u8]) -> f64 {
+    let actual = actual
+        .chunks_exact(4)
+        .map(|pixel| u64::from(pixel[3]))
+        .sum::<u64>();
+    let expected = expected
+        .chunks_exact(4)
+        .map(|pixel| u64::from(pixel[3]))
+        .sum::<u64>();
+    actual.abs_diff(expected) as f64 / expected.max(1) as f64
+}
+
+fn c11_alpha_energy_relative_to_for_test(actual: &[u8], expected_energy: u64) -> f64 {
+    let actual = actual
+        .chunks_exact(4)
+        .map(|pixel| u64::from(pixel[3]))
+        .sum::<u64>();
+    actual.abs_diff(expected_energy) as f64 / expected_energy.max(1) as f64
+}
+
+fn c11_frame_has_exact_execution_for_test(
+    frame: &C11ProductionFrameForTest,
+    size: PhysicalSize,
+    working_format: WorkingFormat,
+) -> bool {
+    frame.output.size() == size
+        && frame.result.output_extent == size
+        && frame.result.working_format == working_format
+        && frame.queue_submissions == 1
+        && frame.graph_submissions == 1
+        && frame.direct_submissions == 0
+        && frame.publication_count == 1
+        && frame.result.stats.commands > 0
+        && terminal_straight_rgba8_is_canonical_for_test(frame.output.rgba())
+}
+
+fn c11_pixels_match_oracle_for_test(frame: &C11ProductionFrameForTest, expected: &[u8]) -> bool {
+    let (alpha_error, color_error) =
+        c11_maximum_error_for_test(frame.output.rgba(), expected, frame.result.working_format);
+    let energy_error = c11_alpha_energy_error_for_test(frame.output.rgba(), expected);
+    let energy_tolerance = match frame.result.working_format {
+        WorkingFormat::HighPrecision => 0.015,
+        WorkingFormat::ReducedPrecision => 0.025,
+    };
+    alpha_error <= 4 && color_error <= 4 && energy_error <= energy_tolerance
+}
+
+fn c11_alpha_centroid_for_test(bytes: &[u8], size: PhysicalSize) -> Point {
+    let mut weighted_x = 0.0;
+    let mut weighted_y = 0.0;
+    let mut energy = 0.0;
+    for (index, pixel) in bytes.chunks_exact(4).enumerate() {
+        let alpha = f64::from(pixel[3]);
+        let index = u32::try_from(index).expect("the C11 centroid index must fit u32");
+        weighted_x += (f64::from(index % size.width()) + 0.5) * alpha;
+        weighted_y += (f64::from(index / size.width()) + 0.5) * alpha;
+        energy += alpha;
+    }
+    Point::new(weighted_x / energy, weighted_y / energy)
+}
+
+fn c11_blur_identity_and_transparency_are_exact_for_test(
+    working_format: WorkingFormat,
+    size: PhysicalSize,
+    scene: &Scene,
+    blurred: &C11ProductionFrameForTest,
+) -> bool {
+    let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+    let blur = FilterBlur::try_new(1.0).unwrap();
+    let with_identity = render_c11_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        scene,
+        vec![
+            FilterList::try_ops(vec![FilterOp::blur(blur)]).unwrap(),
+            FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(0.0).unwrap())]).unwrap(),
+        ],
+        working_format,
+    );
+    if !c11_frame_has_exact_execution_for_test(&with_identity, size, working_format)
+        || with_identity.output.rgba() != blurred.output.rgba()
+    {
+        return false;
+    }
+    let transparent = c11_image_scene_for_test(
+        PhysicalSize::new(1, 1),
+        vec![17, 31, 47, 0],
+        Rect::new(6.0, 6.0, 1.0, 1.0),
+    );
+    let transparent = render_c11_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        &transparent,
+        c11_filter_list_for_test(FilterOp::blur(blur)),
+        working_format,
+    );
+    c11_frame_has_exact_execution_for_test(&transparent, size, working_format)
+        && transparent.output.rgba().iter().all(|byte| *byte == 0)
+}
+
+fn c11_drop_shadow_order_is_authored_for_test(
+    working_format: WorkingFormat,
+    size: PhysicalSize,
+    scene: &Scene,
+    shadow: FilterDropShadow,
+) -> bool {
+    let shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
+    let blur =
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(0.5).unwrap())]).unwrap();
+    let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+    let shadow_then_blur = render_c11_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        scene,
+        vec![shadow.clone(), blur.clone()],
+        working_format,
+    );
+    let blur_then_shadow = render_c11_fixture_for_test(
+        &mut renderer,
+        &mut surface,
+        scene,
+        vec![blur, shadow],
+        working_format,
+    );
+    c11_frame_has_exact_execution_for_test(&shadow_then_blur, size, working_format)
+        && c11_frame_has_exact_execution_for_test(&blur_then_shadow, size, working_format)
+        && shadow_then_blur.output.rgba() != blur_then_shadow.output.rgba()
+}
+
+#[test]
+fn blur_impulse_is_symmetric_normalized_and_matches_oracle() {
+    let size = PhysicalSize::new(17, 17);
+    let center = (8, 8);
+    let blur = FilterBlur::try_new(1.0).unwrap();
+    let source = c11_reference_buffer_for_test(
+        size,
+        &[(
+            center.0,
+            center.1,
+            PremultipliedRgba8::try_new(255, 255, 255, 255).unwrap(),
+        )],
+    );
+    let expected = source
+        .apply_blur(blur, BlurPolicy::css_filter_default())
+        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .unwrap();
+    let mut impulse_pixels = vec![0; 7 * 7 * 4];
+    impulse_pixels[(3 * 7 + 3) * 4..][..4].copy_from_slice(&[255; 4]);
+    let scene = c11_image_scene_for_test(
+        PhysicalSize::new(7, 7),
+        impulse_pixels,
+        Rect::new(5.0, 5.0, 7.0, 7.0),
+    );
+
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+        let frame = render_c11_fixture_for_test(
+            &mut renderer,
+            &mut surface,
+            &scene,
+            c11_filter_list_for_test(FilterOp::blur(blur)),
+            working_format,
+        );
+        let alpha = |x: u32, y: u32| frame.output.rgba()[((y * 17 + x) * 4 + 3) as usize];
+        let symmetric = (0..17).all(|coordinate| {
+            alpha(coordinate, center.1) == alpha(16 - coordinate, center.1)
+                && alpha(center.0, coordinate) == alpha(center.0, 16 - coordinate)
+        });
+        let (alpha_error, color_error) =
+            c11_maximum_error_for_test(frame.output.rgba(), &expected, working_format);
+        let energy_tolerance = match working_format {
+            WorkingFormat::HighPrecision => 0.015,
+            WorkingFormat::ReducedPrecision => 0.025,
+        };
+        assert!(
+            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+                && frame.result.source_spatial.device_origin == (5, 5)
+                && frame.result.source_spatial.device_extent == PhysicalSize::new(7, 7)
+                && frame.result.result_spatial.device_origin == (2, 2)
+                && frame.result.result_spatial.device_extent == PhysicalSize::new(13, 13)
+                && symmetric
+                && alpha_error <= 4
+                && color_error <= 4
+                && c11_alpha_energy_relative_to_for_test(frame.output.rgba(), 255)
+                    <= energy_tolerance,
+            "blur impulse production-GPU comparison exceeds its exact grid, symmetry, or oracle tolerance"
+        );
+    }
+}
+
+#[test]
+fn ordinary_blur_samples_transparent_black_at_all_edges() {
+    let size = PhysicalSize::new(13, 13);
+    let blur = FilterBlur::try_new(1.0).unwrap();
+    let opaque = PremultipliedRgba8::try_new(64, 128, 255, 255).unwrap();
+    let pixels = (5..=7)
+        .flat_map(|y| (5..=7).map(move |x| (x, y, opaque)))
+        .collect::<Vec<_>>();
+    let source = c11_reference_buffer_for_test(size, &pixels);
+    let expected_high = source
+        .apply_blur_to_high_precision_straight_rgba8_for_gpu_oracle(
+            blur,
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+    let expected_reduced = source
+        .apply_blur(blur, BlurPolicy::css_filter_default())
+        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .unwrap();
+    let mut edge_pixels = vec![0; 9 * 9 * 4];
+    for y in 3..=5 {
+        for x in 3..=5 {
+            edge_pixels[(y * 9 + x) * 4..][..4].copy_from_slice(&[64, 128, 255, 255]);
+        }
+    }
+    let scene = c11_image_scene_for_test(
+        PhysicalSize::new(9, 9),
+        edge_pixels,
+        Rect::new(2.0, 2.0, 9.0, 9.0),
+    );
+
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+        let frame = render_c11_fixture_for_test(
+            &mut renderer,
+            &mut surface,
+            &scene,
+            c11_filter_list_for_test(FilterOp::blur(blur)),
+            working_format,
+        );
+        let expected = match working_format {
+            WorkingFormat::HighPrecision => &expected_high,
+            WorkingFormat::ReducedPrecision => &expected_reduced,
+        };
+        let alpha = frame
+            .output
+            .rgba()
+            .chunks_exact(4)
+            .map(|pixel| pixel[3])
+            .collect::<Vec<_>>();
+        let transparent_surface_edge = (0..13).all(|coordinate| {
+            alpha[coordinate] == 0
+                && alpha[12 * 13 + coordinate] == 0
+                && alpha[coordinate * 13] == 0
+                && alpha[coordinate * 13 + 12] == 0
+        });
+        assert!(
+            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+                && frame.result.source_spatial.device_origin == (2, 2)
+                && frame.result.result_spatial.device_origin == (-1, -1)
+                && frame.result.result_spatial.device_extent == PhysicalSize::new(15, 15)
+                && transparent_surface_edge
+                && c11_blur_identity_and_transparency_are_exact_for_test(
+                    working_format,
+                    size,
+                    &scene,
+                    &frame,
+                )
+                && c11_pixels_match_oracle_for_test(&frame, expected),
+            "ordinary blur edge production-GPU comparison violates transparent-black sampling"
+        );
+    }
+}
+
+#[test]
+fn drop_shadow_preserves_source_uses_fractional_offset_and_expands_signed_bounds() {
+    let size = PhysicalSize::new(17, 17);
+    let source_pixel = PremultipliedRgba8::try_new(224, 64, 16, 255).unwrap();
+    let source = c11_reference_buffer_for_test(size, &[(3, 7, source_pixel), (4, 7, source_pixel)]);
+    let shadow = FilterDropShadow::try_new(
+        Point::new(-1.5, 0.75),
+        FilterBlur::try_new(1.0).unwrap(),
+        Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+    )
+    .unwrap();
+    let expected_high = source
+        .apply_fractional_drop_shadow_to_high_precision_straight_rgba8_for_gpu_oracle(
+            &shadow,
+            BlurPolicy::css_filter_default(),
+        )
+        .unwrap();
+    let expected_reduced = source
+        .apply_fractional_drop_shadow_for_gpu_oracle(&shadow, BlurPolicy::css_filter_default())
+        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .unwrap();
+    let mut shadow_pixels = vec![0; 8 * 7 * 4];
+    shadow_pixels[(3 * 8 + 3) * 4..][..4].copy_from_slice(&[224, 64, 16, 255]);
+    shadow_pixels[(3 * 8 + 4) * 4..][..4].copy_from_slice(&[224, 64, 16, 255]);
+    let scene = c11_image_scene_for_test(
+        PhysicalSize::new(8, 7),
+        shadow_pixels,
+        Rect::new(0.0, 4.0, 8.0, 7.0),
+    );
+
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+        let frame = render_c11_fixture_for_test(
+            &mut renderer,
+            &mut surface,
+            &scene,
+            c11_filter_list_for_test(FilterOp::drop_shadow(shadow)),
+            working_format,
+        );
+        let expected = match working_format {
+            WorkingFormat::HighPrecision => &expected_high,
+            WorkingFormat::ReducedPrecision => &expected_reduced,
+        };
+        let source_is_unchanged = [(3, 7), (4, 7)].into_iter().all(|(x, y)| {
+            frame.output.rgba()[((y * 17 + x) * 4) as usize..][..4] == [224, 64, 16, 255]
+        });
+        assert!(
+            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+                && frame.result.source_spatial.device_origin == (0, 4)
+                && frame.result.result_spatial.device_origin.0 < 0
+                && frame.result.result_spatial.logical_bounds[0] < 0.0
+                && source_is_unchanged
+                && c11_drop_shadow_order_is_authored_for_test(working_format, size, &scene, shadow,)
+                && c11_pixels_match_oracle_for_test(&frame, expected),
+            "drop-shadow production-GPU comparison loses SourceAlpha, fractional offset, signed bounds, or source merge"
+        );
+    }
+}
+
+#[test]
+fn nonuniform_scale_and_skew_preserve_local_blur_shape() {
+    let size = PhysicalSize::new(25, 21);
+    let transform = Transform::try_new([2.0, 0.0, 0.5, 1.25, 4.0, 3.0]).unwrap();
+    let local_bounds = Rect::new(2.0, 4.0, 2.0, 2.0);
+    let expected_center = c08_transform_point_for_test(transform, Point::new(3.0, 5.0));
+    let blur = FilterBlur::try_new(1.0).unwrap();
+    let mut scene = Scene::new();
+    scene.transform(transform, |scene| {
+        scene.fill(local_bounds, Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap());
+    });
+
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+        let frame = render_c11_fixture_for_test(
+            &mut renderer,
+            &mut surface,
+            &scene,
+            c11_filter_list_for_test(FilterOp::blur(blur)),
+            working_format,
+        );
+        let centroid = c11_alpha_centroid_for_test(frame.output.rgba(), size);
+        let tolerance = match working_format {
+            WorkingFormat::HighPrecision => 0.25,
+            WorkingFormat::ReducedPrecision => 0.35,
+        };
+        assert!(
+            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+                && frame.result.source_spatial.raster_scale == 1.0
+                && frame.result.result_spatial.raster_scale == 1.0
+                && (centroid.x() - expected_center.x()).abs() <= tolerance
+                && (centroid.y() - expected_center.y()).abs() <= tolerance,
+            "transformed blur production-GPU comparison exceeds the local-shape centroid tolerance"
+        );
+    }
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))

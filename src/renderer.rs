@@ -256,6 +256,16 @@ pub(crate) struct C10ColorFilterRenderResultForTest {
 }
 
 #[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct C11SpatialFilterRenderResultForTest {
+    pub(crate) stats: Stats,
+    pub(crate) working_format: WorkingFormat,
+    pub(crate) output_extent: PhysicalSize,
+    pub(crate) source_spatial: super::pass::C10ColorSpatialObservationForTest,
+    pub(crate) result_spatial: super::pass::C10ColorSpatialObservationForTest,
+}
+
+#[cfg(test)]
 struct C10ColorFilterFixturePreparationForTest {
     device_identity: DeviceSlotIdentity,
     frame_start: Instant,
@@ -264,6 +274,18 @@ struct C10ColorFilterFixturePreparationForTest {
     graph: ExactSurfaceGraph,
     output_extent: PhysicalSize,
     source_spatial: super::pass::C10ColorSpatialObservationForTest,
+}
+
+#[cfg(test)]
+struct C11SpatialFilterFixturePreparationForTest {
+    device_identity: DeviceSlotIdentity,
+    frame_start: Instant,
+    encode_start: Instant,
+    normalized: RenderCommands,
+    graph: ExactSurfaceGraph,
+    output_extent: PhysicalSize,
+    source_spatial: super::pass::C10ColorSpatialObservationForTest,
+    result_spatial: super::pass::C10ColorSpatialObservationForTest,
 }
 
 struct RenderPublication {
@@ -898,6 +920,29 @@ impl Renderer {
         )))
     }
 
+    #[cfg(test)]
+    fn classify_c11_fixture_dispatch(
+        &mut self,
+        graph: &GpuRenderGraph,
+        output_format: Format,
+        working_format: WorkingFormat,
+        capabilities: &DeviceCapabilities,
+    ) -> Result<RendererFrameDispatch> {
+        self.dispatch_observation.boundary_invocations = self
+            .dispatch_observation
+            .boundary_invocations
+            .saturating_add(1);
+        let preparable = super::pass::c11_preparable_graph_from_graph_for_test(
+            graph,
+            output_format,
+            working_format,
+            capabilities,
+        )?;
+        Ok(RendererFrameDispatch::ExactGraph(Box::new(
+            ExactSurfaceGraph::C11(preparable),
+        )))
+    }
+
     /// Submits one render operation for an available surface.
     ///
     /// Awaiting this future returns render statistics after scene validation and
@@ -1326,7 +1371,9 @@ impl Renderer {
         )? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
                 ExactSurfaceGraph::C08(preparable) => preparable,
-                ExactSurfaceGraph::C09(_) | ExactSurfaceGraph::C10(_) => {
+                ExactSurfaceGraph::C09(_)
+                | ExactSurfaceGraph::C10(_)
+                | ExactSurfaceGraph::C11(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private forced graph is outside the exact executable C08 subset",
@@ -1544,7 +1591,9 @@ impl Renderer {
         )? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
                 ExactSurfaceGraph::C10(preparable) => preparable,
-                ExactSurfaceGraph::C08(_) | ExactSurfaceGraph::C09(_) => {
+                ExactSurfaceGraph::C08(_)
+                | ExactSurfaceGraph::C09(_)
+                | ExactSurfaceGraph::C11(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private C10 fixture left its exact renderer dispatch route",
@@ -1573,6 +1622,162 @@ impl Renderer {
             graph: ExactSurfaceGraph::C10(preparable),
             output_extent,
             source_spatial,
+        })
+    }
+
+    /// Private C11 authored-filter ingress into the shared exact graph executor.
+    #[cfg(test)]
+    pub(crate) async fn render_c11_spatial_filter_fixture_for_test(
+        &mut self,
+        surface: &mut Surface,
+        scene: &Scene,
+        filters: Vec<FilterList>,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C11SpatialFilterRenderResultForTest> {
+        let prepared = self.prepare_c11_spatial_filter_fixture_for_test(
+            surface,
+            scene,
+            filters,
+            parameters,
+            working_format,
+        )?;
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await?;
+        let mut stats = Stats {
+            encode_time: prepared.encode_start.elapsed(),
+            render_time: Duration::ZERO,
+            present_time: Duration::ZERO,
+            ..Stats::default()
+        };
+        let mut uploaded_images = self.uploaded_images.clone();
+        collect_render_stats(
+            &prepared.normalized.commands,
+            &mut stats,
+            &mut uploaded_images,
+        );
+        let frame = {
+            let backend = self
+                .backend
+                .as_mut()
+                .expect("C11 fixture preflight confirmed the renderer backend is available");
+            #[cfg(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            ))]
+            {
+                if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
+                    render_exact_presented_graph_surface(backend, surface, prepared.graph).await
+                } else {
+                    render_exact_headless_graph_surface(backend, surface, prepared.graph).await
+                }
+            }
+            #[cfg(not(any(
+                feature = "render-window",
+                all(feature = "render-web", target_arch = "wasm32")
+            )))]
+            {
+                render_exact_headless_graph_surface(backend, surface, prepared.graph).await
+            }
+        };
+        if frame.is_err()
+            && let Some(backend) = self.backend.as_mut()
+        {
+            backend.observe_device_terminal(prepared.device_identity);
+        }
+        let frame = frame?;
+        let stats = self.publish_clean_render_frame(
+            surface,
+            prepared.device_identity,
+            RenderPublication {
+                frame,
+                stats,
+                uploaded_images,
+                parameters,
+            },
+            prepared.frame_start,
+        )?;
+        Ok(C11SpatialFilterRenderResultForTest {
+            stats,
+            working_format,
+            output_extent: prepared.output_extent,
+            source_spatial: prepared.source_spatial,
+            result_spatial: prepared.result_spatial,
+        })
+    }
+
+    #[cfg(test)]
+    fn prepare_c11_spatial_filter_fixture_for_test(
+        &mut self,
+        surface: &Surface,
+        scene: &Scene,
+        filters: Vec<FilterList>,
+        parameters: Parameters,
+        working_format: WorkingFormat,
+    ) -> Result<C11SpatialFilterFixturePreparationForTest> {
+        let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
+        let frame_start = Instant::now();
+        let encode_start = Instant::now();
+        let normalized = scene.normalize(self.capabilities())?;
+        let context = FrameContext::try_new(
+            surface.size(),
+            surface.scale(),
+            self.options.antialiasing(),
+            parameters.base_color,
+        )?;
+        let graph =
+            super::frame::authored_c10_color_graph_for_test(filters, normalized.clone(), context)?;
+        let capabilities = self
+            .backend
+            .as_mut()
+            .and_then(|backend| backend.device_capabilities(device_identity))
+            .ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C11 fixture lost immutable device capabilities",
+                )
+            })?;
+        let preparable = match self.classify_c11_fixture_dispatch(
+            &graph,
+            runtime_surface_format(surface),
+            working_format,
+            &capabilities,
+        )? {
+            RendererFrameDispatch::ExactGraph(graph) => match *graph {
+                ExactSurfaceGraph::C11(preparable) => preparable,
+                ExactSurfaceGraph::C08(_)
+                | ExactSurfaceGraph::C09(_)
+                | ExactSurfaceGraph::C10(_) => {
+                    return Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "the private C11 fixture left its exact renderer dispatch route",
+                    ));
+                }
+            },
+            RendererFrameDispatch::DirectVello(_) => {
+                return Err(Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C11 fixture left its exact renderer dispatch route",
+                ));
+            }
+        };
+        let output_extent = preparable.output_extent()?;
+        let (source_spatial, result_spatial) =
+            preparable.first_filter_spatial_for_test().ok_or_else(|| {
+                Error::new(
+                    BackendErrorCode::RenderFailed,
+                    "the private C11 fixture lost its first spatial filter mapping",
+                )
+            })?;
+        Ok(C11SpatialFilterFixturePreparationForTest {
+            device_identity,
+            frame_start,
+            encode_start,
+            normalized,
+            graph: ExactSurfaceGraph::C11(preparable),
+            output_extent,
+            source_spatial,
+            result_spatial,
         })
     }
 

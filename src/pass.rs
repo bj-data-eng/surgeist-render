@@ -3476,6 +3476,54 @@ impl C11PreparableGraph {
                 .proves_exact_facts_for(&self.closed.lowered)
     }
 
+    #[cfg(test)]
+    pub(crate) const fn working_format(&self) -> WorkingFormat {
+        self.closed.facts.working_format
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn output_format(&self) -> Format {
+        self.closed.facts.output_format
+    }
+
+    #[cfg(test)]
+    pub(crate) fn output_extent(&self) -> Result<PhysicalSize> {
+        self.closed
+            .lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == self.closed.lowered.root_working_image)
+            .map(|resource| resource.spatial.device_extent)
+            .ok_or_else(|| preparation_error("the C11 root output resource is missing"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn first_filter_spatial_for_test(
+        &self,
+    ) -> Option<(
+        C10ColorSpatialObservationForTest,
+        C10ColorSpatialObservationForTest,
+    )> {
+        self.closed
+            .facts
+            .blurs
+            .first()
+            .map(|blur| {
+                (
+                    c10_spatial_observation(blur.blur.spatial.source),
+                    c10_spatial_observation(blur.blur.spatial.result),
+                )
+            })
+            .or_else(|| {
+                self.closed.facts.drop_shadows.first().map(|shadow| {
+                    (
+                        c10_spatial_observation(shadow.blur.spatial.source),
+                        c10_spatial_observation(shadow.parameters.spatial.result),
+                    )
+                })
+            })
+    }
+
     fn into_closed(self) -> ClosedExecutableGraph {
         self.closed
     }
@@ -8649,6 +8697,23 @@ fn c11_preparable_graph_for_test(lowered: LoweredGraphPlan) -> Result<C11Prepara
     }
 }
 
+#[cfg(test)]
+pub(crate) fn c11_preparable_graph_from_graph_for_test(
+    graph: &GpuRenderGraph,
+    output_format: Format,
+    working_format: WorkingFormat,
+    capabilities: &DeviceCapabilities,
+) -> Result<C11PreparableGraph> {
+    capabilities.validate_supported_working_format(working_format)?;
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        graph,
+        working_format,
+        output_format,
+        capabilities,
+    )?;
+    c11_preparable_graph_for_test(lowered)
+}
+
 impl PrePreparationGraphClassification {
     fn classify(lowered: LoweredGraphPlan) -> Self {
         let closed = match ClosedExecutableGraph::try_from_lowered(lowered) {
@@ -9304,16 +9369,19 @@ impl C08CustomSpineEncodingSummary {
             && self.color_filters_preserve_signed_texel_mapping
             && self.color_filter_operation_buffers_released
             && exact_layers;
+        let exact_drop_shadows = (self.drop_shadow_colorize_count == 0
+            && self.drop_shadow_merge_count == 0)
+            || (self.drop_shadow_colorize_count > 0
+                && self.drop_shadow_colorize_count == self.drop_shadow_merge_count
+                && self.drop_shadow_reads_original_source_twice
+                && self.original_source_releases_after_merge);
         let exact_c11 = self.blur_pass_count > 0
-            && self.drop_shadow_colorize_count > 0
-            && self.drop_shadow_merge_count > 0
+            && exact_drop_shadows
             && self.c11_binds_exact_prepared_resources
             && self.c11_uses_signed_viewport_and_scissor
             && self.blur_sources_intermediates_and_results_are_distinct
             && self.c11_kernels_release_at_validated_last_use
             && self.c11_textures_release_at_validated_last_use
-            && self.drop_shadow_reads_original_source_twice
-            && self.original_source_releases_after_merge
             && exact_layers
             && (self.color_filter_count == 0
                 || (self.color_filters_preserve_authored_order
@@ -10466,6 +10534,33 @@ impl<'device> PreparedGraph<'device> {
         if prepared.c10_execution.is_none() {
             return Err(preparation_error(
                 "C10 preparation lost its validated closed execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn try_prepare_c11(
+        preparable: C11PreparableGraph,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_phase: (&'device DevicePassCache, bool),
+    ) -> Result<Self> {
+        let selected_working_format = preparable.working_format();
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C11(preparable),
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache_phase,
+        )?;
+        if prepared.c11_execution.is_none() {
+            return Err(preparation_error(
+                "C11 preparation lost its validated closed execution facts",
             ));
         }
         Ok(prepared)
