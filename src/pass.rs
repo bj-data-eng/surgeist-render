@@ -266,6 +266,42 @@ pub(crate) struct MixedColorFutureDiagnosticObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11ExecutableGraphObservationForTest {
+    pub(crate) accepts_color_blur_and_drop_shadow_for_all_formats: bool,
+    pub(crate) preserves_ordered_nonzero_filter_steps: bool,
+    pub(crate) rejects_empty_missing_and_malformed_spatial_facts: bool,
+    pub(crate) rejects_wrong_axes_inputs_edges_and_aliases: bool,
+    pub(crate) rejects_copy_backdrop_stale_forward_and_c12_plus: bool,
+    pub(crate) rejects_before_resource_acquisition: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11FilterGraphObservationForTest {
+    pub(crate) pass_order: Vec<C11FilterPassTagForTest>,
+    pub(crate) ordinary_blur_uses_transparent_black: bool,
+    pub(crate) drop_shadow_uses_source_alpha_and_continuous_offset: bool,
+    pub(crate) spatial_mappings_are_exact: bool,
+    pub(crate) sources_and_results_are_distinct: bool,
+    pub(crate) source_alpha_fanout_reads_original_twice: bool,
+    pub(crate) original_source_releases_only_after_merge: bool,
+    pub(crate) dependencies_and_last_use_are_exact: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum C11FilterPassTagForTest {
+    Color,
+    BlurHorizontalRgba,
+    BlurVerticalRgba,
+    BlurHorizontalSourceAlpha,
+    BlurVerticalSourceAlpha,
+    DropShadowColorize,
+    DropShadowMerge,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum CompositionOuterOperationObservationForTest {
     SourceMapping,
@@ -407,6 +443,26 @@ pub(crate) fn mixed_color_future_diagnostic_observation_for_test(
         capabilities,
     )
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c11_executable_graph_observation_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C11ExecutableGraphObservationForTest {
+    c11_executable_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c11_filter_graph_observation_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C11FilterGraphObservationForTest {
+    c11_filter_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2348,12 +2404,55 @@ struct ExecutableColorFilterFacts {
 }
 
 #[derive(Clone)]
+struct ExecutableBlurFacts {
+    horizontal: RuntimePassId,
+    vertical: RuntimePassId,
+    source: RuntimeResourceId,
+    intermediate: RuntimeResourceId,
+    result: RuntimeResourceId,
+    blur: RuntimeBlur,
+}
+
+#[derive(Clone)]
+struct ExecutableDropShadowFacts {
+    horizontal: RuntimePassId,
+    vertical: RuntimePassId,
+    colorize: RuntimePassId,
+    merge: RuntimePassId,
+    source: RuntimeResourceId,
+    horizontal_result: RuntimeResourceId,
+    vertical_result: RuntimeResourceId,
+    shadow: RuntimeResourceId,
+    result: RuntimeResourceId,
+    blur: RuntimeBlur,
+    parameters: RuntimeDropShadow,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutableFilterStepFacts {
+    Color(RuntimePassId),
+    Blur {
+        horizontal: RuntimePassId,
+        vertical: RuntimePassId,
+    },
+    DropShadow {
+        horizontal: RuntimePassId,
+        vertical: RuntimePassId,
+        colorize: RuntimePassId,
+        merge: RuntimePassId,
+    },
+}
+
+#[derive(Clone)]
 struct ClosedExecutableGraphFacts {
     working_format: WorkingFormat,
     output_format: Format,
     captures: Vec<ExecutableVelloCaptureFacts>,
     layer_compositions: Vec<ExecutableLayerCompositionFacts>,
     color_filters: Vec<ExecutableColorFilterFacts>,
+    blurs: Vec<ExecutableBlurFacts>,
+    drop_shadows: Vec<ExecutableDropShadowFacts>,
+    filter_steps: Vec<ExecutableFilterStepFacts>,
 }
 
 #[derive(Clone, Copy)]
@@ -2391,6 +2490,10 @@ impl ClosedExecutableGraph {
 
     fn has_color_filters(&self) -> bool {
         !self.facts.color_filters.is_empty()
+    }
+
+    fn has_spatial_filters(&self) -> bool {
+        !self.facts.blurs.is_empty() || !self.facts.drop_shadows.is_empty()
     }
 }
 
@@ -2453,8 +2556,173 @@ impl ClosedExecutableGraphFacts {
                 .iter()
                 .filter(|pass| matches!(pass.kind, RuntimePassKind::ColorFilter(Some(_))))
                 .count();
-        captures_are_exact && layers_are_exact && color_filters_are_exact
+        let blurs_are_exact = self
+            .blurs
+            .iter()
+            .all(|blur| blur.proves_exact_facts_for(plan))
+            && self.blurs.len()
+                == plan
+                    .passes
+                    .iter()
+                    .filter(|pass| {
+                        matches!(
+                            pass.kind,
+                            RuntimePassKind::BlurHorizontal(Some(RuntimeBlur {
+                                input: RuntimeBlurInput::Rgba,
+                                ..
+                            }))
+                        )
+                    })
+                    .count();
+        let drop_shadows_are_exact = self
+            .drop_shadows
+            .iter()
+            .all(|shadow| shadow.proves_exact_facts_for(plan))
+            && self.drop_shadows.len()
+                == plan
+                    .passes
+                    .iter()
+                    .filter(|pass| {
+                        matches!(pass.kind, RuntimePassKind::DropShadowColorize(Some(_)))
+                    })
+                    .count();
+        let filter_order_is_exact =
+            executable_filter_step_order(plan) == Some(self.filter_steps.clone());
+        captures_are_exact
+            && layers_are_exact
+            && color_filters_are_exact
+            && blurs_are_exact
+            && drop_shadows_are_exact
+            && filter_order_is_exact
     }
+}
+
+impl ExecutableBlurFacts {
+    fn proves_exact_facts_for(&self, plan: &LoweredGraphPlan) -> bool {
+        let Some(horizontal) = plan.passes.iter().find(|pass| pass.id == self.horizontal) else {
+            return false;
+        };
+        let Some(vertical) = plan.passes.iter().find(|pass| pass.id == self.vertical) else {
+            return false;
+        };
+        matches!(
+            &horizontal.kind,
+            RuntimePassKind::BlurHorizontal(Some(blur))
+                if runtime_blur_matches_axis(blur, &self.blur, RuntimeBlurAxis::Horizontal)
+        ) && matches!(
+            &vertical.kind,
+            RuntimePassKind::BlurVertical(Some(blur))
+                if runtime_blur_matches_axis(blur, &self.blur, RuntimeBlurAxis::Vertical)
+        ) && horizontal
+            .reads
+            .first()
+            .is_some_and(|read| read.resource == self.source)
+            && horizontal.result == RuntimeResultBinding::Resource(self.intermediate)
+            && vertical
+                .reads
+                .first()
+                .is_some_and(|read| read.resource == self.intermediate)
+            && vertical.result == RuntimeResultBinding::Resource(self.result)
+    }
+}
+
+impl ExecutableDropShadowFacts {
+    fn proves_exact_facts_for(&self, plan: &LoweredGraphPlan) -> bool {
+        let pass = |id| plan.passes.iter().find(|pass| pass.id == id);
+        let (Some(horizontal), Some(vertical), Some(colorize), Some(merge)) = (
+            pass(self.horizontal),
+            pass(self.vertical),
+            pass(self.colorize),
+            pass(self.merge),
+        ) else {
+            return false;
+        };
+        matches!(
+            &horizontal.kind,
+            RuntimePassKind::BlurHorizontal(Some(blur))
+                if runtime_blur_matches_axis(blur, &self.blur, RuntimeBlurAxis::Horizontal)
+        ) && matches!(
+            &vertical.kind,
+            RuntimePassKind::BlurVertical(Some(blur))
+                if runtime_blur_matches_axis(blur, &self.blur, RuntimeBlurAxis::Vertical)
+        ) && matches!(
+            &colorize.kind,
+            RuntimePassKind::DropShadowColorize(Some(parameters))
+                if parameters == &self.parameters
+        ) && matches!(
+            &merge.kind,
+            RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::DropShadow,
+                ..
+            }))
+        ) && horizontal
+            .reads
+            .first()
+            .is_some_and(|read| read.resource == self.source)
+            && horizontal.result == RuntimeResultBinding::Resource(self.horizontal_result)
+            && vertical.result == RuntimeResultBinding::Resource(self.vertical_result)
+            && colorize.result == RuntimeResultBinding::Resource(self.shadow)
+            && merge.result == RuntimeResultBinding::Resource(self.result)
+    }
+}
+
+fn runtime_blur_matches_axis(
+    candidate: &RuntimeBlur,
+    expected: &RuntimeBlur,
+    axis: RuntimeBlurAxis,
+) -> bool {
+    let expected_spatial = match axis {
+        RuntimeBlurAxis::Horizontal => expected.spatial,
+        RuntimeBlurAxis::Vertical => RuntimeFilterSpatialMapping {
+            source: expected.spatial.result,
+            result: expected.spatial.result,
+        },
+    };
+    candidate.axis == axis
+        && candidate.input == expected.input
+        && candidate.standard_deviation == expected.standard_deviation
+        && candidate.support_radius == expected.support_radius
+        && candidate.kernel == expected.kernel
+        && candidate.spatial == expected_spatial
+        && candidate.edge == expected.edge
+}
+
+fn executable_filter_step_order(plan: &LoweredGraphPlan) -> Option<Vec<ExecutableFilterStepFacts>> {
+    let mut steps = Vec::new();
+    let mut cursor = 0_usize;
+    while cursor < plan.passes.len() {
+        let pass = &plan.passes[cursor];
+        match &pass.kind {
+            RuntimePassKind::ColorFilter(Some(_)) => {
+                steps.push(ExecutableFilterStepFacts::Color(pass.id));
+                cursor = cursor.checked_add(1)?;
+            }
+            RuntimePassKind::BlurHorizontal(Some(blur)) if blur.input == RuntimeBlurInput::Rgba => {
+                let vertical = plan.passes.get(cursor.checked_add(1)?)?;
+                steps.push(ExecutableFilterStepFacts::Blur {
+                    horizontal: pass.id,
+                    vertical: vertical.id,
+                });
+                cursor = cursor.checked_add(2)?;
+            }
+            RuntimePassKind::BlurHorizontal(Some(blur))
+                if blur.input == RuntimeBlurInput::SourceAlpha =>
+            {
+                let vertical = plan.passes.get(cursor.checked_add(1)?)?;
+                let colorize = plan.passes.get(cursor.checked_add(2)?)?;
+                let merge = plan.passes.get(cursor.checked_add(3)?)?;
+                steps.push(ExecutableFilterStepFacts::DropShadow {
+                    horizontal: pass.id,
+                    vertical: vertical.id,
+                    colorize: colorize.id,
+                    merge: merge.id,
+                });
+                cursor = cursor.checked_add(4)?;
+            }
+            _ => cursor = cursor.checked_add(1)?,
+        }
+    }
+    Some(steps)
 }
 
 #[derive(Clone, Copy)]
@@ -2549,6 +2817,7 @@ impl C08PreparableGraph {
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
         if closed.has_layer_composition()
             || closed.has_color_filters()
+            || closed.has_spatial_filters()
             || closed.facts.captures.is_empty()
             || closed.facts.captures.iter().any(|capture| {
                 capture
@@ -2616,7 +2885,10 @@ impl C09PreparableGraph {
     fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
-        if !closed.has_layer_composition() || closed.has_color_filters() {
+        if !closed.has_layer_composition()
+            || closed.has_color_filters()
+            || closed.has_spatial_filters()
+        {
             return Err(Box::new(closed));
         }
         Ok(Self { closed })
@@ -2644,7 +2916,7 @@ impl C10PreparableGraph {
     fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
-        if !closed.has_color_filters() {
+        if !closed.has_color_filters() || closed.has_spatial_filters() {
             return Err(Box::new(closed));
         }
         Ok(Self { closed })
@@ -2695,6 +2967,30 @@ impl C10PreparableGraph {
     #[cfg(test)]
     fn color_filters(&self) -> &[ExecutableColorFilterFacts] {
         &self.closed.facts.color_filters
+    }
+}
+
+#[must_use]
+pub(crate) struct C11PreparableGraph {
+    closed: ClosedExecutableGraph,
+}
+
+impl C11PreparableGraph {
+    fn try_from_closed(
+        closed: ClosedExecutableGraph,
+    ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
+        if !closed.has_spatial_filters() {
+            return Err(Box::new(closed));
+        }
+        Ok(Self { closed })
+    }
+
+    fn proves_closed_filter_facts(&self) -> bool {
+        self.closed.has_spatial_filters()
+            && self
+                .closed
+                .facts
+                .proves_exact_facts_for(&self.closed.lowered)
     }
 }
 
@@ -3200,6 +3496,9 @@ struct ClosedGraphTraversal<'plan> {
     captures: Vec<ExecutableVelloCaptureFacts>,
     layer_compositions: Vec<ExecutableLayerCompositionFacts>,
     color_filters: Vec<ExecutableColorFilterFacts>,
+    blurs: Vec<ExecutableBlurFacts>,
+    drop_shadows: Vec<ExecutableDropShadowFacts>,
+    filter_steps: Vec<ExecutableFilterStepFacts>,
     expected_resources: BTreeSet<RuntimeResourceId>,
     cursor: usize,
 }
@@ -3222,6 +3521,9 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             captures: Vec::new(),
             layer_compositions: Vec::new(),
             color_filters: Vec::new(),
+            blurs: Vec::new(),
+            drop_shadows: Vec::new(),
+            filter_steps: Vec::new(),
             expected_resources: BTreeSet::from([root.id]),
             cursor: 1,
         }
@@ -3259,6 +3561,9 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             captures: self.captures,
             layer_compositions: self.layer_compositions,
             color_filters: self.color_filters,
+            blurs: self.blurs,
+            drop_shadows: self.drop_shadows,
+            filter_steps: self.filter_steps,
         })
     }
 
@@ -3276,6 +3581,18 @@ impl<'plan> ClosedGraphTraversal<'plan> {
                 self.visit_clip_coverage_capture(pass)
             }
             RuntimePassKind::ColorFilter(Some(filter)) => self.visit_color_filter(pass, filter),
+            RuntimePassKind::BlurHorizontal(Some(blur))
+                if blur.axis == RuntimeBlurAxis::Horizontal
+                    && blur.input == RuntimeBlurInput::Rgba =>
+            {
+                self.visit_blur(pass, blur)
+            }
+            RuntimePassKind::BlurHorizontal(Some(blur))
+                if blur.axis == RuntimeBlurAxis::Horizontal
+                    && blur.input == RuntimeBlurInput::SourceAlpha =>
+            {
+                self.visit_drop_shadow(pass, blur)
+            }
             RuntimePassKind::Composite(Some(composite))
                 if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
             {
@@ -3520,8 +3837,76 @@ impl<'plan> ClosedGraphTraversal<'plan> {
         runtime_context.current = color.result;
         runtime_context.producer = pass.id;
         self.expected_resources.insert(color.result);
+        self.filter_steps
+            .push(ExecutableFilterStepFacts::Color(pass.id));
         self.color_filters.push(color);
         self.advance(1)
+    }
+
+    fn visit_blur(&mut self, horizontal: &RuntimePass, blur: &RuntimeBlur) -> Option<()> {
+        let vertical = self.plan.passes.get(self.cursor.checked_add(1)?)?;
+        let context = *self.contexts.last()?;
+        if !context.contains_captured_source {
+            return None;
+        }
+        let source = self.resources.get(&context.current).copied()?;
+        let facts = validate_closed_blur(
+            horizontal,
+            vertical,
+            context,
+            source,
+            blur,
+            &self.resources,
+            self.plan.working_format,
+        )?;
+        let runtime_context = self.contexts.last_mut()?;
+        runtime_context.current = facts.result;
+        runtime_context.producer = facts.vertical;
+        self.expected_resources
+            .extend([facts.intermediate, facts.result]);
+        self.filter_steps.push(ExecutableFilterStepFacts::Blur {
+            horizontal: facts.horizontal,
+            vertical: facts.vertical,
+        });
+        self.blurs.push(facts);
+        self.advance(2)
+    }
+
+    fn visit_drop_shadow(&mut self, horizontal: &RuntimePass, blur: &RuntimeBlur) -> Option<()> {
+        let vertical = self.plan.passes.get(self.cursor.checked_add(1)?)?;
+        let colorize = self.plan.passes.get(self.cursor.checked_add(2)?)?;
+        let merge = self.plan.passes.get(self.cursor.checked_add(3)?)?;
+        let context = *self.contexts.last()?;
+        if !context.contains_captured_source {
+            return None;
+        }
+        let source = self.resources.get(&context.current).copied()?;
+        let facts = validate_closed_drop_shadow(
+            [horizontal, vertical, colorize, merge],
+            context,
+            source,
+            blur,
+            &self.resources,
+            self.plan.working_format,
+        )?;
+        let runtime_context = self.contexts.last_mut()?;
+        runtime_context.current = facts.result;
+        runtime_context.producer = facts.merge;
+        self.expected_resources.extend([
+            facts.horizontal_result,
+            facts.vertical_result,
+            facts.shadow,
+            facts.result,
+        ]);
+        self.filter_steps
+            .push(ExecutableFilterStepFacts::DropShadow {
+                horizontal: facts.horizontal,
+                vertical: facts.vertical,
+                colorize: facts.colorize,
+                merge: facts.merge,
+            });
+        self.drop_shadows.push(facts);
+        self.advance(4)
     }
 
     fn visit_layer_composite(&mut self, pass: &RuntimePass) -> Option<()> {
@@ -4245,6 +4630,365 @@ fn runtime_color_operation_is_closed(operation: &RuntimeColorOperation) -> bool 
             angle.sine().is_finite() && angle.cosine().is_finite()
         }
     }
+}
+
+fn validate_closed_blur(
+    horizontal: &RuntimePass,
+    vertical: &RuntimePass,
+    context: ExecutableCompositionContext,
+    source: &RuntimeResourceRequest,
+    blur: &RuntimeBlur,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+) -> Option<ExecutableBlurFacts> {
+    let RuntimeResourceProducer::Pass(source_producer) = source.producer else {
+        return None;
+    };
+    if source.id != context.current
+        || source_producer != context.producer
+        || blur.axis != RuntimeBlurAxis::Horizontal
+        || blur.input != RuntimeBlurInput::Rgba
+        || !runtime_blur_is_closed(blur, true)
+        || blur.spatial.source != source.spatial
+        || !closed_filter_source_is_exact(source, working_format, 1, horizontal.id)
+        || !closed_unary_filter_pass_is_exact(
+            horizontal,
+            source_producer,
+            source,
+            RuntimeReadRole::FilterSource,
+            true,
+        )
+    {
+        return None;
+    }
+    let intermediate = closed_filter_result(
+        horizontal,
+        resources,
+        RuntimeResourceRole::FilterIntermediate,
+        blur.spatial.result,
+        working_format,
+    )?;
+    let RuntimePassKind::BlurVertical(Some(vertical_blur)) = &vertical.kind else {
+        return None;
+    };
+    if !runtime_blur_matches_axis(vertical_blur, blur, RuntimeBlurAxis::Vertical)
+        || intermediate.expected_reads != 1
+        || intermediate.last_use != vertical.id
+        || !closed_unary_filter_pass_is_exact(
+            vertical,
+            horizontal.id,
+            intermediate,
+            RuntimeReadRole::FilterSource,
+            true,
+        )
+    {
+        return None;
+    }
+    let result = closed_filter_result(
+        vertical,
+        resources,
+        RuntimeResourceRole::FilterIntermediate,
+        blur.spatial.result,
+        working_format,
+    )?;
+    Some(ExecutableBlurFacts {
+        horizontal: horizontal.id,
+        vertical: vertical.id,
+        source: source.id,
+        intermediate: intermediate.id,
+        result: result.id,
+        blur: blur.clone(),
+    })
+}
+
+fn validate_closed_drop_shadow(
+    passes: [&RuntimePass; 4],
+    context: ExecutableCompositionContext,
+    source: &RuntimeResourceRequest,
+    blur: &RuntimeBlur,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+) -> Option<ExecutableDropShadowFacts> {
+    let [horizontal, vertical, colorize, merge] = passes;
+    let RuntimeResourceProducer::Pass(source_producer) = source.producer else {
+        return None;
+    };
+    if source.id != context.current
+        || source_producer != context.producer
+        || blur.axis != RuntimeBlurAxis::Horizontal
+        || blur.input != RuntimeBlurInput::SourceAlpha
+        || !runtime_blur_is_closed(blur, false)
+        || blur.spatial.source != source.spatial
+        || !closed_filter_source_is_exact(source, working_format, 2, merge.id)
+        || !closed_unary_filter_pass_is_exact(
+            horizontal,
+            source_producer,
+            source,
+            RuntimeReadRole::FilterSource,
+            false,
+        )
+    {
+        return None;
+    }
+    let horizontal_result = closed_filter_result(
+        horizontal,
+        resources,
+        RuntimeResourceRole::FilterIntermediate,
+        blur.spatial.result,
+        working_format,
+    )?;
+    let (vertical_result, parameters, shadow) = validate_closed_shadow_tail(
+        [vertical, colorize],
+        horizontal,
+        horizontal_result,
+        blur,
+        resources,
+        working_format,
+    )?;
+    let result = validate_closed_shadow_merge(
+        merge,
+        ClosedShadowMergeInputs {
+            source_producer,
+            source,
+            colorize,
+            shadow,
+            result_spatial: parameters.spatial.result,
+        },
+        resources,
+        working_format,
+    )?;
+    Some(ExecutableDropShadowFacts {
+        horizontal: horizontal.id,
+        vertical: vertical.id,
+        colorize: colorize.id,
+        merge: merge.id,
+        source: source.id,
+        horizontal_result: horizontal_result.id,
+        vertical_result: vertical_result.id,
+        shadow: shadow.id,
+        result: result.id,
+        blur: blur.clone(),
+        parameters,
+    })
+}
+
+fn validate_closed_shadow_tail<'plan>(
+    passes: [&RuntimePass; 2],
+    horizontal: &RuntimePass,
+    horizontal_result: &'plan RuntimeResourceRequest,
+    blur: &RuntimeBlur,
+    resources: &BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+) -> Option<(
+    &'plan RuntimeResourceRequest,
+    RuntimeDropShadow,
+    &'plan RuntimeResourceRequest,
+)> {
+    let [vertical, colorize] = passes;
+    let RuntimePassKind::BlurVertical(Some(vertical_blur)) = &vertical.kind else {
+        return None;
+    };
+    if !runtime_blur_matches_axis(vertical_blur, blur, RuntimeBlurAxis::Vertical)
+        || horizontal_result.expected_reads != 1
+        || horizontal_result.last_use != vertical.id
+        || !closed_unary_filter_pass_is_exact(
+            vertical,
+            horizontal.id,
+            horizontal_result,
+            RuntimeReadRole::FilterSource,
+            true,
+        )
+    {
+        return None;
+    }
+    let vertical_result = closed_filter_result(
+        vertical,
+        resources,
+        RuntimeResourceRole::FilterIntermediate,
+        blur.spatial.result,
+        working_format,
+    )?;
+    let RuntimePassKind::DropShadowColorize(Some(parameters)) = &colorize.kind else {
+        return None;
+    };
+    if !runtime_drop_shadow_is_closed(parameters, blur)
+        || vertical_result.expected_reads != 1
+        || vertical_result.last_use != colorize.id
+        || !closed_unary_filter_pass_is_exact(
+            colorize,
+            vertical.id,
+            vertical_result,
+            RuntimeReadRole::BlurredSourceAlpha,
+            true,
+        )
+    {
+        return None;
+    }
+    let shadow = closed_filter_result(
+        colorize,
+        resources,
+        RuntimeResourceRole::ShadowImage,
+        parameters.spatial.result,
+        working_format,
+    )?;
+    Some((vertical_result, *parameters, shadow))
+}
+
+struct ClosedShadowMergeInputs<'plan> {
+    source_producer: RuntimePassId,
+    source: &'plan RuntimeResourceRequest,
+    colorize: &'plan RuntimePass,
+    shadow: &'plan RuntimeResourceRequest,
+    result_spatial: RuntimeSpatialDescriptor,
+}
+
+fn validate_closed_shadow_merge<'plan>(
+    merge: &RuntimePass,
+    inputs: ClosedShadowMergeInputs<'plan>,
+    resources: &BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+) -> Option<&'plan RuntimeResourceRequest> {
+    let ClosedShadowMergeInputs {
+        source_producer,
+        source,
+        colorize,
+        shadow,
+        result_spatial,
+    } = inputs;
+    let RuntimePassKind::Composite(Some(composite)) = &merge.kind else {
+        return None;
+    };
+    if !matches!(composite.kind, RuntimeCompositeKind::DropShadow)
+        || !composite.source_captured_before_outer_semantics
+        || merge.dependencies.as_slice() != [source_producer, colorize.id]
+        || merge.reads.len() != 2
+        || !runtime_read_has_exact_facts(
+            &merge.reads[0],
+            RuntimeReadRole::CompositeSource,
+            source,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::TransparentBlack,
+        )
+        || !runtime_read_has_exact_facts(
+            &merge.reads[1],
+            RuntimeReadRole::Shadow,
+            shadow,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::TransparentBlack,
+        )
+        || !same_resource_set(&merge.releases, &[source.id, shadow.id])
+        || merge.cache_keys.is_none()
+        || shadow.expected_reads != 1
+        || shadow.last_use != merge.id
+    {
+        return None;
+    }
+    closed_filter_result(
+        merge,
+        resources,
+        RuntimeResourceRole::CompositeResult,
+        result_spatial,
+        working_format,
+    )
+}
+
+fn closed_unary_filter_pass_is_exact(
+    pass: &RuntimePass,
+    producer: RuntimePassId,
+    source: &RuntimeResourceRequest,
+    role: RuntimeReadRole,
+    releases_source: bool,
+) -> bool {
+    pass.dependencies.as_slice() == [producer]
+        && pass.reads.len() == 1
+        && runtime_read_has_exact_facts(
+            &pass.reads[0],
+            role,
+            source,
+            RuntimeSamplingFilter::Linear,
+            RuntimeSamplingEdge::TransparentBlack,
+        )
+        && if releases_source {
+            pass.releases.as_slice() == [source.id]
+        } else {
+            pass.releases.is_empty()
+        }
+        && pass.cache_keys.is_some()
+}
+
+fn closed_filter_source_is_exact(
+    source: &RuntimeResourceRequest,
+    working_format: WorkingFormat,
+    expected_reads: u32,
+    last_use: RuntimePassId,
+) -> bool {
+    matches!(
+        source.role,
+        RuntimeResourceRole::FilterIntermediate | RuntimeResourceRole::CompositeResult
+    ) && source.format == RuntimeResourceFormat::Working(working_format)
+        && source.expected_reads == expected_reads
+        && source.last_use == last_use
+}
+
+fn closed_filter_result<'plan>(
+    pass: &RuntimePass,
+    resources: &BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+    role: RuntimeResourceRole,
+    spatial: RuntimeSpatialDescriptor,
+    working_format: WorkingFormat,
+) -> Option<&'plan RuntimeResourceRequest> {
+    let RuntimeResultBinding::Resource(result) = pass.result else {
+        return None;
+    };
+    let resource = resources.get(&result).copied()?;
+    c08_resource_has_fixed_facts(
+        resource,
+        role,
+        RuntimeResourceFormat::Working(working_format),
+        RuntimeResourceProducer::Pass(pass.id),
+    )
+    .then_some(())
+    .filter(|()| resource.spatial == spatial)?;
+    Some(resource)
+}
+
+fn runtime_blur_is_closed(blur: &RuntimeBlur, require_nonzero: bool) -> bool {
+    blur.standard_deviation.is_finite()
+        && if require_nonzero {
+            blur.standard_deviation > 0.0 && blur.support_radius > 0
+        } else {
+            blur.standard_deviation >= 0.0
+        }
+        && blur.edge == RuntimeSamplingEdge::TransparentBlack
+        && blur.spatial.source.raster_scale.is_finite()
+        && blur.spatial.result.raster_scale.is_finite()
+}
+
+fn runtime_drop_shadow_is_closed(shadow: &RuntimeDropShadow, blur: &RuntimeBlur) -> bool {
+    shadow.standard_deviation == blur.standard_deviation
+        && shadow.support_radius == blur.support_radius
+        && shadow.spatial.source == blur.spatial.result
+        && shadow.spatial.result == blur.spatial.result
+        && shadow.edge == RuntimeSamplingEdge::TransparentBlack
+        && shadow.uses_source_alpha
+        && shadow.uses_continuous_offset
+        && shadow.retains_unchanged_source
+        && shadow.offset.x().is_finite()
+        && shadow.offset.y().is_finite()
+        && [
+            shadow.color.r(),
+            shadow.color.g(),
+            shadow.color.b(),
+            shadow.color.a(),
+        ]
+        .into_iter()
+        .all(f32::is_finite)
+}
+
+fn same_resource_set(actual: &[RuntimeResourceId], expected: &[RuntimeResourceId]) -> bool {
+    actual.len() == expected.len()
+        && actual.iter().copied().collect::<BTreeSet<_>>()
+            == expected.iter().copied().collect::<BTreeSet<_>>()
 }
 
 fn validate_closed_composite(
@@ -5241,6 +5985,546 @@ fn mixed_color_future_diagnostic_observation(
         .ok()
         .is_none_or(|closed| C10PreparableGraph::try_from_closed(closed).is_err()),
     })
+}
+
+#[cfg(test)]
+fn c11_executable_graph_observation(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<C11ExecutableGraphObservationForTest> {
+    let (_, lowered) = lower_authored_c10_graph_for_test(
+        filters.clone(),
+        commands.clone(),
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let preparable = c11_preparable_graph_for_test(lowered.clone()).ok()?;
+    let accepts_color_blur_and_drop_shadow_for_all_formats =
+        c11_accepts_all_formats(&filters, &commands, context, &capabilities)?;
+    let preserves_ordered_nonzero_filter_steps =
+        c11_filter_step_shape_is_exact(&preparable.closed.facts);
+    let stale_dependency = RuntimePassId(
+        lowered
+            .passes
+            .get(C11PassIndices::try_new(&lowered)?.color)?
+            .id
+            .0
+            .stale_generation_for_test()?,
+    );
+    let malformed = c11_malformed_plan_observation(&lowered, stale_dependency)?;
+    let resources = ResourceManager::new(super::ResourceCacheBudget::DISABLED);
+    let cache = DevicePassCache::new();
+    let resources_before = resources.observation_for_test();
+    let cache_before = cache.counts_for_test();
+    let valid_classification = c11_preparable_graph_for_test(lowered.clone()).is_ok();
+    let invalid_classification = malformed
+        .all_invalid
+        .iter()
+        .cloned()
+        .all(|plan| c11_preparable_graph_for_test(plan).is_err());
+    Some(C11ExecutableGraphObservationForTest {
+        accepts_color_blur_and_drop_shadow_for_all_formats,
+        preserves_ordered_nonzero_filter_steps,
+        rejects_empty_missing_and_malformed_spatial_facts: malformed.empty_missing_spatial,
+        rejects_wrong_axes_inputs_edges_and_aliases: malformed.axes_inputs_edges_aliases,
+        rejects_copy_backdrop_stale_forward_and_c12_plus: malformed.copy_stale_forward_c12,
+        rejects_before_resource_acquisition: valid_classification
+            && invalid_classification
+            && resources.observation_for_test() == resources_before
+            && cache.counts_for_test() == cache_before,
+    })
+}
+
+#[cfg(test)]
+fn c11_accepts_all_formats(
+    filters: &[super::FilterList],
+    commands: &RenderCommands,
+    context: FrameContext,
+    capabilities: &DeviceCapabilities,
+) -> Option<bool> {
+    let mut accepts = true;
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        for output_format in [Format::Rgba8, Format::Bgra8] {
+            let (_, lowered) = lower_authored_c10_graph_for_test(
+                filters.to_vec(),
+                commands.clone(),
+                context,
+                working_format,
+                output_format,
+                capabilities,
+            )?;
+            accepts &= c11_plan_is_closed(lowered);
+        }
+    }
+    Some(accepts)
+}
+
+#[cfg(test)]
+fn c11_filter_step_shape_is_exact(facts: &ClosedExecutableGraphFacts) -> bool {
+    matches!(
+        facts.filter_steps.as_slice(),
+        [
+            ExecutableFilterStepFacts::Color(_),
+            ExecutableFilterStepFacts::Blur { .. },
+            ExecutableFilterStepFacts::DropShadow { .. },
+            ExecutableFilterStepFacts::Color(_),
+        ]
+    ) && facts.color_filters.len() == 2
+        && facts.blurs.len() == 1
+        && facts.drop_shadows.len() == 1
+        && facts
+            .blurs
+            .iter()
+            .all(|blur| blur.blur.standard_deviation > 0.0)
+}
+
+#[cfg(test)]
+struct C11MalformedPlanObservation {
+    empty_missing_spatial: bool,
+    axes_inputs_edges_aliases: bool,
+    copy_stale_forward_c12: bool,
+    all_invalid: Vec<LoweredGraphPlan>,
+}
+
+#[cfg(test)]
+fn c11_malformed_plan_observation(
+    lowered: &LoweredGraphPlan,
+    stale_dependency: RuntimePassId,
+) -> Option<C11MalformedPlanObservation> {
+    let indices = C11PassIndices::try_new(lowered)?;
+    let empty_missing_spatial = c11_empty_missing_spatial_plans(lowered, indices)?;
+    let axes_inputs_edges_aliases = c11_axes_inputs_edges_alias_plans(lowered, indices)?;
+    let copy_stale_forward_c12 = c11_copy_stale_forward_plans(lowered, indices, stale_dependency)?;
+    let invalid =
+        |plans: &[LoweredGraphPlan]| plans.iter().cloned().all(|plan| !c11_plan_is_closed(plan));
+    let all_invalid = empty_missing_spatial
+        .iter()
+        .chain(&axes_inputs_edges_aliases)
+        .chain(&copy_stale_forward_c12)
+        .cloned()
+        .collect::<Vec<_>>();
+    Some(C11MalformedPlanObservation {
+        empty_missing_spatial: invalid(&empty_missing_spatial),
+        axes_inputs_edges_aliases: invalid(&axes_inputs_edges_aliases),
+        copy_stale_forward_c12: invalid(&copy_stale_forward_c12),
+        all_invalid,
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct C11PassIndices {
+    color: usize,
+    blur_horizontal: usize,
+    shadow_horizontal: usize,
+    shadow_colorize: usize,
+    shadow_merge: usize,
+}
+
+#[cfg(test)]
+impl C11PassIndices {
+    fn try_new(plan: &LoweredGraphPlan) -> Option<Self> {
+        let find = |predicate: fn(&RuntimePassKind) -> bool| {
+            plan.passes.iter().position(|pass| predicate(&pass.kind))
+        };
+        Some(Self {
+            color: find(|kind| matches!(kind, RuntimePassKind::ColorFilter(Some(_))))?,
+            blur_horizontal: find(|kind| {
+                matches!(
+                    kind,
+                    RuntimePassKind::BlurHorizontal(Some(RuntimeBlur {
+                        input: RuntimeBlurInput::Rgba,
+                        ..
+                    }))
+                )
+            })?,
+            shadow_horizontal: find(|kind| {
+                matches!(
+                    kind,
+                    RuntimePassKind::BlurHorizontal(Some(RuntimeBlur {
+                        input: RuntimeBlurInput::SourceAlpha,
+                        ..
+                    }))
+                )
+            })?,
+            shadow_colorize: find(|kind| {
+                matches!(kind, RuntimePassKind::DropShadowColorize(Some(_)))
+            })?,
+            shadow_merge: find(|kind| {
+                matches!(
+                    kind,
+                    RuntimePassKind::Composite(Some(RuntimeComposite {
+                        kind: RuntimeCompositeKind::DropShadow,
+                        ..
+                    }))
+                )
+            })?,
+        })
+    }
+}
+
+#[cfg(test)]
+fn c11_empty_missing_spatial_plans(
+    lowered: &LoweredGraphPlan,
+    indices: C11PassIndices,
+) -> Option<Vec<LoweredGraphPlan>> {
+    let mut plans = Vec::new();
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::ColorFilter(Some(filter)) = &mut invalid.passes[indices.color].kind else {
+        return None;
+    };
+    filter.operations.clear();
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[indices.blur_horizontal].kind = RuntimePassKind::BlurHorizontal(None);
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[indices.shadow_colorize].kind = RuntimePassKind::DropShadowColorize(None);
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::BlurHorizontal(Some(blur)) =
+        &mut invalid.passes[indices.blur_horizontal].kind
+    else {
+        return None;
+    };
+    blur.standard_deviation = 0.0;
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::BlurHorizontal(Some(blur)) =
+        &mut invalid.passes[indices.blur_horizontal].kind
+    else {
+        return None;
+    };
+    blur.spatial.result.device_origin.0 = blur.spatial.result.device_origin.0.checked_add(1)?;
+    plans.push(invalid);
+    Some(plans)
+}
+
+#[cfg(test)]
+fn c11_axes_inputs_edges_alias_plans(
+    lowered: &LoweredGraphPlan,
+    indices: C11PassIndices,
+) -> Option<Vec<LoweredGraphPlan>> {
+    let mut plans = Vec::new();
+    for mutate in [
+        |blur: &mut RuntimeBlur| blur.axis = RuntimeBlurAxis::Vertical,
+        |blur: &mut RuntimeBlur| blur.input = RuntimeBlurInput::SourceAlpha,
+        |blur: &mut RuntimeBlur| {
+            blur.edge = RuntimeSamplingEdge::SemanticBorderMirror(Rect::new(0.0, 0.0, 1.0, 1.0));
+        },
+    ] {
+        let mut invalid = lowered.clone();
+        let RuntimePassKind::BlurHorizontal(Some(blur)) =
+            &mut invalid.passes[indices.blur_horizontal].kind
+        else {
+            return None;
+        };
+        mutate(blur);
+        plans.push(invalid);
+    }
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::BlurHorizontal(Some(blur)) =
+        &mut invalid.passes[indices.shadow_horizontal].kind
+    else {
+        return None;
+    };
+    blur.input = RuntimeBlurInput::Rgba;
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let source = invalid.passes[indices.blur_horizontal]
+        .reads
+        .first()?
+        .resource;
+    invalid.passes[indices.blur_horizontal].result = RuntimeResultBinding::Resource(source);
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::DropShadowColorize(Some(shadow)) =
+        &mut invalid.passes[indices.shadow_colorize].kind
+    else {
+        return None;
+    };
+    shadow.uses_source_alpha = false;
+    plans.push(invalid);
+    Some(plans)
+}
+
+#[cfg(test)]
+fn c11_copy_stale_forward_plans(
+    lowered: &LoweredGraphPlan,
+    indices: C11PassIndices,
+    stale_dependency: RuntimePassId,
+) -> Option<Vec<LoweredGraphPlan>> {
+    let mut plans = Vec::new();
+    let mut invalid = lowered.clone();
+    invalid.passes[indices.blur_horizontal].kind = RuntimePassKind::CopyBackdrop;
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let forward = invalid
+        .passes
+        .get(indices.blur_horizontal.checked_add(1)?)?
+        .id;
+    invalid.passes[indices.blur_horizontal].dependencies = vec![forward];
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[indices.shadow_merge].dependencies =
+        vec![invalid.passes[indices.shadow_colorize].id];
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[indices.blur_horizontal].dependencies = vec![stale_dependency];
+    plans.push(invalid);
+    Some(plans)
+}
+
+#[cfg(test)]
+fn c11_plan_is_closed(lowered: LoweredGraphPlan) -> bool {
+    c11_preparable_graph_for_test(lowered).is_ok()
+}
+
+#[cfg(test)]
+fn c11_filter_graph_observation(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Option<C11FilterGraphObservationForTest> {
+    let (_, lowered) = lower_authored_c10_graph_for_test(
+        filters,
+        commands,
+        context,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let preparable = c11_preparable_graph_for_test(lowered).ok()?;
+    let closed = &preparable.closed;
+    Some(C11FilterGraphObservationForTest {
+        pass_order: c11_filter_pass_tags(&closed.facts),
+        ordinary_blur_uses_transparent_black: c11_blur_edges_are_exact(closed),
+        drop_shadow_uses_source_alpha_and_continuous_offset: c11_shadow_facts_are_exact(closed),
+        spatial_mappings_are_exact: c11_spatial_mappings_are_exact(closed),
+        sources_and_results_are_distinct: c11_sources_and_results_are_distinct(closed),
+        source_alpha_fanout_reads_original_twice: c11_shadow_fanout_is_exact(closed),
+        original_source_releases_only_after_merge: c11_shadow_releases_are_exact(closed),
+        dependencies_and_last_use_are_exact: c11_dependencies_and_lifetimes_are_exact(closed),
+    })
+}
+
+#[cfg(test)]
+fn c11_filter_pass_tags(facts: &ClosedExecutableGraphFacts) -> Vec<C11FilterPassTagForTest> {
+    let mut tags = Vec::new();
+    for step in &facts.filter_steps {
+        match step {
+            ExecutableFilterStepFacts::Color(_) => {
+                tags.push(C11FilterPassTagForTest::Color);
+            }
+            ExecutableFilterStepFacts::Blur { .. } => {
+                tags.extend([
+                    C11FilterPassTagForTest::BlurHorizontalRgba,
+                    C11FilterPassTagForTest::BlurVerticalRgba,
+                ]);
+            }
+            ExecutableFilterStepFacts::DropShadow { .. } => {
+                tags.extend([
+                    C11FilterPassTagForTest::BlurHorizontalSourceAlpha,
+                    C11FilterPassTagForTest::BlurVerticalSourceAlpha,
+                    C11FilterPassTagForTest::DropShadowColorize,
+                    C11FilterPassTagForTest::DropShadowMerge,
+                ]);
+            }
+        }
+    }
+    tags
+}
+
+#[cfg(test)]
+fn c11_blur_edges_are_exact(closed: &ClosedExecutableGraph) -> bool {
+    !closed.facts.blurs.is_empty()
+        && closed.facts.blurs.iter().all(|facts| {
+            facts.blur.edge == RuntimeSamplingEdge::TransparentBlack
+                && [facts.horizontal, facts.vertical].into_iter().all(|pass| {
+                    closed
+                        .lowered
+                        .passes
+                        .iter()
+                        .find(|candidate| candidate.id == pass)
+                        .is_some_and(|pass| {
+                            pass.reads.len() == 1
+                                && pass.reads[0].sampling_edge
+                                    == RuntimeSamplingEdge::TransparentBlack
+                        })
+                })
+        })
+}
+
+#[cfg(test)]
+fn c11_shadow_facts_are_exact(closed: &ClosedExecutableGraph) -> bool {
+    !closed.facts.drop_shadows.is_empty()
+        && closed.facts.drop_shadows.iter().all(|facts| {
+            facts.blur.input == RuntimeBlurInput::SourceAlpha
+                && facts.parameters.uses_source_alpha
+                && facts.parameters.uses_continuous_offset
+                && facts.parameters.retains_unchanged_source
+                && facts.parameters.edge == RuntimeSamplingEdge::TransparentBlack
+        })
+}
+
+#[cfg(test)]
+fn c11_spatial_mappings_are_exact(closed: &ClosedExecutableGraph) -> bool {
+    let resources = closed
+        .lowered
+        .resources
+        .iter()
+        .map(|resource| (resource.id, resource))
+        .collect::<BTreeMap<_, _>>();
+    let blurs = closed.facts.blurs.iter().all(|facts| {
+        let vertical = closed
+            .lowered
+            .passes
+            .iter()
+            .find(|pass| pass.id == facts.vertical)
+            .and_then(|pass| match &pass.kind {
+                RuntimePassKind::BlurVertical(Some(blur)) => Some(blur),
+                _ => None,
+            });
+        resources
+            .get(&facts.source)
+            .zip(resources.get(&facts.intermediate))
+            .zip(resources.get(&facts.result))
+            .is_some_and(|((source, intermediate), result)| {
+                facts.blur.spatial.source == source.spatial
+                    && facts.blur.spatial.result == intermediate.spatial
+                    && facts.blur.spatial.result == result.spatial
+                    && vertical.is_some_and(|blur| {
+                        blur.spatial.source == intermediate.spatial
+                            && blur.spatial.result == result.spatial
+                    })
+            })
+    });
+    let shadows = closed.facts.drop_shadows.iter().all(|facts| {
+        resources
+            .get(&facts.source)
+            .zip(resources.get(&facts.horizontal_result))
+            .zip(resources.get(&facts.vertical_result))
+            .zip(resources.get(&facts.shadow))
+            .zip(resources.get(&facts.result))
+            .is_some_and(|((((source, horizontal), vertical), shadow), result)| {
+                facts.blur.spatial.source == source.spatial
+                    && facts.blur.spatial.result == horizontal.spatial
+                    && facts.blur.spatial.result == vertical.spatial
+                    && facts.parameters.spatial.source == vertical.spatial
+                    && facts.parameters.spatial.result == shadow.spatial
+                    && facts.parameters.spatial.result == result.spatial
+            })
+    });
+    blurs && shadows
+}
+
+#[cfg(test)]
+fn c11_sources_and_results_are_distinct(closed: &ClosedExecutableGraph) -> bool {
+    closed.facts.blurs.iter().all(|facts| {
+        [facts.source, facts.intermediate, facts.result]
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+            .len()
+            == 3
+    }) && closed.facts.drop_shadows.iter().all(|facts| {
+        [
+            facts.source,
+            facts.horizontal_result,
+            facts.vertical_result,
+            facts.shadow,
+            facts.result,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .len()
+            == 5
+    })
+}
+
+#[cfg(test)]
+fn c11_shadow_fanout_is_exact(closed: &ClosedExecutableGraph) -> bool {
+    closed.facts.drop_shadows.iter().all(|facts| {
+        let readers = closed
+            .lowered
+            .passes
+            .iter()
+            .filter(|pass| pass.reads.iter().any(|read| read.resource == facts.source))
+            .map(|pass| pass.id)
+            .collect::<Vec<_>>();
+        readers == [facts.horizontal, facts.merge]
+            && closed
+                .lowered
+                .resources
+                .iter()
+                .find(|resource| resource.id == facts.source)
+                .is_some_and(|resource| resource.expected_reads == 2)
+    })
+}
+
+#[cfg(test)]
+fn c11_shadow_releases_are_exact(closed: &ClosedExecutableGraph) -> bool {
+    closed.facts.drop_shadows.iter().all(|facts| {
+        let horizontal = closed
+            .lowered
+            .passes
+            .iter()
+            .find(|pass| pass.id == facts.horizontal);
+        let merge = closed
+            .lowered
+            .passes
+            .iter()
+            .find(|pass| pass.id == facts.merge);
+        let source = closed
+            .lowered
+            .resources
+            .iter()
+            .find(|resource| resource.id == facts.source);
+        horizontal.is_some_and(|pass| !pass.releases.contains(&facts.source))
+            && merge.is_some_and(|pass| pass.releases.contains(&facts.source))
+            && source.is_some_and(|resource| resource.last_use == facts.merge)
+    })
+}
+
+#[cfg(test)]
+fn c11_dependencies_and_lifetimes_are_exact(closed: &ClosedExecutableGraph) -> bool {
+    let resources = closed
+        .lowered
+        .resources
+        .iter()
+        .map(|resource| (resource.id, resource))
+        .collect::<BTreeMap<_, _>>();
+    let pass_positions = closed
+        .lowered
+        .passes
+        .iter()
+        .enumerate()
+        .map(|(position, pass)| (pass.id, position))
+        .collect::<BTreeMap<_, _>>();
+    closed.facts.proves_exact_facts_for(&closed.lowered)
+        && closed
+            .lowered
+            .passes
+            .iter()
+            .enumerate()
+            .all(|(position, pass)| {
+                pass.dependencies.iter().all(|dependency| {
+                    pass_positions
+                        .get(dependency)
+                        .is_some_and(|dependency_position| *dependency_position < position)
+                }) && pass.releases.iter().all(|released| {
+                    resources
+                        .get(released)
+                        .is_some_and(|resource| resource.last_use == pass.id)
+                })
+            })
 }
 
 fn vello_capture_raster_parameters(
@@ -6672,6 +7956,7 @@ enum PrePreparationGraphClassification {
     ExactC08(C08PreparableGraph),
     ExactC09(ClosedExecutableGraph),
     ExactC10(C10PreparableGraph),
+    ExactC11(C11PreparableGraph),
     FuturePasses,
     Ineligible(GraphPreparationIneligibility),
 }
@@ -6718,6 +8003,14 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
+            PrePreparationGraphClassification::ExactC11(preparable) => {
+                if !preparable.proves_closed_filter_facts() {
+                    return Err(preparation_error(
+                        "C11 classification lost its closed pre-allocation facts",
+                    ));
+                }
+                Ok(Self::FuturePasses)
+            }
             PrePreparationGraphClassification::ExactC10(preparable) => {
                 if !preparable.proves_closed_color_facts() {
                     return Err(preparation_error(
@@ -6746,6 +8039,7 @@ impl ExecutableGraphDispatchEligibility {
                     }
                     PrePreparationGraphClassification::ExactC08(_)
                     | PrePreparationGraphClassification::ExactC10(_)
+                    | PrePreparationGraphClassification::ExactC11(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C09 dispatch lowering changed its closed eligibility result",
@@ -6770,6 +8064,7 @@ impl ExecutableGraphDispatchEligibility {
                     }
                     PrePreparationGraphClassification::ExactC09(_)
                     | PrePreparationGraphClassification::ExactC10(_)
+                    | PrePreparationGraphClassification::ExactC11(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C08 dispatch lowering changed its closed eligibility result",
@@ -6803,9 +8098,29 @@ pub(crate) fn c10_preparable_graph_for_test(
         PrePreparationGraphClassification::ExactC08(_)
         | PrePreparationGraphClassification::ExactC09(_)
         | PrePreparationGraphClassification::ExactC10(_)
+        | PrePreparationGraphClassification::ExactC11(_)
         | PrePreparationGraphClassification::FuturePasses
         | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
             "the authored C10 fixture is outside the exact closed color graph",
+        )),
+    }
+}
+
+#[cfg(test)]
+fn c11_preparable_graph_for_test(lowered: LoweredGraphPlan) -> Result<C11PreparableGraph> {
+    match PrePreparationGraphClassification::classify(lowered) {
+        PrePreparationGraphClassification::ExactC11(preparable)
+            if preparable.proves_closed_filter_facts() =>
+        {
+            Ok(preparable)
+        }
+        PrePreparationGraphClassification::ExactC08(_)
+        | PrePreparationGraphClassification::ExactC09(_)
+        | PrePreparationGraphClassification::ExactC10(_)
+        | PrePreparationGraphClassification::ExactC11(_)
+        | PrePreparationGraphClassification::FuturePasses
+        | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
+            "the authored C11 fixture is outside the exact closed spatial-filter graph",
         )),
     }
 }
@@ -6838,13 +8153,16 @@ impl PrePreparationGraphClassification {
         };
         match C08PreparableGraph::try_from_closed(closed) {
             Ok(preparable) => Self::ExactC08(preparable),
-            Err(closed) => match C10PreparableGraph::try_from_closed(*closed) {
-                Ok(preparable) => Self::ExactC10(preparable),
-                Err(closed) => match C09PreparableGraph::try_from_closed(*closed) {
-                    Ok(preparable) => Self::ExactC09(preparable.into_closed()),
-                    Err(_) => Self::Ineligible(
-                        GraphPreparationIneligibility::OutsideClosedExecutableGraph,
-                    ),
+            Err(closed) => match C11PreparableGraph::try_from_closed(*closed) {
+                Ok(preparable) => Self::ExactC11(preparable),
+                Err(closed) => match C10PreparableGraph::try_from_closed(*closed) {
+                    Ok(preparable) => Self::ExactC10(preparable),
+                    Err(closed) => match C09PreparableGraph::try_from_closed(*closed) {
+                        Ok(preparable) => Self::ExactC09(preparable.into_closed()),
+                        Err(_) => Self::Ineligible(
+                            GraphPreparationIneligibility::OutsideClosedExecutableGraph,
+                        ),
+                    },
                 },
             },
         }
@@ -8426,6 +9744,9 @@ impl<'device> PreparedGraph<'device> {
                 }
                 Ok(prepared)
             }
+            PrePreparationGraphClassification::ExactC11(_) => Err(preparation_error(
+                "a C11 spatial-filter graph has no executable shader preparation in this task",
+            )),
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
                 "a future GPU pass cannot enter C09 resource preparation",
             )),

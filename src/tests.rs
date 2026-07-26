@@ -11561,6 +11561,78 @@ fn mixed_color_and_future_passes_preserve_the_next_unavailable_diagnostic() {
     );
 }
 
+fn c11_authored_filter_steps_for_test() -> Vec<FilterList> {
+    vec![
+        c10_authored_color_runs_for_test()[0].clone(),
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.25).unwrap())]).unwrap(),
+        FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(0.0).unwrap())]).unwrap(),
+        FilterList::try_ops(vec![FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(-1.5, 0.75),
+                FilterBlur::try_new(0.625).unwrap(),
+                Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+            )
+            .unwrap(),
+        )])
+        .unwrap(),
+        c10_authored_color_runs_for_test()[1].clone(),
+    ]
+}
+
+#[test]
+fn c11_executor_accepts_only_color_blur_and_drop_shadow_filter_graphs() {
+    let observed = super::pass::c11_executable_graph_observation_for_test(
+        c11_authored_filter_steps_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.accepts_color_blur_and_drop_shadow_for_all_formats
+            && observed.preserves_ordered_nonzero_filter_steps
+            && observed.rejects_empty_missing_and_malformed_spatial_facts
+            && observed.rejects_wrong_axes_inputs_edges_and_aliases
+            && observed.rejects_copy_backdrop_stale_forward_and_c12_plus
+            && observed.rejects_before_resource_acquisition,
+        "C11 has no closed pre-allocation color blur and drop-shadow subset"
+    );
+}
+
+#[test]
+fn c11_blur_and_drop_shadow_graph_preserve_order_edges_and_lifetimes() {
+    use super::pass::C11FilterPassTagForTest as Tag;
+
+    let observed = super::pass::c11_filter_graph_observation_for_test(
+        c11_authored_filter_steps_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.pass_order
+            == [
+                Tag::Color,
+                Tag::BlurHorizontalRgba,
+                Tag::BlurVerticalRgba,
+                Tag::BlurHorizontalSourceAlpha,
+                Tag::BlurVerticalSourceAlpha,
+                Tag::DropShadowColorize,
+                Tag::DropShadowMerge,
+                Tag::Color,
+            ]
+            && observed.ordinary_blur_uses_transparent_black
+            && observed.drop_shadow_uses_source_alpha_and_continuous_offset
+            && observed.spatial_mappings_are_exact
+            && observed.sources_and_results_are_distinct
+            && observed.source_alpha_fanout_reads_original_twice
+            && observed.original_source_releases_only_after_merge
+            && observed.dependencies_and_last_use_are_exact,
+        "the closed C11 graph lost authored order edge spatial or lifetime facts"
+    );
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
@@ -32708,7 +32780,7 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
 }
 
 #[test]
-fn c10_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
+fn c12_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("future diagnostic ordering requires a real selected WGPU device");
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))

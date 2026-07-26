@@ -1667,6 +1667,14 @@ impl GraphLoweringPassId {
             index: id.index.0,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn stale_generation_for_test(self) -> Option<Self> {
+        self.generation.0.checked_add(1).map(|generation| Self {
+            generation: GraphLoweringGeneration(generation),
+            index: self.index,
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -4668,7 +4676,7 @@ fn graph_lowering_blur_pass(
     let blur = match (pass.result, step) {
         (SemanticPassResult::Empty, None) => None,
         (SemanticPassResult::Resource(_), Some(step)) => {
-            Some(graph_lowering_blur(pass, input, step)?)
+            Some(graph_lowering_blur(graph, pass, input, step)?)
         }
         (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
             return Err(GraphValidationError::InvalidPassArity);
@@ -4688,7 +4696,9 @@ fn graph_lowering_drop_shadow_pass(
     let step = filter_step_for_pass(graph, pass)?;
     let shadow = match (pass.result, step) {
         (SemanticPassResult::Empty, None) => None,
-        (SemanticPassResult::Resource(_), Some(step)) => Some(graph_lowering_drop_shadow(step)?),
+        (SemanticPassResult::Resource(_), Some(step)) => {
+            Some(graph_lowering_drop_shadow(graph, pass, step)?)
+        }
         (SemanticPassResult::Empty, Some(_)) | (SemanticPassResult::Resource(_), None) => {
             return Err(GraphValidationError::InvalidPassArity);
         }
@@ -4712,7 +4722,17 @@ fn graph_lowering_composite_pass(
             if composite.kind == SemanticCompositeKind::DropShadow {
                 let step = filter_step_for_pass(graph, pass)?
                     .ok_or(GraphValidationError::InvalidPassArity)?;
-                graph_lowering_drop_shadow(step)?;
+                let colorize = step
+                    .passes
+                    .get(2)
+                    .and_then(|colorize| {
+                        graph
+                            .passes
+                            .iter()
+                            .find(|candidate| candidate.id == *colorize)
+                    })
+                    .ok_or(GraphValidationError::InvalidPassArity)?;
+                graph_lowering_drop_shadow(graph, colorize, step)?;
             } else {
                 reject_unexpected_filter_metadata(graph, pass.id)?;
             }
@@ -4812,6 +4832,7 @@ fn graph_lowering_edge(edge: FilterEdgePolicy) -> GraphLoweringEdgePolicy {
 }
 
 fn graph_lowering_blur(
+    graph: &GpuRenderGraph,
     pass: &SemanticGraphPass,
     input: BlurInput,
     step: &SemanticFilterStepPlan,
@@ -4848,12 +4869,14 @@ fn graph_lowering_blur(
         },
         standard_deviation,
         support_radius,
-        spatial: graph_lowering_filter_spatial(step.step.spatial_mapping),
+        spatial: graph_lowering_pass_spatial(graph, pass)?,
         edge: graph_lowering_edge(step.step.edge_policy),
     })
 }
 
 fn graph_lowering_drop_shadow(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
     step: &SemanticFilterStepPlan,
 ) -> GraphBuildResult<GraphLoweringDropShadow> {
     let ResolvedFilterOperationIntent::DropShadow(intent) = step.step.operation_intent else {
@@ -4867,12 +4890,36 @@ fn graph_lowering_drop_shadow(
         standard_deviation: intent.authored_shadow.blur().radius(),
         color: intent.authored_shadow.color(),
         support_radius: intent.support.device_radius,
-        spatial: graph_lowering_filter_spatial(step.step.spatial_mapping),
+        spatial: graph_lowering_pass_spatial(graph, pass)?,
         edge: graph_lowering_edge(step.step.edge_policy),
         source_alpha: intent.alpha_source == DropShadowAlphaSource::SourceAlpha,
         continuous_offset: intent.offset_sampling == DropShadowOffsetSampling::ContinuousLinear,
         retains_unchanged_source: intent.source_composition
             == DropShadowSourceComposition::RetainUnchangedForSourceOver,
+    })
+}
+
+fn graph_lowering_pass_spatial(
+    graph: &GpuRenderGraph,
+    pass: &SemanticGraphPass,
+) -> GraphBuildResult<GraphLoweringFilterSpatialMapping> {
+    let [source] = pass.reads.as_slice() else {
+        return Err(GraphValidationError::InvalidPassArity);
+    };
+    let SemanticPassResult::Resource(result) = pass.result else {
+        return Err(GraphValidationError::InvalidPassArity);
+    };
+    let source = graph
+        .resources
+        .get(validate_graph_resource_id(graph, *source)?)
+        .ok_or(GraphValidationError::UnknownResource(*source))?;
+    let result = graph
+        .resources
+        .get(validate_graph_resource_id(graph, result)?)
+        .ok_or(GraphValidationError::UnknownResource(result))?;
+    Ok(GraphLoweringFilterSpatialMapping {
+        source: GraphLoweringSpatialDescriptor::from_semantic(source.descriptor),
+        result: GraphLoweringSpatialDescriptor::from_semantic(result.descriptor),
     })
 }
 

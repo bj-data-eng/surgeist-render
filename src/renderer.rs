@@ -57,13 +57,13 @@ pub struct Renderer {
 #[must_use = "the renderer dispatch boundary must resolve to exactly one execution route"]
 enum RendererFrameDispatch {
     DirectVello(RenderCommands),
-    ExactGraph(ExactSurfaceGraph),
+    ExactGraph(Box<ExactSurfaceGraph>),
 }
 
 #[must_use = "prepared renderer execution must reach its selected GPU transaction"]
 enum PreparedRendererExecution {
-    DirectVello(VelloScene),
-    ExactGraph(ExactSurfaceGraph),
+    DirectVello(Box<VelloScene>),
+    ExactGraph(Box<ExactSurfaceGraph>),
 }
 
 #[cfg(test)]
@@ -837,8 +837,8 @@ impl Renderer {
                             .exact_c08_graph_routes
                             .saturating_add(1);
                     }
-                    Ok(RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(
-                        preparable,
+                    Ok(RendererFrameDispatch::ExactGraph(Box::new(
+                        ExactSurfaceGraph::C08(preparable),
                     )))
                 }
                 ExecutableGraphDispatchEligibility::ExactC09(preparable) => {
@@ -849,8 +849,8 @@ impl Renderer {
                             .exact_c09_graph_routes
                             .saturating_add(1);
                     }
-                    Ok(RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(
-                        preparable,
+                    Ok(RendererFrameDispatch::ExactGraph(Box::new(
+                        ExactSurfaceGraph::C09(preparable),
                     )))
                 }
                 ExecutableGraphDispatchEligibility::FuturePasses => {
@@ -893,8 +893,8 @@ impl Renderer {
             .dispatch_observation
             .exact_c10_fixture_routes
             .saturating_add(1);
-        Ok(RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C10(
-            preparable,
+        Ok(RendererFrameDispatch::ExactGraph(Box::new(
+            ExactSurfaceGraph::C10(preparable),
         )))
     }
 
@@ -1026,7 +1026,7 @@ impl Renderer {
                 let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
                 (
                     normalized,
-                    PreparedRendererExecution::DirectVello(vello_scene),
+                    PreparedRendererExecution::DirectVello(Box::new(vello_scene)),
                 )
             }
             RendererFrameDispatch::ExactGraph(graph) => {
@@ -1071,9 +1071,9 @@ impl Renderer {
                     ))]
                     {
                         if matches!(&surface.backend, SurfaceBackend::Presented { .. }) {
-                            render_exact_presented_graph_surface(backend, surface, graph).await
+                            render_exact_presented_graph_surface(backend, surface, *graph).await
                         } else {
-                            render_exact_headless_graph_surface(backend, surface, graph).await
+                            render_exact_headless_graph_surface(backend, surface, *graph).await
                         }
                     }
                     #[cfg(not(any(
@@ -1081,7 +1081,7 @@ impl Renderer {
                         all(feature = "render-web", target_arch = "wasm32")
                     )))]
                     {
-                        render_exact_headless_graph_surface(backend, surface, graph).await
+                        render_exact_headless_graph_surface(backend, surface, *graph).await
                     }
                 }
             }
@@ -1324,7 +1324,15 @@ impl Renderer {
             ExecutableGraphWorkingFormatRequest::Exact(working_format),
             &capabilities,
         )? {
-            RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(preparable)) => preparable,
+            RendererFrameDispatch::ExactGraph(graph) => match *graph {
+                ExactSurfaceGraph::C08(preparable) => preparable,
+                ExactSurfaceGraph::C09(_) | ExactSurfaceGraph::C10(_) => {
+                    return Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "the private forced graph is outside the exact executable C08 subset",
+                    ));
+                }
+            },
             _ => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
@@ -1534,10 +1542,16 @@ impl Renderer {
             working_format,
             &capabilities,
         )? {
-            RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C10(preparable)) => preparable,
-            RendererFrameDispatch::DirectVello(_)
-            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C08(_))
-            | RendererFrameDispatch::ExactGraph(ExactSurfaceGraph::C09(_)) => {
+            RendererFrameDispatch::ExactGraph(graph) => match *graph {
+                ExactSurfaceGraph::C10(preparable) => preparable,
+                ExactSurfaceGraph::C08(_) | ExactSurfaceGraph::C09(_) => {
+                    return Err(Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "the private C10 fixture left its exact renderer dispatch route",
+                    ));
+                }
+            },
+            RendererFrameDispatch::DirectVello(_) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
                     "the private C10 fixture left its exact renderer dispatch route",
