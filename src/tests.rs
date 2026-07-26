@@ -54,9 +54,9 @@ use super::{
         ReferencePremultipliedRgba8Buffer,
     },
     resource::{
-        AllocationGeneration, GaussianKernelKey, GaussianKernelPlan, GaussianKernelSamplingForm,
-        ResourceAccountingFault, ResourceCacheKey, ResourceIdentity, ResourceManager,
-        ResourceRetentionOutcome, WorkingFormat,
+        AllocationGeneration, GaussianKernelBufferLimits, GaussianKernelKey, GaussianKernelPlan,
+        GaussianKernelSamplingForm, ResourceAccountingFault, ResourceCacheKey, ResourceIdentity,
+        ResourceManager, ResourceRetentionOutcome, WorkingFormat,
     },
     shader::{DevicePassCache, device_pass_cache_owns_exact_key_spaces_for_test},
     style::{ColorFilterOp, ColorFilterPipeline},
@@ -11633,6 +11633,88 @@ fn c11_blur_and_drop_shadow_graph_preserve_order_edges_and_lifetimes() {
     );
 }
 
+#[test]
+fn gaussian_kernel_bytes_are_symmetric_normalized_and_exactly_cached() {
+    assert_gaussian_kernel_upload_lifecycle(2.0, 1.5, 2.5);
+    let plan = GaussianKernelPlan::try_new(2.0, 1.5, 2.5, GaussianKernelSamplingForm::PairedLinear)
+        .unwrap();
+    let samples = plan
+        .upload_bytes()
+        .chunks_exact(8)
+        .map(|sample| {
+            (
+                f32::from_le_bytes(sample[0..4].try_into().unwrap()),
+                f32::from_le_bytes(sample[4..8].try_into().unwrap()),
+            )
+        })
+        .collect::<Vec<_>>();
+    let symmetric = samples[1..].chunks_exact(2).all(|pair| {
+        pair[0].0.to_bits() == (-pair[1].0).to_bits() && pair[0].1.to_bits() == pair[1].1.to_bits()
+    });
+    let normalized = (samples.iter().map(|sample| sample.1).sum::<f32>() - 1.0).abs() <= 1.0e-6;
+    let storage_limit_is_checked = plan
+        .validate_buffer_limits(GaussianKernelBufferLimits::for_test(
+            plan.byte_len(),
+            plan.byte_len() - 1,
+        ))
+        .is_err();
+
+    assert!(
+        symmetric && normalized && storage_limit_is_checked,
+        "Gaussian sample bytes or their exact pre-allocation cache contract differ"
+    );
+}
+
+#[test]
+fn c11_blur_layout_binds_exact_source_spatial_and_kernel() {
+    let observed = super::pass::c11_blur_layout_observation_for_test(
+        c11_authored_filter_steps_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.realizes_all_axis_input_and_precision_keys
+            && observed.binds_exact_working_source
+            && observed.binds_only_one_linear_sampler
+            && observed.binds_spatial_and_read_only_kernel
+            && observed.targets_only_the_working_format
+            && observed.contains_no_dummy_binding,
+        "the C11 blur layout has a missing or dummy binding"
+    );
+}
+
+#[test]
+fn c11_blur_cache_realizes_checked_axis_input_and_precision_programs() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap_or_panic_for_test("C11 checked blur realization requires backend selection")
+        .unwrap_or_panic_for_test("C11 checked blur realization requires a host adapter");
+    let ready = backend
+        .ready_device_state_borrow_for_test(identity)
+        .unwrap_or_panic_for_test("C11 checked blur realization requires a ready device");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let observed = pollster::block_on(
+        super::pass::c11_blur_cache_realization_observation_for_test(
+            ready.device_for_test(),
+            c11_authored_filter_steps_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+            capabilities,
+        ),
+    )
+    .unwrap_or_panic_for_test("the C11 checked blur shader must reach real WGPU realization");
+
+    assert!(
+        observed.realizes_all_eight_programs
+            && observed.checked_scope_is_clean
+            && observed.publishes_only_blur_entries,
+        "the C11 checked blur programs are unrealized"
+    );
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
@@ -14461,6 +14543,7 @@ fn c07_contains_no_placeholder_custom_shader_program() {
         .collect::<Vec<_>>();
     shader_files.sort();
     let expected_shader_files = [
+        "blur.wgsl".to_owned(),
         "canonicalize_capture.wgsl".to_owned(),
         "color_filter.wgsl".to_owned(),
         "layer_composite.wgsl".to_owned(),
@@ -14482,7 +14565,7 @@ fn c07_contains_no_placeholder_custom_shader_program() {
 
     assert!(
         !has_placeholder_program && exact_tracked_sources && checked_borrowed_sources,
-        "C08 introduced a placeholder or later-cycle custom shader program"
+        "the checked custom shader inventory contains a placeholder or unauthorized program"
     );
 }
 

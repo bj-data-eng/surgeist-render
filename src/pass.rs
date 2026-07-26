@@ -31,9 +31,9 @@ use super::{
     layer::BlendMode,
     renderer::{Antialiasing, EffectQualityPolicy},
     resource::{
-        FrameCleanup, FrameResourceScope, GaussianKernelKey, GaussianKernelPlan,
-        GaussianKernelSamplingForm, ResourceAllocationPreflight, ResourceIdentity, ResourceLease,
-        ResourceManager, WorkingFormat,
+        FrameCleanup, FrameResourceScope, GaussianKernelBufferLimits, GaussianKernelKey,
+        GaussianKernelPlan, GaussianKernelSamplingForm, ResourceAllocationPreflight,
+        ResourceIdentity, ResourceLease, ResourceManager, WorkingFormat,
     },
     shader::{
         BindGroupLayoutKey, ColorFilterOperationBufferLimits, ColorFilterOperationBytes,
@@ -221,6 +221,25 @@ pub(crate) struct C10ColorFilterLayoutObservationForTest {
     pub(crate) binds_spatial_and_read_only_operations: bool,
     pub(crate) targets_only_the_working_format: bool,
     pub(crate) contains_no_dummy_binding: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11BlurLayoutObservationForTest {
+    pub(crate) realizes_all_axis_input_and_precision_keys: bool,
+    pub(crate) binds_exact_working_source: bool,
+    pub(crate) binds_only_one_linear_sampler: bool,
+    pub(crate) binds_spatial_and_read_only_kernel: bool,
+    pub(crate) targets_only_the_working_format: bool,
+    pub(crate) contains_no_dummy_binding: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11BlurCacheRealizationObservationForTest {
+    pub(crate) realizes_all_eight_programs: bool,
+    pub(crate) checked_scope_is_clean: bool,
+    pub(crate) publishes_only_blur_entries: bool,
 }
 
 #[cfg(test)]
@@ -656,6 +675,85 @@ pub(crate) fn c10_color_filter_layout_observation_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn c11_blur_layout_observation_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C11BlurLayoutObservationForTest {
+    c11_blur_layout_observation(filters, commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) async fn c11_blur_cache_realization_observation_for_test(
+    device: &wgpu::Device,
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C11BlurCacheRealizationObservationForTest> {
+    capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
+    capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
+    let high = c11_blur_cache_requests_for_test(
+        filters.clone(),
+        commands.clone(),
+        context,
+        capabilities,
+        WorkingFormat::HighPrecision,
+    )?;
+    let reduced = c11_blur_cache_requests_for_test(
+        filters,
+        commands,
+        context,
+        capabilities,
+        WorkingFormat::ReducedPrecision,
+    )?;
+    let mut cache = DevicePassCache::new();
+    let mut update = cache.provisional_update();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let realization = (|| -> Result<usize> {
+        let mut count = 0_usize;
+        for keys in high.iter().chain(&reduced) {
+            update
+                .realize_blur_pass(
+                    device,
+                    &cache,
+                    keys.samplers(),
+                    keys.layout(),
+                    keys.shader(),
+                    keys.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            count += 1;
+        }
+        Ok(count)
+    })();
+    let scope_error = error_scope.pop().await;
+    let realized_count = realization?;
+    if let Some(error) = scope_error {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            format!("C11 checked blur realization failed validation: {error}"),
+        ));
+    }
+    update.commit(&mut cache)?;
+    let all_requests_are_cached = high.iter().chain(&reduced).all(|keys| {
+        cache.contains_blur_pass_for_test(
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        )
+    });
+    Ok(C11BlurCacheRealizationObservationForTest {
+        realizes_all_eight_programs: realized_count == 8,
+        checked_scope_is_clean: true,
+        publishes_only_blur_entries: all_requests_are_cached
+            && cache.contains_only_eight_blur_passes_for_test(),
+    })
+}
+
+#[cfg(test)]
 pub(crate) fn runtime_color_filter_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
@@ -977,6 +1075,123 @@ fn c10_color_filter_cache_requests_for_test(
         ));
     }
     Ok(C10ColorFilterCacheRequestsForTest { passes })
+}
+
+#[cfg(test)]
+fn c11_blur_cache_requests_for_test(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> Result<Vec<RuntimePassCacheKeys>> {
+    let (_, lowered) = lower_authored_c10_graph_for_test(
+        filters,
+        commands,
+        context,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )
+    .ok_or_else(|| lowering_error("the C11 blur cache fixture did not produce a GPU graph"))?;
+    let preparable = c11_preparable_graph_for_test(lowered)?;
+    let passes = preparable
+        .closed
+        .lowered
+        .passes
+        .iter()
+        .filter_map(|pass| {
+            matches!(
+                pass.kind,
+                RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_))
+            )
+            .then(|| pass.cache_keys.clone())
+            .flatten()
+        })
+        .collect::<Vec<_>>();
+    if passes.len() != 4 {
+        return Err(lowering_error(
+            "the C11 blur cache fixture must contain four axis/input program requests",
+        ));
+    }
+    Ok(passes)
+}
+
+#[cfg(test)]
+fn c11_blur_layout_observation(
+    filters: Vec<super::FilterList>,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C11BlurLayoutObservationForTest> {
+    let mut facts = Vec::with_capacity(8);
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        let requests = c11_blur_cache_requests_for_test(
+            filters.clone(),
+            commands.clone(),
+            context,
+            capabilities,
+            working_format,
+        )?;
+        for keys in &requests {
+            let Some(observed) = super::shader::c11_blur_pass_key_facts_for_test(
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            ) else {
+                return Ok(C11BlurLayoutObservationForTest::default());
+            };
+            facts.push(observed);
+        }
+    }
+    let realizes_all_axis_input_and_precision_keys = facts.len() == 8
+        && [
+            ShaderTextureFormatKey::working(WorkingFormat::HighPrecision),
+            ShaderTextureFormatKey::working(WorkingFormat::ReducedPrecision),
+        ]
+        .into_iter()
+        .all(|format| {
+            [true, false].into_iter().all(|horizontal| {
+                [true, false].into_iter().all(|source_alpha| {
+                    facts
+                        .iter()
+                        .filter(|facts| {
+                            facts.working_format == format
+                                && facts.horizontal == horizontal
+                                && facts.source_alpha == source_alpha
+                        })
+                        .count()
+                        == 1
+                })
+            })
+        });
+    let binds_exact_working_source = facts.iter().all(|facts| {
+        facts.source_role == ShaderBindingRoleKey::FilterSource
+            && facts.source_format == facts.working_format
+    });
+    let binds_only_one_linear_sampler = facts
+        .iter()
+        .all(|facts| facts.has_only_linear_source_sampler);
+    let binds_spatial_and_read_only_kernel =
+        facts.iter().all(|facts| facts.has_exact_data_bindings);
+    let targets_only_the_working_format = facts
+        .iter()
+        .all(|facts| facts.target_format == facts.working_format);
+    Ok(C11BlurLayoutObservationForTest {
+        realizes_all_axis_input_and_precision_keys,
+        binds_exact_working_source,
+        binds_only_one_linear_sampler,
+        binds_spatial_and_read_only_kernel,
+        targets_only_the_working_format,
+        contains_no_dummy_binding: realizes_all_axis_input_and_precision_keys
+            && binds_exact_working_source
+            && binds_only_one_linear_sampler
+            && binds_spatial_and_read_only_kernel,
+    })
 }
 
 #[cfg(test)]
@@ -7664,8 +7879,11 @@ fn analyze_runtime_kernel(
         GaussianKernelSamplingForm::PairedLinear,
     )?;
     if kernel_plan.key() != blur.kernel
-        || kernel_plan.byte_len() == 0
-        || kernel_plan.byte_len() > device.limits().max_buffer_size
+        || kernel_plan
+            .validate_buffer_limits(GaussianKernelBufferLimits::from_device_limits(
+                &device.limits(),
+            ))
+            .is_err()
     {
         return Err(preparation_error(
             "Gaussian kernel preparation differs from the exact runtime blur plan",
@@ -9488,6 +9706,16 @@ fn realize_prepared_graph_pass(
                 keys.pipeline(),
             )?
             .require_encoding_ready(),
+        RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_)) => update
+            .realize_blur_pass(
+                device,
+                pass_cache,
+                keys.samplers(),
+                keys.layout(),
+                keys.shader(),
+                keys.pipeline(),
+            )?
+            .require_encoding_ready(),
         RuntimePassKind::Composite(Some(RuntimeComposite {
             kind: RuntimeCompositeKind::Layer { .. },
             ..
@@ -9520,8 +9748,8 @@ fn realize_prepared_graph_pass(
         | RuntimePassKind::VelloCapture(_)
         | RuntimePassKind::CopyBackdrop
         | RuntimePassKind::ColorFilter(None)
-        | RuntimePassKind::BlurHorizontal(_)
-        | RuntimePassKind::BlurVertical(_)
+        | RuntimePassKind::BlurHorizontal(None)
+        | RuntimePassKind::BlurVertical(None)
         | RuntimePassKind::DropShadowColorize(_)
         | RuntimePassKind::Composite(None)
         | RuntimePassKind::Composite(Some(RuntimeComposite {

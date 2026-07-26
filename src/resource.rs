@@ -155,6 +155,34 @@ pub(crate) struct GaussianKernelPlan {
     byte_len: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GaussianKernelBufferLimits {
+    max_buffer_size: u64,
+    max_storage_buffer_binding_size: u64,
+}
+
+impl GaussianKernelBufferLimits {
+    #[must_use]
+    pub(crate) fn from_device_limits(limits: &wgpu::Limits) -> Self {
+        Self {
+            max_buffer_size: limits.max_buffer_size,
+            max_storage_buffer_binding_size: limits.max_storage_buffer_binding_size,
+        }
+    }
+
+    #[cfg(test)]
+    #[must_use]
+    pub(crate) const fn for_test(
+        max_buffer_size: u64,
+        max_storage_buffer_binding_size: u64,
+    ) -> Self {
+        Self {
+            max_buffer_size,
+            max_storage_buffer_binding_size,
+        }
+    }
+}
+
 impl GaussianKernelPlan {
     pub(crate) fn try_new(
         standard_deviation: f64,
@@ -211,6 +239,20 @@ impl GaussianKernelPlan {
                 "Gaussian kernel upload byte length",
                 actual_len,
                 "must equal the exact serialized kernel plan length",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn validate_buffer_limits(&self, limits: GaussianKernelBufferLimits) -> Result<()> {
+        if self.byte_len == 0
+            || self.byte_len > limits.max_buffer_size
+            || self.byte_len > limits.max_storage_buffer_binding_size
+        {
+            return Err(Error::invalid_value(
+                "Gaussian kernel buffer byte length",
+                self.byte_len,
+                "must be positive and no greater than the selected device buffer and storage-binding limits",
             ));
         }
         Ok(())
@@ -2122,14 +2164,10 @@ impl FrameResourceScope {
         plan: &GaussianKernelPlan,
     ) -> Result<ResourceLease> {
         plan.validate_upload_byte_len(plan.upload_bytes().len())?;
+        plan.validate_buffer_limits(GaussianKernelBufferLimits::from_device_limits(
+            &device.limits(),
+        ))?;
         let byte_len = plan.byte_len();
-        if byte_len == 0 || byte_len > device.limits().max_buffer_size {
-            return Err(Error::invalid_value(
-                "Gaussian kernel buffer byte length",
-                byte_len,
-                "must be positive and no greater than the selected device buffer limit",
-            ));
-        }
         let key = ResourceCacheKey::GaussianKernelBuffer(plan.key());
         lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,

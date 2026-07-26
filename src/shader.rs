@@ -16,6 +16,7 @@ const SPAN_SOURCE_OVER_WGSL: &str = include_str!("shaders/span_source_over.wgsl"
 const PRESENT_WGSL: &str = include_str!("shaders/present.wgsl");
 const LAYER_COMPOSITE_WGSL: &str = include_str!("shaders/layer_composite.wgsl");
 const COLOR_FILTER_WGSL: &str = include_str!("shaders/color_filter.wgsl");
+const BLUR_WGSL: &str = include_str!("shaders/blur.wgsl");
 
 const COLOR_FILTER_OPERATION_HEADER_BYTE_LEN: u64 = 16;
 const COLOR_FILTER_OPERATION_RECORD_BYTE_LEN: u64 = 32;
@@ -623,6 +624,33 @@ struct ColorFilterPassKeyRefs<'a> {
     pipeline: &'a RenderPipelineKey,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlurAxis {
+    Horizontal,
+    Vertical,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlurInput {
+    Rgba,
+    SourceAlpha,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct BlurPassDescription {
+    axis: BlurAxis,
+    input: BlurInput,
+    working_format: ShaderTextureFormatKey,
+}
+
+#[derive(Clone, Copy)]
+struct BlurPassKeyRefs<'a> {
+    samplers: &'a [SamplerKey],
+    layout: &'a BindGroupLayoutKey,
+    shader: &'a ShaderModuleKey,
+    pipeline: &'a RenderPipelineKey,
+}
+
 /// Non-clone handles created inside one checked GPU-operation scope. New entries
 /// remain private to this phase until the caller explicitly commits after the
 /// owning transaction resolves cleanly.
@@ -659,6 +687,15 @@ pub(crate) struct ProvisionalCompositePassObjects<'a> {
 /// checked GPU operation resolves successfully.
 pub(crate) struct ProvisionalColorFilterPassObjects<'a> {
     description: ColorFilterPassDescription,
+    source_sampler: &'a wgpu::Sampler,
+    layout: &'a wgpu::BindGroupLayout,
+    shader: &'a wgpu::ShaderModule,
+    pipeline: &'a wgpu::RenderPipeline,
+}
+
+/// Borrowed C11 blur objects selected entirely by checked cache-key facts.
+pub(crate) struct ProvisionalBlurPassObjects<'a> {
+    description: BlurPassDescription,
     source_sampler: &'a wgpu::Sampler,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
@@ -867,6 +904,46 @@ impl DevicePassCache {
             && self.pipelines.keys().all(|key| {
                 key.shader.program == ShaderProgramKey::ColorFilter
                     && key.layout.program == ShaderProgramKey::ColorFilter
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_blur_pass_for_test(
+        &self,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> bool {
+        validate_blur_pass_keys(BlurPassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        })
+        .is_ok()
+            && samplers.iter().all(|key| self.samplers.contains_key(key))
+            && self.layouts.contains_key(layout)
+            && self.shaders.contains_key(shader)
+            && self.pipelines.contains_key(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_only_eight_blur_passes_for_test(&self) -> bool {
+        self.samplers.len() == 2
+            && self.layouts.len() == 8
+            && self.shaders.len() == 8
+            && self.pipelines.len() == 8
+            && self.samplers.keys().all(|key| {
+                key.binding_role == ShaderBindingRoleKey::FilterSource
+                    && key.filter == ShaderSamplingFilterKey::Linear
+                    && key.edge == ShaderSamplingEdgeKey::TransparentBlack
+                    && key.resolved_mask_sampling.is_none()
+            })
+            && self.layouts.keys().all(|key| is_blur_program(key.program))
+            && self.shaders.keys().all(|key| is_blur_program(key.program))
+            && self.pipelines.keys().all(|key| {
+                is_blur_program(key.shader.program) && is_blur_program(key.layout.program)
             })
     }
 }
@@ -1180,6 +1257,140 @@ impl ProvisionalDevicePassCacheUpdate {
                 pipeline,
             },
         )
+    }
+
+    pub(crate) fn realize_blur_pass<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalBlurPassObjects<'a>> {
+        if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
+            return Err(blur_cache_error(
+                "provisional blur objects belong to another device cache",
+            ));
+        }
+        let keys = BlurPassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        };
+        let description = validate_blur_pass_keys(keys)?;
+        for sampler_key in keys.samplers {
+            if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
+            {
+                self.samplers.insert(
+                    *sampler_key,
+                    device.create_sampler(&sampler_descriptor(*sampler_key)),
+                );
+            }
+        }
+        if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
+            self.layouts
+                .insert(keys.layout.clone(), create_blur_bind_group_layout(device));
+        }
+        if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
+            self.shaders.insert(
+                keys.shader.clone(),
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Surgeist C11 Gaussian blur shader"),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLUR_WGSL)),
+                }),
+            );
+        }
+        if !cache.pipelines.contains_key(keys.pipeline)
+            && !self.pipelines.contains_key(keys.pipeline)
+        {
+            let layout_handle = self
+                .layouts
+                .get(keys.layout)
+                .or_else(|| cache.layouts.get(keys.layout))
+                .ok_or_else(|| blur_cache_error("blur bind-group layout realization was lost"))?;
+            let shader_handle = self
+                .shaders
+                .get(keys.shader)
+                .or_else(|| cache.shaders.get(keys.shader))
+                .ok_or_else(|| blur_cache_error("blur shader-module realization was lost"))?;
+            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("Surgeist C11 Gaussian blur pipeline layout"),
+                bind_group_layouts: &[Some(layout_handle)],
+                immediate_size: 0,
+            });
+            let target = wgpu::ColorTargetState {
+                format: texture_format(description.working_format)?,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            };
+            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("Surgeist C11 Gaussian blur pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: shader_handle,
+                    entry_point: Some("vertex_main"),
+                    buffers: &[],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    ..Default::default()
+                },
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: shader_handle,
+                    entry_point: Some(blur_fragment_entry(description)),
+                    targets: &[Some(target)],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
+            self.pipelines.insert(keys.pipeline.clone(), created);
+        }
+        self.blur_pass_objects(cache, keys)
+    }
+
+    fn blur_pass_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        keys: BlurPassKeyRefs<'_>,
+    ) -> Result<ProvisionalBlurPassObjects<'a>> {
+        let [source_sampler_key] = keys.samplers else {
+            return Err(blur_cache_error(
+                "blur realization requires one source sampler",
+            ));
+        };
+        let source_sampler = self
+            .samplers
+            .get(source_sampler_key)
+            .or_else(|| cache.samplers.get(source_sampler_key))
+            .ok_or_else(|| blur_cache_error("blur sampler realization was lost"))?;
+        let layout = self
+            .layouts
+            .get(keys.layout)
+            .or_else(|| cache.layouts.get(keys.layout))
+            .ok_or_else(|| blur_cache_error("blur bind-group layout realization was lost"))?;
+        let shader = self
+            .shaders
+            .get(keys.shader)
+            .or_else(|| cache.shaders.get(keys.shader))
+            .ok_or_else(|| blur_cache_error("blur shader-module realization was lost"))?;
+        let pipeline = self
+            .pipelines
+            .get(keys.pipeline)
+            .or_else(|| cache.pipelines.get(keys.pipeline))
+            .ok_or_else(|| blur_cache_error("blur render-pipeline realization was lost"))?;
+        Ok(ProvisionalBlurPassObjects {
+            description: validate_blur_pass_keys(keys)?,
+            source_sampler,
+            layout,
+            shader,
+            pipeline,
+        })
     }
 
     fn color_filter_pass_objects<'a>(
@@ -1627,6 +1838,19 @@ impl ProvisionalColorFilterPassObjects<'_> {
     }
 }
 
+impl ProvisionalBlurPassObjects<'_> {
+    pub(crate) fn require_encoding_ready(&self) -> Result<()> {
+        let _ = (
+            self.description,
+            self.source_sampler,
+            self.layout,
+            self.shader,
+            self.pipeline,
+        );
+        Ok(())
+    }
+}
+
 fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription> {
     let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
         return Err(c08_cache_error(
@@ -1831,6 +2055,84 @@ fn validate_color_filter_pass_keys(
         ));
     }
     Ok(ColorFilterPassDescription { working_format })
+}
+
+fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescription> {
+    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
+        return Err(blur_cache_error(
+            "a blur layout must bind exactly one sampled texture",
+        ));
+    };
+    let [sampler] = keys.samplers else {
+        return Err(blur_cache_error(
+            "a blur pass must bind exactly one source sampler",
+        ));
+    };
+    let (axis, input) = blur_program_facts(keys.layout.program)
+        .ok_or_else(|| blur_cache_error("a non-blur program reached C11 blur realization"))?;
+    let Some(working_format) = keys.shader.working_format else {
+        return Err(blur_cache_error(
+            "a blur shader key has no selected working format",
+        ));
+    };
+    if keys.layout.data_bindings.as_slice()
+        != [
+            ShaderDataBindingKey::SpatialUniform,
+            ShaderDataBindingKey::GaussianKernel,
+        ]
+        || keys.shader.program != keys.layout.program
+        || &keys.shader.layout != keys.layout
+        || keys.shader.samplers.as_slice() != keys.samplers
+        || keys.shader.output_format.is_some()
+        || &keys.pipeline.shader != keys.shader
+        || &keys.pipeline.layout != keys.layout
+        || keys.pipeline.samplers.as_slice() != keys.samplers
+        || !is_working_format(working_format)
+        || keys.pipeline.target_format != working_format
+        || sampled_texture.binding_role != ShaderBindingRoleKey::FilterSource
+        || sampled_texture.source_format != working_format
+        || sampler.binding_role != ShaderBindingRoleKey::FilterSource
+        || sampler.source_format != working_format
+        || sampler.filter != ShaderSamplingFilterKey::Linear
+        || sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
+        || sampler.resolved_mask_sampling.is_some()
+    {
+        return Err(blur_cache_error(
+            "blur keys disagree across source, layout, shader, or working target",
+        ));
+    }
+    Ok(BlurPassDescription {
+        axis,
+        input,
+        working_format,
+    })
+}
+
+const fn blur_program_facts(program: ShaderProgramKey) -> Option<(BlurAxis, BlurInput)> {
+    match program {
+        ShaderProgramKey::BlurHorizontal { source_alpha } => Some((
+            BlurAxis::Horizontal,
+            if source_alpha {
+                BlurInput::SourceAlpha
+            } else {
+                BlurInput::Rgba
+            },
+        )),
+        ShaderProgramKey::BlurVertical { source_alpha } => Some((
+            BlurAxis::Vertical,
+            if source_alpha {
+                BlurInput::SourceAlpha
+            } else {
+                BlurInput::Rgba
+            },
+        )),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+const fn is_blur_program(program: ShaderProgramKey) -> bool {
+    blur_program_facts(program).is_some()
 }
 
 fn validate_composite_pass_keys(
@@ -2104,6 +2406,60 @@ fn create_color_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGro
     })
 }
 
+fn create_blur_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let entries = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(48),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 3,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(8),
+            },
+            count: None,
+        },
+    ];
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Surgeist C11 Gaussian blur bindings"),
+        entries: &entries,
+    })
+}
+
+const fn blur_fragment_entry(description: BlurPassDescription) -> &'static str {
+    match (description.axis, description.input) {
+        (BlurAxis::Horizontal, BlurInput::Rgba) => "fragment_horizontal_rgba",
+        (BlurAxis::Vertical, BlurInput::Rgba) => "fragment_vertical_rgba",
+        (BlurAxis::Horizontal, BlurInput::SourceAlpha) => "fragment_horizontal_source_alpha",
+        (BlurAxis::Vertical, BlurInput::SourceAlpha) => "fragment_vertical_source_alpha",
+    }
+}
+
 const fn composite_fragment_entry(description: CompositePassDescription) -> &'static str {
     match (
         description.path,
@@ -2194,6 +2550,10 @@ fn c08_cache_error(message: &'static str) -> Error {
 }
 
 fn color_filter_cache_error(message: &'static str) -> Error {
+    Error::new(super::BackendErrorCode::RenderFailed, message)
+}
+
+fn blur_cache_error(message: &'static str) -> Error {
     Error::new(super::BackendErrorCode::RenderFailed, message)
 }
 
@@ -2372,6 +2732,61 @@ pub(crate) fn c10_color_filter_pass_key_facts_for_test(
             == [
                 ShaderDataBindingKey::SpatialUniform,
                 ShaderDataBindingKey::ColorFilterOperations,
+            ],
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C11BlurPassKeyFactsForTest {
+    pub(crate) horizontal: bool,
+    pub(crate) source_alpha: bool,
+    pub(crate) source_role: ShaderBindingRoleKey,
+    pub(crate) source_format: ShaderTextureFormatKey,
+    pub(crate) working_format: ShaderTextureFormatKey,
+    pub(crate) target_format: ShaderTextureFormatKey,
+    pub(crate) has_only_linear_source_sampler: bool,
+    pub(crate) has_exact_data_bindings: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c11_blur_pass_key_facts_for_test(
+    samplers: &[SamplerKey],
+    layout: &BindGroupLayoutKey,
+    shader: &ShaderModuleKey,
+    pipeline: &RenderPipelineKey,
+) -> Option<C11BlurPassKeyFactsForTest> {
+    let [sampled_texture] = layout.sampled_textures.as_slice() else {
+        return None;
+    };
+    let description = validate_blur_pass_keys(BlurPassKeyRefs {
+        samplers,
+        layout,
+        shader,
+        pipeline,
+    })
+    .ok()?;
+    Some(C11BlurPassKeyFactsForTest {
+        horizontal: description.axis == BlurAxis::Horizontal,
+        source_alpha: description.input == BlurInput::SourceAlpha,
+        source_role: sampled_texture.binding_role,
+        source_format: sampled_texture.source_format,
+        working_format: description.working_format,
+        target_format: pipeline.target_format,
+        has_only_linear_source_sampler: matches!(
+            samplers,
+            [SamplerKey {
+                binding_role: ShaderBindingRoleKey::FilterSource,
+                filter: ShaderSamplingFilterKey::Linear,
+                edge: ShaderSamplingEdgeKey::TransparentBlack,
+                resolved_mask_sampling: None,
+                ..
+            }]
+        ),
+        has_exact_data_bindings: layout.data_bindings.as_slice()
+            == [
+                ShaderDataBindingKey::SpatialUniform,
+                ShaderDataBindingKey::GaussianKernel,
             ],
     })
 }
