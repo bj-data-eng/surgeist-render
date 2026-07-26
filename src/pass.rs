@@ -330,6 +330,25 @@ pub(crate) struct C11FilterGraphObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12ExecutableGraphObservationForTest {
+    pub(crate) accepts_bounded_top_level_backdrop: bool,
+    pub(crate) rejects_outside_bounded_subset: bool,
+    pub(crate) rejects_before_resource_acquisition: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12BackdropGraphObservationForTest {
+    pub(crate) closed_subset_receipt: bool,
+    pub(crate) reads_completed_parent_once: bool,
+    pub(crate) copy_precedes_authored_filters: bool,
+    pub(crate) post_filter_clip_precedes_foreground: bool,
+    pub(crate) foreground_precedes_outer_composition: bool,
+    pub(crate) later_sibling_depends_on_completed_group: bool,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum C11FilterPassTagForTest {
     Color,
@@ -503,6 +522,24 @@ pub(crate) fn c11_filter_graph_observation_for_test(
     capabilities: DeviceCapabilities,
 ) -> C11FilterGraphObservationForTest {
     c11_filter_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c12_executable_graph_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C12ExecutableGraphObservationForTest {
+    c12_executable_graph_observation(commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) fn c12_backdrop_graph_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C12BackdropGraphObservationForTest {
+    c12_backdrop_graph_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -2911,6 +2948,22 @@ struct ExecutableDropShadowFacts {
     parameters: RuntimeDropShadow,
 }
 
+#[derive(Clone)]
+struct ExecutableBackdropFacts {
+    copy: RuntimePassId,
+    completed_parent: RuntimeResourceId,
+    copied: RuntimeResourceId,
+    foreground: Option<RuntimeResourceId>,
+    filter_steps: Vec<ExecutableFilterStepFacts>,
+    filtered: RuntimeResourceId,
+    group_clear: RuntimePassId,
+    backdrop_composite: RuntimePassId,
+    foreground_composite: Option<RuntimePassId>,
+    outer_composite: RuntimePassId,
+    completed_group: RuntimeResourceId,
+    result: RuntimeResourceId,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ExecutableFilterStepFacts {
     Color(RuntimePassId),
@@ -2936,6 +2989,7 @@ struct ClosedExecutableGraphFacts {
     blurs: Vec<ExecutableBlurFacts>,
     drop_shadows: Vec<ExecutableDropShadowFacts>,
     filter_steps: Vec<ExecutableFilterStepFacts>,
+    backdrops: Vec<ExecutableBackdropFacts>,
 }
 
 #[derive(Clone, Copy)]
@@ -2977,6 +3031,10 @@ impl ClosedExecutableGraph {
 
     fn has_spatial_filters(&self) -> bool {
         !self.facts.blurs.is_empty() || !self.facts.drop_shadows.is_empty()
+    }
+
+    fn has_backdrops(&self) -> bool {
+        !self.facts.backdrops.is_empty()
     }
 }
 
@@ -3071,12 +3129,50 @@ impl ClosedExecutableGraphFacts {
                     .count();
         let filter_order_is_exact =
             executable_filter_step_order(plan) == Some(self.filter_steps.clone());
+        let backdrops_are_exact = self
+            .backdrops
+            .iter()
+            .all(|backdrop| backdrop.proves_exact_facts_for(plan));
         captures_are_exact
             && layers_are_exact
             && color_filters_are_exact
             && blurs_are_exact
             && drop_shadows_are_exact
             && filter_order_is_exact
+            && backdrops_are_exact
+    }
+}
+
+impl ExecutableBackdropFacts {
+    fn proves_exact_facts_for(&self, plan: &LoweredGraphPlan) -> bool {
+        let pass = |id| plan.passes.iter().find(|candidate| candidate.id == id);
+        let Some(copy) = pass(self.copy) else {
+            return false;
+        };
+        let foreground_is_distinct = self
+            .foreground
+            .is_none_or(|foreground| foreground != self.copied && foreground != self.filtered);
+        matches!(copy.kind, RuntimePassKind::CopyBackdrop)
+            && copy.reads.len() == 1
+            && copy.reads[0].resource == self.completed_parent
+            && copy.result == RuntimeResultBinding::Resource(self.copied)
+            && pass(self.group_clear).is_some_and(|clear| {
+                matches!(
+                    clear.kind,
+                    RuntimePassKind::ClearRoot {
+                        initialization: RuntimeInitialization::Transparent,
+                        color,
+                    } if color == Color::TRANSPARENT
+                )
+            })
+            && pass(self.backdrop_composite).is_some()
+            && self
+                .foreground_composite
+                .is_none_or(|id| pass(id).is_some())
+            && pass(self.outer_composite).is_some()
+            && self.completed_group != self.completed_parent
+            && self.result != self.completed_group
+            && foreground_is_distinct
     }
 }
 
@@ -3301,6 +3397,7 @@ impl C08PreparableGraph {
         if closed.has_layer_composition()
             || closed.has_color_filters()
             || closed.has_spatial_filters()
+            || closed.has_backdrops()
             || closed.facts.captures.is_empty()
             || closed.facts.captures.iter().any(|capture| {
                 capture
@@ -3371,6 +3468,7 @@ impl C09PreparableGraph {
         if !closed.has_layer_composition()
             || closed.has_color_filters()
             || closed.has_spatial_filters()
+            || closed.has_backdrops()
         {
             return Err(Box::new(closed));
         }
@@ -3399,7 +3497,7 @@ impl C10PreparableGraph {
     fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
-        if !closed.has_color_filters() || closed.has_spatial_filters() {
+        if !closed.has_color_filters() || closed.has_spatial_filters() || closed.has_backdrops() {
             return Err(Box::new(closed));
         }
         Ok(Self { closed })
@@ -3462,7 +3560,7 @@ impl C11PreparableGraph {
     fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
-        if !closed.has_spatial_filters() {
+        if !closed.has_spatial_filters() || closed.has_backdrops() {
             return Err(Box::new(closed));
         }
         Ok(Self { closed })
@@ -3526,6 +3624,37 @@ impl C11PreparableGraph {
 
     fn into_closed(self) -> ClosedExecutableGraph {
         self.closed
+    }
+}
+
+#[must_use]
+pub(crate) struct C12PreparableGraph {
+    closed: ClosedExecutableGraph,
+}
+
+impl C12PreparableGraph {
+    fn try_from_closed(
+        closed: ClosedExecutableGraph,
+    ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
+        let [backdrop] = closed.facts.backdrops.as_slice() else {
+            return Err(Box::new(closed));
+        };
+        if backdrop.filter_steps != closed.facts.filter_steps {
+            return Err(Box::new(closed));
+        }
+        Ok(Self { closed })
+    }
+
+    fn proves_closed_backdrop_facts(&self) -> bool {
+        let [backdrop] = self.closed.facts.backdrops.as_slice() else {
+            return false;
+        };
+        backdrop.filter_steps == self.closed.facts.filter_steps
+            && backdrop.proves_exact_facts_for(&self.closed.lowered)
+            && self
+                .closed
+                .facts
+                .proves_exact_facts_for(&self.closed.lowered)
     }
 }
 
@@ -4034,6 +4163,7 @@ struct ClosedGraphTraversal<'plan> {
     blurs: Vec<ExecutableBlurFacts>,
     drop_shadows: Vec<ExecutableDropShadowFacts>,
     filter_steps: Vec<ExecutableFilterStepFacts>,
+    backdrops: Vec<ExecutableBackdropFacts>,
     expected_resources: BTreeSet<RuntimeResourceId>,
     cursor: usize,
 }
@@ -4059,6 +4189,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             blurs: Vec::new(),
             drop_shadows: Vec::new(),
             filter_steps: Vec::new(),
+            backdrops: Vec::new(),
             expected_resources: BTreeSet::from([root.id]),
             cursor: 1,
         }
@@ -4099,6 +4230,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             blurs: self.blurs,
             drop_shadows: self.drop_shadows,
             filter_steps: self.filter_steps,
+            backdrops: self.backdrops,
         })
     }
 
@@ -4128,6 +4260,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             {
                 self.visit_drop_shadow(pass, blur)
             }
+            RuntimePassKind::CopyBackdrop => self.visit_backdrop(pass),
             RuntimePassKind::Composite(Some(composite))
                 if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
             {
@@ -4141,7 +4274,6 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             | RuntimePassKind::VelloCapture(None)
             | RuntimePassKind::VelloCapture(Some(_))
             | RuntimePassKind::CanonicalizeCapture
-            | RuntimePassKind::CopyBackdrop
             | RuntimePassKind::ColorFilter(_)
             | RuntimePassKind::BlurHorizontal(_)
             | RuntimePassKind::BlurVertical(_)
@@ -4379,21 +4511,29 @@ impl<'plan> ClosedGraphTraversal<'plan> {
     }
 
     fn visit_blur(&mut self, horizontal: &RuntimePass, blur: &RuntimeBlur) -> Option<()> {
+        self.visit_blur_with_edge(horizontal, blur, RuntimeSamplingEdge::TransparentBlack)
+    }
+
+    fn visit_blur_with_edge(
+        &mut self,
+        horizontal: &RuntimePass,
+        blur: &RuntimeBlur,
+        edge: RuntimeSamplingEdge,
+    ) -> Option<()> {
         let vertical = self.plan.passes.get(self.cursor.checked_add(1)?)?;
         let context = *self.contexts.last()?;
         if !context.contains_captured_source {
             return None;
         }
         let source = self.resources.get(&context.current).copied()?;
-        let facts = validate_closed_blur(
-            horizontal,
-            vertical,
+        let validation = ClosedFilterValidation {
             context,
             source,
-            blur,
-            &self.resources,
-            self.plan.working_format,
-        )?;
+            resources: &self.resources,
+            working_format: self.plan.working_format,
+            edge,
+        };
+        let facts = validate_closed_blur(horizontal, vertical, blur, validation)?;
         let runtime_context = self.contexts.last_mut()?;
         runtime_context.current = facts.result;
         runtime_context.producer = facts.vertical;
@@ -4408,6 +4548,15 @@ impl<'plan> ClosedGraphTraversal<'plan> {
     }
 
     fn visit_drop_shadow(&mut self, horizontal: &RuntimePass, blur: &RuntimeBlur) -> Option<()> {
+        self.visit_drop_shadow_with_edge(horizontal, blur, RuntimeSamplingEdge::TransparentBlack)
+    }
+
+    fn visit_drop_shadow_with_edge(
+        &mut self,
+        horizontal: &RuntimePass,
+        blur: &RuntimeBlur,
+        edge: RuntimeSamplingEdge,
+    ) -> Option<()> {
         let vertical = self.plan.passes.get(self.cursor.checked_add(1)?)?;
         let colorize = self.plan.passes.get(self.cursor.checked_add(2)?)?;
         let merge = self.plan.passes.get(self.cursor.checked_add(3)?)?;
@@ -4416,14 +4565,15 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             return None;
         }
         let source = self.resources.get(&context.current).copied()?;
-        let facts = validate_closed_drop_shadow(
-            [horizontal, vertical, colorize, merge],
+        let validation = ClosedFilterValidation {
             context,
             source,
-            blur,
-            &self.resources,
-            self.plan.working_format,
-        )?;
+            resources: &self.resources,
+            working_format: self.plan.working_format,
+            edge,
+        };
+        let facts =
+            validate_closed_drop_shadow([horizontal, vertical, colorize, merge], blur, validation)?;
         let runtime_context = self.contexts.last_mut()?;
         runtime_context.current = facts.result;
         runtime_context.producer = facts.merge;
@@ -4442,6 +4592,265 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             });
         self.drop_shadows.push(facts);
         self.advance(4)
+    }
+
+    fn visit_backdrop(&mut self, copy: &RuntimePass) -> Option<()> {
+        let foreground = match self.contexts.len() {
+            1 => None,
+            2 => Some(self.contexts.pop()?),
+            _ => return None,
+        };
+        if foreground.is_some_and(|context| !context.contains_captured_source) {
+            return None;
+        }
+        let parent = *self.contexts.first()?;
+        let copied = self.validate_backdrop_copy(copy, parent)?;
+        let filter_start = self.filter_steps.len();
+        self.contexts.push(ExecutableCompositionContext {
+            current: copied,
+            producer: copy.id,
+            contains_captured_source: true,
+        });
+        self.advance(1)?;
+        self.visit_backdrop_filters()?;
+        let filtered = self.contexts.pop()?;
+        let filter_steps = self.filter_steps.get(filter_start..)?.to_vec();
+        let group_clear = self.plan.passes.get(self.cursor)?;
+        self.visit_transparent_clear(group_clear, Color::TRANSPARENT)?;
+        let backdrop_composite = self.visit_backdrop_source_composite(filtered)?;
+        let foreground_composite = match foreground {
+            Some(foreground) => Some(self.visit_backdrop_foreground(foreground)?),
+            None => None,
+        };
+        let completed_group = *self.contexts.last()?;
+        let outer_composite = self.visit_backdrop_outer_composite(parent, completed_group)?;
+        let result = self.contexts.first()?.current;
+        self.backdrops.push(ExecutableBackdropFacts {
+            copy: copy.id,
+            completed_parent: parent.current,
+            copied,
+            foreground: foreground.map(|context| context.current),
+            filter_steps,
+            filtered: filtered.current,
+            group_clear: group_clear.id,
+            backdrop_composite,
+            foreground_composite,
+            outer_composite,
+            completed_group: completed_group.current,
+            result,
+        });
+        Some(())
+    }
+
+    fn validate_backdrop_copy(
+        &mut self,
+        copy: &RuntimePass,
+        parent: ExecutableCompositionContext,
+    ) -> Option<RuntimeResourceId> {
+        let parent_resource = self.resources.get(&parent.current).copied()?;
+        if copy.dependencies.as_slice() != [parent.producer]
+            || copy.reads.len() != 1
+            || !runtime_read_has_exact_facts(
+                &copy.reads[0],
+                RuntimeReadRole::CompletedParent,
+                parent_resource,
+                RuntimeSamplingFilter::Nearest,
+                RuntimeSamplingEdge::TransparentBlack,
+            )
+            || !copy.releases.is_empty()
+            || copy.cache_keys.is_none()
+        {
+            return None;
+        }
+        let RuntimeResultBinding::Resource(copied) = copy.result else {
+            return None;
+        };
+        let resource = self.resources.get(&copied).copied()?;
+        if !c08_resource_has_fixed_facts(
+            resource,
+            RuntimeResourceRole::BackdropCopy,
+            RuntimeResourceFormat::Working(self.plan.working_format),
+            RuntimeResourceProducer::Pass(copy.id),
+        ) || resource.expected_reads != 1
+        {
+            return None;
+        }
+        self.expected_resources.insert(copied);
+        Some(copied)
+    }
+
+    fn visit_backdrop_filters(&mut self) -> Option<()> {
+        loop {
+            let pass = self.plan.passes.get(self.cursor)?;
+            match &pass.kind {
+                RuntimePassKind::ColorFilter(Some(filter)) => {
+                    self.visit_color_filter(pass, filter)?;
+                }
+                RuntimePassKind::BlurHorizontal(Some(blur))
+                    if blur.axis == RuntimeBlurAxis::Horizontal
+                        && blur.input == RuntimeBlurInput::Rgba =>
+                {
+                    self.visit_backdrop_blur(pass, blur)?;
+                }
+                RuntimePassKind::BlurHorizontal(Some(blur))
+                    if blur.axis == RuntimeBlurAxis::Horizontal
+                        && blur.input == RuntimeBlurInput::SourceAlpha =>
+                {
+                    self.visit_backdrop_drop_shadow(pass, blur)?;
+                }
+                RuntimePassKind::ClearRoot {
+                    initialization: RuntimeInitialization::Transparent,
+                    color,
+                } if *color == Color::TRANSPARENT => return Some(()),
+                _ => return None,
+            }
+        }
+    }
+
+    fn visit_backdrop_blur(&mut self, horizontal: &RuntimePass, blur: &RuntimeBlur) -> Option<()> {
+        let RuntimeSamplingEdge::SemanticBorderMirror(_) = blur.edge else {
+            return None;
+        };
+        self.visit_blur_with_edge(horizontal, blur, blur.edge)
+    }
+
+    fn visit_backdrop_drop_shadow(
+        &mut self,
+        horizontal: &RuntimePass,
+        blur: &RuntimeBlur,
+    ) -> Option<()> {
+        let RuntimeSamplingEdge::SemanticBorderMirror(_) = blur.edge else {
+            return None;
+        };
+        self.visit_drop_shadow_with_edge(horizontal, blur, blur.edge)
+    }
+
+    fn visit_backdrop_source_composite(
+        &mut self,
+        filtered: ExecutableCompositionContext,
+    ) -> Option<RuntimePassId> {
+        let pass = self.next_layer_composite_with_optional_coverage()?;
+        let parent = *self.contexts.last()?;
+        let source = self.resources.get(&filtered.current).copied()?;
+        let layer = validate_closed_composite(
+            pass,
+            parent,
+            source,
+            &self.resources,
+            self.plan.working_format,
+            true,
+        )??;
+        if !runtime_composite_is_backdrop_inner(&layer.composite) {
+            return None;
+        }
+        self.record_backdrop_composite_result(pass, layer)?;
+        Some(pass.id)
+    }
+
+    fn visit_backdrop_foreground(
+        &mut self,
+        foreground: ExecutableCompositionContext,
+    ) -> Option<RuntimePassId> {
+        let pass = self.plan.passes.get(self.cursor)?;
+        let parent = *self.contexts.last()?;
+        let source = self.resources.get(&foreground.current).copied()?;
+        if validate_closed_composite(
+            pass,
+            parent,
+            source,
+            &self.resources,
+            self.plan.working_format,
+            false,
+        )?
+        .is_some()
+        {
+            return None;
+        }
+        self.record_backdrop_span_result(pass)?;
+        Some(pass.id)
+    }
+
+    fn visit_backdrop_outer_composite(
+        &mut self,
+        parent: ExecutableCompositionContext,
+        group: ExecutableCompositionContext,
+    ) -> Option<RuntimePassId> {
+        let pass = self.next_layer_composite_with_optional_coverage()?;
+        let source = self.resources.get(&group.current).copied()?;
+        let layer = validate_closed_composite_with_parent_reads(
+            pass,
+            parent,
+            source,
+            &self.resources,
+            self.plan.working_format,
+            true,
+            2,
+        )??;
+        if !runtime_composite_is_untransformed_outer(&layer.composite) {
+            return None;
+        }
+        let RuntimeResultBinding::Resource(result) = pass.result else {
+            return None;
+        };
+        self.contexts.pop()?;
+        let root = self.contexts.first_mut()?;
+        root.current = result;
+        root.producer = pass.id;
+        root.contains_captured_source = true;
+        self.expected_resources.insert(result);
+        self.record_layer_resources(&layer);
+        self.layer_compositions.push(layer);
+        self.advance(1)?;
+        Some(pass.id)
+    }
+
+    fn next_layer_composite_with_optional_coverage(&mut self) -> Option<&'plan RuntimePass> {
+        let pass = self.plan.passes.get(self.cursor)?;
+        if matches!(
+            pass.kind,
+            RuntimePassKind::VelloCapture(Some(RuntimeVelloCapture::ClipCoverage(_)))
+        ) {
+            self.visit_clip_coverage_capture(pass)?;
+        }
+        let composite = self.plan.passes.get(self.cursor)?;
+        matches!(
+            composite.kind,
+            RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::Layer { .. },
+                ..
+            }))
+        )
+        .then_some(composite)
+    }
+
+    fn record_backdrop_composite_result(
+        &mut self,
+        pass: &RuntimePass,
+        layer: ExecutableLayerCompositionFacts,
+    ) -> Option<()> {
+        let RuntimeResultBinding::Resource(result) = pass.result else {
+            return None;
+        };
+        let context = self.contexts.last_mut()?;
+        context.current = result;
+        context.producer = pass.id;
+        context.contains_captured_source = true;
+        self.expected_resources.insert(result);
+        self.record_layer_resources(&layer);
+        self.layer_compositions.push(layer);
+        self.advance(1)
+    }
+
+    fn record_backdrop_span_result(&mut self, pass: &RuntimePass) -> Option<()> {
+        let RuntimeResultBinding::Resource(result) = pass.result else {
+            return None;
+        };
+        let context = self.contexts.last_mut()?;
+        context.current = result;
+        context.producer = pass.id;
+        context.contains_captured_source = true;
+        self.expected_resources.insert(result);
+        self.advance(1)
     }
 
     fn visit_layer_composite(&mut self, pass: &RuntimePass) -> Option<()> {
@@ -5100,7 +5509,9 @@ fn validate_closed_color_filter(
         || source.format != RuntimeResourceFormat::Working(working_format)
         || !matches!(
             source.role,
-            RuntimeResourceRole::FilterIntermediate | RuntimeResourceRole::CompositeResult
+            RuntimeResourceRole::BackdropCopy
+                | RuntimeResourceRole::FilterIntermediate
+                | RuntimeResourceRole::CompositeResult
         )
         || source.expected_reads != 1
         || source.last_use != pass.id
@@ -5167,15 +5578,28 @@ fn runtime_color_operation_is_closed(operation: &RuntimeColorOperation) -> bool 
     }
 }
 
+#[derive(Clone, Copy)]
+struct ClosedFilterValidation<'plan> {
+    context: ExecutableCompositionContext,
+    source: &'plan RuntimeResourceRequest,
+    resources: &'plan BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+    edge: RuntimeSamplingEdge,
+}
+
 fn validate_closed_blur(
     horizontal: &RuntimePass,
     vertical: &RuntimePass,
-    context: ExecutableCompositionContext,
-    source: &RuntimeResourceRequest,
     blur: &RuntimeBlur,
-    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
-    working_format: WorkingFormat,
+    validation: ClosedFilterValidation<'_>,
 ) -> Option<ExecutableBlurFacts> {
+    let ClosedFilterValidation {
+        context,
+        source,
+        resources,
+        working_format,
+        edge,
+    } = validation;
     let RuntimeResourceProducer::Pass(source_producer) = source.producer else {
         return None;
     };
@@ -5183,7 +5607,7 @@ fn validate_closed_blur(
         || source_producer != context.producer
         || blur.axis != RuntimeBlurAxis::Horizontal
         || blur.input != RuntimeBlurInput::Rgba
-        || !runtime_blur_is_closed(blur, true)
+        || !runtime_blur_is_closed(blur, true, edge)
         || blur.spatial.source != source.spatial
         || !closed_filter_source_is_exact(source, working_format, 1, horizontal.id)
         || !closed_unary_filter_pass_is_exact(
@@ -5192,6 +5616,7 @@ fn validate_closed_blur(
             source,
             RuntimeReadRole::FilterSource,
             true,
+            edge,
         )
     {
         return None;
@@ -5215,6 +5640,7 @@ fn validate_closed_blur(
             intermediate,
             RuntimeReadRole::FilterSource,
             true,
+            edge,
         )
     {
         return None;
@@ -5238,12 +5664,16 @@ fn validate_closed_blur(
 
 fn validate_closed_drop_shadow(
     passes: [&RuntimePass; 4],
-    context: ExecutableCompositionContext,
-    source: &RuntimeResourceRequest,
     blur: &RuntimeBlur,
-    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
-    working_format: WorkingFormat,
+    validation: ClosedFilterValidation<'_>,
 ) -> Option<ExecutableDropShadowFacts> {
+    let ClosedFilterValidation {
+        context,
+        source,
+        resources,
+        working_format,
+        edge,
+    } = validation;
     let [horizontal, vertical, colorize, merge] = passes;
     let RuntimeResourceProducer::Pass(source_producer) = source.producer else {
         return None;
@@ -5252,7 +5682,7 @@ fn validate_closed_drop_shadow(
         || source_producer != context.producer
         || blur.axis != RuntimeBlurAxis::Horizontal
         || blur.input != RuntimeBlurInput::SourceAlpha
-        || !runtime_blur_is_closed(blur, false)
+        || !runtime_blur_is_closed(blur, false, edge)
         || blur.spatial.source != source.spatial
         || !closed_filter_source_is_exact(source, working_format, 2, merge.id)
         || !closed_unary_filter_pass_is_exact(
@@ -5261,6 +5691,7 @@ fn validate_closed_drop_shadow(
             source,
             RuntimeReadRole::FilterSource,
             false,
+            edge,
         )
     {
         return None;
@@ -5279,6 +5710,7 @@ fn validate_closed_drop_shadow(
         blur,
         resources,
         working_format,
+        edge,
     )?;
     let result = validate_closed_shadow_merge(
         merge,
@@ -5314,6 +5746,7 @@ fn validate_closed_shadow_tail<'plan>(
     blur: &RuntimeBlur,
     resources: &BTreeMap<RuntimeResourceId, &'plan RuntimeResourceRequest>,
     working_format: WorkingFormat,
+    edge: RuntimeSamplingEdge,
 ) -> Option<(
     &'plan RuntimeResourceRequest,
     RuntimeDropShadow,
@@ -5332,6 +5765,7 @@ fn validate_closed_shadow_tail<'plan>(
             horizontal_result,
             RuntimeReadRole::FilterSource,
             true,
+            edge,
         )
     {
         return None;
@@ -5355,6 +5789,7 @@ fn validate_closed_shadow_tail<'plan>(
             vertical_result,
             RuntimeReadRole::BlurredSourceAlpha,
             true,
+            RuntimeSamplingEdge::TransparentBlack,
         )
     {
         return None;
@@ -5433,6 +5868,7 @@ fn closed_unary_filter_pass_is_exact(
     source: &RuntimeResourceRequest,
     role: RuntimeReadRole,
     releases_source: bool,
+    edge: RuntimeSamplingEdge,
 ) -> bool {
     pass.dependencies.as_slice() == [producer]
         && pass.reads.len() == 1
@@ -5441,7 +5877,7 @@ fn closed_unary_filter_pass_is_exact(
             role,
             source,
             RuntimeSamplingFilter::Linear,
-            RuntimeSamplingEdge::TransparentBlack,
+            edge,
         )
         && if releases_source {
             pass.releases.as_slice() == [source.id]
@@ -5459,7 +5895,9 @@ fn closed_filter_source_is_exact(
 ) -> bool {
     matches!(
         source.role,
-        RuntimeResourceRole::FilterIntermediate | RuntimeResourceRole::CompositeResult
+        RuntimeResourceRole::BackdropCopy
+            | RuntimeResourceRole::FilterIntermediate
+            | RuntimeResourceRole::CompositeResult
     ) && source.format == RuntimeResourceFormat::Working(working_format)
         && source.expected_reads == expected_reads
         && source.last_use == last_use
@@ -5487,14 +5925,18 @@ fn closed_filter_result<'plan>(
     Some(resource)
 }
 
-fn runtime_blur_is_closed(blur: &RuntimeBlur, require_nonzero: bool) -> bool {
+fn runtime_blur_is_closed(
+    blur: &RuntimeBlur,
+    require_nonzero: bool,
+    edge: RuntimeSamplingEdge,
+) -> bool {
     blur.standard_deviation.is_finite()
         && if require_nonzero {
             blur.standard_deviation > 0.0 && blur.support_radius > 0
         } else {
             blur.standard_deviation >= 0.0
         }
-        && blur.edge == RuntimeSamplingEdge::TransparentBlack
+        && blur.edge == edge
         && blur.spatial.source.raster_scale.is_finite()
         && blur.spatial.result.raster_scale.is_finite()
 }
@@ -5504,7 +5946,7 @@ fn runtime_drop_shadow_is_closed(shadow: &RuntimeDropShadow, blur: &RuntimeBlur)
         && shadow.support_radius == blur.support_radius
         && shadow.spatial.source == blur.spatial.result
         && shadow.spatial.result == blur.spatial.result
-        && shadow.edge == RuntimeSamplingEdge::TransparentBlack
+        && shadow.edge == blur.edge
         && shadow.uses_source_alpha
         && shadow.uses_continuous_offset
         && shadow.retains_unchanged_source
@@ -5534,17 +5976,78 @@ fn validate_closed_composite(
     working_format: WorkingFormat,
     requires_isolated_source: bool,
 ) -> Option<Option<ExecutableLayerCompositionFacts>> {
+    validate_closed_composite_with_parent_reads(
+        pass,
+        parent,
+        source,
+        resources,
+        working_format,
+        requires_isolated_source,
+        1,
+    )
+}
+
+fn runtime_composite_is_backdrop_inner(composite: &RuntimeComposite) -> bool {
+    let RuntimeCompositeKind::Layer {
+        transform,
+        parameters,
+        outer_clips,
+        ..
+    } = &composite.kind
+    else {
+        return false;
+    };
+    *transform == Transform::identity()
+        && parameters.destination_to_layer_local().affine() == Transform::identity()
+        && parameters.opacity() == 1.0
+        && parameters.blend() == BlendMode::Normal
+        && outer_clips.is_empty()
+        && parameters.alpha_mask().is_none()
+}
+
+fn runtime_composite_is_untransformed_outer(composite: &RuntimeComposite) -> bool {
+    let RuntimeCompositeKind::Layer {
+        transform,
+        parameters,
+        ..
+    } = &composite.kind
+    else {
+        return false;
+    };
+    *transform == Transform::identity()
+        && parameters.destination_to_layer_local().affine() == Transform::identity()
+}
+
+fn validate_closed_composite_with_parent_reads(
+    pass: &RuntimePass,
+    parent: ExecutableCompositionContext,
+    source: &RuntimeResourceRequest,
+    resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
+    working_format: WorkingFormat,
+    requires_isolated_source: bool,
+    parent_expected_reads: u32,
+) -> Option<Option<ExecutableLayerCompositionFacts>> {
     let RuntimePassKind::Composite(Some(composite)) = &pass.kind else {
         return None;
     };
-    let result =
-        validate_closed_composite_base(pass, parent, source, resources, working_format, composite)?;
+    let result = validate_closed_composite_base(
+        pass,
+        parent,
+        source,
+        resources,
+        working_format,
+        composite,
+        parent_expected_reads,
+    )?;
 
     match &composite.kind {
         RuntimeCompositeKind::SpanSourceOver => {
             if requires_isolated_source
                 || pass.reads.len() != 2
-                || source.role != RuntimeResourceRole::FilterIntermediate
+                || !matches!(
+                    source.role,
+                    RuntimeResourceRole::FilterIntermediate | RuntimeResourceRole::CompositeResult
+                )
             {
                 return None;
             }
@@ -5586,6 +6089,7 @@ fn validate_closed_composite_base(
     resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
     working_format: WorkingFormat,
     composite: &RuntimeComposite,
+    parent_expected_reads: u32,
 ) -> Option<RuntimeResourceId> {
     if !composite.source_captured_before_outer_semantics || source.id == parent.current {
         return None;
@@ -5630,7 +6134,7 @@ fn validate_closed_composite_base(
                 | RuntimeResourceRole::IsolationWorkingImage
                 | RuntimeResourceRole::CompositeResult
         )
-        || parent_resource.expected_reads != 1
+        || parent_resource.expected_reads != parent_expected_reads
         || parent_resource.last_use != pass.id
         || source.expected_reads != 1
         || source.last_use != pass.id
@@ -6016,7 +6520,10 @@ fn c09_executable_graph_observation(
         Format::Rgba8,
     )
     .ok()?;
-    let rejects_actual_c10 = ClosedExecutableGraph::try_from_lowered(c10_lowered).is_err();
+    let rejects_actual_c10 = !matches!(
+        PrePreparationGraphClassification::classify(c10_lowered),
+        PrePreparationGraphClassification::ExactC09(_)
+    );
     let layer_index = c09_lowered.passes.iter().position(|pass| {
         matches!(
             pass.kind,
@@ -6849,6 +7356,230 @@ fn c11_filter_graph_observation(
         original_source_releases_only_after_merge: c11_shadow_releases_are_exact(closed),
         dependencies_and_last_use_are_exact: c11_dependencies_and_lifetimes_are_exact(closed),
     })
+}
+
+#[cfg(test)]
+fn c12_executable_graph_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    _capabilities: DeviceCapabilities,
+) -> Option<C12ExecutableGraphObservationForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
+        return None;
+    };
+    let mut accepts_bounded_top_level_backdrop = true;
+    let mut selected = None;
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        for output_format in [Format::Rgba8, Format::Bgra8] {
+            let lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
+                &graph,
+                working_format,
+                output_format,
+            )
+            .ok()?;
+            accepts_bounded_top_level_backdrop &= c12_plan_is_exact(lowered.clone());
+            if selected.is_none() {
+                selected = Some(lowered);
+            }
+        }
+    }
+    let lowered = selected?;
+    let resources = ResourceManager::new(super::ResourceCacheBudget::DISABLED);
+    let cache = DevicePassCache::new();
+    let resources_before = resources.observation_for_test();
+    let cache_before = cache.counts_for_test();
+    let no_effect_format = DeviceCapabilities::from_test_facts(false, false, 4_096);
+    accepts_bounded_top_level_backdrop &= matches!(
+        ExecutableGraphDispatchEligibility::try_classify(
+            &graph,
+            Format::Rgba8,
+            ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
+            &no_effect_format,
+        ),
+        Ok(ExecutableGraphDispatchEligibility::ExactC12)
+    );
+    let rejects_outside_bounded_subset = c12_malformed_plans(&lowered)?
+        .into_iter()
+        .all(|plan| !c12_plan_is_exact(plan));
+    Some(C12ExecutableGraphObservationForTest {
+        accepts_bounded_top_level_backdrop,
+        rejects_outside_bounded_subset,
+        rejects_before_resource_acquisition: resources.observation_for_test() == resources_before
+            && cache.counts_for_test() == cache_before,
+    })
+}
+
+#[cfg(test)]
+fn c12_plan_is_exact(lowered: LoweredGraphPlan) -> bool {
+    matches!(
+        PrePreparationGraphClassification::classify(lowered),
+        PrePreparationGraphClassification::ExactC12(_)
+    )
+}
+
+#[cfg(test)]
+fn c12_malformed_plans(lowered: &LoweredGraphPlan) -> Option<Vec<LoweredGraphPlan>> {
+    let copy = lowered
+        .passes
+        .iter()
+        .position(|pass| matches!(pass.kind, RuntimePassKind::CopyBackdrop))?;
+    let mirror = lowered.passes.iter().position(|pass| {
+        matches!(
+            pass.kind,
+            RuntimePassKind::BlurHorizontal(Some(RuntimeBlur {
+                edge: RuntimeSamplingEdge::SemanticBorderMirror(_),
+                ..
+            }))
+        )
+    })?;
+    let outer = lowered.passes.iter().rposition(|pass| {
+        matches!(
+            pass.kind,
+            RuntimePassKind::Composite(Some(RuntimeComposite {
+                kind: RuntimeCompositeKind::Layer { .. },
+                ..
+            }))
+        )
+    })?;
+    let mut plans = Vec::new();
+    let mut invalid = lowered.clone();
+    invalid.passes[copy].dependencies.clear();
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[copy].reads[0].role = RuntimeReadRole::FilterSource;
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    invalid.passes[mirror].kind = RuntimePassKind::CopyBackdrop;
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::BlurHorizontal(Some(blur)) = &mut invalid.passes[mirror].kind else {
+        return None;
+    };
+    blur.edge = RuntimeSamplingEdge::TransparentBlack;
+    plans.push(invalid);
+    let mut invalid = lowered.clone();
+    let RuntimePassKind::Composite(Some(RuntimeComposite {
+        kind: RuntimeCompositeKind::Layer { transform, .. },
+        ..
+    })) = &mut invalid.passes[outer].kind
+    else {
+        return None;
+    };
+    *transform = Transform::translation(1.0, 0.0).ok()?;
+    plans.push(invalid);
+    Some(plans)
+}
+
+#[cfg(test)]
+fn c12_backdrop_graph_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    _capabilities: DeviceCapabilities,
+) -> Option<C12BackdropGraphObservationForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
+        return None;
+    };
+    let lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
+        &graph,
+        WorkingFormat::HighPrecision,
+        Format::Rgba8,
+    )
+    .ok()?;
+    let PrePreparationGraphClassification::ExactC12(preparable) =
+        PrePreparationGraphClassification::classify(lowered)
+    else {
+        return None;
+    };
+    let [backdrop] = preparable.closed.facts.backdrops.as_slice() else {
+        return None;
+    };
+    let positions = preparable
+        .closed
+        .lowered
+        .passes
+        .iter()
+        .enumerate()
+        .map(|(position, pass)| (pass.id, position))
+        .collect::<BTreeMap<_, _>>();
+    let copy_position = *positions.get(&backdrop.copy)?;
+    let filter_passes = backdrop_filter_passes(&backdrop.filter_steps);
+    let backdrop_position = *positions.get(&backdrop.backdrop_composite)?;
+    let foreground_position = backdrop
+        .foreground_composite
+        .and_then(|pass| positions.get(&pass).copied());
+    let outer_position = *positions.get(&backdrop.outer_composite)?;
+    let copy_pass = preparable.closed.lowered.passes.get(copy_position)?;
+    let reads_completed_parent_once = copy_pass.reads.len() == 1
+        && copy_pass.reads[0].role == RuntimeReadRole::CompletedParent
+        && copy_pass.reads[0].resource == backdrop.completed_parent;
+    let backdrop_layer = preparable
+        .closed
+        .facts
+        .layer_compositions
+        .iter()
+        .find(|layer| layer.pass == backdrop.backdrop_composite)?;
+    let post_filter_clip_precedes_foreground = matches!(
+        &backdrop_layer.composite.kind,
+        RuntimeCompositeKind::Layer {
+            clip: Some(_),
+            clip_coverage: Some(_),
+            ..
+        }
+    ) && filter_passes.iter().all(|pass| {
+        positions
+            .get(pass)
+            .is_some_and(|position| *position < backdrop_position)
+    }) && foreground_position
+        .is_some_and(|position| backdrop_position < position);
+    let later_sibling_depends_on_completed_group = preparable
+        .closed
+        .lowered
+        .passes
+        .iter()
+        .skip(outer_position.saturating_add(1))
+        .any(|pass| {
+            pass.dependencies.contains(&backdrop.outer_composite)
+                && pass
+                    .reads
+                    .iter()
+                    .any(|read| read.resource == backdrop.result)
+        });
+    Some(C12BackdropGraphObservationForTest {
+        closed_subset_receipt: preparable.proves_closed_backdrop_facts(),
+        reads_completed_parent_once,
+        copy_precedes_authored_filters: filter_passes.iter().all(|pass| {
+            positions
+                .get(pass)
+                .is_some_and(|position| copy_position < *position)
+        }),
+        post_filter_clip_precedes_foreground,
+        foreground_precedes_outer_composition: foreground_position
+            .is_some_and(|position| position < outer_position),
+        later_sibling_depends_on_completed_group,
+    })
+}
+
+#[cfg(test)]
+fn backdrop_filter_passes(steps: &[ExecutableFilterStepFacts]) -> Vec<RuntimePassId> {
+    steps
+        .iter()
+        .flat_map(|step| match *step {
+            ExecutableFilterStepFacts::Color(pass) => vec![pass],
+            ExecutableFilterStepFacts::Blur {
+                horizontal,
+                vertical,
+            } => vec![horizontal, vertical],
+            ExecutableFilterStepFacts::DropShadow {
+                horizontal,
+                vertical,
+                colorize,
+                merge,
+            } => vec![horizontal, vertical, colorize, merge],
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -8529,6 +9260,7 @@ enum PrePreparationGraphClassification {
     ExactC09(ClosedExecutableGraph),
     ExactC10(C10PreparableGraph),
     ExactC11(C11PreparableGraph),
+    ExactC12(C12PreparableGraph),
     FuturePasses,
     Ineligible(GraphPreparationIneligibility),
 }
@@ -8557,6 +9289,7 @@ impl ExecutableGraphWorkingFormatRequest {
 pub(crate) enum ExecutableGraphDispatchEligibility {
     ExactC08(C08PreparableGraph),
     ExactC09(C09PreparableGraph),
+    ExactC12,
     FuturePasses,
 }
 
@@ -8575,6 +9308,14 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
+            PrePreparationGraphClassification::ExactC12(preparable) => {
+                if !preparable.proves_closed_backdrop_facts() {
+                    return Err(preparation_error(
+                        "C12 classification lost its closed pre-allocation facts",
+                    ));
+                }
+                Ok(Self::ExactC12)
+            }
             PrePreparationGraphClassification::ExactC11(preparable) => {
                 if !preparable.proves_closed_filter_facts() {
                     return Err(preparation_error(
@@ -8612,6 +9353,7 @@ impl ExecutableGraphDispatchEligibility {
                     PrePreparationGraphClassification::ExactC08(_)
                     | PrePreparationGraphClassification::ExactC10(_)
                     | PrePreparationGraphClassification::ExactC11(_)
+                    | PrePreparationGraphClassification::ExactC12(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C09 dispatch lowering changed its closed eligibility result",
@@ -8637,6 +9379,7 @@ impl ExecutableGraphDispatchEligibility {
                     PrePreparationGraphClassification::ExactC09(_)
                     | PrePreparationGraphClassification::ExactC10(_)
                     | PrePreparationGraphClassification::ExactC11(_)
+                    | PrePreparationGraphClassification::ExactC12(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
                         "checked C08 dispatch lowering changed its closed eligibility result",
@@ -8671,6 +9414,7 @@ pub(crate) fn c10_preparable_graph_for_test(
         | PrePreparationGraphClassification::ExactC09(_)
         | PrePreparationGraphClassification::ExactC10(_)
         | PrePreparationGraphClassification::ExactC11(_)
+        | PrePreparationGraphClassification::ExactC12(_)
         | PrePreparationGraphClassification::FuturePasses
         | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
             "the authored C10 fixture is outside the exact closed color graph",
@@ -8690,6 +9434,7 @@ fn c11_preparable_graph_for_test(lowered: LoweredGraphPlan) -> Result<C11Prepara
         | PrePreparationGraphClassification::ExactC09(_)
         | PrePreparationGraphClassification::ExactC10(_)
         | PrePreparationGraphClassification::ExactC11(_)
+        | PrePreparationGraphClassification::ExactC12(_)
         | PrePreparationGraphClassification::FuturePasses
         | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
             "the authored C11 fixture is outside the exact closed spatial-filter graph",
@@ -8742,15 +9487,18 @@ impl PrePreparationGraphClassification {
         };
         match C08PreparableGraph::try_from_closed(closed) {
             Ok(preparable) => Self::ExactC08(preparable),
-            Err(closed) => match C11PreparableGraph::try_from_closed(*closed) {
-                Ok(preparable) => Self::ExactC11(preparable),
-                Err(closed) => match C10PreparableGraph::try_from_closed(*closed) {
-                    Ok(preparable) => Self::ExactC10(preparable),
-                    Err(closed) => match C09PreparableGraph::try_from_closed(*closed) {
-                        Ok(preparable) => Self::ExactC09(preparable.into_closed()),
-                        Err(_) => Self::Ineligible(
-                            GraphPreparationIneligibility::OutsideClosedExecutableGraph,
-                        ),
+            Err(closed) => match C12PreparableGraph::try_from_closed(*closed) {
+                Ok(preparable) => Self::ExactC12(preparable),
+                Err(closed) => match C11PreparableGraph::try_from_closed(*closed) {
+                    Ok(preparable) => Self::ExactC11(preparable),
+                    Err(closed) => match C10PreparableGraph::try_from_closed(*closed) {
+                        Ok(preparable) => Self::ExactC10(preparable),
+                        Err(closed) => match C09PreparableGraph::try_from_closed(*closed) {
+                            Ok(preparable) => Self::ExactC09(preparable.into_closed()),
+                            Err(_) => Self::Ineligible(
+                                GraphPreparationIneligibility::OutsideClosedExecutableGraph,
+                            ),
+                        },
                     },
                 },
             },
@@ -10654,6 +11402,9 @@ impl<'device> PreparedGraph<'device> {
                 }
                 Ok(prepared)
             }
+            PrePreparationGraphClassification::ExactC12(_) => Err(preparation_error(
+                "a C12 bounded-backdrop graph has no executable copy preparation in this task",
+            )),
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
                 "a future GPU pass cannot enter C09 resource preparation",
             )),

@@ -876,6 +876,16 @@ impl Renderer {
                         ExactSurfaceGraph::C09(preparable),
                     )))
                 }
+                ExecutableGraphDispatchEligibility::ExactC12 => {
+                    #[cfg(test)]
+                    {
+                        self.dispatch_observation.future_pass_rejections = self
+                            .dispatch_observation
+                            .future_pass_rejections
+                            .saturating_add(1);
+                    }
+                    Err(bounded_backdrop_execution_unavailable())
+                }
                 ExecutableGraphDispatchEligibility::FuturePasses => {
                     #[cfg(test)]
                     {
@@ -2785,7 +2795,7 @@ fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<(
     let unsupported = if has_copy_backdrop {
         Some((
             PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
+            PrimitiveOperation::BroadBackdropExecution,
         ))
     } else if has_drop_shadow {
         Some((
@@ -2816,6 +2826,13 @@ fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<(
     ))
 }
 
+fn bounded_backdrop_execution_unavailable() -> Error {
+    Error::unsupported_render_primitive(UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BoundedBackdropFilterExecution,
+    ))
+}
+
 #[cfg(test)]
 pub(crate) fn future_graph_diagnostic_for_test(
     graph: &GpuRenderGraph,
@@ -2835,6 +2852,10 @@ pub(crate) fn future_graph_diagnostic_for_test(
         }
         ExecutableGraphDispatchEligibility::ExactC08(_)
         | ExecutableGraphDispatchEligibility::ExactC09(_) => Ok(None),
+        ExecutableGraphDispatchEligibility::ExactC12 => Ok(Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BoundedBackdropFilterExecution,
+        ))),
     }
 }
 

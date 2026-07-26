@@ -11633,6 +11633,101 @@ fn c11_blur_and_drop_shadow_graph_preserve_order_edges_and_lifetimes() {
     );
 }
 
+fn c12_bounded_graph_commands_for_test() -> command::RenderCommands {
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(-1.25, 0.75),
+                FilterBlur::try_new(0.5).unwrap(),
+                Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let backdrop_clip = ClipInput::try_shape(Shape::rect(Rect::new(0.5, 0.5, 7.0, 5.0))).unwrap();
+    let backdrop = Layer::new()
+        .try_clip(Shape::rect(Rect::new(0.25, 0.25, 7.5, 5.5)))
+        .unwrap()
+        .try_opacity(0.75)
+        .unwrap()
+        .blend(BlendMode::Screen)
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                Some(backdrop_clip),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(1.0, 0.0, 0.0, 0.5).unwrap(),
+            );
+        })
+        .fill(
+            Rect::new(6.0, 4.0, 1.0, 1.0),
+            Color::try_rgba(0.0, 1.0, 0.0, 0.75).unwrap(),
+        );
+    scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the exact C12 bounded backdrop fixture must normalize")
+}
+
+#[test]
+fn c12_executor_accepts_only_bounded_top_level_backdrop_graphs() {
+    let observed = super::pass::c12_executable_graph_observation_for_test(
+        c12_bounded_graph_commands_for_test(),
+        super::frame::FrameContext::try_new(
+            Size::new(16.0, 12.0),
+            1.0,
+            Antialiasing::Msaa8,
+            Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+        )
+        .unwrap(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.accepts_bounded_top_level_backdrop
+            && observed.rejects_outside_bounded_subset
+            && observed.rejects_before_resource_acquisition,
+        "production dispatch still rejects every CopyBackdrop"
+    );
+}
+
+#[test]
+fn c12_backdrop_graph_reads_completed_parent_once_and_preserves_group_order() {
+    let observed = super::pass::c12_backdrop_graph_observation_for_test(
+        c12_bounded_graph_commands_for_test(),
+        super::frame::FrameContext::try_new(
+            Size::new(16.0, 12.0),
+            1.0,
+            Antialiasing::Msaa8,
+            Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+        )
+        .unwrap(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.closed_subset_receipt
+            && observed.reads_completed_parent_once
+            && observed.copy_precedes_authored_filters
+            && observed.post_filter_clip_precedes_foreground
+            && observed.foreground_precedes_outer_composition
+            && observed.later_sibling_depends_on_completed_group,
+        "the bounded backdrop graph lost its closed classification or dependency receipt: {observed:?}"
+    );
+}
+
 #[test]
 fn gaussian_kernel_bytes_are_symmetric_normalized_and_exactly_cached() {
     assert_gaussian_kernel_upload_lifecycle(2.0, 1.5, 2.5);
@@ -33924,6 +34019,36 @@ fn c10_future_backdrop_scene(
     scene
 }
 
+fn c13_future_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
+    let filters = FilterList::try_ops(vec![FilterOp::brightness(
+        FilterAmount::try_new(1.25).unwrap(),
+    )])
+    .unwrap();
+    let backdrop = Layer::new()
+        .try_transform(Transform::translation(1.0, 0.0).unwrap())
+        .unwrap()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, size.width(), size.height()))
+                    .unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(
+            Rect::new(0.0, 0.0, size.width(), size.height()),
+            Color::BLACK,
+        )
+        .layer(backdrop, |scene| {
+            scene.fill(inner_bounds, Color::BLACK);
+        });
+    scene
+}
+
 #[test]
 fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publication() {
     let mut renderer = pollster::block_on(Renderer::new(
@@ -34012,7 +34137,7 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
 }
 
 #[test]
-fn c12_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
+fn c13_plus_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("future diagnostic ordering requires a real selected WGPU device");
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
@@ -34041,12 +34166,8 @@ fn c12_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
         "the real renderer must accept the scoped no-effect-format capability facts"
     );
 
-    let future = c10_future_backdrop_scene(
-        Size::new(4.0, 4.0),
-        Rect::new(1.0, 1.0, 2.0, 2.0),
-        Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
-        Color::BLACK,
-    );
+    let future =
+        c13_future_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -34058,7 +34179,7 @@ fn c12_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
         .expect_err("a C10+ graph must retain its typed unavailable-pass diagnostic");
     let expected = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
-        PrimitiveOperation::BoundedBackdropFilterExecution,
+        PrimitiveOperation::BroadBackdropExecution,
     );
     assert_eq!(
         error.unsupported_primitive(),
@@ -34093,10 +34214,8 @@ fn c12_plus_graph_diagnostic_precedes_unavailable_effect_working_format() {
 
     assert!(
         no_gpu_work
-            && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.future_pass_rejections
-                == dispatch_before.future_pass_rejections.saturating_add(1)
+            && dispatch_after.boundary_invocations == dispatch_before.boundary_invocations
+            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections
             && dispatch_after.direct_vello_routes == dispatch_before.direct_vello_routes
             && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
             && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes

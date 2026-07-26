@@ -182,9 +182,15 @@ impl FrameContext {
                         .try_translate(shadow.offset(), "filter drop-shadow offset alpha bounds")?;
                     let result_bounds = source_bounds
                         .try_union(shadow_bounds, "filter drop-shadow result bounds")?;
+                    let edge_policy = match source_role {
+                        FilterSourceRole::Ordinary => FilterEdgePolicy::TransparentBlack,
+                        FilterSourceRole::Backdrop => FilterEdgePolicy::SemanticBorderMirror {
+                            semantic_border: initial_bounds,
+                        },
+                    };
                     (
                         result_bounds,
-                        FilterEdgePolicy::TransparentBlack,
+                        edge_policy,
                         ResolvedFilterOperationIntent::DropShadow(ResolvedDropShadowIntent {
                             authored_shadow: shadow,
                             alpha_source: DropShadowAlphaSource::SourceAlpha,
