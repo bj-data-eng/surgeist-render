@@ -4,7 +4,7 @@
 
 - Cycle: `P01/I03/S01/C11`.
 - Owning repository: `surgeist-render`.
-- Status: `in_progress`.
+- Status: `complete`.
 - Cycle base and published prerequisite: `3345fe6bb1face00ee3364ae4345b5c0782053e2`
   (`P01/I03/S01/C10`, remotely verified and explicitly closed).
 - Specification: `plans/P01-surgeist-render/initiatives/P01-I03-gpu-render-pipeline.md`
