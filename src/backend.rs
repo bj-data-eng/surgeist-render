@@ -409,6 +409,28 @@ pub(crate) struct C11FailurePreservationObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12BackdropGraphEncodingObservationForTest {
+    pub(crate) encodes_copy_filter_clip_foreground_and_group_in_order: bool,
+    pub(crate) parent_is_copied_once: bool,
+    pub(crate) copy_filter_foreground_and_group_are_distinct: bool,
+    pub(crate) later_sibling_reads_completed_group: bool,
+    pub(crate) releases_at_validated_last_use: bool,
+    pub(crate) one_graph_command_encoder: bool,
+    pub(crate) transaction_committed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12FailurePreservationObservationForTest {
+    pub(crate) encode_failure_is_reported: bool,
+    pub(crate) resources_are_unchanged: bool,
+    pub(crate) cache_is_unchanged: bool,
+    pub(crate) publication_is_unchanged: bool,
+    pub(crate) performs_no_submission_or_retry: bool,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy)]
 enum C11InjectedFailureForTest {
     Encode,
@@ -1287,6 +1309,40 @@ fn c11_spatial_encoding_observation(
         textures_release_at_validated_last_use: summary.c11_textures_release_at_validated_last_use,
         drop_shadow_reads_original_source_twice: summary.drop_shadow_reads_original_source_twice,
         original_source_releases_after_merge: summary.original_source_releases_after_merge,
+        one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
+        transaction_committed: false,
+    }
+}
+
+#[cfg(test)]
+fn c12_backdrop_encoding_observation(
+    summary: &super::pass::C08CustomSpineEncodingSummary,
+) -> C12BackdropGraphEncodingObservationForTest {
+    C12BackdropGraphEncodingObservationForTest {
+        encodes_copy_filter_clip_foreground_and_group_in_order: summary
+            .encodes_custom_passes_in_order
+            && summary.copy_backdrop_count == 1
+            && summary.color_filter_count > 0
+            && summary.blur_pass_count > 0
+            && summary.drop_shadow_colorize_count > 0
+            && summary.drop_shadow_merge_count > 0
+            && summary.layer_composite_count >= 2
+            && summary.c12_group_order_is_exact
+            && summary.advances_every_pass_once,
+        parent_is_copied_once: summary.copy_backdrop_count == 1
+            && summary.copy_backdrop_binds_exact_prepared_resources
+            && summary.copy_backdrop_preserves_signed_mapping,
+        copy_filter_foreground_and_group_are_distinct: summary
+            .copy_backdrop_source_and_result_are_distinct
+            && summary.color_filter_sources_and_results_are_distinct
+            && summary.blur_sources_intermediates_and_results_are_distinct
+            && summary.parent_and_result_are_distinct
+            && summary.c12_group_resources_are_distinct,
+        later_sibling_reads_completed_group: summary.c12_later_sibling_transition_is_exact,
+        releases_at_validated_last_use: summary.advances_every_pass_once
+            && summary.color_filter_operation_buffers_released
+            && summary.c11_kernels_release_at_validated_last_use
+            && summary.c11_textures_release_at_validated_last_use,
         one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
         transaction_committed: false,
     }
@@ -4007,6 +4063,167 @@ impl Backend {
         let _ = committed.into_parts();
         observed.transaction_committed = true;
         Ok(observed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c12_backdrop_graph_encoding_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C12BackdropGraphEncodingObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C12 encoding observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let super::frame::FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "C12 encoding observation requires a validated GPU graph",
+            ));
+        };
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (device, queue) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C12 encoding observation lost its ready device",
+            )?;
+            (ready.device.clone(), ready.queue.clone())
+        };
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let (output_texture, output_view) =
+            create_headless_texture(&device, output_extent, Format::Rgba8)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C12 caller-owned graph observation encoder"),
+        });
+        let pending = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await?;
+        let mut observed = c12_backdrop_encoding_observation(pending.summary_for_test());
+        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        drop(output_view);
+        let payload = C08GraphSubmissionPayload::new(
+            encoder.finish(),
+            prepared_submission,
+            HeadlessPublication::new(output_texture),
+        );
+        let committed = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C12 encoding observation lost its pass cache before commit",
+            )?;
+            transaction
+                .submit_c08_graph(
+                    &device,
+                    &queue,
+                    &mut ready.pass_cache,
+                    payload,
+                    RuntimeOperation::EffectRendering,
+                )
+                .await?
+        };
+        let _ = committed.into_parts();
+        observed.transaction_committed = true;
+        Ok(observed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c12_failure_preservation_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C12FailurePreservationObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C12 failure observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let super::frame::FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+            return Err(Error::new(
+                BackendErrorCode::RenderFailed,
+                "C12 failure observation requires a validated GPU graph",
+            ));
+        };
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C12 failure observation lost its publication device",
+            )?
+            .device
+            .clone();
+        let published_surface = c11_failure_publication_for_test(&device, identity)?;
+        let publication_count_before = published_surface.headless_publication_count_for_test();
+        let publication_state_before = published_surface.resource_state();
+        let (resources_before, cache_before) = self.c11_resource_and_cache_state(identity)?;
+        let submission_scope =
+            super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
+        let submission = submission_scope.observation_for_test();
+        let graph_scope =
+            super::gpu_transaction::ScopedC08GraphSubmissionObservationForTest::begin();
+        let graph_submission = graph_scope.observation_for_test();
+        let direct_scope =
+            super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
+        let direct_submission = direct_scope.observation_for_test();
+        let encode_error = self
+            .run_c11_failed_encoding_attempt(
+                identity,
+                lowered,
+                policy,
+                C11InjectedFailureForTest::Encode,
+            )
+            .await?;
+        let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
+            && graph_submission.queue_submission_count_for_test() == 0
+            && direct_submission.queue_submission_count_for_test() == 0;
+        drop(direct_scope);
+        drop(graph_scope);
+        drop(submission_scope);
+        let (resources_after, cache_after) = self.c11_resource_and_cache_state(identity)?;
+        Ok(C12FailurePreservationObservationForTest {
+            encode_failure_is_reported: encode_error
+                .message()
+                .contains("injected C10 color-filter shader failure"),
+            resources_are_unchanged: c11_resources_preserved(&resources_before, &resources_after),
+            cache_is_unchanged: cache_after == cache_before,
+            publication_is_unchanged: published_surface.headless_publication_count_for_test()
+                == publication_count_before
+                && published_surface.resource_state() == publication_state_before,
+            performs_no_submission_or_retry,
+        })
     }
 
     #[cfg(test)]

@@ -11884,6 +11884,98 @@ fn c12_backdrop_filter_chain_preserves_authored_order_and_clamp_boundaries() {
 }
 
 #[test]
+fn c12_graph_encodes_copy_filter_clip_foreground_and_group_in_order() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
+        identity,
+        c12_bounded_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+    ))
+    .unwrap_or_panic_for_test("the C12 fixture must reach its shared GPU graph executor");
+
+    assert!(
+        observed.encodes_copy_filter_clip_foreground_and_group_in_order
+            && observed.parent_is_copied_once
+            && observed.releases_at_validated_last_use,
+        "the scheduler has no C12 encoding route"
+    );
+}
+
+#[test]
+fn backdrop_copy_filter_and_group_use_distinct_resources_without_readback() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
+        identity,
+        c12_bounded_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+    ))
+    .unwrap_or_panic_for_test("the C12 alias fixture must reach its shared GPU graph executor");
+    let no_cpu_visibility = [include_str!("pass.rs"), include_str!("backend.rs")]
+        .iter()
+        .all(|source| {
+            ["map_async", "Device::poll", "MAP_READ", "get_mapped_range"]
+                .iter()
+                .all(|forbidden| !source.contains(forbidden))
+        });
+
+    assert!(
+        observed.copy_filter_foreground_and_group_are_distinct
+            && observed.releases_at_validated_last_use
+            && no_cpu_visibility,
+        "the C12 backdrop copy, filters, foreground, or group alias or reach CPU visibility"
+    );
+}
+
+#[test]
+fn later_sibling_dependency_follows_completed_backdrop_group() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
+        identity,
+        c12_bounded_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+    ))
+    .unwrap_or_panic_for_test(
+        "the C12 dependency fixture must reach its shared GPU graph executor",
+    );
+    let submission = submission_scope.observation_for_test();
+
+    assert!(
+        observed.later_sibling_reads_completed_group
+            && observed.one_graph_command_encoder
+            && observed.transaction_committed
+            && submission.queue_submission_count_for_test() == 1
+            && submission.scopes_resolved_for_test()
+            && submission.prepared_frame_committed_for_test()
+            && submission.capture_resources_committed_for_test(),
+        "the later sibling did not follow the committed backdrop-group transition"
+    );
+}
+
+#[test]
+fn c12_backdrop_encode_failure_preserves_resources_cache_and_publication() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(backend.c12_failure_preservation_observation_for_test(
+        identity,
+        c12_bounded_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+    ))
+    .unwrap_or_panic_for_test("the C12 failure fixture must reach its atomic abort path");
+    let submission = submission_scope.observation_for_test();
+
+    assert!(
+        observed.encode_failure_is_reported
+            && observed.resources_are_unchanged
+            && observed.cache_is_unchanged
+            && observed.publication_is_unchanged
+            && observed.performs_no_submission_or_retry
+            && submission.queue_submission_count_for_test() == 0,
+        "the C12 encode abort changed provisional or published state"
+    );
+}
+
+#[test]
 fn copy_backdrop_maps_signed_bounds_and_transparent_surface_edges() {
     let source = fs::read_to_string(
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/shaders/copy_backdrop.wgsl"),
