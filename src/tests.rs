@@ -11812,6 +11812,133 @@ fn c11_prepared_spatial_filter_objects_expose_exact_encoding_handles() {
     let _ = (require_blur_handles, require_drop_shadow_handles);
 }
 
+#[test]
+fn c11_graph_encodes_blur_and_drop_shadow_in_authored_order() {
+    use super::pass::C11FilterPassTagForTest as Tag;
+
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let observed = pollster::block_on(
+        backend.c11_spatial_filter_graph_encoding_observation_for_test(
+            identity,
+            c11_authored_filter_steps_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C11 fixture must reach its shared GPU graph executor");
+
+    assert!(
+        observed.pass_order
+            == [
+                Tag::Color,
+                Tag::BlurHorizontalRgba,
+                Tag::BlurVerticalRgba,
+                Tag::BlurHorizontalSourceAlpha,
+                Tag::BlurVerticalSourceAlpha,
+                Tag::DropShadowColorize,
+                Tag::DropShadowMerge,
+                Tag::Color,
+            ]
+            && observed.each_pass_advances_once
+            && observed.binds_exact_prepared_resources
+            && observed.uses_signed_viewport_and_scissor
+            && observed.one_graph_command_encoder
+            && observed.transaction_committed
+            && submission.queue_submission_count_for_test() == 1
+            && submission.transaction_generation_for_test()
+                == submission.active_generation_for_test()
+            && submission.scopes_resolved_for_test()
+            && submission.prepared_frame_committed_for_test()
+            && submission.capture_resources_committed_for_test(),
+        "the C11 scheduler has no ordered spatial-filter encoding route"
+    );
+}
+
+#[test]
+fn blur_passes_use_distinct_source_intermediate_and_result_without_readback() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(
+        backend.c11_spatial_filter_graph_encoding_observation_for_test(
+            identity,
+            c11_authored_filter_steps_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C11 blur fixture must reach its shared GPU graph executor");
+    let no_cpu_visibility = [include_str!("pass.rs"), include_str!("backend.rs")]
+        .iter()
+        .all(|source| {
+            [
+                "queue.submit",
+                "map_async",
+                "Device::poll",
+                "MAP_READ",
+                "get_mapped_range",
+            ]
+            .iter()
+            .all(|forbidden| !source.contains(forbidden))
+        });
+
+    assert!(
+        observed.blur_pass_count == 4
+            && observed.blur_sources_intermediates_and_results_are_distinct
+            && observed.binds_exact_prepared_resources
+            && observed.kernels_release_at_validated_last_use
+            && observed.textures_release_at_validated_last_use
+            && no_cpu_visibility,
+        "the C11 blur scheduler has no exact pass receipts"
+    );
+}
+
+#[test]
+fn drop_shadow_reads_source_twice_and_releases_after_merge() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(
+        backend.c11_spatial_filter_graph_encoding_observation_for_test(
+            identity,
+            c11_authored_filter_steps_for_test(),
+            c10_authored_color_graph_commands_for_test(),
+            c10_authored_color_graph_context_for_test(),
+        ),
+    )
+    .unwrap_or_panic_for_test("the C11 shadow fixture must reach its shared GPU graph executor");
+
+    assert!(
+        observed.drop_shadow_colorize_count == 1
+            && observed.drop_shadow_merge_count == 1
+            && observed.drop_shadow_reads_original_source_twice
+            && observed.original_source_releases_after_merge
+            && observed.textures_release_at_validated_last_use
+            && observed.each_pass_advances_once,
+        "the C11 drop-shadow scheduler lost its exact lease transition"
+    );
+}
+
+#[test]
+fn c11_encode_failure_preserves_resources_cache_and_publication() {
+    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let observed = pollster::block_on(backend.c11_failure_preservation_observation_for_test(
+        identity,
+        c11_authored_filter_steps_for_test(),
+        c10_authored_color_graph_commands_for_test(),
+        c10_authored_color_graph_context_for_test(),
+    ))
+    .unwrap_or_panic_for_test("the C11 failure fixture must exercise both abort paths");
+
+    assert!(
+        observed.encode_failure_is_reported
+            && observed.scope_failure_is_reported
+            && observed.resources_are_unchanged
+            && observed.cache_is_unchanged
+            && observed.publication_is_unchanged
+            && observed.performs_no_submission_or_retry,
+        "failed C11 encoding changed provisional or published state"
+    );
+}
+
 fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))

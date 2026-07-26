@@ -371,6 +371,43 @@ pub(crate) struct C10OversizedBufferPreservationObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11SpatialFilterGraphEncodingObservationForTest {
+    pub(crate) pass_order: Vec<super::pass::C11FilterPassTagForTest>,
+    pub(crate) blur_pass_count: usize,
+    pub(crate) drop_shadow_colorize_count: usize,
+    pub(crate) drop_shadow_merge_count: usize,
+    pub(crate) each_pass_advances_once: bool,
+    pub(crate) binds_exact_prepared_resources: bool,
+    pub(crate) uses_signed_viewport_and_scissor: bool,
+    pub(crate) blur_sources_intermediates_and_results_are_distinct: bool,
+    pub(crate) kernels_release_at_validated_last_use: bool,
+    pub(crate) textures_release_at_validated_last_use: bool,
+    pub(crate) drop_shadow_reads_original_source_twice: bool,
+    pub(crate) original_source_releases_after_merge: bool,
+    pub(crate) one_graph_command_encoder: bool,
+    pub(crate) transaction_committed: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C11FailurePreservationObservationForTest {
+    pub(crate) encode_failure_is_reported: bool,
+    pub(crate) scope_failure_is_reported: bool,
+    pub(crate) resources_are_unchanged: bool,
+    pub(crate) cache_is_unchanged: bool,
+    pub(crate) publication_is_unchanged: bool,
+    pub(crate) performs_no_submission_or_retry: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+enum C11InjectedFailureForTest {
+    Encode,
+    Scope,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct C08CaptureFailureObservationForTest {
     pub(crate) capture_failure_is_reported: bool,
@@ -1221,6 +1258,67 @@ fn c09_ordered_encoding_observation(
         one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
         transaction_committed: false,
     }
+}
+
+#[cfg(test)]
+fn c11_spatial_encoding_observation(
+    summary: &super::pass::C08CustomSpineEncodingSummary,
+) -> C11SpatialFilterGraphEncodingObservationForTest {
+    C11SpatialFilterGraphEncodingObservationForTest {
+        pass_order: summary.c11_pass_order.clone(),
+        blur_pass_count: summary.blur_pass_count,
+        drop_shadow_colorize_count: summary.drop_shadow_colorize_count,
+        drop_shadow_merge_count: summary.drop_shadow_merge_count,
+        each_pass_advances_once: summary.advances_every_pass_once
+            && summary.encodes_custom_passes_in_order,
+        binds_exact_prepared_resources: summary.c11_binds_exact_prepared_resources,
+        uses_signed_viewport_and_scissor: summary.c11_uses_signed_viewport_and_scissor,
+        blur_sources_intermediates_and_results_are_distinct: summary
+            .blur_sources_intermediates_and_results_are_distinct,
+        kernels_release_at_validated_last_use: summary.c11_kernels_release_at_validated_last_use,
+        textures_release_at_validated_last_use: summary.c11_textures_release_at_validated_last_use,
+        drop_shadow_reads_original_source_twice: summary.drop_shadow_reads_original_source_twice,
+        original_source_releases_after_merge: summary.original_source_releases_after_merge,
+        one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
+        transaction_committed: false,
+    }
+}
+
+#[cfg(test)]
+fn c11_resources_preserved(
+    before: &ResourceManagerObservationForTest,
+    after: &ResourceManagerObservationForTest,
+) -> bool {
+    after.leased_count == 0
+        && after.active_frame_count == 0
+        && after.resolved_lease_count == 0
+        && after.accounting_fault_for_test().is_none()
+        && after
+            .entry_identities_for_test()
+            .iter()
+            .all(|identity| before.entry_identities_for_test().contains(identity))
+}
+
+#[cfg(test)]
+fn c11_failure_publication_for_test(
+    device: &wgpu::Device,
+    identity: DeviceSlotIdentity,
+) -> Result<Surface> {
+    let extent = PhysicalSize::new(1, 1);
+    let (texture, view) = create_headless_texture(device, extent, Format::Rgba8)?;
+    drop(view);
+    let mut surface = Surface::with_backend(
+        Attachment::Headless,
+        SurfaceOptions::default(),
+        SurfaceBackend::Headless {
+            device_identity: identity,
+            resources: HeadlessResources::Pending,
+            physical_size: extent,
+        },
+        RendererIdentity::new(),
+    );
+    surface.commit_headless_publication(HeadlessPublication::new(texture));
+    Ok(surface)
 }
 
 #[cfg(test)]
@@ -3811,6 +3909,245 @@ impl Backend {
         let _ = committed.into_parts();
         observed.transaction_committed = true;
         Ok(observed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c11_spatial_filter_graph_encoding_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        filters: Vec<FilterList>,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C11SpatialFilterGraphEncodingObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C11 encoding observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let (device, queue) = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C11 encoding observation lost its ready device",
+            )?;
+            (ready.device.clone(), ready.queue.clone())
+        };
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        let output_extent = prepared.output_extent()?;
+        let (output_texture, output_view) =
+            create_headless_texture(&device, output_extent, Format::Rgba8)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C11 caller-owned graph observation encoder"),
+        });
+        let pending = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+            )
+            .await?;
+        let summary = pending.summary_for_test();
+        let mut observed = c11_spatial_encoding_observation(summary);
+        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        drop(output_view);
+        let payload = C08GraphSubmissionPayload::new(
+            encoder.finish(),
+            prepared_submission,
+            HeadlessPublication::new(output_texture),
+        );
+        let committed = {
+            let ready = self.ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C11 encoding observation lost its pass cache before commit",
+            )?;
+            transaction
+                .submit_c08_graph(
+                    &device,
+                    &queue,
+                    &mut ready.pass_cache,
+                    payload,
+                    RuntimeOperation::EffectRendering,
+                )
+                .await?
+        };
+        let _ = committed.into_parts();
+        observed.transaction_committed = true;
+        Ok(observed)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn c11_failure_preservation_observation_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        filters: Vec<FilterList>,
+        commands: super::command::RenderCommands,
+        context: super::frame::FrameContext,
+    ) -> Result<C11FailurePreservationObservationForTest> {
+        let capabilities = self.device_capabilities(identity).ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "C11 failure observation requires immutable device capabilities",
+            )
+        })?;
+        let policy = EffectQualityPolicy::AllowReducedPrecision;
+        let working_format = capabilities.resolve_effect_working_format(policy)?;
+        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let lowered = LoweredGraphPlan::try_lower_validated_graph(
+            &graph,
+            working_format,
+            Format::Rgba8,
+            &capabilities,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C11 failure observation lost its publication device",
+            )?
+            .device
+            .clone();
+        let published_surface = c11_failure_publication_for_test(&device, identity)?;
+        let publication_count_before = published_surface.headless_publication_count_for_test();
+        let publication_state_before = published_surface.resource_state();
+        let (resources_before, cache_before) = self.c11_resource_and_cache_state(identity)?;
+        let submission_scope =
+            super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
+        let submission = submission_scope.observation_for_test();
+        let graph_scope =
+            super::gpu_transaction::ScopedC08GraphSubmissionObservationForTest::begin();
+        let graph_submission = graph_scope.observation_for_test();
+        let direct_scope =
+            super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
+        let direct_submission = direct_scope.observation_for_test();
+        let encode_error = self
+            .run_c11_failed_encoding_attempt(
+                identity,
+                lowered.clone(),
+                policy,
+                C11InjectedFailureForTest::Encode,
+            )
+            .await?;
+        let scope_error = self
+            .run_c11_failed_encoding_attempt(
+                identity,
+                lowered,
+                policy,
+                C11InjectedFailureForTest::Scope,
+            )
+            .await?;
+        let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
+            && graph_submission.queue_submission_count_for_test() == 0
+            && direct_submission.queue_submission_count_for_test() == 0;
+        drop(direct_scope);
+        drop(graph_scope);
+        drop(submission_scope);
+        let (resources_after, cache_after) = self.c11_resource_and_cache_state(identity)?;
+        Ok(C11FailurePreservationObservationForTest {
+            encode_failure_is_reported: encode_error
+                .message()
+                .contains("injected C10 color-filter shader failure"),
+            scope_failure_is_reported: scope_error.message()
+                == "checked internal Vello resource or command encoding failed",
+            resources_are_unchanged: c11_resources_preserved(&resources_before, &resources_after),
+            cache_is_unchanged: cache_after == cache_before,
+            publication_is_unchanged: published_surface.headless_publication_count_for_test()
+                == publication_count_before
+                && published_surface.resource_state() == publication_state_before,
+            performs_no_submission_or_retry,
+        })
+    }
+
+    #[cfg(test)]
+    fn c11_resource_and_cache_state(
+        &mut self,
+        identity: DeviceSlotIdentity,
+    ) -> Result<(
+        ResourceManagerObservationForTest,
+        DevicePassCacheCountsForTest,
+    )> {
+        let ready = self.ready_state_mut(
+            identity,
+            RuntimeOperation::EffectRendering,
+            BackendErrorCode::RenderFailed,
+            "C11 failure observation lost its ready state",
+        )?;
+        Ok((
+            ready.resources.observation_for_test(),
+            ready.pass_cache.counts_for_test(),
+        ))
+    }
+
+    #[cfg(test)]
+    async fn run_c11_failed_encoding_attempt(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        failure: C11InjectedFailureForTest,
+    ) -> Result<Error> {
+        let transaction = self.begin_gpu_operation(
+            identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::EffectRendering,
+        )?;
+        let device = self
+            .ready_state_mut(
+                identity,
+                RuntimeOperation::EffectRendering,
+                BackendErrorCode::RenderFailed,
+                "C11 failure attempt lost its ready device",
+            )?
+            .device
+            .clone();
+        let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
+        if matches!(failure, C11InjectedFailureForTest::Scope) {
+            prepared.fail_scope_resolution_for_test();
+        }
+        let extent = prepared.output_extent()?;
+        let (output_texture, output_view) =
+            create_headless_texture(&device, extent, Format::Rgba8)?;
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("Surgeist C11 injected-failure graph encoder"),
+        });
+        let _encode_failure = matches!(failure, C11InjectedFailureForTest::Encode)
+            .then(super::pass::ScopedC10ColorFilterShaderFailureForTest::after_checked_realization);
+        let result = prepared
+            .encode_c08_custom_spine(
+                &mut encoder,
+                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, extent)?,
+            )
+            .await;
+        drop(output_view);
+        drop(output_texture);
+        drop(encoder.finish());
+        drop(prepared);
+        transaction
+            .finish(RuntimeOperation::EffectRendering)
+            .await?;
+        result.err().ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::RenderFailed,
+                "the injected C11 encoding failure unexpectedly succeeded",
+            )
+        })
     }
 
     #[cfg(test)]

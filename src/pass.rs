@@ -3475,6 +3475,10 @@ impl C11PreparableGraph {
                 .facts
                 .proves_exact_facts_for(&self.closed.lowered)
     }
+
+    fn into_closed(self) -> ClosedExecutableGraph {
+        self.closed
+    }
 }
 
 #[cfg(test)]
@@ -8433,6 +8437,24 @@ struct PreparedColorFilterOperationBinding {
     buffer: Option<wgpu::Buffer>,
 }
 
+enum PreparedC11PassObjects {
+    Blur {
+        source_sampler: wgpu::Sampler,
+        layout: wgpu::BindGroupLayout,
+        pipeline: wgpu::RenderPipeline,
+    },
+    DropShadowColorize {
+        source_sampler: wgpu::Sampler,
+        layout: wgpu::BindGroupLayout,
+        pipeline: wgpu::RenderPipeline,
+    },
+}
+
+struct PreparedPassRealization {
+    update: Option<ProvisionalDevicePassCacheUpdate>,
+    c11_objects: BTreeMap<RuntimePassId, PreparedC11PassObjects>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum DispatchPassSemantics {
     ClosedExecutable,
@@ -8751,6 +8773,7 @@ enum GraphPreparationSource {
         preparable: C10PreparableGraph,
         operation_limits: Option<ColorFilterOperationBufferLimits>,
     },
+    C11(C11PreparableGraph),
 }
 
 impl GraphPreparationSource {
@@ -8759,7 +8782,7 @@ impl GraphPreparationSource {
             Self::C10 {
                 operation_limits, ..
             } => *operation_limits,
-            Self::C08(_) | Self::C09(_) => None,
+            Self::C08(_) | Self::C09(_) | Self::C11(_) => None,
         }
     }
 
@@ -8770,16 +8793,21 @@ impl GraphPreparationSource {
         Option<C08ExecutionFacts>,
         Option<ClosedExecutableGraphFacts>,
         Option<ClosedExecutableGraphFacts>,
+        Option<ClosedExecutableGraphFacts>,
     ) {
         match self {
             Self::C08(preparable) => {
                 let (lowered, execution) = preparable.into_parts();
-                (lowered, Some(execution), None, None)
+                (lowered, Some(execution), None, None, None)
             }
-            Self::C09(closed) => (closed.lowered, None, Some(closed.facts), None),
+            Self::C09(closed) => (closed.lowered, None, Some(closed.facts), None, None),
             Self::C10 { preparable, .. } => {
                 let closed = preparable.into_closed();
-                (closed.lowered, None, None, Some(closed.facts))
+                (closed.lowered, None, None, Some(closed.facts), None)
+            }
+            Self::C11(preparable) => {
+                let closed = preparable.into_closed();
+                (closed.lowered, None, None, None, Some(closed.facts))
             }
         }
     }
@@ -8904,6 +8932,12 @@ enum C08ScheduledEncodingKind {
     VelloCapture,
     CanonicalizeCapture,
     ColorFilter,
+    BlurHorizontalRgba,
+    BlurVerticalRgba,
+    BlurHorizontalSourceAlpha,
+    BlurVerticalSourceAlpha,
+    DropShadowColorize,
+    DropShadowMerge,
     SpanSourceOver,
     LayerComposite,
     Present,
@@ -8946,7 +8980,19 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) color_filters_use_validated_viewport_and_scissor: bool,
     pub(crate) color_filters_preserve_signed_texel_mapping: bool,
     pub(crate) color_filter_operation_buffers_released: bool,
+    pub(crate) blur_pass_count: usize,
+    pub(crate) drop_shadow_colorize_count: usize,
+    pub(crate) drop_shadow_merge_count: usize,
+    pub(crate) c11_binds_exact_prepared_resources: bool,
+    pub(crate) c11_uses_signed_viewport_and_scissor: bool,
+    pub(crate) blur_sources_intermediates_and_results_are_distinct: bool,
+    pub(crate) c11_kernels_release_at_validated_last_use: bool,
+    pub(crate) c11_textures_release_at_validated_last_use: bool,
+    pub(crate) drop_shadow_reads_original_source_twice: bool,
+    pub(crate) original_source_releases_after_merge: bool,
     pub(crate) advances_every_pass_once: bool,
+    #[cfg(test)]
+    pub(crate) c11_pass_order: Vec<C11FilterPassTagForTest>,
     #[cfg(test)]
     pub(crate) capture_count: usize,
     #[cfg(test)]
@@ -8994,6 +9040,16 @@ struct C08CustomSpineEncodingProgress {
     color_filter_regions_are_validated: bool,
     color_filter_signed_texel_mapping_is_exact: bool,
     color_filter_operation_buffers_released: bool,
+    blur_pass_count: usize,
+    drop_shadow_colorize_count: usize,
+    drop_shadow_merge_count: usize,
+    c11_bindings_are_exact: bool,
+    c11_regions_are_exact: bool,
+    blur_allocations_are_distinct: bool,
+    c11_kernels_released: bool,
+    c11_textures_released: bool,
+    shadow_source_read_twice: bool,
+    shadow_source_released_after_merge: bool,
     #[cfg(test)]
     capture_observations: Vec<C08EncodedCaptureObservationForTest>,
     #[cfg(test)]
@@ -9037,6 +9093,16 @@ impl C08CustomSpineEncodingProgress {
             color_filter_regions_are_validated: true,
             color_filter_signed_texel_mapping_is_exact: true,
             color_filter_operation_buffers_released: true,
+            blur_pass_count: 0,
+            drop_shadow_colorize_count: 0,
+            drop_shadow_merge_count: 0,
+            c11_bindings_are_exact: true,
+            c11_regions_are_exact: true,
+            blur_allocations_are_distinct: true,
+            c11_kernels_released: true,
+            c11_textures_released: true,
+            shadow_source_read_twice: true,
+            shadow_source_released_after_merge: true,
             #[cfg(test)]
             capture_observations: Vec::with_capacity(expected_capture_count),
             #[cfg(test)]
@@ -9109,8 +9175,20 @@ impl C08CustomSpineEncodingProgress {
                 && self.color_filter_signed_texel_mapping_is_exact,
             color_filter_operation_buffers_released: self.color_filter_count > 0
                 && self.color_filter_operation_buffers_released,
+            blur_pass_count: self.blur_pass_count,
+            drop_shadow_colorize_count: self.drop_shadow_colorize_count,
+            drop_shadow_merge_count: self.drop_shadow_merge_count,
+            c11_binds_exact_prepared_resources: self.c11_bindings_are_exact,
+            c11_uses_signed_viewport_and_scissor: self.c11_regions_are_exact,
+            blur_sources_intermediates_and_results_are_distinct: self.blur_allocations_are_distinct,
+            c11_kernels_release_at_validated_last_use: self.c11_kernels_released,
+            c11_textures_release_at_validated_last_use: self.c11_textures_released,
+            drop_shadow_reads_original_source_twice: self.shadow_source_read_twice,
+            original_source_releases_after_merge: self.shadow_source_released_after_merge,
             advances_every_pass_once: self.completed_pass_count == self.expected_pass_count
                 && prepared.next_pass == self.expected_pass_count,
+            #[cfg(test)]
+            c11_pass_order: c11_scheduled_pass_order_for_test(&self.scheduled),
             #[cfg(test)]
             capture_count: self.capture_count,
             #[cfg(test)]
@@ -9118,8 +9196,9 @@ impl C08CustomSpineEncodingProgress {
             #[cfg(test)]
             captures_share_one_active_vello_scope: self.captures_share_one_active_vello_scope(),
             #[cfg(test)]
-            graph_work_shares_one_command_encoder: self
-                .graph_work_shares_one_command_encoder(prepared.c10_execution.is_some()),
+            graph_work_shares_one_command_encoder: self.graph_work_shares_one_command_encoder(
+                prepared.c10_execution.is_some() || prepared.c11_execution.is_some(),
+            ),
             #[cfg(test)]
             capture_observations: self.capture_observations,
         }
@@ -9194,9 +9273,16 @@ impl C08CustomSpineEncodingSummary {
             && (self.layer_composite_count == 0
                 || (self.layer_composites_bind_exact_resources_and_parameters
                     && self.layer_composites_preserve_signed_mapping));
-        let exact_c08 = self.layer_composite_count == 0 && self.color_filter_count == 0;
+        let spatial_pass_count = self
+            .blur_pass_count
+            .saturating_add(self.drop_shadow_colorize_count)
+            .saturating_add(self.drop_shadow_merge_count);
+        let exact_c08 = self.layer_composite_count == 0
+            && self.color_filter_count == 0
+            && spatial_pass_count == 0;
         let exact_c09 = self.layer_composite_count > 0
             && self.color_filter_count == 0
+            && spatial_pass_count == 0
             && self
                 .normal_composite_count
                 .saturating_add(self.destination_composite_count)
@@ -9210,6 +9296,7 @@ impl C08CustomSpineEncodingSummary {
             && self.layer_composites_bind_exact_resources_and_parameters
             && self.layer_composites_preserve_signed_mapping;
         let exact_c10 = self.color_filter_count > 0
+            && spatial_pass_count == 0
             && self.color_filters_preserve_authored_order
             && self.color_filters_bind_exact_source_spatial_and_operations
             && self.color_filter_sources_and_results_are_distinct
@@ -9217,7 +9304,25 @@ impl C08CustomSpineEncodingSummary {
             && self.color_filters_preserve_signed_texel_mapping
             && self.color_filter_operation_buffers_released
             && exact_layers;
-        common && (exact_c08 || exact_c09 || exact_c10)
+        let exact_c11 = self.blur_pass_count > 0
+            && self.drop_shadow_colorize_count > 0
+            && self.drop_shadow_merge_count > 0
+            && self.c11_binds_exact_prepared_resources
+            && self.c11_uses_signed_viewport_and_scissor
+            && self.blur_sources_intermediates_and_results_are_distinct
+            && self.c11_kernels_release_at_validated_last_use
+            && self.c11_textures_release_at_validated_last_use
+            && self.drop_shadow_reads_original_source_twice
+            && self.original_source_releases_after_merge
+            && exact_layers
+            && (self.color_filter_count == 0
+                || (self.color_filters_preserve_authored_order
+                    && self.color_filters_bind_exact_source_spatial_and_operations
+                    && self.color_filter_sources_and_results_are_distinct
+                    && self.color_filters_use_validated_viewport_and_scissor
+                    && self.color_filters_preserve_signed_texel_mapping
+                    && self.color_filter_operation_buffers_released));
+        common && (exact_c08 || exact_c09 || exact_c10 || exact_c11)
     }
 }
 
@@ -9343,8 +9448,11 @@ struct C08PreparedPassEncodingRequest {
     result: RuntimeResultBinding,
     spatial_uniform: Option<PassSpatialUniformBytes>,
     color_filter_operations: Option<ColorFilterOperationBytes>,
+    drop_shadow_parameters: Option<DropShadowParameterBytes>,
     composite_parameters: Option<CompositeParameterBytes>,
     cache_keys: Option<RuntimePassCacheKeys>,
+    releases: Vec<RuntimeResourceId>,
+    kernel_releases: Vec<GaussianKernelKey>,
 }
 
 impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
@@ -9356,8 +9464,11 @@ impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
             result: request.runtime.result,
             spatial_uniform: request.spatial_uniform.clone(),
             color_filter_operations: request.color_filter_operations.clone(),
+            drop_shadow_parameters: request.drop_shadow_parameters.clone(),
             composite_parameters: request.composite_parameters.clone(),
             cache_keys: request.cache_keys.clone(),
+            releases: request.runtime.releases.clone(),
+            kernel_releases: request.kernel_releases.clone(),
         }
     }
 }
@@ -9409,6 +9520,32 @@ struct C10ColorFilterEncodingFacts {
     source_and_result_are_distinct: bool,
     validated_viewport_and_scissor: bool,
     preserved_signed_texel_mapping: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct C11BlurEncodingFacts {
+    exact_prepared_bindings: bool,
+    distinct_source_and_result: bool,
+    validated_region: bool,
+    preserved_signed_mapping: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct C11DropShadowColorizeEncodingFacts {
+    exact_prepared_bindings: bool,
+    distinct_source_and_result: bool,
+    validated_region: bool,
+    preserved_signed_mapping: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct C11DropShadowMergeEncodingFacts {
+    exact_prepared_bindings: bool,
+    distinct_source_shadow_and_result: bool,
+    validated_region: bool,
+    preserved_signed_mapping: bool,
+    fixed_source_over_blend: bool,
+    reads_original_source_and_shadow: bool,
 }
 
 struct PreparedC10ColorFilterEncoding<'prepared> {
@@ -9617,6 +9754,60 @@ fn c09_transformed_source_device_bounds(
     Ok([minimum_x, minimum_y, maximum_x, maximum_y])
 }
 
+fn encode_c11_full_target_pass(
+    encoder: &mut wgpu::CommandEncoder,
+    target: &wgpu::TextureView,
+    pipeline: &wgpu::RenderPipeline,
+    bind_group: &wgpu::BindGroup,
+    region: C08RenderRegion,
+    label: &'static str,
+) {
+    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+        label: Some(label),
+        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+            view: target,
+            resolve_target: None,
+            ops: wgpu::Operations {
+                load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                store: wgpu::StoreOp::Store,
+            },
+            depth_slice: None,
+        })],
+        depth_stencil_attachment: None,
+        occlusion_query_set: None,
+        timestamp_writes: None,
+        multiview_mask: None,
+    });
+    pass.set_pipeline(pipeline);
+    pass.set_bind_group(0, bind_group, &[]);
+    pass.set_viewport(
+        region.viewport_x,
+        region.viewport_y,
+        region.viewport_width,
+        region.viewport_height,
+        0.0,
+        1.0,
+    );
+    pass.set_scissor_rect(
+        region.scissor_x,
+        region.scissor_y,
+        region.scissor_width,
+        region.scissor_height,
+    );
+    pass.draw(0..3, 0..1);
+}
+
+fn c11_full_region_is_exact(region: C08RenderRegion, extent: PhysicalSize) -> bool {
+    region.viewport_x == 0.0
+        && region.viewport_y == 0.0
+        && region.viewport_width == extent.width() as f32
+        && region.viewport_height == extent.height() as f32
+        && region.scissor_x == 0
+        && region.scissor_y == 0
+        && region.scissor_width == extent.width()
+        && region.scissor_height == extent.height()
+}
+
 fn exact_c08_read(
     request: &C08PreparedPassEncodingRequest,
     role: RuntimeReadRole,
@@ -9646,10 +9837,29 @@ fn c08_scheduled_encoding_order_is_exact(
                     C08ScheduledEncodingKind::CanonicalizeCapture
                 }
                 RuntimePassKind::ColorFilter(Some(_)) => C08ScheduledEncodingKind::ColorFilter,
+                RuntimePassKind::BlurHorizontal(Some(blur)) => match blur.input {
+                    RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurHorizontalRgba,
+                    RuntimeBlurInput::SourceAlpha => {
+                        C08ScheduledEncodingKind::BlurHorizontalSourceAlpha
+                    }
+                },
+                RuntimePassKind::BlurVertical(Some(blur)) => match blur.input {
+                    RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurVerticalRgba,
+                    RuntimeBlurInput::SourceAlpha => {
+                        C08ScheduledEncodingKind::BlurVerticalSourceAlpha
+                    }
+                },
+                RuntimePassKind::DropShadowColorize(Some(_)) => {
+                    C08ScheduledEncodingKind::DropShadowColorize
+                }
                 RuntimePassKind::Composite(Some(RuntimeComposite {
                     kind: RuntimeCompositeKind::SpanSourceOver,
                     ..
                 })) => C08ScheduledEncodingKind::SpanSourceOver,
+                RuntimePassKind::Composite(Some(RuntimeComposite {
+                    kind: RuntimeCompositeKind::DropShadow,
+                    ..
+                })) => C08ScheduledEncodingKind::DropShadowMerge,
                 RuntimePassKind::Composite(Some(RuntimeComposite {
                     kind: RuntimeCompositeKind::Layer { .. },
                     ..
@@ -9658,17 +9868,49 @@ fn c08_scheduled_encoding_order_is_exact(
                 RuntimePassKind::VelloCapture(None)
                 | RuntimePassKind::CopyBackdrop
                 | RuntimePassKind::ColorFilter(None)
-                | RuntimePassKind::BlurHorizontal(_)
-                | RuntimePassKind::BlurVertical(_)
-                | RuntimePassKind::DropShadowColorize(_)
-                | RuntimePassKind::Composite(None)
-                | RuntimePassKind::Composite(Some(RuntimeComposite {
-                    kind: RuntimeCompositeKind::DropShadow,
-                    ..
-                })) => return false,
+                | RuntimePassKind::BlurHorizontal(None)
+                | RuntimePassKind::BlurVertical(None)
+                | RuntimePassKind::DropShadowColorize(None)
+                | RuntimePassKind::Composite(None) => return false,
             };
             *scheduled == expected
         })
+}
+
+#[cfg(test)]
+fn c11_scheduled_pass_order_for_test(
+    scheduled: &[C08ScheduledEncodingKind],
+) -> Vec<C11FilterPassTagForTest> {
+    scheduled
+        .iter()
+        .filter_map(|kind| match kind {
+            C08ScheduledEncodingKind::ColorFilter => Some(C11FilterPassTagForTest::Color),
+            C08ScheduledEncodingKind::BlurHorizontalRgba => {
+                Some(C11FilterPassTagForTest::BlurHorizontalRgba)
+            }
+            C08ScheduledEncodingKind::BlurVerticalRgba => {
+                Some(C11FilterPassTagForTest::BlurVerticalRgba)
+            }
+            C08ScheduledEncodingKind::BlurHorizontalSourceAlpha => {
+                Some(C11FilterPassTagForTest::BlurHorizontalSourceAlpha)
+            }
+            C08ScheduledEncodingKind::BlurVerticalSourceAlpha => {
+                Some(C11FilterPassTagForTest::BlurVerticalSourceAlpha)
+            }
+            C08ScheduledEncodingKind::DropShadowColorize => {
+                Some(C11FilterPassTagForTest::DropShadowColorize)
+            }
+            C08ScheduledEncodingKind::DropShadowMerge => {
+                Some(C11FilterPassTagForTest::DropShadowMerge)
+            }
+            C08ScheduledEncodingKind::ClearRoot
+            | C08ScheduledEncodingKind::VelloCapture
+            | C08ScheduledEncodingKind::CanonicalizeCapture
+            | C08ScheduledEncodingKind::SpanSourceOver
+            | C08ScheduledEncodingKind::LayerComposite
+            | C08ScheduledEncodingKind::Present => None,
+        })
+        .collect()
 }
 
 fn c08_capture_handoff_is_bounded(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> bool {
@@ -9837,9 +10079,11 @@ pub(crate) struct PreparedGraph<'device> {
     c08_execution: Option<C08ExecutionFacts>,
     c09_execution: Option<ClosedExecutableGraphFacts>,
     c10_execution: Option<ClosedExecutableGraphFacts>,
+    c11_execution: Option<ClosedExecutableGraphFacts>,
     resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
     color_filter_operation_bindings: BTreeMap<RuntimePassId, PreparedColorFilterOperationBinding>,
+    c11_pass_objects: BTreeMap<RuntimePassId, PreparedC11PassObjects>,
     pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
     frame_scope: Option<FrameResourceScope>,
     next_pass: usize,
@@ -9956,20 +10200,34 @@ fn realize_prepared_graph_passes(
     device: &wgpu::Device,
     pass_cache: &DevicePassCache,
     enabled: bool,
-) -> Result<Option<ProvisionalDevicePassCacheUpdate>> {
+) -> Result<PreparedPassRealization> {
     if !enabled {
-        return Ok(None);
+        return Ok(PreparedPassRealization {
+            update: None,
+            c11_objects: BTreeMap::new(),
+        });
     }
     let mut update = pass_cache.provisional_update();
     let mut realized_pass = false;
+    let mut c11_objects = BTreeMap::new();
     for request in &plan.passes {
         let Some(keys) = request.cache_keys.as_ref() else {
             continue;
         };
-        realize_prepared_graph_pass(&mut update, device, pass_cache, request, keys)?;
+        let objects = realize_prepared_graph_pass(&mut update, device, pass_cache, request, keys)?;
+        if let Some(objects) = objects
+            && c11_objects.insert(request.runtime.id, objects).is_some()
+        {
+            return Err(preparation_error(
+                "one C11 pass retained more than one prepared object set",
+            ));
+        }
         realized_pass = true;
     }
-    Ok(realized_pass.then_some(update))
+    Ok(PreparedPassRealization {
+        update: realized_pass.then_some(update),
+        c11_objects,
+    })
 }
 
 fn realize_prepared_graph_pass(
@@ -9978,66 +10236,87 @@ fn realize_prepared_graph_pass(
     pass_cache: &DevicePassCache,
     request: &RuntimePassPreparationRequest,
     keys: &RuntimePassCacheKeys,
-) -> Result<()> {
+) -> Result<Option<PreparedC11PassObjects>> {
     match &request.runtime.kind {
-        RuntimePassKind::ColorFilter(Some(_)) => update
-            .realize_color_filter_pass(
+        RuntimePassKind::ColorFilter(Some(_)) => {
+            update
+                .realize_color_filter_pass(
+                    device,
+                    pass_cache,
+                    keys.samplers(),
+                    keys.layout(),
+                    keys.shader(),
+                    keys.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            Ok(None)
+        }
+        RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_)) => {
+            let objects = update.realize_blur_pass(
                 device,
                 pass_cache,
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
                 keys.pipeline(),
-            )?
-            .require_encoding_ready(),
-        RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_)) => update
-            .realize_blur_pass(
+            )?;
+            objects.require_encoding_ready()?;
+            Ok(Some(PreparedC11PassObjects::Blur {
+                source_sampler: objects.source_sampler().clone(),
+                layout: objects.bind_group_layout().clone(),
+                pipeline: objects.render_pipeline().clone(),
+            }))
+        }
+        RuntimePassKind::DropShadowColorize(Some(_)) => {
+            let objects = update.realize_drop_shadow_colorize_pass(
                 device,
                 pass_cache,
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
                 keys.pipeline(),
-            )?
-            .require_encoding_ready(),
-        RuntimePassKind::DropShadowColorize(Some(_)) => update
-            .realize_drop_shadow_colorize_pass(
-                device,
-                pass_cache,
-                keys.samplers(),
-                keys.layout(),
-                keys.shader(),
-                keys.pipeline(),
-            )?
-            .require_encoding_ready(),
+            )?;
+            objects.require_encoding_ready()?;
+            Ok(Some(PreparedC11PassObjects::DropShadowColorize {
+                source_sampler: objects.source_sampler().clone(),
+                layout: objects.bind_group_layout().clone(),
+                pipeline: objects.render_pipeline().clone(),
+            }))
+        }
         RuntimePassKind::Composite(Some(RuntimeComposite {
             kind: RuntimeCompositeKind::Layer { .. },
             ..
-        })) => update
-            .realize_composite_pass(
-                device,
-                pass_cache,
-                keys.samplers(),
-                keys.layout(),
-                keys.shader(),
-                keys.pipeline(),
-            )?
-            .require_encoding_ready(),
+        })) => {
+            update
+                .realize_composite_pass(
+                    device,
+                    pass_cache,
+                    keys.samplers(),
+                    keys.layout(),
+                    keys.shader(),
+                    keys.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            Ok(None)
+        }
         RuntimePassKind::CanonicalizeCapture
         | RuntimePassKind::Composite(Some(RuntimeComposite {
             kind: RuntimeCompositeKind::SpanSourceOver | RuntimeCompositeKind::DropShadow,
             ..
         }))
-        | RuntimePassKind::Present => update
-            .realize_c08_pass(
-                device,
-                pass_cache,
-                keys.samplers(),
-                keys.layout(),
-                keys.shader(),
-                keys.pipeline(),
-            )?
-            .require_encoding_ready(),
+        | RuntimePassKind::Present => {
+            update
+                .realize_c08_pass(
+                    device,
+                    pass_cache,
+                    keys.samplers(),
+                    keys.layout(),
+                    keys.shader(),
+                    keys.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            Ok(None)
+        }
         RuntimePassKind::ClearRoot { .. }
         | RuntimePassKind::VelloCapture(_)
         | RuntimePassKind::CopyBackdrop
@@ -10262,9 +10541,24 @@ impl<'device> PreparedGraph<'device> {
                 }
                 Ok(prepared)
             }
-            PrePreparationGraphClassification::ExactC11(_) => Err(preparation_error(
-                "a C11 spatial-filter graph has no executable shader preparation in this task",
-            )),
+            PrePreparationGraphClassification::ExactC11(preparable) => {
+                let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
+                let prepared = Self::try_prepare_inner(
+                    GraphPreparationSource::C11(preparable),
+                    selected_working_format,
+                    capabilities,
+                    device,
+                    queue,
+                    resources,
+                    pass_cache_phase,
+                )?;
+                if prepared.c11_execution.is_none() {
+                    return Err(preparation_error(
+                        "C11 preparation lost its validated closed execution facts",
+                    ));
+                }
+                Ok(prepared)
+            }
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
                 "a future GPU pass cannot enter C09 resource preparation",
             )),
@@ -10324,7 +10618,8 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         let (pass_cache, realize_checked_passes) = pass_cache_phase;
         let color_filter_operation_limits = source.color_filter_operation_limits();
-        let (lowered, c08_execution, c09_execution, c10_execution) = source.into_parts();
+        let (lowered, c08_execution, c09_execution, c10_execution, c11_execution) =
+            source.into_parts();
         let plan = match color_filter_operation_limits {
             Some(limits) => RuntimeGraphPreparationPlan::try_derive_with_color_filter_limits(
                 lowered,
@@ -10344,28 +10639,36 @@ impl<'device> PreparedGraph<'device> {
 
         let mut frame_scope = resources.begin_frame()?;
         frame_scope.abort_provisional_on_drop();
-        if c08_execution.is_some() || c09_execution.is_some() || c10_execution.is_some() {
+        if c08_execution.is_some()
+            || c09_execution.is_some()
+            || c10_execution.is_some()
+            || c11_execution.is_some()
+        {
             frame_scope.discard_on_drop();
         }
         let (resource_bindings, kernel_bindings) =
             acquire_prepared_graph_resources(&plan, &mut frame_scope, device, queue, capabilities)?;
         let color_filter_operation_bindings =
             create_color_filter_operation_bindings(&plan, device, queue)?;
-        let pass_cache_update =
+        let pass_realization =
             realize_prepared_graph_passes(&plan, device, pass_cache, realize_checked_passes)?;
-        let c08_encoding_state =
-            (c08_execution.is_some() || c09_execution.is_some() || c10_execution.is_some())
-                .then_some(C08CustomSpineEncodingState::Ready);
+        let c08_encoding_state = (c08_execution.is_some()
+            || c09_execution.is_some()
+            || c10_execution.is_some()
+            || c11_execution.is_some())
+        .then_some(C08CustomSpineEncodingState::Ready);
 
         Ok(Self {
             plan,
             c08_execution,
             c09_execution,
             c10_execution,
+            c11_execution,
             resource_bindings,
             kernel_bindings,
             color_filter_operation_bindings,
-            pass_cache_update,
+            c11_pass_objects: pass_realization.c11_objects,
+            pass_cache_update: pass_realization.update,
             frame_scope: Some(frame_scope),
             next_pass: 0,
             c08_encoding_state,
@@ -10550,6 +10853,12 @@ impl<'device> PreparedGraph<'device> {
                     execution.output_format,
                     execution.captures.len(),
                 )
+            } else if let Some(execution) = self.c11_execution.as_ref() {
+                (
+                    execution.working_format,
+                    execution.output_format,
+                    execution.captures.len(),
+                )
             } else {
                 return Err(preparation_error(
                     "the C08 custom scheduler requires validated execution facts",
@@ -10627,6 +10936,17 @@ impl<'device> PreparedGraph<'device> {
             RuntimePassKind::ColorFilter(Some(_)) => {
                 self.encode_c10_color_filter_step(encoder, request, progress)
             }
+            RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_)) => {
+                self.encode_c11_blur_step(encoder, request, progress)
+            }
+            RuntimePassKind::DropShadowColorize(Some(_)) => {
+                self.encode_c11_drop_shadow_colorize_step(encoder, request, progress)
+            }
+            RuntimePassKind::Composite(Some(composite))
+                if matches!(composite.kind, RuntimeCompositeKind::DropShadow) =>
+            {
+                self.encode_c11_drop_shadow_merge_step(encoder, request, progress)
+            }
             RuntimePassKind::Composite(Some(composite))
                 if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
             {
@@ -10643,9 +10963,9 @@ impl<'device> PreparedGraph<'device> {
             RuntimePassKind::VelloCapture(None)
             | RuntimePassKind::CopyBackdrop
             | RuntimePassKind::ColorFilter(None)
-            | RuntimePassKind::BlurHorizontal(_)
-            | RuntimePassKind::BlurVertical(_)
-            | RuntimePassKind::DropShadowColorize(_)
+            | RuntimePassKind::BlurHorizontal(None)
+            | RuntimePassKind::BlurVertical(None)
+            | RuntimePassKind::DropShadowColorize(None)
             | RuntimePassKind::Composite(_) => Err(preparation_error(
                 "a non-C08 pass reached the custom graph spine scheduler",
             )),
@@ -10732,6 +11052,129 @@ impl<'device> PreparedGraph<'device> {
             .get(&request.id)
             .is_some_and(|binding| binding.buffer.is_none());
         progress.record_custom_completion(C08ScheduledEncodingKind::ColorFilter);
+        Ok(())
+    }
+
+    fn encode_c11_blur_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c11_blur(encoder, request)?;
+        let kind = match &request.kind {
+            RuntimePassKind::BlurHorizontal(Some(blur)) => match blur.input {
+                RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurHorizontalRgba,
+                RuntimeBlurInput::SourceAlpha => {
+                    C08ScheduledEncodingKind::BlurHorizontalSourceAlpha
+                }
+            },
+            RuntimePassKind::BlurVertical(Some(blur)) => match blur.input {
+                RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurVerticalRgba,
+                RuntimeBlurInput::SourceAlpha => C08ScheduledEncodingKind::BlurVerticalSourceAlpha,
+            },
+            _ => {
+                return Err(preparation_error(
+                    "the C11 blur scheduler lost its pass kind",
+                ));
+            }
+        };
+        #[cfg(test)]
+        progress
+            .composite_encoder_identities
+            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        self.complete_c08_custom_pass(request.id)?;
+        progress.blur_pass_count = progress.blur_pass_count.saturating_add(1);
+        progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
+        progress.c11_regions_are_exact &= facts.validated_region && facts.preserved_signed_mapping;
+        progress.blur_allocations_are_distinct &= facts.distinct_source_and_result;
+        progress.c11_kernels_released &= request.kernel_releases.iter().all(|kernel| {
+            self.kernel_bindings
+                .get(kernel)
+                .is_some_and(|binding| binding.lease.is_none())
+        });
+        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+            self.resource_bindings
+                .get(resource)
+                .is_some_and(|binding| binding.lease.is_none())
+        });
+        progress.record_custom_completion(kind);
+        Ok(())
+    }
+
+    fn encode_c11_drop_shadow_colorize_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c11_drop_shadow_colorize(encoder, request)?;
+        #[cfg(test)]
+        progress
+            .composite_encoder_identities
+            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        self.complete_c08_custom_pass(request.id)?;
+        progress.drop_shadow_colorize_count = progress.drop_shadow_colorize_count.saturating_add(1);
+        progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
+        progress.c11_regions_are_exact &= facts.validated_region && facts.preserved_signed_mapping;
+        progress.blur_allocations_are_distinct &= facts.distinct_source_and_result;
+        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+            self.resource_bindings
+                .get(resource)
+                .is_some_and(|binding| binding.lease.is_none())
+        });
+        progress.record_custom_completion(C08ScheduledEncodingKind::DropShadowColorize);
+        Ok(())
+    }
+
+    fn encode_c11_drop_shadow_merge_step(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+        progress: &mut C08CustomSpineEncodingProgress,
+    ) -> Result<()> {
+        let facts = self.encode_c11_drop_shadow_merge(encoder, request)?;
+        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?.resource();
+        let source_is_live = self
+            .resource_bindings
+            .get(&source)
+            .is_some_and(|binding| binding.lease.is_some());
+        let source_read_twice = self.c11_execution.as_ref().is_some_and(|execution| {
+            execution.drop_shadows.iter().any(|shadow| {
+                shadow.merge == request.id
+                    && shadow.source == source
+                    && self
+                        .resource_request(source)
+                        .is_ok_and(|resource| resource.expected_reads == 2)
+            })
+        });
+        #[cfg(test)]
+        progress
+            .composite_encoder_identities
+            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        self.complete_c08_custom_pass(request.id)?;
+        let source_is_released = self
+            .resource_bindings
+            .get(&source)
+            .is_some_and(|binding| binding.lease.is_none());
+        progress.drop_shadow_merge_count = progress.drop_shadow_merge_count.saturating_add(1);
+        progress.source_over_count = progress.source_over_count.saturating_add(1);
+        progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
+        progress.c11_regions_are_exact &= facts.validated_region && facts.preserved_signed_mapping;
+        progress.parent_and_result_are_distinct &= facts.distinct_source_shadow_and_result;
+        progress.full_copy_before_bounded_render &= facts.distinct_source_shadow_and_result;
+        progress.samples_source_with_fixed_blend &= facts.fixed_source_over_blend;
+        progress.preserves_signed_origin &= facts.preserved_signed_mapping;
+        progress.shadow_source_read_twice &=
+            facts.reads_original_source_and_shadow && source_read_twice;
+        progress.shadow_source_released_after_merge &=
+            source_is_live && source_is_released && request.releases.contains(&source);
+        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+            self.resource_bindings
+                .get(resource)
+                .is_some_and(|binding| binding.lease.is_none())
+        });
+        progress.record_custom_completion(C08ScheduledEncodingKind::DropShadowMerge);
         Ok(())
     }
 
@@ -10978,6 +11421,46 @@ impl<'device> PreparedGraph<'device> {
             )
     }
 
+    fn c11_blur_pass_objects(
+        &self,
+        pass: RuntimePassId,
+    ) -> Result<(
+        &wgpu::Sampler,
+        &wgpu::BindGroupLayout,
+        &wgpu::RenderPipeline,
+    )> {
+        match self.c11_pass_objects.get(&pass) {
+            Some(PreparedC11PassObjects::Blur {
+                source_sampler,
+                layout,
+                pipeline,
+            }) => Ok((source_sampler, layout, pipeline)),
+            Some(PreparedC11PassObjects::DropShadowColorize { .. }) | None => Err(
+                preparation_error("the C11 blur pass lost its exact prepared object handles"),
+            ),
+        }
+    }
+
+    fn c11_drop_shadow_colorize_pass_objects(
+        &self,
+        pass: RuntimePassId,
+    ) -> Result<(
+        &wgpu::Sampler,
+        &wgpu::BindGroupLayout,
+        &wgpu::RenderPipeline,
+    )> {
+        match self.c11_pass_objects.get(&pass) {
+            Some(PreparedC11PassObjects::DropShadowColorize {
+                source_sampler,
+                layout,
+                pipeline,
+            }) => Ok((source_sampler, layout, pipeline)),
+            Some(PreparedC11PassObjects::Blur { .. }) | None => Err(preparation_error(
+                "the C11 drop-shadow pass lost its exact prepared object handles",
+            )),
+        }
+    }
+
     fn create_c08_spatial_uniform_buffer(&self, bytes: &PassSpatialUniformBytes) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Surgeist C08 pass spatial uniform"),
@@ -10995,6 +11478,20 @@ impl<'device> PreparedGraph<'device> {
     ) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Surgeist C09 composite parameter uniform"),
+            size: bytes.as_bytes().len() as u64,
+            usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(&buffer, 0, bytes.as_bytes());
+        buffer
+    }
+
+    fn create_c11_drop_shadow_parameter_buffer(
+        &self,
+        bytes: &DropShadowParameterBytes,
+    ) -> wgpu::Buffer {
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("Surgeist C11 drop-shadow parameter uniform"),
             size: bytes.as_bytes().len() as u64,
             usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -11031,6 +11528,13 @@ impl<'device> PreparedGraph<'device> {
                 })
                 .or_else(|| {
                     self.c10_execution.as_ref().and_then(|execution| {
+                        execution.captures.iter().find(|capture| {
+                            capture.pass() == request.id && capture.target() == target
+                        })
+                    })
+                })
+                .or_else(|| {
+                    self.c11_execution.as_ref().and_then(|execution| {
                         execution.captures.iter().find(|capture| {
                             capture.pass() == request.id && capture.target() == target
                         })
@@ -11452,6 +11956,275 @@ impl<'device> PreparedGraph<'device> {
         pass.draw(0..3, 0..1);
 
         Ok(prepared.facts)
+    }
+
+    fn encode_c11_blur(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C11BlurEncodingFacts> {
+        let blur = match &request.kind {
+            RuntimePassKind::BlurHorizontal(Some(blur))
+            | RuntimePassKind::BlurVertical(Some(blur)) => blur,
+            _ => return Err(preparation_error("the C11 blur payload is missing")),
+        };
+        let source = exact_c08_read(request, RuntimeReadRole::FilterSource)?;
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error("the C11 blur result is missing"));
+        };
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        let distinct = source.resource() != target
+            && source_binding.allocation_resource() != target_binding.allocation_resource();
+        let spatial = request
+            .spatial_uniform
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C11 blur spatial bytes are missing"))?;
+        let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
+            source_spatial,
+            target_spatial,
+        )?;
+        let kernel = self
+            .gaussian_kernel_binding_for_pass(request.id)?
+            .ok_or_else(|| preparation_error("the C11 blur kernel binding is missing"))?;
+        let keys = request
+            .cache_keys
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C11 blur cache keys are missing"))?;
+        let (sampler, layout, pipeline) = self.c11_blur_pass_objects(request.id)?;
+        if request.reads.len() != 1
+            || !distinct
+            || blur.spatial.source != source_spatial
+            || blur.spatial.result != target_spatial
+            || blur.kernel != kernel.key()
+            || spatial != &expected_spatial
+            || keys.samplers() != [source.sampler_key()]
+            || source.sampling_filter() != RuntimeSamplingFilter::Linear
+            || source.sampling_edge() != RuntimeSamplingEdge::TransparentBlack
+            || self.resource_request(source.resource())?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+            || self.resource_request(target)?.format
+                != RuntimeResourceFormat::Working(self.plan.working_format)
+        {
+            return Err(preparation_error(
+                "the C11 blur bindings differ from the checked pass",
+            ));
+        }
+        let region = C08RenderRegion::full(target_spatial.device_extent)?;
+        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C11 exact blur bindings"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_binding.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: spatial_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: kernel.buffer().as_entire_binding(),
+                },
+            ],
+        });
+        encode_c11_full_target_pass(
+            encoder,
+            target_binding.view(),
+            pipeline,
+            &bind_group,
+            region,
+            "Surgeist C11 Gaussian blur",
+        );
+        Ok(C11BlurEncodingFacts {
+            exact_prepared_bindings: true,
+            distinct_source_and_result: distinct,
+            validated_region: c11_full_region_is_exact(region, target_spatial.device_extent),
+            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+                spatial,
+                source_spatial,
+            ),
+        })
+    }
+
+    fn encode_c11_drop_shadow_colorize(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C11DropShadowColorizeEncodingFacts> {
+        let RuntimePassKind::DropShadowColorize(Some(shadow)) = &request.kind else {
+            return Err(preparation_error("the C11 drop-shadow payload is missing"));
+        };
+        let source = exact_c08_read(request, RuntimeReadRole::BlurredSourceAlpha)?;
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error("the C11 drop-shadow result is missing"));
+        };
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        let distinct = source.resource() != target
+            && source_binding.allocation_resource() != target_binding.allocation_resource();
+        let spatial = request
+            .spatial_uniform
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C11 drop-shadow spatial bytes are missing"))?;
+        let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
+            source_spatial,
+            target_spatial,
+        )?;
+        let parameters = request
+            .drop_shadow_parameters
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C11 drop-shadow parameter bytes are missing"))?;
+        let expected_parameters = DropShadowParameterBytes::try_new(shadow.offset, shadow.color)?;
+        let keys = request
+            .cache_keys
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C11 drop-shadow cache keys are missing"))?;
+        let (sampler, layout, pipeline) = self.c11_drop_shadow_colorize_pass_objects(request.id)?;
+        if request.reads.len() != 1
+            || !distinct
+            || shadow.spatial.source != source_spatial
+            || shadow.spatial.result != target_spatial
+            || spatial != &expected_spatial
+            || parameters != &expected_parameters
+            || keys.samplers() != [source.sampler_key()]
+            || source.sampling_filter() != RuntimeSamplingFilter::Linear
+            || source.sampling_edge() != RuntimeSamplingEdge::TransparentBlack
+        {
+            return Err(preparation_error(
+                "the C11 drop-shadow bindings differ from the checked pass",
+            ));
+        }
+        let region = C08RenderRegion::full(target_spatial.device_extent)?;
+        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let parameter_buffer = self.create_c11_drop_shadow_parameter_buffer(parameters);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("Surgeist C11 exact drop-shadow colorize bindings"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source_binding.view()),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: spatial_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: parameter_buffer.as_entire_binding(),
+                },
+            ],
+        });
+        encode_c11_full_target_pass(
+            encoder,
+            target_binding.view(),
+            pipeline,
+            &bind_group,
+            region,
+            "Surgeist C11 drop-shadow colorize",
+        );
+        Ok(C11DropShadowColorizeEncodingFacts {
+            exact_prepared_bindings: true,
+            distinct_source_and_result: distinct,
+            validated_region: c11_full_region_is_exact(region, target_spatial.device_extent),
+            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+                spatial,
+                source_spatial,
+            ),
+        })
+    }
+
+    fn encode_c11_drop_shadow_merge(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        request: &C08PreparedPassEncodingRequest,
+    ) -> Result<C11DropShadowMergeEncodingFacts> {
+        let RuntimePassKind::Composite(Some(RuntimeComposite {
+            kind: RuntimeCompositeKind::DropShadow,
+            source_captured_before_outer_semantics: true,
+        })) = &request.kind
+        else {
+            return Err(preparation_error(
+                "the C11 drop-shadow merge payload is missing",
+            ));
+        };
+        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
+        let shadow = exact_c08_read(request, RuntimeReadRole::Shadow)?;
+        let RuntimeResultBinding::Resource(target) = request.result else {
+            return Err(preparation_error(
+                "the C11 drop-shadow merge result is missing",
+            ));
+        };
+        let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
+        let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
+        let shadow_binding = self.texture_binding_for_pass(request.id, shadow.resource())?;
+        let shadow_spatial = self.validate_texture_binding(&shadow_binding, shadow.resource())?;
+        let target_binding = self.texture_binding_for_pass(request.id, target)?;
+        let target_spatial = self.validate_texture_binding(&target_binding, target)?;
+        let distinct = source_binding.allocation_resource() != shadow_binding.allocation_resource()
+            && source_binding.allocation_resource() != target_binding.allocation_resource()
+            && shadow_binding.allocation_resource() != target_binding.allocation_resource();
+        if request.reads.len() != 2 || !distinct || shadow_spatial != target_spatial {
+            return Err(preparation_error(
+                "the C11 drop-shadow merge aliases or changed its shadow grid",
+            ));
+        }
+        copy_c09_composite_parent(
+            encoder,
+            &shadow_binding,
+            &target_binding,
+            c09_composite_copy_extent(shadow_spatial),
+        );
+        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
+        let fixed_blend = self.encode_c08_sampled_render_pass(
+            encoder,
+            request,
+            source,
+            C08SampledRenderTarget {
+                view: target_binding.view(),
+                extent: target_spatial.device_extent,
+                region,
+                load: wgpu::LoadOp::Load,
+                label: "Surgeist C11 unchanged source over drop shadow",
+            },
+        )?;
+        let spatial = request
+            .spatial_uniform
+            .as_ref()
+            .ok_or_else(|| preparation_error("the C11 merge spatial bytes are missing"))?;
+        Ok(C11DropShadowMergeEncodingFacts {
+            exact_prepared_bindings: true,
+            distinct_source_shadow_and_result: distinct,
+            validated_region: region.is_none_or(|region| {
+                region.scissor_x.saturating_add(region.scissor_width)
+                    <= target_spatial.device_extent.width()
+                    && region.scissor_y.saturating_add(region.scissor_height)
+                        <= target_spatial.device_extent.height()
+            }),
+            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+                spatial,
+                source_spatial,
+            ),
+            fixed_source_over_blend: fixed_blend,
+            reads_original_source_and_shadow: source.sampling_edge()
+                == RuntimeSamplingEdge::TransparentBlack
+                && shadow.sampling_edge() == RuntimeSamplingEdge::TransparentBlack,
+        })
     }
 
     fn c09_composite_semantic<'prepared>(
@@ -12027,13 +12800,6 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "C08 inspects exact prepared Gaussian bindings before blur encoding"
-        )
-    )]
     pub(crate) fn gaussian_kernel_binding_for_pass(
         &self,
         pass: RuntimePassId,
