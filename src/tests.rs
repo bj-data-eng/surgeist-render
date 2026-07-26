@@ -11729,6 +11729,98 @@ fn c12_backdrop_graph_reads_completed_parent_once_and_preserves_group_order() {
 }
 
 #[test]
+fn c12_copy_backdrop_layout_binds_parent_and_spatial_mapping() {
+    let observed = super::pass::c12_copy_backdrop_layout_observation_for_test(
+        c12_bounded_graph_commands_for_test(),
+        super::frame::FrameContext::try_new(
+            Size::new(16.0, 12.0),
+            1.0,
+            Antialiasing::Msaa8,
+            Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+        )
+        .unwrap(),
+        DeviceCapabilities::from_test_facts(true, true, 4_096),
+    );
+
+    assert!(
+        observed.realizes_both_working_formats
+            && observed.binds_exact_completed_parent
+            && observed.binds_only_one_nearest_transparent_sampler
+            && observed.binds_only_spatial_uniform
+            && observed.targets_only_the_working_format
+            && observed.source_and_result_are_distinct,
+        "the C12 CopyBackdrop layout is not exact"
+    );
+}
+
+#[test]
+fn c12_copy_backdrop_cache_realizes_checked_working_format_programs() {
+    let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
+    let identity = pollster::block_on(backend.select_device(None))
+        .unwrap_or_panic_for_test("C12 checked copy realization requires backend selection")
+        .unwrap_or_panic_for_test("C12 checked copy realization requires a host adapter");
+    let ready = backend
+        .ready_device_state_borrow_for_test(identity)
+        .unwrap_or_panic_for_test("C12 checked copy realization requires a ready device");
+    let capabilities =
+        DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
+    let observed = pollster::block_on(
+        super::pass::c12_copy_backdrop_cache_realization_observation_for_test(
+            ready.device_for_test(),
+            c12_bounded_graph_commands_for_test(),
+            super::frame::FrameContext::try_new(
+                Size::new(16.0, 12.0),
+                1.0,
+                Antialiasing::Msaa8,
+                Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
+            )
+            .unwrap(),
+            capabilities,
+        ),
+    )
+    .unwrap_or_panic_for_test("the C12 checked copy shader must reach real WGPU realization");
+
+    assert!(
+        observed.realizes_high_precision
+            && observed.realizes_reduced_precision
+            && observed.checked_scope_is_clean
+            && observed.publishes_only_copy_backdrop_entries
+            && observed.rejects_unsupported_format_before_publication,
+        "the C12 CopyBackdrop working-format program is unrealized"
+    );
+}
+
+#[test]
+fn copy_backdrop_maps_signed_bounds_and_transparent_surface_edges() {
+    let source = fs::read_to_string(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/shaders/copy_backdrop.wgsl"),
+    )
+    .unwrap_or_panic_for_test("the canonical CopyBackdrop shader source must be readable");
+    let maps_capture_centers_to_surface = source
+        .contains("let capture_point = spatial.destination_origin_scale.xy")
+        && source.contains("+ capture_position / spatial.destination_origin_scale.z;")
+        && source.contains("return (capture_point - spatial.source_origin_scale.xy)")
+        && source.contains("* spatial.source_origin_scale.z;");
+    let checks_signed_surface_bounds = source.contains("if (any(surface_texel < vec2<f32>(0.0))")
+        && source.contains("|| any(surface_texel >= surface_extent))");
+    let transparent_outside_surface =
+        source.contains("return vec4<f32>(0.0);") && source.contains("surface_texel");
+    let samples_exact_parent_center = source.contains("textureSampleLevel(")
+        && source.contains("parent_texture,")
+        && source.contains("parent_sampler,")
+        && source.contains("surface_texel / surface_extent,")
+        && source.contains("0.0,");
+
+    assert!(
+        maps_capture_centers_to_surface
+            && checks_signed_surface_bounds
+            && transparent_outside_surface
+            && samples_exact_parent_center,
+        "CopyBackdrop does not preserve signed mapping and transparent surface edges"
+    );
+}
+
+#[test]
 fn gaussian_kernel_bytes_are_symmetric_normalized_and_exactly_cached() {
     assert_gaussian_kernel_upload_lifecycle(2.0, 1.5, 2.5);
     let plan = GaussianKernelPlan::try_new(2.0, 1.5, 2.5, GaussianKernelSamplingForm::PairedLinear)
@@ -15789,6 +15881,7 @@ fn c07_contains_no_placeholder_custom_shader_program() {
         "blur.wgsl".to_owned(),
         "canonicalize_capture.wgsl".to_owned(),
         "color_filter.wgsl".to_owned(),
+        "copy_backdrop.wgsl".to_owned(),
         "drop_shadow.wgsl".to_owned(),
         "layer_composite.wgsl".to_owned(),
         "present.wgsl".to_owned(),

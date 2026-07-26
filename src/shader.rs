@@ -18,6 +18,7 @@ const LAYER_COMPOSITE_WGSL: &str = include_str!("shaders/layer_composite.wgsl");
 const COLOR_FILTER_WGSL: &str = include_str!("shaders/color_filter.wgsl");
 const BLUR_WGSL: &str = include_str!("shaders/blur.wgsl");
 const DROP_SHADOW_WGSL: &str = include_str!("shaders/drop_shadow.wgsl");
+const COPY_BACKDROP_WGSL: &str = include_str!("shaders/copy_backdrop.wgsl");
 
 const COLOR_FILTER_OPERATION_HEADER_BYTE_LEN: u64 = 16;
 const COLOR_FILTER_OPERATION_RECORD_BYTE_LEN: u64 = 32;
@@ -692,6 +693,19 @@ struct ColorFilterPassKeyRefs<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CopyBackdropPassDescription {
+    working_format: ShaderTextureFormatKey,
+}
+
+#[derive(Clone, Copy)]
+struct CopyBackdropPassKeyRefs<'a> {
+    samplers: &'a [SamplerKey],
+    layout: &'a BindGroupLayoutKey,
+    shader: &'a ShaderModuleKey,
+    pipeline: &'a RenderPipelineKey,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BlurAxis {
     Horizontal,
     Vertical,
@@ -768,6 +782,15 @@ pub(crate) struct ProvisionalCompositePassObjects<'a> {
 pub(crate) struct ProvisionalColorFilterPassObjects<'a> {
     description: ColorFilterPassDescription,
     source_sampler: &'a wgpu::Sampler,
+    layout: &'a wgpu::BindGroupLayout,
+    shader: &'a wgpu::ShaderModule,
+    pipeline: &'a wgpu::RenderPipeline,
+}
+
+/// Borrowed C12 backdrop-copy objects selected entirely by checked cache facts.
+pub(crate) struct ProvisionalCopyBackdropPassObjects<'a> {
+    description: CopyBackdropPassDescription,
+    parent_sampler: &'a wgpu::Sampler,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
     pipeline: &'a wgpu::RenderPipeline,
@@ -993,6 +1016,53 @@ impl DevicePassCache {
             && self.pipelines.keys().all(|key| {
                 key.shader.program == ShaderProgramKey::ColorFilter
                     && key.layout.program == ShaderProgramKey::ColorFilter
+            })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_copy_backdrop_pass_for_test(
+        &self,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> bool {
+        validate_copy_backdrop_pass_keys(CopyBackdropPassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        })
+        .is_ok()
+            && samplers.iter().all(|key| self.samplers.contains_key(key))
+            && self.layouts.contains_key(layout)
+            && self.shaders.contains_key(shader)
+            && self.pipelines.contains_key(pipeline)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn contains_only_two_copy_backdrop_passes_for_test(&self) -> bool {
+        self.samplers.len() == 2
+            && self.layouts.len() == 2
+            && self.shaders.len() == 2
+            && self.pipelines.len() == 2
+            && self.samplers.keys().all(|key| {
+                key.binding_role == ShaderBindingRoleKey::CompletedParent
+                    && key.filter == ShaderSamplingFilterKey::Nearest
+                    && key.edge == ShaderSamplingEdgeKey::TransparentBlack
+                    && key.resolved_mask_sampling.is_none()
+            })
+            && self
+                .layouts
+                .keys()
+                .all(|key| key.program == ShaderProgramKey::CopyBackdrop)
+            && self
+                .shaders
+                .keys()
+                .all(|key| key.program == ShaderProgramKey::CopyBackdrop)
+            && self.pipelines.keys().all(|key| {
+                key.shader.program == ShaderProgramKey::CopyBackdrop
+                    && key.layout.program == ShaderProgramKey::CopyBackdrop
             })
     }
 
@@ -1288,6 +1358,126 @@ impl ProvisionalDevicePassCacheUpdate {
                 pipeline,
             },
         )
+    }
+
+    pub(crate) fn realize_copy_backdrop_pass<'a>(
+        &'a mut self,
+        device: &wgpu::Device,
+        cache: &'a DevicePassCache,
+        samplers: &[SamplerKey],
+        layout: &BindGroupLayoutKey,
+        shader: &ShaderModuleKey,
+        pipeline: &RenderPipelineKey,
+    ) -> Result<ProvisionalCopyBackdropPassObjects<'a>> {
+        if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
+            return Err(copy_backdrop_cache_error(
+                "provisional backdrop-copy objects belong to another device cache",
+            ));
+        }
+        let keys = CopyBackdropPassKeyRefs {
+            samplers,
+            layout,
+            shader,
+            pipeline,
+        };
+        let description = validate_copy_backdrop_pass_keys(keys)?;
+        for sampler_key in keys.samplers {
+            if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
+            {
+                self.samplers.insert(
+                    *sampler_key,
+                    device.create_sampler(&sampler_descriptor(*sampler_key)),
+                );
+            }
+        }
+        if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
+            self.layouts.insert(
+                keys.layout.clone(),
+                create_copy_backdrop_bind_group_layout(device),
+            );
+        }
+        if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
+            self.shaders.insert(
+                keys.shader.clone(),
+                device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("Surgeist C12 backdrop-copy shader"),
+                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COPY_BACKDROP_WGSL)),
+                }),
+            );
+        }
+        if !cache.pipelines.contains_key(keys.pipeline)
+            && !self.pipelines.contains_key(keys.pipeline)
+        {
+            let created = create_copy_backdrop_pipeline(
+                device,
+                description,
+                self.layouts
+                    .get(keys.layout)
+                    .or_else(|| cache.layouts.get(keys.layout))
+                    .ok_or_else(|| {
+                        copy_backdrop_cache_error(
+                            "backdrop-copy bind-group layout realization was lost",
+                        )
+                    })?,
+                self.shaders
+                    .get(keys.shader)
+                    .or_else(|| cache.shaders.get(keys.shader))
+                    .ok_or_else(|| {
+                        copy_backdrop_cache_error(
+                            "backdrop-copy shader-module realization was lost",
+                        )
+                    })?,
+            )?;
+            self.pipelines.insert(keys.pipeline.clone(), created);
+        }
+        self.copy_backdrop_pass_objects(cache, keys)
+    }
+
+    fn copy_backdrop_pass_objects<'a>(
+        &'a self,
+        cache: &'a DevicePassCache,
+        keys: CopyBackdropPassKeyRefs<'_>,
+    ) -> Result<ProvisionalCopyBackdropPassObjects<'a>> {
+        let [parent_sampler_key] = keys.samplers else {
+            return Err(copy_backdrop_cache_error(
+                "backdrop-copy realization requires one parent sampler",
+            ));
+        };
+        let parent_sampler = self
+            .samplers
+            .get(parent_sampler_key)
+            .or_else(|| cache.samplers.get(parent_sampler_key))
+            .ok_or_else(|| {
+                copy_backdrop_cache_error("backdrop-copy sampler realization was lost")
+            })?;
+        let layout = self
+            .layouts
+            .get(keys.layout)
+            .or_else(|| cache.layouts.get(keys.layout))
+            .ok_or_else(|| {
+                copy_backdrop_cache_error("backdrop-copy layout realization was lost")
+            })?;
+        let shader = self
+            .shaders
+            .get(keys.shader)
+            .or_else(|| cache.shaders.get(keys.shader))
+            .ok_or_else(|| {
+                copy_backdrop_cache_error("backdrop-copy shader realization was lost")
+            })?;
+        let pipeline = self
+            .pipelines
+            .get(keys.pipeline)
+            .or_else(|| cache.pipelines.get(keys.pipeline))
+            .ok_or_else(|| {
+                copy_backdrop_cache_error("backdrop-copy pipeline realization was lost")
+            })?;
+        Ok(ProvisionalCopyBackdropPassObjects {
+            description: validate_copy_backdrop_pass_keys(keys)?,
+            parent_sampler,
+            layout,
+            shader,
+            pipeline,
+        })
     }
 
     pub(crate) fn realize_color_filter_pass<'a>(
@@ -2144,6 +2334,19 @@ impl ProvisionalColorFilterPassObjects<'_> {
     }
 }
 
+impl ProvisionalCopyBackdropPassObjects<'_> {
+    pub(crate) fn require_encoding_ready(&self) -> Result<()> {
+        let _ = (
+            self.description,
+            self.parent_sampler,
+            self.layout,
+            self.shader,
+            self.pipeline,
+        );
+        Ok(())
+    }
+}
+
 impl ProvisionalBlurPassObjects<'_> {
     pub(crate) fn require_encoding_ready(&self) -> Result<()> {
         let _ = (
@@ -2402,6 +2605,50 @@ fn validate_color_filter_pass_keys(
         ));
     }
     Ok(ColorFilterPassDescription { working_format })
+}
+
+fn validate_copy_backdrop_pass_keys(
+    keys: CopyBackdropPassKeyRefs<'_>,
+) -> Result<CopyBackdropPassDescription> {
+    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
+        return Err(copy_backdrop_cache_error(
+            "a backdrop-copy layout must bind exactly one sampled texture",
+        ));
+    };
+    let [sampler] = keys.samplers else {
+        return Err(copy_backdrop_cache_error(
+            "a backdrop-copy pass must bind exactly one parent sampler",
+        ));
+    };
+    let Some(working_format) = keys.shader.working_format else {
+        return Err(copy_backdrop_cache_error(
+            "a backdrop-copy shader key has no selected working format",
+        ));
+    };
+    if keys.layout.program != ShaderProgramKey::CopyBackdrop
+        || keys.layout.data_bindings.as_slice() != [ShaderDataBindingKey::SpatialUniform]
+        || keys.shader.program != ShaderProgramKey::CopyBackdrop
+        || &keys.shader.layout != keys.layout
+        || keys.shader.samplers.as_slice() != keys.samplers
+        || keys.shader.output_format.is_some()
+        || &keys.pipeline.shader != keys.shader
+        || &keys.pipeline.layout != keys.layout
+        || keys.pipeline.samplers.as_slice() != keys.samplers
+        || !is_working_format(working_format)
+        || keys.pipeline.target_format != working_format
+        || sampled_texture.binding_role != ShaderBindingRoleKey::CompletedParent
+        || sampled_texture.source_format != working_format
+        || sampler.binding_role != ShaderBindingRoleKey::CompletedParent
+        || sampler.source_format != working_format
+        || sampler.filter != ShaderSamplingFilterKey::Nearest
+        || sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
+        || sampler.resolved_mask_sampling.is_some()
+    {
+        return Err(copy_backdrop_cache_error(
+            "backdrop-copy keys disagree across parent, layout, shader, or working target",
+        ));
+    }
+    Ok(CopyBackdropPassDescription { working_format })
 }
 
 fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescription> {
@@ -2756,6 +3003,85 @@ fn create_composite_bind_group_layout(
     })
 }
 
+fn create_copy_backdrop_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    let entries = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 1,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(48),
+            },
+            count: None,
+        },
+    ];
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("Surgeist C12 backdrop-copy bindings"),
+        entries: &entries,
+    })
+}
+
+fn create_copy_backdrop_pipeline(
+    device: &wgpu::Device,
+    description: CopyBackdropPassDescription,
+    layout: &wgpu::BindGroupLayout,
+    shader: &wgpu::ShaderModule,
+) -> Result<wgpu::RenderPipeline> {
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("Surgeist C12 backdrop-copy pipeline layout"),
+        bind_group_layouts: &[Some(layout)],
+        immediate_size: 0,
+    });
+    let target = wgpu::ColorTargetState {
+        format: texture_format(description.working_format)?,
+        blend: None,
+        write_mask: wgpu::ColorWrites::ALL,
+    };
+    Ok(
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("Surgeist C12 backdrop-copy pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: shader,
+                entry_point: Some("vertex_main"),
+                buffers: &[],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: shader,
+                entry_point: Some("fragment_main"),
+                targets: &[Some(target)],
+                compilation_options: wgpu::PipelineCompilationOptions::default(),
+            }),
+            multiview_mask: None,
+            cache: None,
+        }),
+    )
+}
+
 fn create_color_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     let entries = [
         wgpu::BindGroupLayoutEntry {
@@ -2997,6 +3323,10 @@ fn color_filter_cache_error(message: &'static str) -> Error {
     Error::new(super::BackendErrorCode::RenderFailed, message)
 }
 
+fn copy_backdrop_cache_error(message: &'static str) -> Error {
+    Error::new(super::BackendErrorCode::RenderFailed, message)
+}
+
 fn blur_cache_error(message: &'static str) -> Error {
     Error::new(super::BackendErrorCode::RenderFailed, message)
 }
@@ -3185,6 +3515,54 @@ pub(crate) fn c10_color_filter_pass_key_facts_for_test(
                 ShaderDataBindingKey::SpatialUniform,
                 ShaderDataBindingKey::ColorFilterOperations,
             ],
+    })
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct C12CopyBackdropPassKeyFactsForTest {
+    pub(crate) source_role: ShaderBindingRoleKey,
+    pub(crate) source_format: ShaderTextureFormatKey,
+    pub(crate) working_format: ShaderTextureFormatKey,
+    pub(crate) target_format: ShaderTextureFormatKey,
+    pub(crate) has_only_nearest_transparent_sampler: bool,
+    pub(crate) has_only_spatial_uniform: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn c12_copy_backdrop_pass_key_facts_for_test(
+    samplers: &[SamplerKey],
+    layout: &BindGroupLayoutKey,
+    shader: &ShaderModuleKey,
+    pipeline: &RenderPipelineKey,
+) -> Option<C12CopyBackdropPassKeyFactsForTest> {
+    let [sampled_texture] = layout.sampled_textures.as_slice() else {
+        return None;
+    };
+    let description = validate_copy_backdrop_pass_keys(CopyBackdropPassKeyRefs {
+        samplers,
+        layout,
+        shader,
+        pipeline,
+    })
+    .ok()?;
+    Some(C12CopyBackdropPassKeyFactsForTest {
+        source_role: sampled_texture.binding_role,
+        source_format: sampled_texture.source_format,
+        working_format: description.working_format,
+        target_format: pipeline.target_format,
+        has_only_nearest_transparent_sampler: matches!(
+            samplers,
+            [SamplerKey {
+                binding_role: ShaderBindingRoleKey::CompletedParent,
+                filter: ShaderSamplingFilterKey::Nearest,
+                edge: ShaderSamplingEdgeKey::TransparentBlack,
+                resolved_mask_sampling: None,
+                ..
+            }]
+        ),
+        has_only_spatial_uniform: layout.data_bindings.as_slice()
+            == [ShaderDataBindingKey::SpatialUniform],
     })
 }
 

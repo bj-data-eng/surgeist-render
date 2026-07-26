@@ -349,6 +349,27 @@ pub(crate) struct C12BackdropGraphObservationForTest {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12CopyBackdropLayoutObservationForTest {
+    pub(crate) realizes_both_working_formats: bool,
+    pub(crate) binds_exact_completed_parent: bool,
+    pub(crate) binds_only_one_nearest_transparent_sampler: bool,
+    pub(crate) binds_only_spatial_uniform: bool,
+    pub(crate) targets_only_the_working_format: bool,
+    pub(crate) source_and_result_are_distinct: bool,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct C12CopyBackdropCacheRealizationObservationForTest {
+    pub(crate) realizes_high_precision: bool,
+    pub(crate) realizes_reduced_precision: bool,
+    pub(crate) checked_scope_is_clean: bool,
+    pub(crate) publishes_only_copy_backdrop_entries: bool,
+    pub(crate) rejects_unsupported_format_before_publication: bool,
+}
+
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum C11FilterPassTagForTest {
     Color,
@@ -543,6 +564,54 @@ pub(crate) fn c12_backdrop_graph_observation_for_test(
 }
 
 #[cfg(test)]
+pub(crate) fn c12_copy_backdrop_layout_observation_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> C12CopyBackdropLayoutObservationForTest {
+    c12_copy_backdrop_layout_observation(commands, context, capabilities).unwrap_or_default()
+}
+
+#[cfg(test)]
+pub(crate) async fn c12_copy_backdrop_cache_realization_observation_for_test(
+    device: &wgpu::Device,
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C12CopyBackdropCacheRealizationObservationForTest> {
+    capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
+    capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
+    let high = c12_copy_backdrop_cache_request_for_test(
+        commands.clone(),
+        context,
+        capabilities,
+        WorkingFormat::HighPrecision,
+    )?;
+    let reduced = c12_copy_backdrop_cache_request_for_test(
+        commands.clone(),
+        context,
+        capabilities,
+        WorkingFormat::ReducedPrecision,
+    )?;
+    let rejected_cache = DevicePassCache::new();
+    let unsupported = DeviceCapabilities::from_test_facts(false, false, 4_096);
+    let rejects_unsupported_format_before_publication = c12_copy_backdrop_cache_request_for_test(
+        commands,
+        context,
+        unsupported,
+        WorkingFormat::HighPrecision,
+    )
+    .is_err()
+        && rejected_cache.counts_for_test().is_empty();
+    realize_c12_copy_backdrop_requests(
+        device,
+        [high, reduced],
+        rejects_unsupported_format_before_publication,
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) fn color_filter_operation_bytes_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
@@ -720,6 +789,59 @@ pub(crate) async fn c10_color_filter_cache_realization_observation_for_test(
         checked_scope_is_clean: true,
         publishes_only_color_filter_entries: all_requests_are_cached
             && cache.contains_only_two_color_filter_passes_for_test(),
+    })
+}
+
+#[cfg(test)]
+async fn realize_c12_copy_backdrop_requests(
+    device: &wgpu::Device,
+    requests: [C12CopyBackdropCacheRequestForTest; 2],
+    rejects_unsupported_format_before_publication: bool,
+) -> Result<C12CopyBackdropCacheRealizationObservationForTest> {
+    let mut cache = DevicePassCache::new();
+    let mut update = cache.provisional_update();
+    let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let realization = (|| -> Result<[bool; 2]> {
+        let mut realized = [false; 2];
+        for (index, request) in requests.iter().enumerate() {
+            update
+                .realize_copy_backdrop_pass(
+                    device,
+                    &cache,
+                    request.keys.samplers(),
+                    request.keys.layout(),
+                    request.keys.shader(),
+                    request.keys.pipeline(),
+                )?
+                .require_encoding_ready()?;
+            realized[index] = true;
+        }
+        Ok(realized)
+    })();
+    let scope_error = error_scope.pop().await;
+    let [realizes_high_precision, realizes_reduced_precision] = realization?;
+    if let Some(error) = scope_error {
+        return Err(Error::new(
+            BackendErrorCode::RenderFailed,
+            format!("C12 checked backdrop-copy realization failed validation: {error}"),
+        ));
+    }
+    update.commit(&mut cache)?;
+    let all_requests_are_cached = requests.iter().all(|request| {
+        cache.contains_copy_backdrop_pass_for_test(
+            request.keys.samplers(),
+            request.keys.layout(),
+            request.keys.shader(),
+            request.keys.pipeline(),
+        )
+    });
+    Ok(C12CopyBackdropCacheRealizationObservationForTest {
+        realizes_high_precision,
+        realizes_reduced_precision,
+        checked_scope_is_clean: true,
+        publishes_only_copy_backdrop_entries: all_requests_are_cached
+            && cache.contains_only_two_copy_backdrop_passes_for_test(),
+        rejects_unsupported_format_before_publication,
     })
 }
 
@@ -1246,6 +1368,137 @@ fn c10_color_filter_cache_requests_for_test(
         ));
     }
     Ok(C10ColorFilterCacheRequestsForTest { passes })
+}
+
+#[cfg(test)]
+struct C12CopyBackdropCacheRequestForTest {
+    keys: RuntimePassCacheKeys,
+    source_and_result_are_distinct: bool,
+}
+
+#[cfg(test)]
+fn c12_copy_backdrop_cache_request_for_test(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+    working_format: WorkingFormat,
+) -> Result<C12CopyBackdropCacheRequestForTest> {
+    let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
+        return Err(lowering_error(
+            "the C12 backdrop-copy cache fixture did not produce a GPU graph",
+        ));
+    };
+    let lowered = LoweredGraphPlan::try_lower_validated_graph(
+        &graph,
+        working_format,
+        Format::Rgba8,
+        &capabilities,
+    )?;
+    let PrePreparationGraphClassification::ExactC12(preparable) =
+        PrePreparationGraphClassification::classify(lowered)
+    else {
+        return Err(lowering_error(
+            "the C12 backdrop-copy fixture is outside the exact bounded graph",
+        ));
+    };
+    let copies = preparable
+        .closed
+        .lowered
+        .passes
+        .iter()
+        .filter(|pass| matches!(pass.kind, RuntimePassKind::CopyBackdrop))
+        .collect::<Vec<_>>();
+    let [copy] = copies.as_slice() else {
+        return Err(lowering_error(
+            "the C12 backdrop-copy fixture must contain one checked copy request",
+        ));
+    };
+    let [parent] = copy.reads.as_slice() else {
+        return Err(lowering_error(
+            "the C12 backdrop-copy fixture must read one completed parent",
+        ));
+    };
+    let RuntimeResultBinding::Resource(result) = copy.result else {
+        return Err(lowering_error(
+            "the C12 backdrop-copy fixture must write one working resource",
+        ));
+    };
+    Ok(C12CopyBackdropCacheRequestForTest {
+        keys: copy
+            .cache_keys
+            .clone()
+            .ok_or_else(|| lowering_error("the C12 backdrop-copy cache keys are missing"))?,
+        source_and_result_are_distinct: parent.resource != result,
+    })
+}
+
+#[cfg(test)]
+fn c12_copy_backdrop_layout_observation(
+    commands: RenderCommands,
+    context: FrameContext,
+    capabilities: DeviceCapabilities,
+) -> Result<C12CopyBackdropLayoutObservationForTest> {
+    let mut requests = Vec::with_capacity(2);
+    for working_format in [
+        WorkingFormat::HighPrecision,
+        WorkingFormat::ReducedPrecision,
+    ] {
+        requests.push(c12_copy_backdrop_cache_request_for_test(
+            commands.clone(),
+            context,
+            capabilities,
+            working_format,
+        )?);
+    }
+    let facts = requests
+        .iter()
+        .filter_map(|request| {
+            super::shader::c12_copy_backdrop_pass_key_facts_for_test(
+                request.keys.samplers(),
+                request.keys.layout(),
+                request.keys.shader(),
+                request.keys.pipeline(),
+            )
+        })
+        .collect::<Vec<_>>();
+    Ok(c12_copy_backdrop_layout_facts(&requests, &facts))
+}
+
+#[cfg(test)]
+fn c12_copy_backdrop_layout_facts(
+    requests: &[C12CopyBackdropCacheRequestForTest],
+    facts: &[super::shader::C12CopyBackdropPassKeyFactsForTest],
+) -> C12CopyBackdropLayoutObservationForTest {
+    let realizes_both_working_formats = facts.len() == 2
+        && [
+            ShaderTextureFormatKey::working(WorkingFormat::HighPrecision),
+            ShaderTextureFormatKey::working(WorkingFormat::ReducedPrecision),
+        ]
+        .into_iter()
+        .all(|format| {
+            facts
+                .iter()
+                .filter(|facts| facts.working_format == format)
+                .count()
+                == 1
+        });
+    C12CopyBackdropLayoutObservationForTest {
+        realizes_both_working_formats,
+        binds_exact_completed_parent: facts.iter().all(|facts| {
+            facts.source_role == ShaderBindingRoleKey::CompletedParent
+                && facts.source_format == facts.working_format
+        }),
+        binds_only_one_nearest_transparent_sampler: facts
+            .iter()
+            .all(|facts| facts.has_only_nearest_transparent_sampler),
+        binds_only_spatial_uniform: facts.iter().all(|facts| facts.has_only_spatial_uniform),
+        targets_only_the_working_format: facts
+            .iter()
+            .all(|facts| facts.target_format == facts.working_format),
+        source_and_result_are_distinct: requests
+            .iter()
+            .all(|request| request.source_and_result_are_distinct),
+    }
 }
 
 #[cfg(test)]
@@ -11054,6 +11307,10 @@ fn realize_prepared_graph_pass(
     keys: &RuntimePassCacheKeys,
 ) -> Result<Option<PreparedC11PassObjects>> {
     match &request.runtime.kind {
+        RuntimePassKind::CopyBackdrop => {
+            realize_copy_backdrop_for_preparation(update, device, pass_cache, keys)?;
+            Ok(None)
+        }
         RuntimePassKind::ColorFilter(Some(_)) => {
             update
                 .realize_color_filter_pass(
@@ -11135,7 +11392,6 @@ fn realize_prepared_graph_pass(
         }
         RuntimePassKind::ClearRoot { .. }
         | RuntimePassKind::VelloCapture(_)
-        | RuntimePassKind::CopyBackdrop
         | RuntimePassKind::ColorFilter(None)
         | RuntimePassKind::BlurHorizontal(None)
         | RuntimePassKind::BlurVertical(None)
@@ -11144,6 +11400,24 @@ fn realize_prepared_graph_pass(
             "checked pass realization reached an unsupported graph pass",
         )),
     }
+}
+
+fn realize_copy_backdrop_for_preparation(
+    update: &mut ProvisionalDevicePassCacheUpdate,
+    device: &wgpu::Device,
+    pass_cache: &DevicePassCache,
+    keys: &RuntimePassCacheKeys,
+) -> Result<()> {
+    update
+        .realize_copy_backdrop_pass(
+            device,
+            pass_cache,
+            keys.samplers(),
+            keys.layout(),
+            keys.shader(),
+            keys.pipeline(),
+        )?
+        .require_encoding_ready()
 }
 
 fn validate_c08_vello_capture_target(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> Result<()> {
