@@ -2862,3 +2862,41 @@ This initiative is accepted only when all of the following are true:
 
 Planning, implementation review, landing, publication, and candidate handoff
 follow the canonical `$surgeist-agent` workflow and are not redefined here.
+
+## S39 Post-Experiment Sprawl Review And Cohesion Remediation
+
+The final I03 cycle audits the repository-wide function-size experiment rather
+than treating a 100-line threshold as architecture. The exact historical
+source evidence is commit `9488f2000f0a31485679c39a568ff2a6d9d6f28f`
+(`fix(renderer): bound private color-filter helpers`) and commit
+`4225fae1466aef093f5f22f69bd8c17c6e4420d7`
+(`refactor(repo): bound repository function sizes`), each compared with its
+first parent and with the final C14 source. Those commits are review inputs, not
+desired-state authority.
+
+The audit is finite: it covers every Rust item changed by either experiment
+commit, the surviving helper/call relationships descended from those items,
+and only the adjacent current code needed to judge ownership, cohesion, phase
+boundaries, control flow, state and resource lifetimes, diagnostics, and test
+intent. Every reviewed extraction is classified as retained or remediated with
+source evidence. The review must identify mechanical fragmentation such as
+single-use forwarding helpers with no semantic boundary, argument-bundle or
+return-bundle churn, split control flow that obscures ordering or cleanup,
+misleading names, duplicated setup/assertion fragments, and ownership moved
+away from the module or phase that actually governs it.
+
+Confirmed experiment-caused damage is corrected in production and test code.
+Corrections may recombine, reshape, rename, relocate, or remove helpers, but
+must preserve public API, rendering behavior and pixels, diagnostics,
+capabilities, statistics, ordering, transaction/resource lifetime, test names
+and assertions, dependency/feature surface, provenance, and unsafe absence.
+Useful extractions that express a genuine reusable operation, phase boundary,
+failure boundary, invariant, or independently testable concept remain intact.
+No function is split or recombined merely to satisfy a physical-line count.
+
+`clippy::too_many_lines` and similar structural signals are advisory evidence
+for this review, never Boolean acceptance gates. Completion requires fresh task
+reviewers to inspect both historical experiment ranges and the composed
+remediation, followed by the full crate feature/target/MSRV/native-presentation
+matrix, a clean holistic review, canonical publication, and remote readback.
+The cycle adds no unrelated cleanup and is the last cycle of I03.
