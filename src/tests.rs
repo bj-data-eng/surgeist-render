@@ -41120,6 +41120,88 @@ fn c14_changed_public_items_have_semantic_documentation() {
     }
 }
 
+#[test]
+fn render_window_smoke_source_covers_direct_and_graph_routes() {
+    let manifest = include_str!("../Cargo.toml");
+    let example_path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/render_window_smoke.rs");
+    let example = std::fs::read_to_string(&example_path).ok();
+
+    assert!(
+        manifest.contains(
+            "[[example]]\nname = \"render_window_smoke\"\npath = \"examples/render_window_smoke.rs\"\nrequired-features = [\"render-window\"]"
+        ) && example.is_some(),
+        "Cargo.toml must declare the render-window-gated target and examples/render_window_smoke.rs must exist"
+    );
+
+    let example = example.expect("the example source existence was checked");
+    for required in [
+        "surgeist_window::app(",
+        "surgeist_window::open(",
+        ".run()",
+        ".handle()",
+        "Attachment::from_window(",
+        "Renderer::new(",
+        ".create_surface(",
+        ".render(",
+        "RenderRoute::DirectVello",
+        "RenderRoute::GpuGraph",
+        ".exit()",
+        "#![forbid(unsafe_code)]",
+    ] {
+        assert!(
+            example.contains(required),
+            "render_window_smoke must compose the public lifecycle and contain `{required}`"
+        );
+    }
+    let occlusion_deferral = "if frame.is_occluded() {\n            frame.draw();\n            return Ok(());\n        }";
+    assert!(
+        example.contains("Scope")
+            && example.contains(occlusion_deferral)
+            && example
+                .find(occlusion_deferral)
+                .zip(example.find(".render("))
+                .is_some_and(|(deferral, render)| deferral < render),
+        "render_window_smoke must use public Scope state to defer before rendering while occluded"
+    );
+    for required in [
+        "runtime_capability_unavailable_diagnostic()",
+        "RuntimeCapabilityUnavailableReason::SurfaceUnavailable",
+        "RenderSurfaceAvailability::Occluded",
+        "Err(source) => Err(render_error(",
+    ] {
+        assert!(
+            example.contains(required),
+            "render_window_smoke must defer exact acquire-time occlusion and preserve other errors through `{required}`"
+        );
+    }
+    assert!(
+        example
+            .find("RenderRoute::DirectVello")
+            .zip(example.find("RenderRoute::GpuGraph"))
+            .is_some_and(|(direct, graph)| direct < graph),
+        "the example must assert the direct route before the GPU-graph route"
+    );
+    for forbidden in [
+        "crate::",
+        "read_headless",
+        concat!("un", "safe {"),
+        concat!("un", "safe fn"),
+        concat!("un", "safe impl"),
+        concat!("un", "safe trait"),
+        "std::thread::sleep",
+        "cfg(test)",
+        "testing::",
+        "#[allow(",
+        "#[expect(",
+    ] {
+        assert!(
+            !example.contains(forbidden),
+            "render_window_smoke must not contain `{forbidden}`"
+        );
+    }
+}
+
 fn assert_document_terms(label: &str, document: &str, required_terms: &[&str]) {
     let normalized_document = document.to_ascii_lowercase();
     for term in required_terms {
