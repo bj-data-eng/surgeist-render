@@ -41168,6 +41168,8 @@ fn render_window_smoke_source_covers_direct_and_graph_routes() {
         "runtime_capability_unavailable_diagnostic()",
         "RuntimeCapabilityUnavailableReason::SurfaceUnavailable",
         "RenderSurfaceAvailability::Occluded",
+        ".resize(surface.size(), surface.scale())",
+        "failed to resynchronize occluded smoke surface",
         "Err(source) => Err(render_error(",
     ] {
         assert!(
@@ -41175,6 +41177,22 @@ fn render_window_smoke_source_covers_direct_and_graph_routes() {
             "render_window_smoke must defer exact acquire-time occlusion and preserve other errors through `{required}`"
         );
     }
+    let presented_render = source_braced_block_from_marker(&example, "fn render_presented(");
+    let acquire_occlusion = presented_render
+        .find("Some(RuntimeCapabilityUnavailableReason::SurfaceUnavailable")
+        .expect("render_window_smoke must retain its exact typed acquire-occlusion branch");
+    let lifecycle_resync = presented_render[acquire_occlusion..]
+        .find(".resize(surface.size(), surface.scale())")
+        .map(|offset| acquire_occlusion + offset)
+        .expect("acquire-time occlusion must resynchronize the public Surface lifecycle");
+    let draw_next = presented_render[lifecycle_resync..]
+        .find("frame.draw();")
+        .map(|offset| lifecycle_resync + offset)
+        .expect("the resynchronized acquire-occlusion branch must queue DrawNext");
+    assert!(
+        acquire_occlusion < lifecycle_resync && lifecycle_resync < draw_next,
+        "same-extent public Surface lifecycle resynchronization must precede DrawNext"
+    );
     assert!(
         example
             .find("RenderRoute::DirectVello")
@@ -41198,6 +41216,188 @@ fn render_window_smoke_source_covers_direct_and_graph_routes() {
         assert!(
             !example.contains(forbidden),
             "render_window_smoke must not contain `{forbidden}`"
+        );
+    }
+}
+
+#[test]
+fn c14_dependency_feature_and_provenance_contract_is_final() {
+    assert_internal_vello_dependency_roles();
+    assert_internal_vello_dependency_source_uses();
+    assert_internal_vello_imported_provenance();
+    assert_internal_vello_omissions_and_licenses();
+    assert_internal_vello_source_headers();
+
+    let manifest = include_str!("../Cargo.toml");
+    let readme = include_str!("../README.md");
+    assert_c14_manifest_features_and_target_are_exact(manifest);
+    assert_c14_bytemuck_derive_is_external_only();
+    assert_c14_examples_and_provenance_inventory_is_exact();
+
+    assert!(
+        manifest.contains(
+            "repository = \"https://github.com/bj-data-eng/surgeist-render\"\nreadme = \"README.md\""
+        ) && !manifest.lines().any(|line| line.trim_start().starts_with("rust-version")),
+        "leaf package provenance must name its authoritative repository while the Rust floor remains root-owned"
+    );
+    assert_document_terms(
+        "README.md compatibility provenance",
+        readme,
+        &[
+            "Rust 1.97",
+            "root integration compatibility floor",
+            "root `surgeist`",
+            "leaf repository owns its source API",
+            "browser-host integration",
+            "API artifacts",
+            "gitlink",
+        ],
+    );
+}
+
+fn assert_c14_manifest_features_and_target_are_exact(manifest: &str) {
+    let (_, features_and_after) = manifest
+        .split_once("[features]\n")
+        .expect("Cargo.toml must contain one feature table");
+    assert_eq!(manifest.matches("[features]\n").count(), 1);
+    let (features, after_features) = features_and_after
+        .split_once("\n[dev-dependencies]\n")
+        .expect("the exact feature table must precede development dependencies");
+    assert_eq!(
+        features.trim_end(),
+        "default = []\nrender-web = [\"wgpu/webgpu\"]\nrender-window = [\"dep:surgeist-window\"]",
+        "the native/web/window feature surface must remain the exact additive S36 set"
+    );
+    assert!(after_features.starts_with(
+        "pollster = \"=0.4.0\"\nproptest = { version = \"=1.11.0\", default-features = false, features = [\"std\"] }"
+    ));
+
+    let example_record = "[[example]]\nname = \"render_window_smoke\"\npath = \"examples/render_window_smoke.rs\"\nrequired-features = [\"render-window\"]";
+    assert_eq!(manifest.matches("[[example]]").count(), 1);
+    assert_eq!(manifest.matches(example_record).count(), 1);
+}
+
+fn assert_c14_bytemuck_derive_is_external_only() {
+    let forbidden = [
+        "derive(Pod".to_owned(),
+        "derive(Zeroable".to_owned(),
+        "bytemuck::Pod".to_owned(),
+        "bytemuck::Zeroable".to_owned(),
+        ["un", "safe impl Pod"].concat(),
+        ["un", "safe impl Zeroable"].concat(),
+    ];
+    for (path, source) in production_rust_sources_for_static_reachability() {
+        let code = source_code_only_for_static_reachability(&source);
+        for marker in &forbidden {
+            assert!(
+                !code.contains(marker),
+                "{path} must not take ownership of external bytemuck derive/unsafe contracts through `{marker}`"
+            );
+        }
+    }
+}
+
+fn assert_c14_examples_and_provenance_inventory_is_exact() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let directory_files = |relative: &str| {
+        let directory = root.join(relative);
+        let mut files = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+            .map(|entry| {
+                entry
+                    .unwrap_or_else(|error| panic!("cannot read {relative} entry: {error}"))
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    };
+    assert_eq!(
+        directory_files("examples"),
+        ["render_window_smoke.rs"],
+        "C14 owns one tracked public composition example"
+    );
+    assert_eq!(
+        directory_files("LICENSES"),
+        ["Vello-0.9.0-APACHE-2.0.txt", "Vello-0.9.0-MIT.txt"],
+        "the two pinned Vello license texts must remain the exact license inventory"
+    );
+    assert_eq!(
+        directory_files("tests/fixtures/fonts/ahem"),
+        ["Ahem.ttf", "COPYING", "PROVENANCE.md", "UPSTREAM-README"],
+        "the source-owned Ahem fixture and provenance inventory changed"
+    );
+    assert!(root.join("NOTICE-VELLO.md").is_file());
+}
+
+#[test]
+fn c14_final_quality_contract_matches_published_gpu_architecture() {
+    let tests_code = source_code_only_for_static_reachability(include_str!("tests.rs"));
+    for required_guard in [
+        "final_primitive_inventory_has_101_unique_capability_consistent_rows",
+        "final_property_inventory_maps_22_surfaces_to_known_primitive_ids",
+        "final_diagnostic_subcase_inventory_maps_every_typed_boundary_once",
+        "c13_semantic_capabilities_match_final_gpu_only_contract",
+        "c13_gpu_only_cutover_reconciles_capabilities_stats_and_inventories",
+        "reference_module_exclusively_owns_cpu_pixel_execution",
+        "cpu_reference_algorithms_are_test_only_after_gpu_cutover",
+        "readback_static_paths_confine_map_poll_and_copy_submission",
+        "render_path_submits_without_map_or_cpu_wait",
+        "render_window_smoke_executes_direct_and_graph_presented_frames",
+        "render_window_smoke_source_covers_direct_and_graph_routes",
+        "c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries",
+        "c14_changed_public_items_have_semantic_documentation",
+    ] {
+        assert_eq!(
+            tests_code
+                .matches(&format!("fn {required_guard}()"))
+                .count(),
+            1,
+            "the published C13/C14 cross-surface guard `{required_guard}` must remain uniquely owned"
+        );
+    }
+
+    let manifest = include_str!("../Cargo.toml");
+    let readme = include_str!("../README.md");
+    let production_code = production_rust_sources_for_static_reachability()
+        .into_iter()
+        .map(|(_, source)| source_code_only_for_static_reachability(&source))
+        .collect::<Vec<_>>()
+        .join("\n");
+    for stale_identity in [
+        "vello::",
+        "glifo::",
+        "use_cpu",
+        "materialize_resolved_backdrop",
+        "materialize_resolved_layer_mask",
+    ] {
+        assert!(
+            !production_code.contains(stale_identity),
+            "the final GPU architecture retains stale production identity `{stale_identity}`"
+        );
+    }
+    assert!(!manifest.contains("\nvello ="));
+    assert!(!manifest.contains("\nglifo ="));
+    assert_document_terms(
+        "README.md final host boundary",
+        readme,
+        &[
+            "successful wasm build is not a browser execution claim",
+            "browser canvas event-loop execution",
+            "remain root integration evidence",
+            "native `WebCanvas`",
+            "typed unsupported-platform diagnostic",
+        ],
+    );
+    for stale_claim in [
+        "the C14 follow-on task adds",
+        "its planned direct-and-graph command is",
+    ] {
+        assert!(
+            !readme.contains(stale_claim),
+            "published final documentation retains the stale pre-T02 claim `{stale_claim}`"
         );
     }
 }

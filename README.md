@@ -53,8 +53,8 @@ uses that readback path.
 ## Host and repository boundaries
 
 Native headless execution is available without a host window. With
-`render-window`, the C14 follow-on task adds the tracked presented smoke target;
-its planned direct-and-graph command is:
+`render-window`, the tracked presented smoke target renders and presents one
+direct frame and one GPU-graph frame through the live window lifecycle:
 
 ```sh
 CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window
@@ -74,4 +74,6 @@ construction remains a typed unsupported-platform diagnostic.
 The root `surgeist` repository owns the public root facade, cross-crate
 adapters, browser-host integration, generated API artifacts, and the
 `surgeist-render` gitlink. This leaf repository owns its source API and focused
-verification; it does not generate or update root artifacts.
+verification; it does not generate or update root artifacts. Rust 1.97 is the
+root integration compatibility floor; the leaf manifest intentionally does not
+duplicate that root-owned `rust-version` declaration.

@@ -134,6 +134,11 @@ fn render_presented(
                 })
             ) =>
         {
+            surface
+                .resize(surface.size(), surface.scale())
+                .map_err(|source| {
+                    render_error("failed to resynchronize occluded smoke surface", source)
+                })?;
             frame.draw();
             Ok(None)
         }
