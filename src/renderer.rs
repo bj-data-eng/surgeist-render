@@ -1034,6 +1034,10 @@ impl Renderer {
             present_time: Duration::ZERO,
             ..Stats::default()
         };
+        if matches!(&execution, PreparedRendererExecution::DirectVello(_)) {
+            stats.route = Some(RenderRoute::DirectVello);
+            stats.vello_passes = stats.vello_passes.saturating_add(1);
+        }
         let mut uploaded_images = self.uploaded_images.clone();
         collect_render_stats(&normalized.commands, &mut stats, &mut uploaded_images);
         stats.encode_time = encode_start.elapsed();

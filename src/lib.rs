@@ -66,7 +66,7 @@ pub use scene::Scene;
 pub use shape::{
     Dash, FillRule, FilledPath, LineCap, LineJoin, Path, PathElement, Shape, Stroke, StrokeAlign,
 };
-pub use stats::Stats;
+pub use stats::{EffectPrecision, RenderRoute, Stats};
 pub use style::{
     BackdropCaptureBounds, BackdropFilterInput, BackgroundAreas, BackgroundAttachment,
     BackgroundBlendList, BackgroundBlendMode, BackgroundBox, BackgroundClipGeometry,

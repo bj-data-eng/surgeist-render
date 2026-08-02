@@ -6,8 +6,30 @@ use super::{
 };
 use std::time::Duration;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderRoute {
+    DirectVello,
+    GpuGraph,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EffectPrecision {
+    High,
+    Reduced,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Stats {
+    pub route: Option<RenderRoute>,
+    pub effect_precision: Option<EffectPrecision>,
+    pub vello_passes: usize,
+    pub image_passes: usize,
+    pub composite_passes: usize,
+    pub copy_operations: usize,
+    pub custom_present_passes: usize,
+    pub effect_texture_allocations: usize,
+    pub effect_texture_reuses: usize,
+    pub retained_effect_bytes: u64,
     pub frame_time: Duration,
     pub encode_time: Duration,
     pub render_time: Duration,

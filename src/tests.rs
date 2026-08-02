@@ -31520,6 +31520,88 @@ fn unsupported_web_canvas_attachment_reports_target_requirement() {
 }
 
 #[test]
+fn stats_default_exposes_no_route_precision_or_pass_activity() {
+    fn assert_observation_traits<T: Clone + Copy + std::fmt::Debug + Eq + PartialEq>() {}
+
+    assert_observation_traits::<RenderRoute>();
+    assert_observation_traits::<EffectPrecision>();
+
+    let stats = Stats::default();
+
+    assert_eq!(stats.route, None);
+    assert_eq!(stats.effect_precision, None);
+    assert_eq!(stats.vello_passes, 0);
+    assert_eq!(stats.image_passes, 0);
+    assert_eq!(stats.composite_passes, 0);
+    assert_eq!(stats.copy_operations, 0);
+    assert_eq!(stats.custom_present_passes, 0);
+    assert_eq!(stats.effect_texture_allocations, 0);
+    assert_eq!(stats.effect_texture_reuses, 0);
+    assert_eq!(stats.retained_effect_bytes, 0);
+}
+
+#[test]
+fn direct_vello_stats_report_exact_route_and_single_raster_pass() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect("a direct internal-Vello frame should publish render observations");
+
+    assert_eq!(stats.route, Some(RenderRoute::DirectVello));
+    assert_eq!(stats.effect_precision, None);
+    assert_eq!(stats.vello_passes, 1);
+    assert_eq!(stats.image_passes, 0);
+    assert_eq!(stats.composite_passes, 0);
+    assert_eq!(stats.copy_operations, 0);
+    assert_eq!(stats.custom_present_passes, 0);
+    assert_eq!(stats.effect_texture_allocations, 0);
+    assert_eq!(stats.effect_texture_reuses, 0);
+    assert_eq!(stats.retained_effect_bytes, 0);
+    assert_eq!(renderer.stats(), stats);
+}
+
+#[test]
+fn non_render_operations_do_not_mutate_last_successful_stats() {
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    assert_eq!(renderer.stats(), Stats::default());
+    let _ = renderer.capabilities();
+    assert_eq!(renderer.stats(), Stats::default());
+
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
+    assert_eq!(renderer.stats(), Stats::default());
+
+    let mut scene = Scene::new();
+    scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    let last_successful =
+        pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+            .expect("the baseline direct frame should publish stats");
+    assert_eq!(last_successful.route, Some(RenderRoute::DirectVello));
+
+    let _ = renderer.capabilities();
+    assert_eq!(renderer.stats(), last_successful);
+    let _ = renderer.runtime_capabilities(&surface);
+    assert_eq!(renderer.stats(), last_successful);
+    let _ = pollster::block_on(renderer.read_headless(&surface))
+        .expect("explicit readback should observe the published frame");
+    assert_eq!(renderer.stats(), last_successful);
+
+    let _other = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("surface creation should remain independent from render stats");
+    assert_eq!(renderer.stats(), last_successful);
+    surface.resize(Size::new(3.0, 2.0), 1.0).unwrap();
+    assert_eq!(renderer.stats(), last_successful);
+    surface.suspend().unwrap();
+    assert_eq!(renderer.stats(), last_successful);
+    surface.resume(Attachment::Headless).unwrap();
+    assert_eq!(renderer.stats(), last_successful);
+}
+
+#[test]
 fn render_reports_command_stats() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
