@@ -212,28 +212,36 @@
 
 ### 4.5 T05 Reconcile The Closed Audit And Final Preservation Matrix
 
-- Area: the complete disposition ledger, focused C15 closure guards in
-  `src/tests.rs`, and only a directly falsified C15-owned correction from
-  T01-T04.
+- Area: the complete disposition ledger, removal of every C15-only raw-source
+  parser/string-matching guard from `src/tests.rs`, and only a directly
+  falsified C15-owned correction from T01-T04.
 - Outcome: prove there is no unrecorded experiment item/relationship, no open or
-  multiply owned remediation, no drift between ledger and exact current source,
-  and no regression in the C14 architecture/quality/platform contract.
-- RED: `c15_sprawl_audit_is_closed_against_current_source` fails on any missing,
-  stale, open, or multiply owned entry before final reconciliation;
-  `c15_final_preservation_contract_matches_c14` fails on any public API,
-  dependency, feature, provenance, route, diagnostics, stats, test, or safety
-  drift rather than accepting it as cleanup.
+  multiply owned remediation and no regression in the C14
+  architecture/quality/platform contract, then retire the temporary C15 test
+  machinery instead of publishing a bespoke Rust parser as permanent code.
+- RED: the final-source residue check initially finds the C15-only constants,
+  helpers, and tests accumulated by T01-T05. Before removing them, the worker
+  runs their accepted focused evidence once on the exact pre-cleanup head and
+  records the result; behavioral characterization remains in the ordinary test
+  suite after cleanup.
 - Acceptance: all historical item occurrences and surviving relationships are
   present; every disposition is final; every `retain` and `already superseded`
-  rationale still matches current source; every remediation cites the exact
-  correction; no physical-line ceiling appears as acceptance logic; the full
-  feature/target/MSRV/native matrix is green; the initiative handoff is exact.
-- Commands:
-  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_sprawl_audit_is_closed_against_current_source -- --exact`;
-  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_final_preservation_contract_matches_c14 -- --exact`;
-  rerun both historical extraction sets and every command in Section 5.
+  rationale is supported by the ledger and independent review; every
+  remediation cites the exact correction; `src/tests.rs` contains no `C15_`
+  constant and no function whose name begins `c15_`; no C15-only source parser,
+  raw-code relationship matcher, immutable-anchor loader, ledger validator, or
+  mutation fixture remains; the T04 behavioral scanner characterization and the
+  actual T03/T04 refactors remain; no physical-line ceiling appears as
+  acceptance logic; the full feature/target/MSRV/native matrix is green; the
+  initiative handoff is exact.
+- Commands: on the exact pre-cleanup head, run the six accepted C15 focused
+  guards once; after cleanup require
+  `test -z "$(git grep -nE 'C15_|fn c15_' -- src/tests.rs || true)"`; rerun both
+  historical extraction sets and every command in Section 5. The task reviewer
+  independently re-extracts the ledger inputs and inspects the final source and
+  remediation descendants without delegating semantic proof to string matches.
 - Depends on: T04.
-- Intended commit: `test(audit): close sprawl preservation evidence`.
+- Intended commit: `test(audit): retire temporary source validators`.
 
 ## 5 Verification And Completion
 
@@ -267,12 +275,7 @@ do
   git diff --find-renames --function-context "$first_parent_sha" "$experiment_sha" -- '*.rs' >/dev/null
   git diff --unified=0 "$first_parent_sha" "$experiment_sha" -- '*.rs' >/dev/null
 done
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_lifecycle_resource_remediations_are_closed -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_graph_raster_model_remediations_are_closed -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_test_code_remediations_are_closed -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_sprawl_audit_is_closed_against_current_source -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c15_final_preservation_contract_matches_c14 -- --exact
+test -z "$(git grep -nE 'C15_|fn c15_' -- src/tests.rs || true)"
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
