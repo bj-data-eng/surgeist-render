@@ -170,13 +170,6 @@ Implementation and final commands use only already-installed artifacts with
 
 ```sh
 set -euo pipefail
-cycle_base=2bd2d36638b8a3436b69cb99a905d37b36886d16
-cycle_head=$(git rev-parse HEAD)
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_changed_public_items_have_semantic_documentation -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::render_window_smoke_source_covers_direct_and_graph_routes -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_dependency_feature_and_provenance_contract_is_final -- --exact
-CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_final_quality_contract_matches_published_gpu_architecture -- --exact
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
@@ -188,6 +181,13 @@ The complete C14 final command set is:
 
 ```sh
 set -euo pipefail
+cycle_base=2bd2d36638b8a3436b69cb99a905d37b36886d16
+cycle_head=$(git rev-parse HEAD)
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_changed_public_items_have_semantic_documentation -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::render_window_smoke_source_covers_direct_and_graph_routes -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_dependency_feature_and_provenance_contract_is_final -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_final_quality_contract_matches_published_gpu_architecture -- --exact
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
