@@ -2,7 +2,7 @@ use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
     pass::{
-        AccountingReadyC08PreparedFrameCommit, C08PreparedGraphSubmission,
+        AccountingReadyC08PreparedFrameCommit, C08PreparedGraphSubmission, EncodedGpuGraphActivity,
         PendingC08PreparedFrameCommit,
     },
     resource::FrameCleanup,
@@ -468,6 +468,7 @@ pub(crate) struct C08GraphSubmissionPayload {
     command_buffer: wgpu::CommandBuffer,
     capture_resources: PendingVelloResourceCommit,
     prepared_frame: PendingC08PreparedFrameCommit,
+    activity: EncodedGpuGraphActivity,
     output: PendingC08GraphHostEffect,
 }
 
@@ -476,6 +477,7 @@ pub(crate) struct C08GraphSubmissionPayload {
 pub(crate) struct C08GraphSubmissionCommit {
     output: C08GraphOutputCommit,
     frame_cleanup: FrameCleanup,
+    activity: EncodedGpuGraphActivity,
 }
 
 struct C08SubmittedCommand {
@@ -565,11 +567,12 @@ impl C08GraphSubmissionPayload {
         prepared: C08PreparedGraphSubmission,
         headless_draft: HeadlessPublication,
     ) -> Self {
-        let (capture_resources, prepared_frame) = prepared.into_parts();
+        let (capture_resources, prepared_frame, activity) = prepared.into_parts();
         Self {
             command_buffer,
             capture_resources,
             prepared_frame,
+            activity,
             output: PendingC08GraphHostEffect::Headless(headless_draft),
         }
     }
@@ -583,11 +586,12 @@ impl C08GraphSubmissionPayload {
         prepared: C08PreparedGraphSubmission,
         acquired: AcquiredPresentedSurfaceTexture,
     ) -> Self {
-        let (capture_resources, prepared_frame) = prepared.into_parts();
+        let (capture_resources, prepared_frame, activity) = prepared.into_parts();
         Self {
             command_buffer,
             capture_resources,
             prepared_frame,
+            activity,
             output: PendingC08GraphHostEffect::Presented(PendingC08PresentedHostEffect {
                 acquired,
             }),
@@ -625,13 +629,15 @@ impl AccountingReadyC08GraphResources {
             .capture_resources
             .commit(VelloResourceCommitProof { _private: () })?;
         let prepared_cleanup = self.prepared_frame.commit(pass_cache)?;
-        Ok(prepared_cleanup.followed_by(capture_cleanup))
+        Ok(capture_cleanup.followed_by(prepared_cleanup))
     }
 }
 
 impl C08GraphSubmissionCommit {
-    pub(crate) fn into_parts(self) -> (C08GraphOutputCommit, FrameCleanup) {
-        (self.output, self.frame_cleanup)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (C08GraphOutputCommit, FrameCleanup, EncodedGpuGraphActivity) {
+        (self.output, self.frame_cleanup, self.activity)
     }
 }
 
@@ -1721,6 +1727,7 @@ impl GpuOperationTransaction {
             command_buffer,
             capture_resources,
             prepared_frame,
+            activity,
             output,
         } = payload;
         let submitted = self
@@ -1764,6 +1771,7 @@ impl GpuOperationTransaction {
         Ok(C08GraphSubmissionCommit {
             output,
             frame_cleanup,
+            activity,
         })
     }
 

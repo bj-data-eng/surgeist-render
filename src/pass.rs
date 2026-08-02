@@ -10544,6 +10544,78 @@ enum C08ScheduledEncodingKind {
     Present,
 }
 
+/// Immutable counts derived only from runtime passes that finished encoding.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct EncodedGpuGraphActivity {
+    vello_passes: usize,
+    image_passes: usize,
+    composite_passes: usize,
+    copy_operations: usize,
+    custom_present_passes: usize,
+}
+
+impl EncodedGpuGraphActivity {
+    fn from_scheduled(
+        scheduled: &[C08ScheduledEncodingKind],
+        destination_parent_copies: usize,
+    ) -> Self {
+        let mut activity = Self {
+            copy_operations: destination_parent_copies,
+            ..Self::default()
+        };
+        for kind in scheduled {
+            match kind {
+                C08ScheduledEncodingKind::VelloCapture => {
+                    activity.vello_passes = activity.vello_passes.saturating_add(1);
+                }
+                C08ScheduledEncodingKind::ClearRoot
+                | C08ScheduledEncodingKind::CanonicalizeCapture
+                | C08ScheduledEncodingKind::ColorFilter
+                | C08ScheduledEncodingKind::BlurHorizontalRgba
+                | C08ScheduledEncodingKind::BlurVerticalRgba
+                | C08ScheduledEncodingKind::BlurHorizontalSourceAlpha
+                | C08ScheduledEncodingKind::BlurVerticalSourceAlpha
+                | C08ScheduledEncodingKind::DropShadowColorize => {
+                    activity.image_passes = activity.image_passes.saturating_add(1);
+                }
+                C08ScheduledEncodingKind::CopyBackdrop => {
+                    activity.copy_operations = activity.copy_operations.saturating_add(1);
+                }
+                C08ScheduledEncodingKind::DropShadowMerge
+                | C08ScheduledEncodingKind::SpanSourceOver
+                | C08ScheduledEncodingKind::LayerComposite => {
+                    activity.composite_passes = activity.composite_passes.saturating_add(1);
+                }
+                C08ScheduledEncodingKind::Present => {
+                    activity.custom_present_passes =
+                        activity.custom_present_passes.saturating_add(1);
+                }
+            }
+        }
+        activity
+    }
+
+    pub(crate) const fn vello_passes(self) -> usize {
+        self.vello_passes
+    }
+
+    pub(crate) const fn image_passes(self) -> usize {
+        self.image_passes
+    }
+
+    pub(crate) const fn composite_passes(self) -> usize {
+        self.composite_passes
+    }
+
+    pub(crate) const fn copy_operations(self) -> usize {
+        self.copy_operations
+    }
+
+    pub(crate) const fn custom_present_passes(self) -> usize {
+        self.custom_present_passes
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum C08CustomSpineEncodingState {
     Ready,
@@ -10553,6 +10625,7 @@ enum C08CustomSpineEncodingState {
 }
 
 pub(crate) struct C08CustomSpineEncodingSummary {
+    activity: EncodedGpuGraphActivity,
     pub(crate) encodes_custom_passes_in_order: bool,
     pub(crate) clears_full_root_once: bool,
     pub(crate) uses_exact_prepared_spatial_mapping: bool,
@@ -10750,6 +10823,10 @@ impl C08CustomSpineEncodingProgress {
             .saturating_add(self.layer_composite_count);
         let c12 = c12_execution_receipt(prepared);
         C08CustomSpineEncodingSummary {
+            activity: EncodedGpuGraphActivity::from_scheduled(
+                &self.scheduled,
+                self.destination_composite_count,
+            ),
             encodes_custom_passes_in_order: c08_scheduled_encoding_order_is_exact(
                 &self.scheduled,
                 &prepared.plan.passes,
@@ -10961,6 +11038,10 @@ fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
 }
 
 impl C08CustomSpineEncodingSummary {
+    pub(crate) const fn activity(&self) -> EncodedGpuGraphActivity {
+        self.activity
+    }
+
     fn proves_complete_submission(&self) -> bool {
         let common = self.encodes_custom_passes_in_order
             && self.clears_full_root_once
@@ -11171,11 +11252,18 @@ impl AccountingReadyC08PreparedFrameCommit {
 pub(crate) struct C08PreparedGraphSubmission {
     capture_resources: PendingVelloResourceCommit,
     prepared_frame: PendingC08PreparedFrameCommit,
+    activity: EncodedGpuGraphActivity,
 }
 
 impl C08PreparedGraphSubmission {
-    pub(crate) fn into_parts(self) -> (PendingVelloResourceCommit, PendingC08PreparedFrameCommit) {
-        (self.capture_resources, self.prepared_frame)
+    pub(crate) fn into_parts(
+        self,
+    ) -> (
+        PendingVelloResourceCommit,
+        PendingC08PreparedFrameCommit,
+        EncodedGpuGraphActivity,
+    ) {
+        (self.capture_resources, self.prepared_frame, self.activity)
     }
 }
 
@@ -15074,7 +15162,7 @@ impl<'device> PreparedGraph<'device> {
             preparation_error("the completed C08 graph lost its prepared frame scope")
         })?;
         let C08PendingGraphEncoding {
-            summary: _,
+            summary,
             resources: capture_resources,
             session: _,
         } = pending;
@@ -15084,6 +15172,7 @@ impl<'device> PreparedGraph<'device> {
                 frame_scope,
                 pass_cache_update,
             },
+            activity: summary.activity(),
         })
     }
 

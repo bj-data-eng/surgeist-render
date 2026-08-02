@@ -3,7 +3,8 @@ use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
 use super::pass::{
-    C08ExternalOutputView, C08PreparableGraph, C09PreparableGraph, LoweredGraphPlan, PreparedGraph,
+    C08ExternalOutputView, C08PreparableGraph, C09PreparableGraph, EncodedGpuGraphActivity,
+    LoweredGraphPlan, PreparedGraph,
 };
 #[cfg(test)]
 use super::pass::{C08PassCacheRequestsForTest, C09CompositeCacheRequestsForTest};
@@ -17,6 +18,7 @@ use super::resource::{
 };
 #[cfg(test)]
 use super::shader::{ColorFilterOperationBufferLimits, DevicePassCacheCountsForTest};
+use super::stats::GpuGraphStatsObservation;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -5418,6 +5420,7 @@ pub(crate) struct SurfaceFrameCommit {
     timings: RenderTimings,
     headless_publication: Option<HeadlessPublication>,
     _frame_cleanup: Option<FrameCleanup>,
+    stats_observation: Option<GpuGraphStatsObservation>,
 }
 
 impl SurfaceFrameCommit {
@@ -5426,6 +5429,7 @@ impl SurfaceFrameCommit {
             timings,
             headless_publication: None,
             _frame_cleanup: None,
+            stats_observation: None,
         }
     }
 
@@ -5434,18 +5438,24 @@ impl SurfaceFrameCommit {
             timings,
             headless_publication: Some(publication),
             _frame_cleanup: None,
+            stats_observation: None,
         }
     }
 
     fn headless_graph(
         publication: HeadlessPublication,
         frame_cleanup: FrameCleanup,
+        graph_activity: EncodedGpuGraphActivity,
+        working_format: WorkingFormat,
         timings: RenderTimings,
     ) -> Self {
+        let stats_observation =
+            GpuGraphStatsObservation::after_cleanup(working_format, graph_activity, &frame_cleanup);
         Self {
             timings,
             headless_publication: Some(publication),
             _frame_cleanup: Some(frame_cleanup),
+            stats_observation: Some(stats_observation),
         }
     }
 
@@ -5453,16 +5463,30 @@ impl SurfaceFrameCommit {
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     ))]
-    fn presented_graph(frame_cleanup: FrameCleanup, timings: RenderTimings) -> Self {
+    fn presented_graph(
+        frame_cleanup: FrameCleanup,
+        graph_activity: EncodedGpuGraphActivity,
+        working_format: WorkingFormat,
+        timings: RenderTimings,
+    ) -> Self {
+        let stats_observation =
+            GpuGraphStatsObservation::after_cleanup(working_format, graph_activity, &frame_cleanup);
         Self {
             timings,
             headless_publication: None,
             _frame_cleanup: Some(frame_cleanup),
+            stats_observation: Some(stats_observation),
         }
     }
 
     pub(crate) const fn timings(&self) -> RenderTimings {
         self.timings
+    }
+
+    pub(crate) fn apply_stats_observation(&self, stats: &mut Stats) {
+        if let Some(observation) = self.stats_observation {
+            observation.apply_to(stats);
+        }
     }
 
     pub(crate) fn commit(self, surface: &mut Surface) {
@@ -5548,7 +5572,7 @@ pub(crate) async fn render_exact_headless_graph_surface(
             )
             .await?
     };
-    let (output, frame_cleanup) = clean.into_parts();
+    let (output, frame_cleanup, graph_activity) = clean.into_parts();
     #[cfg(not(any(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
@@ -5570,6 +5594,8 @@ pub(crate) async fn render_exact_headless_graph_surface(
     Ok(SurfaceFrameCommit::headless_graph(
         publication,
         frame_cleanup,
+        graph_activity,
+        selected_working_format,
         RenderTimings {
             render_time: render_start.elapsed(),
             present_time: Duration::ZERO,
@@ -5704,7 +5730,7 @@ pub(crate) async fn render_exact_presented_graph_surface(
             )
             .await?
     };
-    let (output, frame_cleanup) = clean.into_parts();
+    let (output, frame_cleanup, graph_activity) = clean.into_parts();
     if !matches!(output, C08GraphOutputCommit::Presented) {
         return Err(Error::new(
             BackendErrorCode::PresentFailed,
@@ -5713,6 +5739,8 @@ pub(crate) async fn render_exact_presented_graph_surface(
     }
     Ok(SurfaceFrameCommit::presented_graph(
         frame_cleanup,
+        graph_activity,
+        selected_working_format,
         RenderTimings {
             render_time: present_start.duration_since(render_start),
             present_time: present_start.elapsed(),

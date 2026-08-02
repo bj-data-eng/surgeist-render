@@ -683,6 +683,46 @@ enum IdleReuse {
     Fresh,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ResourceAcquisitionSource {
+    Allocation,
+    Reuse,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FrameResourceAcquisitions {
+    allocations: usize,
+    reuses: usize,
+}
+
+impl FrameResourceAcquisitions {
+    fn record(&mut self, source: ResourceAcquisitionSource) {
+        match source {
+            ResourceAcquisitionSource::Allocation => {
+                self.allocations = self.allocations.saturating_add(1);
+            }
+            ResourceAcquisitionSource::Reuse => {
+                self.reuses = self.reuses.saturating_add(1);
+            }
+        }
+    }
+
+    fn followed_by(self, later: Self) -> Self {
+        Self {
+            allocations: self.allocations.saturating_add(later.allocations),
+            reuses: self.reuses.saturating_add(later.reuses),
+        }
+    }
+
+    pub(crate) const fn allocations(self) -> usize {
+        self.allocations
+    }
+
+    pub(crate) const fn reuses(self) -> usize {
+        self.reuses
+    }
+}
+
 impl ResourceManagerState {
     const ACCOUNTING_FAULT_MESSAGE: &'static str =
         "resource manager is unavailable after a retained-byte accounting invariant failure";
@@ -903,6 +943,11 @@ impl ResourceManagerState {
             resource,
             allocation_generation,
             payload,
+            if reusable.is_some() {
+                ResourceAcquisitionSource::Reuse
+            } else {
+                ResourceAcquisitionSource::Allocation
+            },
         ))
     }
 
@@ -1176,6 +1221,7 @@ impl ResourceManagerState {
             token.resource_identity,
             allocation_generation,
             ResourcePayload::Modeled,
+            ResourceAcquisitionSource::Allocation,
         ))
     }
 
@@ -1539,6 +1585,7 @@ impl ResourceManager {
             state: Arc::clone(&self.state),
             manager_identity: state.identity.clone(),
             frame,
+            acquisitions: FrameResourceAcquisitions::default(),
             pending_drop_disposition: Some(FrameResourceDisposition::ReleaseReusable),
         })
     }
@@ -1776,6 +1823,7 @@ struct ResourceLeaseToken {
 pub(crate) struct ResourceLease {
     token: ResourceLeaseToken,
     payload: ResourcePayload,
+    acquisition_source: ResourceAcquisitionSource,
 }
 
 impl ResourceLease {
@@ -1785,6 +1833,7 @@ impl ResourceLease {
         resource_identity: ResourceIdentity,
         allocation_generation: AllocationGeneration,
         payload: ResourcePayload,
+        acquisition_source: ResourceAcquisitionSource,
     ) -> Self {
         Self {
             token: ResourceLeaseToken {
@@ -1794,6 +1843,7 @@ impl ResourceLease {
                 allocation_generation,
             },
             payload,
+            acquisition_source,
         }
     }
 
@@ -1830,6 +1880,7 @@ pub(crate) struct FrameResourceScope {
     state: Arc<Mutex<ResourceManagerState>>,
     manager_identity: ManagerIdentity,
     frame: FrameIdentity,
+    acquisitions: FrameResourceAcquisitions,
     pending_drop_disposition: Option<FrameResourceDisposition>,
 }
 
@@ -1841,13 +1892,20 @@ enum FrameResourceDisposition {
 }
 
 impl FrameResourceScope {
+    fn record_acquisition(&mut self, lease: ResourceLease) -> ResourceLease {
+        self.acquisitions.record(lease.acquisition_source);
+        lease
+    }
+
     #[cfg(test)]
     pub(crate) fn acquire(
         &mut self,
         key: ResourceCacheKey,
         byte_len: u64,
     ) -> Result<ResourceLease> {
-        lock_state(&self.state).acquire(&self.manager_identity, self.frame, key, byte_len)
+        let lease =
+            lock_state(&self.state).acquire(&self.manager_identity, self.frame, key, byte_len)?;
+        Ok(self.record_acquisition(lease))
     }
 
     fn validated_payload<'scope>(
@@ -1909,7 +1967,7 @@ impl FrameResourceScope {
         idle_reuse: IdleReuse,
     ) -> Result<ResourceLease> {
         let byte_len = key.byte_len();
-        lock_state(&self.state).acquire_with_payload(
+        let lease = lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             ResourceCacheKey::VelloBuffer(key),
@@ -1924,7 +1982,8 @@ impl FrameResourceScope {
                 });
                 Ok(ResourcePayload::VelloBuffer { buffer })
             },
-        )
+        )?;
+        Ok(self.record_acquisition(lease))
     }
 
     pub(crate) fn acquire_vello_image(
@@ -1952,7 +2011,7 @@ impl FrameResourceScope {
         byte_len: u64,
         idle_reuse: IdleReuse,
     ) -> Result<ResourceLease> {
-        lock_state(&self.state).acquire_with_payload(
+        let lease = lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             ResourceCacheKey::VelloImage(key),
@@ -1988,7 +2047,8 @@ impl FrameResourceScope {
                 });
                 Ok(ResourcePayload::VelloImage { texture, view })
             },
-        )
+        )?;
+        Ok(self.record_acquisition(lease))
     }
 
     pub(crate) fn effect_texture<'scope>(
@@ -2047,7 +2107,7 @@ impl FrameResourceScope {
         )?;
         let byte_len = descriptor.checked_byte_len()?;
         let key = ResourceCacheKey::EffectTexture(descriptor.cache_key());
-        lock_state(&self.state).acquire_with_payload(
+        let lease = lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             key,
@@ -2071,7 +2131,8 @@ impl FrameResourceScope {
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 Ok(ResourcePayload::EffectTexture { texture, view })
             },
-        )
+        )?;
+        Ok(self.record_acquisition(lease))
     }
 
     #[cfg(test)]
@@ -2112,7 +2173,7 @@ impl FrameResourceScope {
             usage,
         )?;
         let key = ResourceCacheKey::ResolvedMaskUpload(descriptor.cache_key());
-        lock_state(&self.state).acquire_with_payload(
+        let lease = lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             key,
@@ -2155,7 +2216,8 @@ impl FrameResourceScope {
                 let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
                 Ok(ResourcePayload::ResolvedMaskUpload { texture, view })
             },
-        )
+        )?;
+        Ok(self.record_acquisition(lease))
     }
 
     pub(crate) fn acquire_gaussian_kernel_buffer(
@@ -2169,7 +2231,7 @@ impl FrameResourceScope {
         ))?;
         let byte_len = plan.byte_len();
         let key = ResourceCacheKey::GaussianKernelBuffer(plan.key());
-        lock_state(&self.state).acquire_with_payload(
+        let lease = lock_state(&self.state).acquire_with_payload(
             &self.manager_identity,
             self.frame,
             key,
@@ -2183,7 +2245,8 @@ impl FrameResourceScope {
                 });
                 Ok(ResourcePayload::GaussianKernelBuffer { buffer })
             },
-        )
+        )?;
+        Ok(self.record_acquisition(lease))
     }
 
     pub(crate) fn release(&mut self, lease: ResourceLease) -> Result<()> {
@@ -2218,13 +2281,14 @@ impl FrameResourceScope {
         key: ResourceCacheKey,
         byte_len: u64,
     ) -> Result<ResourceLease> {
-        lock_state(&self.state).replace(
+        let lease = lock_state(&self.state).replace(
             &self.manager_identity,
             self.frame,
             lease.token,
             key,
             byte_len,
-        )
+        )?;
+        Ok(self.record_acquisition(lease))
     }
 
     /// Removes the exact validated lease even when accounting becomes faulted.
@@ -2270,7 +2334,7 @@ impl FrameResourceScope {
             return FrameCleanup::default();
         }
         let mut state = lock_state(&self.state);
-        match disposition {
+        let cleanup = match disposition {
             FrameResourceDisposition::ReleaseReusable => {
                 state.cleanup_frame(&self.manager_identity, self.frame)
             }
@@ -2280,7 +2344,8 @@ impl FrameResourceScope {
             FrameResourceDisposition::Discard => {
                 state.discard_frame(&self.manager_identity, self.frame)
             }
-        }
+        };
+        cleanup.with_acquisitions(self.acquisitions)
     }
 
     #[cfg(test)]
@@ -2394,6 +2459,7 @@ impl ResourceRetentionOutcome {
 pub(crate) struct FrameCleanup {
     evicted_resources: Vec<ResourceIdentity>,
     retention: ResourceRetentionOutcome,
+    acquisitions: FrameResourceAcquisitions,
 }
 
 impl FrameCleanup {
@@ -2401,11 +2467,13 @@ impl FrameCleanup {
         Self {
             evicted_resources: Vec::new(),
             retention: ResourceRetentionOutcome::AccountingFault { fault },
+            acquisitions: FrameResourceAcquisitions::default(),
         }
     }
 
     pub(crate) fn followed_by(mut self, mut later: Self) -> Self {
         self.evicted_resources.append(&mut later.evicted_resources);
+        self.acquisitions = self.acquisitions.followed_by(later.acquisitions);
         self.retention = match (self.retention, later.retention) {
             (ResourceRetentionOutcome::AccountingFault { fault }, _) => {
                 ResourceRetentionOutcome::AccountingFault { fault }
@@ -2416,6 +2484,26 @@ impl FrameCleanup {
             (_, later) => later,
         };
         self
+    }
+
+    fn with_acquisitions(mut self, acquisitions: FrameResourceAcquisitions) -> Self {
+        self.acquisitions = acquisitions;
+        self
+    }
+
+    pub(crate) const fn acquisitions(&self) -> FrameResourceAcquisitions {
+        self.acquisitions
+    }
+
+    pub(crate) const fn retained_byte_len(&self) -> u64 {
+        match self.retention {
+            ResourceRetentionOutcome::NoIdleResources => 0,
+            ResourceRetentionOutcome::RetainedReusable { byte_len, .. } => byte_len,
+            ResourceRetentionOutcome::Trimmed {
+                retained_byte_len, ..
+            } => retained_byte_len,
+            ResourceRetentionOutcome::AccountingFault { .. } => 0,
+        }
     }
 
     pub(crate) fn into_accounting_result(self) -> Result<Self> {

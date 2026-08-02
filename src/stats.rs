@@ -2,6 +2,8 @@ use super::{
     Image, ImageId, Paint,
     command::{RenderCommand, RenderPaint},
     paint::PaintKind,
+    pass::EncodedGpuGraphActivity,
+    resource::{FrameCleanup, WorkingFormat},
     scene::Command,
 };
 use std::time::Duration;
@@ -44,6 +46,49 @@ pub struct Stats {
     pub cache_hits: usize,
     pub cache_misses: usize,
     pub uploaded_bytes: u64,
+}
+
+/// One complete graph-frame observation, frozen only after resource cleanup.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GpuGraphStatsObservation {
+    effect_precision: EffectPrecision,
+    activity: EncodedGpuGraphActivity,
+    effect_texture_allocations: usize,
+    effect_texture_reuses: usize,
+    retained_effect_bytes: u64,
+}
+
+impl GpuGraphStatsObservation {
+    pub(crate) fn after_cleanup(
+        working_format: WorkingFormat,
+        activity: EncodedGpuGraphActivity,
+        cleanup: &FrameCleanup,
+    ) -> Self {
+        let acquisitions = cleanup.acquisitions();
+        Self {
+            effect_precision: match working_format {
+                WorkingFormat::HighPrecision => EffectPrecision::High,
+                WorkingFormat::ReducedPrecision => EffectPrecision::Reduced,
+            },
+            activity,
+            effect_texture_allocations: acquisitions.allocations(),
+            effect_texture_reuses: acquisitions.reuses(),
+            retained_effect_bytes: cleanup.retained_byte_len(),
+        }
+    }
+
+    pub(crate) fn apply_to(self, stats: &mut Stats) {
+        stats.route = Some(RenderRoute::GpuGraph);
+        stats.effect_precision = Some(self.effect_precision);
+        stats.vello_passes = self.activity.vello_passes();
+        stats.image_passes = self.activity.image_passes();
+        stats.composite_passes = self.activity.composite_passes();
+        stats.copy_operations = self.activity.copy_operations();
+        stats.custom_present_passes = self.activity.custom_present_passes();
+        stats.effect_texture_allocations = self.effect_texture_allocations;
+        stats.effect_texture_reuses = self.effect_texture_reuses;
+        stats.retained_effect_bytes = self.retained_effect_bytes;
+    }
 }
 
 pub(crate) fn collect_stats(

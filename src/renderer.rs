@@ -1230,6 +1230,9 @@ impl Renderer {
         mut publication: RenderPublication,
         frame_start: Instant,
     ) -> Result<Stats> {
+        publication
+            .frame
+            .apply_stats_observation(&mut publication.stats);
         let timings = publication.frame.timings();
         publication.stats.render_time = timings.render_time;
         publication.stats.present_time = timings.present_time;

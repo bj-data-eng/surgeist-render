@@ -31602,6 +31602,128 @@ fn non_render_operations_do_not_mutate_last_successful_stats() {
 }
 
 #[test]
+fn gpu_graph_stats_count_exact_c12_passes_copies_resources_and_precision() {
+    let (scene, size, parameters, _) = c12_integration_fixture_for_test();
+    for (working_format, precision) in [
+        (WorkingFormat::HighPrecision, EffectPrecision::High),
+        (WorkingFormat::ReducedPrecision, EffectPrecision::Reduced),
+    ] {
+        let stats = render_c12_fixture_for_test(&scene, size, parameters, working_format)
+            .result
+            .stats;
+        assert_eq!(
+            (
+                stats.route,
+                stats.effect_precision,
+                stats.vello_passes,
+                stats.image_passes,
+                stats.composite_passes,
+                stats.copy_operations,
+                stats.custom_present_passes,
+            ),
+            (Some(RenderRoute::GpuGraph), Some(precision), 3, 9, 6, 1, 1,)
+        );
+        assert!(stats.effect_texture_allocations > 0);
+        assert_eq!(stats.effect_texture_reuses, 0);
+        assert!(stats.retained_effect_bytes > 0);
+    }
+}
+
+#[test]
+fn resource_stats_report_acquisition_source_and_post_trim_retention() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("resource-stat coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
+        .expect("resource-stat coverage requires a headless surface");
+    let scene = repeated_c08_scene_for_test();
+
+    let first = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the first resource-stat graph must succeed");
+    let second = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the repeated resource-stat graph must succeed");
+    let resources = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("resource-stat coverage must retain its ready device")
+        .internal_resource_manager_observation_for_test();
+
+    assert!(first.stats.effect_texture_allocations > 0);
+    assert_eq!(first.stats.effect_texture_reuses, 0);
+    assert!(second.stats.effect_texture_reuses > 0);
+    assert_eq!(second.stats.retained_effect_bytes, resources.retained_bytes);
+    assert_eq!(resources.leased_count, 0);
+    assert_eq!(resources.active_frame_count, 0);
+}
+
+#[test]
+fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("graph stats failure coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
+        .expect("graph stats failure coverage requires a headless surface");
+    let scene = repeated_c08_scene_for_test();
+    let successful = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect("the graph stats baseline must succeed")
+    .stats;
+    assert_eq!(successful.route, Some(RenderRoute::GpuGraph));
+    assert!(successful.effect_texture_allocations > 0);
+
+    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut surface,
+        &scene,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("the injected graph failure must not publish stats");
+    drop(failure);
+    assert_eq!(renderer.stats(), successful);
+
+    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    {
+        let future = renderer.render_forced_c08_graph_for_test(
+            &mut surface,
+            &scene,
+            Parameters::default(),
+            working_format,
+        );
+        let mut future = std::pin::pin!(future);
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(matches!(
+            Future::poll(future.as_mut(), &mut context),
+            Poll::Pending
+        ));
+        pause.wait_for_submission_for_test(Duration::from_secs(2));
+    }
+    drop(pause);
+    assert_eq!(renderer.stats(), successful);
+}
+
+#[test]
 fn render_reports_command_stats() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
