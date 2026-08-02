@@ -2859,6 +2859,11 @@ This initiative is accepted only when all of the following are true:
     Rust-1.97 compatibility, and target check is green; unavailable required tooling is
     reported through the canonical permission blocker rather than treated as a
     pass.
+12. The final post-C14 cycle has a source-backed disposition for every Rust
+    item and surviving descended helper/call relationship changed by the
+    function-size experiment, corrects every confirmed cohesion regression,
+    and preserves the behavior, API, test, dependency, provenance, and safety
+    properties required by S39.
 
 Planning, implementation review, landing, publication, and candidate handoff
 follow the canonical `$surgeist-agent` workflow and are not redefined here.
@@ -2871,19 +2876,22 @@ source evidence is commit `9488f2000f0a31485679c39a568ff2a6d9d6f28f`
 (`fix(renderer): bound private color-filter helpers`) and commit
 `4225fae1466aef093f5f22f69bd8c17c6e4420d7`
 (`refactor(repo): bound repository function sizes`), each compared with its
-first parent and with the final C14 source. Those commits are review inputs, not
-desired-state authority.
+first parent and with the immutable C14 implementation-source baseline at
+commit `92cdd9114046115d45451153c6ebad3b425db36e`. Those commits are review
+inputs, not desired-state authority.
 
 The audit is finite: it covers every Rust item changed by either experiment
 commit, the surviving helper/call relationships descended from those items,
 and only the adjacent current code needed to judge ownership, cohesion, phase
 boundaries, control flow, state and resource lifetimes, diagnostics, and test
-intent. Every reviewed extraction is classified as retained or remediated with
-source evidence. The review must identify mechanical fragmentation such as
-single-use forwarding helpers with no semantic boundary, argument-bundle or
-return-bundle churn, split control flow that obscures ordering or cleanup,
-misleading names, duplicated setup/assertion fragments, and ownership moved
-away from the module or phase that actually governs it.
+intent. A source-backed inventory enumerates every changed Rust item and every
+surviving descended helper/call relationship and gives each an explicit
+disposition: retain, remediate in C15, or already superseded, with the relevant
+current source evidence. The review must identify mechanical fragmentation
+such as single-use forwarding helpers with no semantic boundary,
+argument-bundle or return-bundle churn, split control flow that obscures
+ordering or cleanup, misleading names, duplicated setup/assertion fragments,
+and ownership moved away from the module or phase that actually governs it.
 
 Confirmed experiment-caused damage is corrected in production and test code.
 Corrections may recombine, reshape, rename, relocate, or remove helpers, but
@@ -2895,8 +2903,8 @@ failure boundary, invariant, or independently testable concept remain intact.
 No function is split or recombined merely to satisfy a physical-line count.
 
 `clippy::too_many_lines` and similar structural signals are advisory evidence
-for this review, never Boolean acceptance gates. Completion requires fresh task
-reviewers to inspect both historical experiment ranges and the composed
-remediation, followed by the full crate feature/target/MSRV/native-presentation
-matrix, a clean holistic review, canonical publication, and remote readback.
-The cycle adds no unrelated cleanup and is the last cycle of I03.
+for this review, never Boolean acceptance gates. Acceptance requires source
+evidence for the complete inventory, every required remediation, and the full
+crate feature/target/MSRV/native-presentation matrix. The cycle adds no
+unrelated cleanup and is the last cycle of I03. Review, landing, publication,
+and remote readback follow the canonical `$surgeist-agent` workflow.
