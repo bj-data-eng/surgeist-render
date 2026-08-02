@@ -4,8 +4,8 @@
 
 - Owning repository: `surgeist-render`.
 - Desired state: `plans/specs/gpu-render-pipeline.md` at commit
-  `9903b58e8c96063bd834fb561baaf321116feead`, normalized semantic SHA-256
-  `d33bb1478eac256c75203b7ecaff450a12adc8158f3f2ba72e4ed891e9c6a9ce`.
+  `e88e00bc8bd9325ae82ef1f1db2e4c72de44b28b`, normalized semantic SHA-256
+  `30dee50db5e8ad2f06df7cbd01ef34c61b5ccd037924a100932053a8507712af`.
 - Specification review disposition: `CLEAN` for that exact revision.
 - Recovery base: published C01 commit
   `5361e3460278dffb877b9d485a2d12977977c3ef`; the former C02 plan is
@@ -190,11 +190,29 @@
 - Outcome: complete native feature combinations, presented direct/graph smoke,
   wasm compilation, Rust 1.97 evidence, dependency/provenance inspection,
   API/docs/example updates, and full deterministic/real-GPU acceptance.
-- Specification: S02-S06B and S31-S38.
+- Specification: S02-S06B, S31-S37, and S38 items 1-11.
 - Prerequisites: C13.
 - Entry state: final GPU-only behavior and matrix reconciliation are published.
 - Exit evidence: every available required feature, target, quality, lifecycle,
   font-preflight, lint, format, unsafe-absence, and compatibility gate is green;
   unavailable required target/host evidence is an exact canonical blocker.
-- Handoff: publish and remotely verify the leaf candidate, then report public API
-  migration, browser-host follow-up, and root-owned facade/artifact/gitlink work.
+- Handoff: publish and remotely verify the C14 leaf candidate, then C15 audits
+  the function-size experiment against that immutable implementation source.
+
+## C15 Sprawl Review And Cohesion Remediation
+
+- Outcome: exhaustively review the two function-size experiment commits and
+  repair every confirmed cohesion regression without imposing a line ceiling
+  or changing rendering behavior, public API, or repository boundaries.
+- Specification: S39 and S38 item 12.
+- Prerequisites: C14.
+- Entry state: the final GPU architecture, documentation, platform evidence,
+  and immutable C14 implementation-source baseline are published.
+- Exit evidence: every experiment-changed Rust item and surviving descended
+  helper/call relationship has a source-backed disposition; every item marked
+  for remediation is corrected; retained boundaries are justified; the full
+  feature, target, Rust-1.97, native-presentation, safety, and behavior matrix
+  remains green.
+- Handoff: publish and remotely verify the final I03 leaf candidate, then report
+  public API migration, browser-host follow-up, and root-owned
+  facade/artifact/gitlink work.
