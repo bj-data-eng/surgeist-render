@@ -243,5 +243,5 @@ surface, exact feature/MSRV/wasm/native evidence, and the required C15
 sprawl-review entry state. Browser execution remains owed by root, as do the
 later facade/API-artifact/gitlink changes after final I03 publication. Missing
 installed tooling, graphical-host capability, credentials, or stable remote
-history uses
-the canonical blocker contract; no unavailable requirement is counted as green.
+history uses the canonical blocker contract; no unavailable requirement is
+counted as green.
