@@ -41980,3 +41980,93 @@ fn assert_finite_positive_rect(rect: Rect) {
     assert!(rect.width() > 0.0);
     assert!(rect.height() > 0.0);
 }
+
+#[test]
+fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
+    const LEDGER_PATH: &str = "plans/evidence/gpu-render-pipeline-c15-sprawl-dispositions.md";
+    const EXPERIMENTS: [(&str, &str); 2] = [
+        (
+            "9488f2000f0a31485679c39a568ff2a6d9d6f28f",
+            "fa9c738577110c893b7b156c0e68b68fdeec6e51",
+        ),
+        (
+            "4225fae1466aef093f5f22f69bd8c17c6e4420d7",
+            "93fbc8e59f4b58a26520915ac1285d3fe8f54622",
+        ),
+    ];
+    const FILE_COUNTS: [(&str, usize, usize); 13] = [
+        ("src/backend.rs", 0, 46),
+        ("src/capability.rs", 0, 11),
+        ("src/frame.rs", 0, 52),
+        ("src/gpu_transaction.rs", 0, 6),
+        ("src/pass.rs", 0, 151),
+        ("src/renderer.rs", 4, 20),
+        ("src/resource.rs", 0, 8),
+        ("src/shader.rs", 0, 4),
+        ("src/tests.rs", 6, 184),
+        ("src/vello_engine/glyph.rs", 0, 2),
+        ("src/vello_engine/raster.rs", 0, 8),
+        ("src/vello_engine/recording.rs", 0, 4),
+        ("src/vello_engine/scene.rs", 0, 5),
+    ];
+
+    let ledger = std::fs::read_to_string(LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {LEDGER_PATH}: {error}")
+    });
+    assert!(ledger.contains("baseline: `92cdd9114046115d45451153c6ebad3b425db36e`"));
+    for (experiment, parent) in EXPERIMENTS {
+        assert!(
+            ledger.contains(experiment),
+            "missing experiment {experiment}"
+        );
+        assert!(ledger.contains(parent), "missing first parent {parent}");
+    }
+    for (file, first_count, second_count) in FILE_COUNTS {
+        let row = format!("| `{file}` | {first_count} | {second_count} |");
+        assert!(ledger.contains(&row), "missing exact manifest row {row}");
+    }
+
+    let item_rows = ledger
+        .lines()
+        .filter(|line| line.starts_with("| ITEM-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        item_rows.len(),
+        511,
+        "every experiment item occurrence needs one row"
+    );
+    let relationship_rows = ledger
+        .lines()
+        .filter(|line| line.starts_with("| REL-"))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        relationship_rows.len(),
+        1157,
+        "every surviving direct call relationship needs one row"
+    );
+
+    for row in item_rows.iter().chain(&relationship_rows) {
+        assert!(row.contains("92cdd9114046115d45451153c6ebad3b425db36e:"));
+        assert!(
+            row.contains("| retain |")
+                || row.contains("| remediate in C15 |")
+                || row.contains("| already superseded |"),
+            "invalid or missing disposition: {row}"
+        );
+        assert!(!row.contains("too_many_lines") && !row.contains("physical-line"));
+        if row.contains("| remediate in C15 |") {
+            let owner_count = ["T02", "T03", "T04"]
+                .into_iter()
+                .filter(|owner| row.contains(owner))
+                .count();
+            assert_eq!(owner_count, 1, "remediation needs exactly one owner: {row}");
+        }
+    }
+    assert!(
+        item_rows
+            .iter()
+            .any(|row| row.contains("c10_future_backdrop_scene")
+                && row.contains("| already superseded |")),
+        "the absent duplicate helper needs an explicit superseded disposition"
+    );
+}
