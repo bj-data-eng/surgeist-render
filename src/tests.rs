@@ -42497,3 +42497,66 @@ fn c15_lifecycle_resource_remediations_are_closed() {
         );
     }
 }
+
+#[test]
+fn c15_graph_raster_model_remediations_are_closed() {
+    const CLOSURE: &str = "## T03 graph raster and model closure";
+    const CLOSED_ITEM: &str = "- Corrected remediation: **1** (`ITEM-X2-PA-069`).";
+    const ZERO_OPEN: &str = "- Open or assigned T03 remediations: **0**.";
+
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    validate_c15_disposition_ledger(&ledger).unwrap_or_else(|error| panic!("{error}"));
+
+    for required_evidence in [CLOSURE, CLOSED_ITEM, ZERO_OPEN] {
+        assert!(
+            ledger.contains(required_evidence),
+            "the T03 closure record lacks exact evidence: {required_evidence}"
+        );
+    }
+    let closed_item = ledger
+        .lines()
+        .find(|line| line.starts_with("| ITEM-X2-PA-069 |"))
+        .expect("ITEM-X2-PA-069 must retain its stable ledger row");
+    for supersession_evidence in [
+        "| pass::AcquiredGraphBindings | none |",
+        "92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:11983; T03 committed descendant:src/pass.rs:struct AcquiredGraphBindings",
+        "| already superseded | R-MECHANICAL-OWNERSHIP | — |",
+    ] {
+        assert!(
+            closed_item.contains(supersession_evidence),
+            "ITEM-X2-PA-069 lacks exact supersession evidence: {supersession_evidence}"
+        );
+    }
+    for row in ledger
+        .lines()
+        .filter(|line| line.starts_with("| ITEM-") || line.starts_with("| REL-"))
+    {
+        assert!(
+            !(row.contains("| remediate in C15 |") && row.contains("| T03 |")),
+            "T03 remediation remains open: {row}"
+        );
+    }
+
+    let source_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/pass.rs");
+    let source = std::fs::read_to_string(&source_path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", source_path.display()));
+    assert!(
+        !source.contains("type PreparedGraphResourceBindings = ("),
+        "the positional prepared-graph binding alias remains"
+    );
+    for named_ownership in [
+        "struct AcquiredGraphBindings {",
+        "runtime_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>",
+        "gaussian_kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>",
+        "let acquired_resources =",
+        "resource_bindings: acquired_resources.runtime_bindings,",
+        "kernel_bindings: acquired_resources.gaussian_kernel_bindings,",
+    ] {
+        assert!(
+            source.contains(named_ownership),
+            "the acquisition handoff lacks named ownership: {named_ownership}"
+        );
+    }
+}

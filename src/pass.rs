@@ -11979,25 +11979,23 @@ pub(crate) struct PreparedGraph<'device> {
     pass_cache: &'device DevicePassCache,
     _ready_device: PhantomData<&'device ResourceManager>,
 }
-
-type PreparedGraphResourceBindings = (
-    BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
-    BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
-);
-
+struct AcquiredGraphBindings {
+    runtime_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
+    gaussian_kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
+}
 fn acquire_prepared_graph_resources(
     plan: &RuntimeGraphPreparationPlan,
     frame_scope: &mut FrameResourceScope,
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     capabilities: &DeviceCapabilities,
-) -> Result<PreparedGraphResourceBindings> {
-    let mut resource_bindings = BTreeMap::new();
+) -> Result<AcquiredGraphBindings> {
+    let mut runtime_bindings = BTreeMap::new();
     for request in &plan.resources {
         let lease = request
             .allocation
             .acquire(frame_scope, device, queue, capabilities)?;
-        if resource_bindings
+        if runtime_bindings
             .insert(
                 request.runtime.id,
                 PreparedResourceBinding {
@@ -12012,10 +12010,10 @@ fn acquire_prepared_graph_resources(
             ));
         }
     }
-    let mut kernel_bindings = BTreeMap::new();
+    let mut gaussian_kernel_bindings = BTreeMap::new();
     for request in &plan.kernels {
         let lease = frame_scope.acquire_gaussian_kernel_buffer(device, &request.plan)?;
-        if kernel_bindings
+        if gaussian_kernel_bindings
             .insert(request.key, PreparedKernelBinding { lease: Some(lease) })
             .is_some()
         {
@@ -12024,9 +12022,11 @@ fn acquire_prepared_graph_resources(
             ));
         }
     }
-    Ok((resource_bindings, kernel_bindings))
+    Ok(AcquiredGraphBindings {
+        runtime_bindings,
+        gaussian_kernel_bindings,
+    })
 }
-
 fn create_color_filter_operation_bindings(
     plan: &RuntimeGraphPreparationPlan,
     device: &wgpu::Device,
@@ -12614,7 +12614,7 @@ impl<'device> PreparedGraph<'device> {
         {
             frame_scope.discard_on_drop();
         }
-        let (resource_bindings, kernel_bindings) =
+        let acquired_resources =
             acquire_prepared_graph_resources(&plan, &mut frame_scope, device, queue, capabilities)?;
         let color_filter_operation_bindings =
             create_color_filter_operation_bindings(&plan, device, queue)?;
@@ -12634,8 +12634,8 @@ impl<'device> PreparedGraph<'device> {
             c10_execution,
             c11_execution,
             c12_execution,
-            resource_bindings,
-            kernel_bindings,
+            resource_bindings: acquired_resources.runtime_bindings,
+            kernel_bindings: acquired_resources.gaussian_kernel_bindings,
             color_filter_operation_bindings,
             c11_pass_objects: pass_realization.c11_objects,
             pass_cache_update: pass_realization.update,

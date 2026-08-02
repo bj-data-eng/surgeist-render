@@ -77,6 +77,15 @@ text-model `.run()` calls.
 - Cohesion result: backend device/surface acquisition and presentation failure paths, frame declaration/scheduling/lowering validation phases, graph transaction submission and headless/presented completion, renderer identity/preparation/execution/publication/resume dispatch, and resource kernel validation/serialization remain genuine governing flows, operation/failure boundaries, models, ownership boundaries, or focused test-intent helpers. Their bundles retain phase-owned state; their relationships preserve ordering, cleanup, publication, or lifetime handoff. No forwarding, bundle, ordering, cleanup, publication, or lifetime regression was found.
 - Open or assigned T02 remediations: **0**.
 
+## T03 graph raster and model closure
+
+- Domain: the one accepted T03 remediation in the production portion of `src/pass.rs`; the other graph, pass, shader, capability, glyph, raster, recording, and scene dispositions remain unchanged.
+- Corrected remediation: **1** (`ITEM-X2-PA-069`).
+- Corrected descendant/source evidence: the historical positional `pass::PreparedGraphResourceBindings` alias is superseded in this task's committed source by private `pass::AcquiredGraphBindings` at `src/pass.rs`, whose `runtime_bindings` and `gaussian_kernel_bindings` fields name the independently owned runtime-resource and Gaussian-kernel binding maps.
+- Preserved acquisition evidence: `pass::acquire_prepared_graph_resources` and retained relationship `REL-0276` remain the single acquisition phase and consumer handoff; the consumer moves the two named fields into the existing `PreparedGraph` fields.
+- Preservation result: resource acquisition remains before kernel acquisition; duplicate diagnostics, frame-scope lease ownership, error/drop cleanup, color-filter binding creation, pass realization, and final `PreparedGraph` installation are unchanged.
+- Open or assigned T03 remediations: **0**.
+
 ## Item occurrences
 
 | ID | Experiment / first parent | File | Historical item / hunk | Current descendant | Related caller/callee entry IDs | Current source anchor | Disposition | Rationale | Owner |
@@ -274,7 +283,7 @@ text-model `.run()` calls.
 | ITEM-X2-PA-066 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | fn pass::PreparedGraph::try_prepare_inner; 93fbc8e59f4b58a26520915ac1285d3fe8f54622:src/pass.rs:old:7278-7418 | pass::PreparedGraph::try_prepare_inner | relationships=REL-0276,REL-0277,REL-0278 | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:12577 | retain | R-GOVERNING-FLOW | — |
 | ITEM-X2-PA-067 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | fn pass::PreparedGraph::validate_c09_composite_bindings; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:9751-9771 | pass::PreparedGraph::validate_c09_composite_bindings | relationships=REL-0225 | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:14534 | retain | R-OPERATION-PHASE | — |
 | ITEM-X2-PA-068 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | fn pass::PreparedGraph::validate_c10_operation_buffer; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:9491-9518 | pass::PreparedGraph::validate_c10_operation_buffer | relationships=REL-0274 | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:14014 | retain | R-OPERATION-PHASE | — |
-| ITEM-X2-PA-069 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | type pass::PreparedGraphResourceBindings; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:8042-8254 | pass::PreparedGraphResourceBindings | none | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:11983 | remediate in C15 | R-MECHANICAL-OWNERSHIP | T03 |
+| ITEM-X2-PA-069 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | type pass::PreparedGraphResourceBindings; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:8042-8254 | pass::AcquiredGraphBindings | none | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:11983; T03 committed descendant:src/pass.rs:struct AcquiredGraphBindings | already superseded | R-MECHANICAL-OWNERSHIP | — |
 | ITEM-X2-PA-070 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | struct pass::PreparedRuntimeResources; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:6061-6066 | pass::PreparedRuntimeResources | none | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:9300 | retain | R-MODEL | — |
 | ITEM-X2-PA-071 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | fn pass::RuntimeGraphPreparationPlan::try_derive_with_color_filter_limits; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:6022-6045 | pass::RuntimeGraphPreparationPlan::try_derive_with_color_filter_limits | relationships=REL-0280,REL-0281,REL-0282,REL-0283 | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:9248 | retain | R-GOVERNING-FLOW | — |
 | ITEM-X2-PA-072 | 4225fae1466aef093f5f22f69bd8c17c6e4420d7 / 93fbc8e59f4b58a26520915ac1285d3fe8f54622 | src/pass.rs | struct pass::RuntimePassAnalysis; 4225fae1466aef093f5f22f69bd8c17c6e4420d7:src/pass.rs:new:6196-6349 | pass::RuntimePassAnalysis | none | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:9443 | retain | R-MODEL | — |
@@ -1770,6 +1779,6 @@ row independently source-addressable.
 ## Open remediation ownership
 
 - T02: none identified; lifecycle helpers retain validation, acquisition, execution, publication, and failure boundaries.
-- T03: pass::PreparedGraphResourceBindings and its acquisition edge; remove tuple-return churn while preserving preparation ownership.
+- T03: none; ITEM-X2-PA-069 is closed by the named `pass::AcquiredGraphBindings` descendant while retained acquisition relationship REL-0276 preserves preparation ownership.
 - T04: StaticSourceScanForTest lexical masking and end scanners plus governing edges; restore lexical-parser ownership without weakening checks.
 - T01 changes no production helper and resolves no remediation.
