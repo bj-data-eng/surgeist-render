@@ -1791,3 +1791,22 @@ row independently source-addressable.
 - T03: none; ITEM-X2-PA-069 is closed by the named `pass::AcquiredGraphBindings` descendant while retained acquisition relationship REL-0276 preserves preparation ownership.
 - T04: none; the four lexical helpers and governing edges are closed under `StaticSourceScanForTest` with preserved scanner behavior.
 - T01 changes no production helper and resolves no remediation.
+
+## T05 final reconciliation and C14 preservation
+
+- Final audit inventory: **511 ITEM occurrences, 400 accepted REL relationships, and 757 separately rejected collision candidates**.
+- Final dispositions: **502 retain and 9 already superseded ITEM occurrences; 400 retain REL relationships; 0 open remediations and 0 task owners**.
+- Current reconciliation: every retained ITEM descendant remains present in its current owning Rust source; all 400 accepted relationships retain a current source call token; the four explicit absences remain absent; and the eleven corrected T03/T04 ITEM occurrences plus four corrected T04 relationships retain semantic committed-descendant evidence alongside their immutable Git-object anchors.
+- Stable audit identity: experiment and parent SHAs, ITEM/REL/rejection IDs, historical hunk anchors, duplicate links, accepted relationship endpoints, reverse links, and accepted/rejected counts are unchanged from the reviewed T01 ledger.
+- Corrected production evidence: `c4dbdb791f9f161b9de6ff6d11af0fcbad809140` replaces only the positional prepared-graph binding alias and handoff with private `pass::AcquiredGraphBindings`, `runtime_bindings`, and `gaussian_kernel_bindings`; acquisition order, errors, leases, cleanup, realization, and installed `PreparedGraph` fields are otherwise byte-identical to the immutable C14 implementation source.
+- Corrected test evidence: `e881522c2cf6cbc053ddfda551654825f356ab0c` places the four lexical helpers under `StaticSourceScanForTest`, preserves every C14 test name and all other C14 test bodies byte-for-byte, and expands the scanner characterization for nested comments and character literals.
+- Structural advisory: `clippy::too_many_lines` remains non-Boolean evidence; no physical-line threshold or ceiling is acceptance logic.
+
+### C14 preservation evidence
+
+- Current source scope: relative to immutable C14 implementation source `92cdd9114046115d45451153c6ebad3b425db36e`, production source is byte-identical except for the accepted T03 private `pass::AcquiredGraphBindings` ownership repair; T01, T02, T04, and T05 change only audit evidence and tests.
+- Preserved contract: the C14 public front door, manifest dependencies/features/provenance, routes, pixels, diagnostics, statistics, resource lifetimes, test expectations, Rust 1.97/native/wasm intent, and repository-wide safe-Rust posture remain unchanged.
+- Source-backed front door and provenance: current `Cargo.toml`, `README.md`, `src/lib.rs`, and `examples/render_window_smoke.rs` are byte-identical to their immutable C14 Git objects; established C14 documentation, public-item, smoke-source, dependency/feature/provenance, and final-quality guards remain present and are composed by the final preservation guard.
+- Source-backed behavior and tests: every C14 `#[test]` name remains present; every C14 test body except the explicitly strengthened lexical-scanner characterization is byte-identical to its immutable Git object; the T03 and T04 focused closure contracts verify their exact semantic corrections; full suites remain the execution oracle for routes, pixels, diagnostics, statistics, and resource lifetimes.
+- Platform and safety intent: the unchanged manifest/front door/docs/example retain the native window, `render-web`, wasm32 compile-only, root-owned browser execution, and Rust 1.97 contracts; every tracked Rust source is scanned for executable unsafe constructs and the crate retains `#![forbid(unsafe_code)]`.
+- Final matrix evidence: Section 5 reruns default, window, web, combined, native-presentation, wasm32, Rust 1.97, rustdoc, dependency-tree, format, check, test, Clippy, lockfile, and owned-Rust unsafe gates; structural lint output remains advisory.

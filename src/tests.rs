@@ -40448,6 +40448,58 @@ impl StaticSourceScanForTest {
             code_mask,
         }
     }
+
+    fn braced_block_range_from_marker(
+        &self,
+        source: &str,
+        marker: &str,
+    ) -> std::ops::RangeInclusive<usize> {
+        assert!(
+            !marker.is_empty(),
+            "static reachability marker must not be empty"
+        );
+        let marker_scan = Self::new(marker);
+        let marker_offsets = source
+            .match_indices(marker)
+            .filter_map(|(offset, _)| {
+                marker_scan
+                    .code_mask
+                    .iter()
+                    .enumerate()
+                    .all(|(marker_offset, marker_is_code)| {
+                        self.code_mask[offset + marker_offset] == *marker_is_code
+                    })
+                    .then_some(offset)
+            })
+            .collect::<Vec<_>>();
+        let marker_offset = match marker_offsets.as_slice() {
+            [offset] => *offset,
+            offsets => panic!(
+                "static reachability expected exactly one executable marker, found {}: {marker}",
+                offsets.len()
+            ),
+        };
+        let code_bytes = self.code_only.as_bytes();
+        let block_offset = (marker_offset..code_bytes.len())
+            .find(|offset| code_bytes[*offset] == b'{')
+            .unwrap_or_else(|| panic!("static reachability marker had no body: {marker}"));
+        let mut depth = 0_u32;
+        for (offset, byte) in code_bytes[block_offset..].iter().copied().enumerate() {
+            match byte {
+                b'{' => depth = depth.saturating_add(1),
+                b'}' => {
+                    depth = depth
+                        .checked_sub(1)
+                        .expect("static reachability found an unmatched closing brace");
+                    if depth == 0 {
+                        return marker_offset..=block_offset + offset;
+                    }
+                }
+                _ => {}
+            }
+        }
+        panic!("static reachability marker had an unterminated body: {marker}");
+    }
 }
 
 fn source_code_only_for_static_reachability(source: &str) -> String {
@@ -40455,52 +40507,9 @@ fn source_code_only_for_static_reachability(source: &str) -> String {
 }
 
 fn source_braced_block_from_marker(source: &str, marker: &str) -> String {
-    assert!(
-        !marker.is_empty(),
-        "static reachability marker must not be empty"
-    );
     let source_scan = StaticSourceScanForTest::new(source);
-    let marker_scan = StaticSourceScanForTest::new(marker);
-    let marker_offsets = source
-        .match_indices(marker)
-        .filter_map(|(offset, _)| {
-            marker_scan
-                .code_mask
-                .iter()
-                .enumerate()
-                .all(|(marker_offset, marker_is_code)| {
-                    source_scan.code_mask[offset + marker_offset] == *marker_is_code
-                })
-                .then_some(offset)
-        })
-        .collect::<Vec<_>>();
-    let marker_offset = match marker_offsets.as_slice() {
-        [offset] => *offset,
-        offsets => panic!(
-            "static reachability expected exactly one executable marker, found {}: {marker}",
-            offsets.len()
-        ),
-    };
-    let code_bytes = source_scan.code_only.as_bytes();
-    let block_offset = (marker_offset..code_bytes.len())
-        .find(|offset| code_bytes[*offset] == b'{')
-        .unwrap_or_else(|| panic!("static reachability marker had no body: {marker}"));
-    let mut depth = 0_u32;
-    for (offset, byte) in code_bytes[block_offset..].iter().copied().enumerate() {
-        match byte {
-            b'{' => depth = depth.saturating_add(1),
-            b'}' => {
-                depth = depth
-                    .checked_sub(1)
-                    .expect("static reachability found an unmatched closing brace");
-                if depth == 0 {
-                    return source_scan.code_only[marker_offset..=block_offset + offset].to_owned();
-                }
-            }
-            _ => {}
-        }
-    }
-    panic!("static reachability marker had an unterminated body: {marker}");
+    let range = source_scan.braced_block_range_from_marker(source, marker);
+    source_scan.code_only[range].to_owned()
 }
 
 #[test]
@@ -42806,4 +42815,554 @@ fn c15_test_code_remediations_are_closed() {
             "the displaced top-level helper remains: {displaced_helper}"
         );
     }
+}
+
+fn c15_current_source<'a>(
+    file: &str,
+    source_cache: &'a mut std::collections::BTreeMap<String, String>,
+) -> std::result::Result<&'a str, String> {
+    if !source_cache.contains_key(file) {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(file);
+        let source = std::fs::read_to_string(&path)
+            .map_err(|error| format!("failed to read current {}: {error}", path.display()))?;
+        source_cache.insert(file.to_owned(), source);
+    }
+    source_cache
+        .get(file)
+        .map(String::as_str)
+        .ok_or_else(|| format!("current C15 source cache lacks {file}"))
+}
+
+fn c15_terminal_identifier(identity: &str) -> Option<&str> {
+    identity
+        .split(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .rfind(|segment| !segment.is_empty())
+}
+
+fn c15_semantic_marker_is_source_backed(source: &str, marker: &str) -> bool {
+    if let Some((owner, call)) = marker.split_once("->") {
+        let mut owner_segments = owner.rsplit("::");
+        let Some(method) = owner_segments.next() else {
+            return false;
+        };
+        let Some(owner_type) = owner_segments.next() else {
+            return false;
+        };
+        let implementation = source_braced_block_from_marker(source, &format!("impl {owner_type}"));
+        return implementation.contains(&format!("fn {method}(")) && implementation.contains(call);
+    }
+    if let Some(identity) = marker.strip_prefix("fn ") {
+        let mut identity_segments = identity.rsplit("::");
+        let Some(method) = identity_segments.next() else {
+            return false;
+        };
+        let Some(owner_type) = identity_segments.next() else {
+            return source.contains(&format!("fn {method}("));
+        };
+        let implementation = source_braced_block_from_marker(source, &format!("impl {owner_type}"));
+        return implementation.contains(&format!("fn {method}("));
+    }
+    source.contains(marker)
+}
+
+fn validate_c15_final_current_source(ledger: &str) -> std::result::Result<(), String> {
+    const FINAL_RECONCILIATION: &str = "## T05 final reconciliation and C14 preservation";
+    const FINAL_COUNTS: &str = "- Final audit inventory: **511 ITEM occurrences, 400 accepted REL relationships, and 757 separately rejected collision candidates**.";
+    const FINAL_DISPOSITIONS: &str = "- Final dispositions: **502 retain and 9 already superseded ITEM occurrences; 400 retain REL relationships; 0 open remediations and 0 task owners**.";
+    const FINAL_ADVISORY: &str = "- Structural advisory: `clippy::too_many_lines` remains non-Boolean evidence; no physical-line threshold or ceiling is acceptance logic.";
+
+    if !ledger.contains(FINAL_RECONCILIATION) {
+        return Err(format!(
+            "missing final C15 reconciliation section {FINAL_RECONCILIATION}"
+        ));
+    }
+    for required in [FINAL_COUNTS, FINAL_DISPOSITIONS, FINAL_ADVISORY] {
+        if !ledger.contains(required) {
+            return Err(format!(
+                "final C15 reconciliation lacks exact evidence: {required}"
+            ));
+        }
+    }
+
+    validate_c15_disposition_ledger(ledger)?;
+    let item_rows = ledger
+        .lines()
+        .filter(|line| line.starts_with("| ITEM-"))
+        .collect::<Vec<_>>();
+    let relationship_rows = ledger
+        .lines()
+        .filter(|line| line.starts_with("| REL-"))
+        .collect::<Vec<_>>();
+    let rejected_rows = ledger
+        .lines()
+        .filter(|line| line.starts_with("| REJECT-REL-"))
+        .collect::<Vec<_>>();
+
+    let retained_items = item_rows
+        .iter()
+        .filter(|row| row.contains("| retain |"))
+        .count();
+    let superseded_items = item_rows
+        .iter()
+        .filter(|row| row.contains("| already superseded |"))
+        .count();
+    if (
+        retained_items,
+        superseded_items,
+        relationship_rows.len(),
+        rejected_rows.len(),
+    ) != (502, 9, 400, 757)
+    {
+        return Err(format!(
+            "final C15 counts drifted: retain ITEM={retained_items}, superseded ITEM={superseded_items}, REL={}, rejected={}",
+            relationship_rows.len(),
+            rejected_rows.len()
+        ));
+    }
+
+    let mut current_sources = std::collections::BTreeMap::<String, String>::new();
+    let mut current_code = std::collections::BTreeMap::<String, String>::new();
+    let mut baseline_sources = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for row in &item_rows {
+        let columns = c15_ledger_columns(row);
+        let item_id = columns[1];
+        let file = columns[3];
+        let descendant = columns[5];
+        let source_evidence = columns[7];
+        let disposition = columns[8];
+        let rationale = columns[9];
+        let owner = columns[10];
+
+        if disposition == "remediate in C15" || owner != "—" {
+            return Err(format!("{item_id} remains open or task-owned: {row}"));
+        }
+        if !matches!(disposition, "retain" | "already superseded") {
+            return Err(format!("{item_id} lacks a final disposition: {row}"));
+        }
+        if !rationale.starts_with("R-") {
+            return Err(format!("{item_id} lacks a final rationale: {row}"));
+        }
+
+        if !current_code.contains_key(file) {
+            let source = c15_current_source(file, &mut current_sources)?;
+            current_code.insert(
+                file.to_owned(),
+                source_code_only_for_static_reachability(source),
+            );
+        }
+        let code = current_code
+            .get(file)
+            .ok_or_else(|| format!("current C15 code cache lacks {file}"))?;
+
+        if descendant == "explicit absence" {
+            let absent = source_evidence
+                .split_once(":ABSENT(")
+                .and_then(|(_, identity)| identity.strip_suffix(')'))
+                .ok_or_else(|| format!("{item_id} lacks explicit absence evidence: {row}"))?;
+            let identifier = c15_terminal_identifier(absent)
+                .ok_or_else(|| format!("{item_id} has no absent identifier: {row}"))?;
+            let absent_declaration = format!("fn {identifier}(");
+            if identifier != "imports" && code.contains(&absent_declaration) {
+                return Err(format!(
+                    "{item_id} claims {identifier} is absent, but current {file} declares it"
+                ));
+            }
+            if identifier == "imports" {
+                let historical_owner = columns[4]
+                    .strip_prefix("use tests::")
+                    .and_then(|identity| identity.split_once("::imports;").map(|(owner, _)| owner))
+                    .ok_or_else(|| format!("{item_id} lacks an import owner: {row}"))?;
+                let source = current_sources
+                    .get(file)
+                    .ok_or_else(|| format!("current C15 source cache lacks {file}"))?;
+                let body =
+                    source_braced_block_from_marker(source, &format!("fn {historical_owner}("));
+                if body
+                    .lines()
+                    .any(|line| line.trim_start().starts_with("use "))
+                {
+                    return Err(format!(
+                        "{item_id} claims function-local imports are absent from {historical_owner}"
+                    ));
+                }
+            }
+            continue;
+        }
+
+        let identifier = c15_terminal_identifier(descendant)
+            .ok_or_else(|| format!("{item_id} has no current descendant identifier: {row}"))?;
+        if identifier == "imports" {
+            let immutable_anchor = source_evidence
+                .split_once("; ")
+                .map_or(source_evidence, |(anchor, _)| anchor);
+            let (baseline_line, _) = c15_source_line(immutable_anchor, &mut baseline_sources)?;
+            let baseline_line = baseline_line.trim();
+            let source = current_sources
+                .get(file)
+                .ok_or_else(|| format!("current C15 source cache lacks {file}"))?;
+            if baseline_line.is_empty() || !source.contains(baseline_line) {
+                return Err(format!(
+                    "{item_id} retained import is not source-backed by {immutable_anchor}"
+                ));
+            }
+            continue;
+        }
+        if !code.contains(identifier) {
+            return Err(format!(
+                "{item_id} descendant {descendant} is not source-backed in current {file}"
+            ));
+        }
+        if disposition == "already superseded" {
+            let semantic_anchor = source_evidence
+                .split_once(" committed descendant:")
+                .map(|(_, anchor)| anchor)
+                .ok_or_else(|| format!("{item_id} lacks committed correction evidence: {row}"))?;
+            let (semantic_file, semantic_marker) = semantic_anchor
+                .split_once(':')
+                .ok_or_else(|| format!("{item_id} has malformed correction evidence: {row}"))?;
+            let source = current_sources
+                .get(file)
+                .ok_or_else(|| format!("current C15 source cache lacks {file}"))?;
+            if semantic_file != file
+                || !c15_semantic_marker_is_source_backed(source, semantic_marker)
+            {
+                return Err(format!(
+                    "{item_id} corrected descendant is not source-backed by {semantic_anchor}"
+                ));
+            }
+        }
+    }
+
+    for row in &relationship_rows {
+        let columns = c15_ledger_columns(row);
+        let relationship_id = columns[1];
+        let anchor = columns[4]
+            .split_once("; ")
+            .map_or(columns[4], |(anchor, _)| anchor);
+        let file_and_line = anchor
+            .strip_prefix(C15_IMPLEMENTATION_BASELINE)
+            .and_then(|anchor| anchor.strip_prefix(':'))
+            .ok_or_else(|| format!("{relationship_id} lacks immutable source evidence"))?;
+        let (file, _) = file_and_line
+            .rsplit_once(':')
+            .ok_or_else(|| format!("{relationship_id} has malformed source evidence"))?;
+        if !current_code.contains_key(file) {
+            let source = c15_current_source(file, &mut current_sources)?;
+            current_code.insert(
+                file.to_owned(),
+                source_code_only_for_static_reachability(source),
+            );
+        }
+        let code = current_code
+            .get(file)
+            .ok_or_else(|| format!("current C15 code cache lacks {file}"))?;
+        let evidence = columns[5]
+            .strip_prefix('`')
+            .and_then(|evidence| evidence.strip_suffix('`'))
+            .ok_or_else(|| format!("{relationship_id} lacks delimited call evidence"))?;
+        let token_and_target = evidence
+            .split_once("; token=")
+            .map(|(_, token)| token)
+            .or_else(|| evidence.strip_prefix("token="))
+            .ok_or_else(|| format!("{relationship_id} has malformed call evidence"))?;
+        let current_token = token_and_target
+            .split_once("; target=")
+            .map(|(token, _)| token)
+            .ok_or_else(|| format!("{relationship_id} has malformed call evidence"))?;
+        if !code.contains(current_token) {
+            return Err(format!(
+                "{relationship_id} current call token {current_token} is absent from {file}"
+            ));
+        }
+        if columns[6] != "retain" || columns[8] != "—" {
+            return Err(format!("{relationship_id} is not final and unowned: {row}"));
+        }
+        if columns[4].contains(" committed descendant:") {
+            let semantic_anchor = columns[4]
+                .split_once(" committed descendant:")
+                .map(|(_, anchor)| anchor)
+                .ok_or_else(|| format!("{relationship_id} lacks correction evidence"))?;
+            let (semantic_file, semantic_marker) = semantic_anchor
+                .split_once(':')
+                .ok_or_else(|| format!("{relationship_id} has malformed correction evidence"))?;
+            let source = current_sources
+                .get(file)
+                .ok_or_else(|| format!("current C15 source cache lacks {file}"))?;
+            if semantic_file != file
+                || !c15_semantic_marker_is_source_backed(source, semantic_marker)
+            {
+                return Err(format!(
+                    "{relationship_id} corrected relationship is not source-backed by {semantic_anchor}"
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn c15_sprawl_audit_is_closed_against_current_source() {
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    validate_c15_final_current_source(&ledger).unwrap_or_else(|error| panic!("{error}"));
+}
+
+fn c15_git_object(file: &str) -> std::result::Result<String, String> {
+    let object = format!("{C15_IMPLEMENTATION_BASELINE}:{file}");
+    let output = Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "show", &object])
+        .output()
+        .map_err(|error| format!("failed to invoke Git for C14 object {object}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "failed to read C14 object {object}: Git exited with {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    String::from_utf8(output.stdout)
+        .map_err(|error| format!("C14 object {object} is not UTF-8: {error}"))
+}
+
+fn c15_replace_exact_once(
+    source: String,
+    old: &str,
+    new: &str,
+    label: &str,
+) -> std::result::Result<String, String> {
+    let occurrences = source.matches(old).count();
+    if occurrences != 1 {
+        return Err(format!(
+            "C14 pass source needs exactly one {label} replacement site; found {occurrences}"
+        ));
+    }
+    Ok(source.replacen(old, new, 1))
+}
+
+fn c15_expected_pass_source_after_accepted_t03_repair() -> std::result::Result<String, String> {
+    let mut source = c15_git_object("src/pass.rs")?;
+    for (old, new, label) in [
+        (
+            "type PreparedGraphResourceBindings = (\n    BTreeMap<RuntimeResourceId, PreparedResourceBinding>,\n    BTreeMap<GaussianKernelKey, PreparedKernelBinding>,\n);",
+            "struct AcquiredGraphBindings {\n    runtime_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,\n    gaussian_kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,\n}",
+            "named binding model",
+        ),
+        (
+            ") -> Result<PreparedGraphResourceBindings> {\n    let mut resource_bindings = BTreeMap::new();",
+            ") -> Result<AcquiredGraphBindings> {\n    let mut runtime_bindings = BTreeMap::new();",
+            "acquisition result ownership",
+        ),
+        (
+            "        if resource_bindings\n            .insert(",
+            "        if runtime_bindings\n            .insert(",
+            "runtime binding insertion",
+        ),
+        (
+            "    let mut kernel_bindings = BTreeMap::new();\n",
+            "    let mut gaussian_kernel_bindings = BTreeMap::new();\n",
+            "Gaussian binding ownership",
+        ),
+        (
+            "        if kernel_bindings\n            .insert(request.key, PreparedKernelBinding { lease: Some(lease) })",
+            "        if gaussian_kernel_bindings\n            .insert(request.key, PreparedKernelBinding { lease: Some(lease) })",
+            "Gaussian binding insertion",
+        ),
+        (
+            "    Ok((resource_bindings, kernel_bindings))",
+            "    Ok(AcquiredGraphBindings {\n        runtime_bindings,\n        gaussian_kernel_bindings,\n    })",
+            "named acquisition return",
+        ),
+        (
+            "        let (resource_bindings, kernel_bindings) =\n            acquire_prepared_graph_resources(&plan, &mut frame_scope, device, queue, capabilities)?;",
+            "        let acquired_resources =\n            acquire_prepared_graph_resources(&plan, &mut frame_scope, device, queue, capabilities)?;",
+            "named acquisition handoff",
+        ),
+        (
+            "            c12_execution,\n            resource_bindings,\n            kernel_bindings,\n            color_filter_operation_bindings,",
+            "            c12_execution,\n            resource_bindings: acquired_resources.runtime_bindings,\n            kernel_bindings: acquired_resources.gaussian_kernel_bindings,\n            color_filter_operation_bindings,",
+            "named graph field installation",
+        ),
+    ] {
+        source = c15_replace_exact_once(source, old, new, label)?;
+    }
+    Ok(source)
+}
+
+fn c15_test_names(source: &str) -> std::collections::BTreeSet<String> {
+    let mut names = std::collections::BTreeSet::new();
+    let mut awaiting_test = false;
+    for line in source.lines() {
+        let line = line.trim();
+        if line == "#[test]" {
+            awaiting_test = true;
+            continue;
+        }
+        if awaiting_test && let Some(signature) = line.strip_prefix("fn ") {
+            let name = signature
+                .split_once('(')
+                .map_or(signature, |(name, _)| name)
+                .trim();
+            names.insert(name.to_owned());
+            awaiting_test = false;
+        }
+    }
+    names
+}
+
+fn validate_c15_c14_preservation(ledger: &str) -> std::result::Result<(), String> {
+    const PRESERVATION_HEADING: &str = "### C14 preservation evidence";
+    const SOURCE_SCOPE: &str = "- Current source scope: relative to immutable C14 implementation source `92cdd9114046115d45451153c6ebad3b425db36e`, production source is byte-identical except for the accepted T03 private `pass::AcquiredGraphBindings` ownership repair; T01, T02, T04, and T05 change only audit evidence and tests.";
+    const CONTRACT_SCOPE: &str = "- Preserved contract: the C14 public front door, manifest dependencies/features/provenance, routes, pixels, diagnostics, statistics, resource lifetimes, test expectations, Rust 1.97/native/wasm intent, and repository-wide safe-Rust posture remain unchanged.";
+    const COMMAND_SCOPE: &str = "- Final matrix evidence: Section 5 reruns default, window, web, combined, native-presentation, wasm32, Rust 1.97, rustdoc, dependency-tree, format, check, test, Clippy, lockfile, and owned-Rust unsafe gates; structural lint output remains advisory.";
+
+    if !ledger.contains(PRESERVATION_HEADING) {
+        return Err(format!(
+            "missing final C15 preservation section {PRESERVATION_HEADING}"
+        ));
+    }
+    for required in [SOURCE_SCOPE, CONTRACT_SCOPE, COMMAND_SCOPE] {
+        if !ledger.contains(required) {
+            return Err(format!("C14 preservation lacks exact evidence: {required}"));
+        }
+    }
+
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    for file in [
+        "Cargo.toml",
+        "README.md",
+        "src/lib.rs",
+        "examples/render_window_smoke.rs",
+    ] {
+        let baseline = c15_git_object(file)?;
+        let current_path = root.join(file);
+        let current = std::fs::read_to_string(&current_path).map_err(|error| {
+            format!("failed to read current {}: {error}", current_path.display())
+        })?;
+        if current != baseline {
+            return Err(format!("C15 changed preserved C14 artifact {file}"));
+        }
+    }
+
+    let changed_source = Command::new("git")
+        .args([
+            "-C",
+            env!("CARGO_MANIFEST_DIR"),
+            "diff",
+            "--name-only",
+            C15_IMPLEMENTATION_BASELINE,
+            "--",
+            "src",
+            "Cargo.toml",
+            "README.md",
+            "examples",
+        ])
+        .output()
+        .map_err(|error| format!("failed to inspect C15 source scope: {error}"))?;
+    if !changed_source.status.success() {
+        return Err(format!(
+            "failed to inspect C15 source scope: {}",
+            String::from_utf8_lossy(&changed_source.stderr).trim()
+        ));
+    }
+    let changed_source = String::from_utf8(changed_source.stdout)
+        .map_err(|error| format!("C15 source-scope output is not UTF-8: {error}"))?;
+    let changed_source = changed_source.lines().collect::<Vec<_>>();
+    if changed_source != ["src/pass.rs", "src/tests.rs"] {
+        return Err(format!(
+            "C15 source scope is not the accepted pass/tests pair: {changed_source:?}"
+        ));
+    }
+
+    let expected_pass = c15_expected_pass_source_after_accepted_t03_repair()?;
+    let current_pass = std::fs::read_to_string(root.join("src/pass.rs"))
+        .map_err(|error| format!("failed to read current src/pass.rs: {error}"))?;
+    if current_pass != expected_pass {
+        return Err(
+            "production drift exceeds the accepted T03 private pass binding ownership repair"
+                .to_owned(),
+        );
+    }
+
+    let baseline_tests = c15_git_object("src/tests.rs")?;
+    let current_tests = std::fs::read_to_string(root.join("src/tests.rs"))
+        .map_err(|error| format!("failed to read current src/tests.rs: {error}"))?;
+    let baseline_test_names = c15_test_names(&baseline_tests);
+    let current_test_names = c15_test_names(&current_tests);
+    let missing_tests = baseline_test_names
+        .difference(&current_test_names)
+        .cloned()
+        .collect::<Vec<_>>();
+    if !missing_tests.is_empty() {
+        return Err(format!("C15 removed C14 tests: {missing_tests:?}"));
+    }
+    let baseline_test_scan = StaticSourceScanForTest::new(&baseline_tests);
+    let current_test_scan = StaticSourceScanForTest::new(&current_tests);
+    for test_name in baseline_test_names {
+        if test_name
+            == "source_scanner_ignores_non_code_routes_and_braces_and_rejects_duplicate_markers"
+        {
+            continue;
+        }
+        let marker = format!("fn {test_name}(");
+        let baseline_range =
+            baseline_test_scan.braced_block_range_from_marker(&baseline_tests, &marker);
+        let current_range =
+            current_test_scan.braced_block_range_from_marker(&current_tests, &marker);
+        let baseline_body = &baseline_tests[baseline_range];
+        let current_body = &current_tests[current_range];
+        if current_body != baseline_body {
+            return Err(format!("C15 changed the C14 test expectation {test_name}"));
+        }
+    }
+
+    let owned_rust = Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "ls-files", "--", "*.rs"])
+        .output()
+        .map_err(|error| format!("failed to enumerate owned Rust: {error}"))?;
+    if !owned_rust.status.success() {
+        return Err(format!(
+            "failed to enumerate owned Rust: {}",
+            String::from_utf8_lossy(&owned_rust.stderr).trim()
+        ));
+    }
+    let owned_rust = String::from_utf8(owned_rust.stdout)
+        .map_err(|error| format!("owned-Rust manifest is not UTF-8: {error}"))?;
+    for file in owned_rust.lines() {
+        let source = std::fs::read_to_string(root.join(file))
+            .map_err(|error| format!("failed to read owned Rust {file}: {error}"))?;
+        let code = source_code_only_for_static_reachability(&source);
+        for forbidden in [
+            ["un", "safe {"].concat(),
+            ["un", "safe fn"].concat(),
+            ["un", "safe trait"].concat(),
+            ["un", "safe impl"].concat(),
+            ["un", "safe extern"].concat(),
+            ["static", " mut"].concat(),
+            ["#[", "unsafe("].concat(),
+            ["#[no_", "mangle"].concat(),
+            ["#[export_", "name"].concat(),
+        ] {
+            if code.contains(&forbidden) {
+                return Err(format!("owned Rust {file} contains forbidden {forbidden}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn c15_final_preservation_contract_matches_c14() {
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    validate_c15_c14_preservation(&ledger).unwrap_or_else(|error| panic!("{error}"));
+
+    c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries();
+    c14_changed_public_items_have_semantic_documentation();
+    render_window_smoke_source_covers_direct_and_graph_routes();
+    c14_dependency_feature_and_provenance_contract_is_final();
+    c14_final_quality_contract_matches_published_gpu_architecture();
+    c15_graph_raster_model_remediations_are_closed();
+    c15_test_code_remediations_are_closed();
 }
