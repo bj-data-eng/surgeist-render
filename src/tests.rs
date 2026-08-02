@@ -42035,6 +42035,7 @@ fn c15_source_line<'a>(
     anchor: &str,
     source_cache: &'a mut std::collections::BTreeMap<String, Vec<String>>,
 ) -> std::result::Result<(&'a str, String), String> {
+    let immutable_anchor = anchor;
     let anchor = anchor
         .strip_prefix(C15_IMPLEMENTATION_BASELINE)
         .and_then(|value| value.strip_prefix(':'))
@@ -42045,6 +42046,11 @@ fn c15_source_line<'a>(
     let line_number = line_number
         .parse::<usize>()
         .map_err(|error| format!("invalid line in {anchor}: {error}"))?;
+    let line_index = line_number.checked_sub(1).ok_or_else(|| {
+        format!(
+            "malformed immutable C15 source anchor {immutable_anchor}: line number must be one-based"
+        )
+    })?;
     if !source_cache.contains_key(file) {
         let object = format!("{C15_IMPLEMENTATION_BASELINE}:{file}");
         let output = Command::new("git")
@@ -42073,7 +42079,7 @@ fn c15_source_line<'a>(
         .get(file)
         .ok_or_else(|| format!("immutable C15 baseline cache lacks {file}"))?;
     let source_line = source
-        .get(line_number - 1)
+        .get(line_index)
         .ok_or_else(|| format!("missing {C15_IMPLEMENTATION_BASELINE}:{file}:{line_number}"))?;
     Ok((source_line, file.to_owned()))
 }
@@ -42478,9 +42484,10 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
 }
 
 #[test]
-fn c15_historical_anchor_loader_uses_immutable_source_after_current_offset_drift() {
-    const ITEM_ID: &str = "| ITEM-X2-PA-108 |";
-    const DESCENDANT_SYMBOL: &str = "fn create_color_filter_operation_bindings(";
+fn c15_historical_anchor_loader_distinguishes_immutable_and_current_symbol_identity() {
+    const ITEM_ID: &str = "| ITEM-X2-PA-069 |";
+    const HISTORICAL_DECLARATION: &str = "type PreparedGraphResourceBindings = (";
+    const CURRENT_DECLARATION: &str = "struct AcquiredGraphBindings {";
 
     let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
         panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
@@ -42488,33 +42495,57 @@ fn c15_historical_anchor_loader_uses_immutable_source_after_current_offset_drift
     let item_row = ledger
         .lines()
         .find(|line| line.starts_with(ITEM_ID))
-        .expect("ITEM-X2-PA-108 must retain its stable ledger row");
+        .expect("ITEM-X2-PA-069 must retain its stable ledger row");
     let columns = c15_ledger_columns(item_row);
-    let anchor = columns
+    let source_evidence = columns
         .get(7)
-        .expect("ITEM-X2-PA-108 must retain immutable source evidence");
+        .expect("ITEM-X2-PA-069 must retain immutable source evidence");
+    let anchor = source_evidence
+        .split_once("; ")
+        .map_or(*source_evidence, |(anchor, _)| anchor);
     let mut source_cache = std::collections::BTreeMap::<String, Vec<String>>::new();
     let (baseline_line, file) = c15_source_line(anchor, &mut source_cache)
         .unwrap_or_else(|error| panic!("immutable anchor must resolve: {error}"));
     assert!(
-        baseline_line.contains(DESCENDANT_SYMBOL),
-        "the immutable anchor must resolve against its baseline object: {anchor}"
+        baseline_line.contains(HISTORICAL_DECLARATION),
+        "the immutable anchor must resolve the historical binding alias: {anchor}"
     );
 
-    let baseline_symbol_line = source_cache[&file]
-        .iter()
-        .position(|line| line.contains(DESCENDANT_SYMBOL))
-        .expect("the immutable baseline must contain the descendant symbol");
+    let baseline_source = source_cache[&file].join("\n");
+    assert!(baseline_source.contains(HISTORICAL_DECLARATION));
+    assert!(!baseline_source.contains(CURRENT_DECLARATION));
     let current_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&file);
     let current_source = std::fs::read_to_string(&current_path)
         .unwrap_or_else(|error| panic!("{} must be readable: {error}", current_path.display()));
-    let current_symbol_line = current_source
-        .lines()
-        .position(|line| line.contains(DESCENDANT_SYMBOL))
-        .expect("the current descendant must remain symbol-addressable");
-    assert_ne!(
-        current_symbol_line, baseline_symbol_line,
-        "the regression requires current formatting offsets to differ from immutable evidence"
+    for current_identity in [
+        CURRENT_DECLARATION,
+        "runtime_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>",
+        "gaussian_kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>",
+    ] {
+        assert!(
+            current_source.contains(current_identity),
+            "the current acquired-binding model lacks semantic identity: {current_identity}"
+        );
+    }
+    assert!(
+        !current_source.contains(HISTORICAL_DECLARATION),
+        "the historical positional binding alias returned to the current checkout"
+    );
+}
+
+#[test]
+fn c15_historical_anchor_loader_rejects_zero_line_with_precise_diagnostic() {
+    const MALFORMED_ANCHOR: &str = "92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:0";
+    let mut source_cache = std::collections::BTreeMap::<String, Vec<String>>::new();
+
+    let error = c15_source_line(MALFORMED_ANCHOR, &mut source_cache)
+        .expect_err("a zero-line immutable anchor must return a diagnostic");
+
+    assert_eq!(
+        error,
+        format!(
+            "malformed immutable C15 source anchor {MALFORMED_ANCHOR}: line number must be one-based"
+        )
     );
 }
 
