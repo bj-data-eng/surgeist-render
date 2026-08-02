@@ -333,3 +333,26 @@ Completion guards require:
   contradiction, unavailable required native GPU execution, required unsafe,
   unavailable Surgeist profiles, or publication credentials/remote history
   failure.
+
+### 7.1 Retrospective Workflow-Transition Note
+
+- The first holistic review flagged T01 because its implementation commit
+  `cbbca415dfef3749d315c9ab0dbadb4d046a01ae` precedes the canonical
+  `plans/{specs,sequences,cycles}` artifacts introduced by `9903b58e`,
+  `75ba3b1c`, and `21bab732` and resumed by `fda66394`.
+- The contemporaneous evidence is the reviewed legacy cycle at
+  `plans/P01-surgeist-render/cycles/P01-I03-S01-C13-gpu-only-cutover-and-matrix-reconciliation.md`:
+  `9533f95a` defined it, `f49bea18` marked it `in_progress`, and its Header
+  cites the reviewed specification and sequence at `e96614d3`. The complete
+  ordering is reproducible with `git log --reverse --format='%H %s'
+  7bd4fcdaf23ebb0ba137496b17458dcbd1278e13..fda663947c0e2d752ab1e22c7bbea1b4ea6c1946`.
+- This discrepancy records an in-progress `surgeist-agent`/PISCT planning-model
+  transition, not implementation performed without planning. On 2026-08-02 the
+  user confirmed that planning proceeded under the process then in force and
+  directed that this chronology finding be ignored for C13 gating.
+- Disposition: retain the finding and these commit locations as provenance, but
+  do not replay or reorder T01, reopen C13, or block publication solely on this
+  finding. This disposition changes no C13 task, acceptance criterion, command,
+  implementation verdict, or safety gate. Apply the same contemporaneous-
+  evidence test if completed PISCT rules later supersede planning rules that
+  were still being developed while work proceeded.
