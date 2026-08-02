@@ -10,12 +10,12 @@
   verified on local `main`, `origin/main`, and the observed authority-remote
   `main` before this plan was written.
 - Specification: `plans/specs/gpu-render-pipeline.md` at
-  `9903b58e8c96063bd834fb561baaf321116feead`,
-  `sha256:d33bb1478eac256c75203b7ecaff450a12adc8158f3f2ba72e4ed891e9c6a9ce`;
-  sections S02-S06B and S31-S38.
+  `e88e00bc8bd9325ae82ef1f1db2e4c72de44b28b`,
+  `sha256:30dee50db5e8ad2f06df7cbd01ef34c61b5ccd037924a100932053a8507712af`;
+  sections S02-S06B, S31-S37, and S38 items 1-11.
 - Sequence: `plans/sequences/gpu-render-pipeline.md` at
-  `75ba3b1c0a1d0f1c83734d69663eb6abb3061474`,
-  `sha256:7a016389ae9925480c81b951840ca5bacf48d1c5c822e5f78dae472461618e9d`;
+  `8709e0d6ce1e04b646d41763c5efafdf9ecf7daf`,
+  `sha256:7047172964b388c17e6d7fee43fb0be788dd9c5761d51dabc566c605d31a57d1`;
   entry `C14 Platform Evidence Documentation And Final Quality`.
 - Outcome: document the final GPU-only public contract, add the tracked native
   presented direct/graph smoke example, close deterministic dependency,
@@ -51,8 +51,8 @@
   `fe58f35aebaf43177fd761b8222a67b3e8f11827`. Root facade, API artifacts, and
   gitlink promotion remain outside this leaf cycle.
 - Structural Clippy signals such as `too_many_lines` are advisory rather than
-  Boolean C14 failures. The required first I04 cycle owns the separate sprawl
-  review of the earlier 100-line lint experiment and any justified cohesion
+  Boolean C14 failures. The final I03 cycle, C15, owns the separate sprawl review
+  of the earlier 100-line lint experiment and every justified cohesion
   remediation; C14 neither repeats nor hides that work.
 
 ## 3 Impacts
@@ -239,7 +239,9 @@ coordinator acceptance, a separate status-only `complete` commit, the complete
 command set on the exact completed head, a fresh `CLEAN` holistic review, a
 post-review repeat of the complete command set, and canonical publication and
 remote readback. The handoff records the immutable candidate, additive C13 API
-surface, exact feature/MSRV/wasm/native evidence, browser execution still owed
-by root, and root-owned facade/API-artifact/gitlink work. Missing installed
-tooling, graphical-host capability, credentials, or stable remote history uses
+surface, exact feature/MSRV/wasm/native evidence, and the required C15
+sprawl-review entry state. Browser execution remains owed by root, as do the
+later facade/API-artifact/gitlink changes after final I03 publication. Missing
+installed tooling, graphical-host capability, credentials, or stable remote
+history uses
 the canonical blocker contract; no unavailable requirement is counted as green.
