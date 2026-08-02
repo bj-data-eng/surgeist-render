@@ -41981,9 +41981,84 @@ fn assert_finite_positive_rect(rect: Rect) {
     assert!(rect.height() > 0.0);
 }
 
-#[test]
-fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
-    const LEDGER_PATH: &str = "plans/evidence/gpu-render-pipeline-c15-sprawl-dispositions.md";
+const C15_DISPOSITION_LEDGER_PATH: &str =
+    "plans/evidence/gpu-render-pipeline-c15-sprawl-dispositions.md";
+const C15_IMPLEMENTATION_BASELINE: &str = "92cdd9114046115d45451153c6ebad3b425db36e";
+
+fn c15_ledger_columns(row: &str) -> Vec<&str> {
+    row.split('|').map(str::trim).collect()
+}
+
+fn c15_callable_name(value: &str) -> &str {
+    value
+        .rsplit([':', '.'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(value)
+}
+
+fn validate_c15_relationship_endpoint(
+    endpoint: &str,
+    item_descendants: &std::collections::BTreeMap<String, String>,
+) -> std::result::Result<Vec<String>, String> {
+    if endpoint.starts_with("ITEM-") {
+        let (item_ids, listed_descendant) = endpoint
+            .split_once(": ")
+            .ok_or_else(|| format!("item endpoint lacks its descendant: {endpoint}"))?;
+        let item_ids = item_ids.split(',').map(str::to_owned).collect::<Vec<_>>();
+        for item_id in &item_ids {
+            let current_descendant = item_descendants
+                .get(item_id)
+                .ok_or_else(|| format!("missing item endpoint {item_id}: {endpoint}"))?;
+            if current_descendant != listed_descendant {
+                return Err(format!(
+                    "{item_id} endpoint claims {listed_descendant}, but its ITEM descendant is {current_descendant}"
+                ));
+            }
+        }
+        return Ok(item_ids);
+    }
+
+    let adjacent = endpoint
+        .strip_prefix("ADJ(")
+        .and_then(|value| value.split_once("): "))
+        .ok_or_else(|| format!("invalid adjacent endpoint: {endpoint}"))?;
+    if adjacent.0 != adjacent.1 {
+        return Err(format!(
+            "adjacent caller endpoint drifted: {} != {}",
+            adjacent.0, adjacent.1
+        ));
+    }
+    Ok(Vec::new())
+}
+
+fn c15_source_line<'a>(
+    anchor: &str,
+    source_cache: &'a mut std::collections::BTreeMap<String, Vec<String>>,
+) -> std::result::Result<(&'a str, String), String> {
+    let anchor = anchor
+        .strip_prefix(C15_IMPLEMENTATION_BASELINE)
+        .and_then(|value| value.strip_prefix(':'))
+        .ok_or_else(|| format!("source anchor does not use the immutable baseline: {anchor}"))?;
+    let (file, line_number) = anchor
+        .rsplit_once(':')
+        .ok_or_else(|| format!("invalid source anchor: {anchor}"))?;
+    let line_number = line_number
+        .parse::<usize>()
+        .map_err(|error| format!("invalid line in {anchor}: {error}"))?;
+    let source = source_cache.entry(file.to_owned()).or_insert_with(|| {
+        std::fs::read_to_string(file)
+            .unwrap_or_else(|error| panic!("failed to read {file}: {error}"))
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    });
+    let source_line = source
+        .get(line_number - 1)
+        .ok_or_else(|| format!("missing {file}:{line_number}"))?;
+    Ok((source_line, file.to_owned()))
+}
+
+fn validate_c15_disposition_ledger(ledger: &str) -> std::result::Result<(), String> {
     const EXPERIMENTS: [(&str, &str); 2] = [
         (
             "9488f2000f0a31485679c39a568ff2a6d9d6f28f",
@@ -42025,112 +42100,91 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
         ("src/vello_engine/scene.rs", 3),
     ];
 
-    let ledger = std::fs::read_to_string(LEDGER_PATH).unwrap_or_else(|error| {
-        panic!("C15 disposition ledger is required at {LEDGER_PATH}: {error}")
-    });
-    assert!(ledger.contains("baseline: `92cdd9114046115d45451153c6ebad3b425db36e`"));
+    if !ledger.contains(&format!("baseline: `{C15_IMPLEMENTATION_BASELINE}`")) {
+        return Err("ledger does not name the immutable implementation baseline".to_owned());
+    }
     for (experiment, parent) in EXPERIMENTS {
-        assert!(
-            ledger.contains(experiment),
-            "missing experiment {experiment}"
-        );
-        assert!(ledger.contains(parent), "missing first parent {parent}");
+        if !ledger.contains(experiment) {
+            return Err(format!("missing experiment {experiment}"));
+        }
+        if !ledger.contains(parent) {
+            return Err(format!("missing first parent {parent}"));
+        }
     }
     for (file, first_count, second_count) in FILE_COUNTS {
         let row = format!("| `{file}` | {first_count} | {second_count} |");
-        assert!(ledger.contains(&row), "missing exact manifest row {row}");
+        if !ledger.contains(&row) {
+            return Err(format!("missing exact manifest row {row}"));
+        }
     }
 
     let item_rows = ledger
         .lines()
         .filter(|line| line.starts_with("| ITEM-"))
         .collect::<Vec<_>>();
-    assert_eq!(
-        item_rows.len(),
-        511,
-        "every experiment item occurrence needs one row"
-    );
+    if item_rows.len() != 511 {
+        return Err(format!(
+            "every experiment item occurrence needs one row; found {}",
+            item_rows.len()
+        ));
+    }
     let relationship_rows = ledger
         .lines()
         .filter(|line| line.starts_with("| REL-"))
         .collect::<Vec<_>>();
 
-    for (relationship_id, file, line_number, actual_call, rejected_callee) in [
-        (
-            "REL-0001",
-            "src/backend.rs",
-            3788,
-            "transaction.finish(",
-            "pass::C08CustomSpineEncodingProgress::finish",
-        ),
-        (
-            "REL-0381",
-            "src/renderer.rs",
-            2985,
-            "RuntimeCapabilityUnavailable::try_new(",
-            "pass::ClosedGraphMaps::try_new",
-        ),
-        (
-            "REL-1135",
-            "src/vello_engine/glyph.rs",
-            959,
-            "usize::from(",
-            "renderer::C08ForcedGraphCaptureForTest::from",
-        ),
-        (
-            "REL-1153",
-            "src/vello_engine/recording.rs",
-            860,
-            "fn finish(",
-            "pass::C08CustomSpineEncodingProgress::finish",
-        ),
-        (
-            "REL-1089",
-            "src/tests.rs",
-            4328,
-            ".run(",
-            "pass::ClosedGraphTraversal::run",
-        ),
-    ] {
-        let source = std::fs::read_to_string(file)
-            .unwrap_or_else(|error| panic!("failed to read {file}: {error}"));
-        let source_line = source
-            .lines()
-            .nth(line_number - 1)
-            .unwrap_or_else(|| panic!("missing {file}:{line_number}"));
-        assert!(
-            source_line.contains(actual_call),
-            "regression evidence drifted at {file}:{line_number}: {source_line}"
-        );
-        assert!(
-            !relationship_rows
-                .iter()
-                .any(|row| { row.contains(relationship_id) && row.contains(rejected_callee) }),
-            "{relationship_id} must not assign {actual_call} to {rejected_callee}"
-        );
+    if relationship_rows.len() != 400 {
+        return Err(format!(
+            "every surviving direct call relationship needs one row; found {}",
+            relationship_rows.len()
+        ));
     }
 
-    assert_eq!(
-        relationship_rows.len(),
-        400,
-        "every surviving direct call relationship needs one row"
-    );
+    let mut item_descendants = std::collections::BTreeMap::<String, String>::new();
+    let mut item_relationships =
+        std::collections::BTreeMap::<String, std::collections::BTreeSet<String>>::new();
+    for row in &item_rows {
+        let columns = c15_ledger_columns(row);
+        if columns.len() != 12 {
+            return Err(format!("invalid ITEM row shape: {row}"));
+        }
+        if item_descendants
+            .insert(columns[1].to_owned(), columns[5].to_owned())
+            .is_some()
+        {
+            return Err(format!("duplicate ITEM ID {}", columns[1]));
+        }
+        let links = columns[6]
+            .split(';')
+            .map(str::trim)
+            .find_map(|part| part.strip_prefix("relationships="))
+            .map_or_else(std::collections::BTreeSet::new, |ids| {
+                ids.split(',').map(str::to_owned).collect()
+            });
+        item_relationships.insert(columns[1].to_owned(), links);
+    }
 
     let mut relationship_ids = std::collections::BTreeSet::new();
     let mut source_cache = std::collections::BTreeMap::<String, Vec<String>>::new();
     let mut actual_relationship_file_counts = std::collections::BTreeMap::<String, usize>::new();
+    let mut accepted_tuples = std::collections::BTreeSet::new();
     for row in &relationship_rows {
-        let columns = row.split('|').map(str::trim).collect::<Vec<_>>();
-        assert_eq!(
-            columns.len(),
-            10,
-            "relationship rows need source-backed resolution evidence: {row}"
-        );
+        let columns = c15_ledger_columns(row);
+        if columns.len() != 10 {
+            return Err(format!(
+                "relationship rows need source-backed resolution evidence: {row}"
+            ));
+        }
         let relationship_id = columns[1];
-        assert!(
-            relationship_ids.insert(relationship_id),
-            "duplicate {relationship_id}"
-        );
+        if !relationship_ids.insert(relationship_id.to_owned()) {
+            return Err(format!("duplicate {relationship_id}"));
+        }
+
+        let caller_item_ids = validate_c15_relationship_endpoint(columns[2], &item_descendants)?;
+        let callee_item_ids = validate_c15_relationship_endpoint(columns[3], &item_descendants)?;
+        if callee_item_ids.is_empty() {
+            return Err(format!("accepted relationship needs an ITEM callee: {row}"));
+        }
 
         let listed_callee = columns[3]
             .split_once(": ")
@@ -42138,127 +42192,267 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
         let evidence = columns[5]
             .strip_prefix('`')
             .and_then(|value| value.strip_suffix('`'))
-            .unwrap_or_else(|| panic!("missing delimited source evidence: {row}"));
+            .ok_or_else(|| format!("missing delimited source evidence: {row}"))?;
         let (token, resolved_target) = evidence
             .strip_prefix("token=")
             .and_then(|value| value.split_once("; target="))
-            .unwrap_or_else(|| panic!("invalid source evidence: {row}"));
-        assert_eq!(
-            resolved_target, listed_callee,
-            "resolved callee drifted from the relationship target: {row}"
-        );
-
-        let anchor = columns[4]
-            .strip_prefix("92cdd9114046115d45451153c6ebad3b425db36e:")
-            .unwrap_or_else(|| panic!("relationship needs the immutable baseline: {row}"));
-        let (file, line_number) = anchor
-            .rsplit_once(':')
-            .unwrap_or_else(|| panic!("invalid relationship source anchor: {row}"));
-        let line_number = line_number
-            .parse::<usize>()
-            .unwrap_or_else(|error| panic!("invalid line in {row}: {error}"));
-        let source = source_cache.entry(file.to_owned()).or_insert_with(|| {
-            std::fs::read_to_string(file)
-                .unwrap_or_else(|error| panic!("failed to read {file}: {error}"))
-                .lines()
-                .map(str::to_owned)
-                .collect()
-        });
-        let source_line = source
-            .get(line_number - 1)
-            .unwrap_or_else(|| panic!("missing {file}:{line_number}"));
-        assert!(
-            source_line.contains(token),
-            "{relationship_id} source token {token:?} drifted at {file}:{line_number}: {source_line}"
-        );
-        *actual_relationship_file_counts
-            .entry(file.to_owned())
-            .or_default() += 1;
-    }
-    for (file, expected_count) in RELATIONSHIP_FILE_COUNTS {
-        assert_eq!(
-            actual_relationship_file_counts.get(file),
-            Some(&expected_count),
-            "relationship manifest drifted for {file}"
-        );
-        let row = format!("| `{file}` | {expected_count} |");
-        assert!(
-            ledger.contains(&row),
-            "missing relationship manifest row {row}"
-        );
-    }
-
-    let item_relationships = item_rows
-        .iter()
-        .map(|row| {
-            let columns = row.split('|').map(str::trim).collect::<Vec<_>>();
-            let links = columns[6]
-                .split(';')
-                .map(str::trim)
-                .find_map(|part| part.strip_prefix("relationships="))
-                .map_or_else(Vec::new, |ids| ids.split(',').collect::<Vec<_>>());
-            for relationship_id in &links {
-                assert!(
-                    relationship_ids.contains(relationship_id),
-                    "{} links removed relationship {relationship_id}",
-                    columns[1]
-                );
+            .ok_or_else(|| format!("invalid source evidence: {row}"))?;
+        if resolved_target != listed_callee {
+            return Err(format!(
+                "resolved callee drifted from the relationship target: {row}"
+            ));
+        }
+        if c15_callable_name(token) != c15_callable_name(resolved_target) {
+            return Err(format!(
+                "{relationship_id} token {token:?} does not name target {resolved_target}"
+            ));
+        }
+        if let Some((qualifier, _)) = token.rsplit_once("::")
+            && qualifier != "Self"
+        {
+            let target_receiver = resolved_target
+                .rsplit_once("::")
+                .and_then(|(receiver, _)| receiver.rsplit("::").next())
+                .unwrap_or("");
+            let token_receiver = qualifier.rsplit("::").next().unwrap_or(qualifier);
+            if token_receiver != target_receiver {
+                return Err(format!(
+                    "{relationship_id} qualifier {token_receiver} does not name target receiver {target_receiver}"
+                ));
             }
-            (columns[1], links)
-        })
-        .collect::<std::collections::BTreeMap<_, _>>();
-    for row in &relationship_rows {
-        let columns = row.split('|').map(str::trim).collect::<Vec<_>>();
-        for endpoint in [columns[2], columns[3]] {
-            let item_ids = endpoint.split_once(": ").map_or(endpoint, |(ids, _)| ids);
-            if !item_ids.starts_with("ITEM-") {
-                continue;
-            }
-            for item_id in item_ids.split(',') {
-                let links = item_relationships
-                    .get(item_id)
-                    .unwrap_or_else(|| panic!("missing item endpoint {item_id}: {row}"));
-                assert!(
-                    links.contains(&columns[1]),
-                    "{item_id} needs the reverse link to {}",
-                    columns[1]
-                );
+        }
+
+        let (source_line, file) = c15_source_line(columns[4], &mut source_cache)?;
+        if !source_line.contains(token) {
+            return Err(format!(
+                "{relationship_id} source token {token:?} drifted at {}: {source_line}",
+                columns[4]
+            ));
+        }
+        accepted_tuples.insert((
+            columns[2].to_owned(),
+            columns[4].to_owned(),
+            c15_callable_name(token).to_owned(),
+            resolved_target.to_owned(),
+        ));
+        *actual_relationship_file_counts.entry(file).or_default() += 1;
+
+        for item_id in caller_item_ids.into_iter().chain(callee_item_ids) {
+            let links = item_relationships
+                .get(&item_id)
+                .ok_or_else(|| format!("missing reverse-link record for {item_id}"))?;
+            if !links.contains(relationship_id) {
+                return Err(format!(
+                    "{item_id} needs the reverse link to {relationship_id}"
+                ));
             }
         }
     }
-    assert!(relationship_rows.iter().any(|row| {
-        row.contains("REL-0218")
-            && row.contains("token=ClosedGraphMaps::try_new")
-            && row.contains("target=pass::ClosedGraphMaps::try_new")
-    }));
-    assert!(relationship_rows.iter().any(|row| {
-        row.contains("REL-0242")
-            && row.contains("token=progress.finish")
-            && row.contains("target=pass::C08CustomSpineEncodingProgress::finish")
-    }));
+    for (file, expected_count) in RELATIONSHIP_FILE_COUNTS {
+        if actual_relationship_file_counts.get(file) != Some(&expected_count) {
+            return Err(format!("relationship manifest drifted for {file}"));
+        }
+        let row = format!("| `{file}` | {expected_count} |");
+        if !ledger.contains(&row) {
+            return Err(format!("missing relationship manifest row {row}"));
+        }
+    }
+
+    for (item_id, links) in &item_relationships {
+        for relationship_id in links {
+            if !relationship_ids.contains(relationship_id) {
+                return Err(format!(
+                    "{item_id} links removed relationship {relationship_id}"
+                ));
+            }
+        }
+    }
+
+    let rejected_rows = ledger
+        .lines()
+        .filter(|line| line.starts_with("| REJECT-REL-"))
+        .collect::<Vec<_>>();
+    if rejected_rows.len() != 757 {
+        return Err(format!(
+            "complete rejected-collision manifest needs 757 rows; found {}",
+            rejected_rows.len()
+        ));
+    }
+    let mut rejected_ids = std::collections::BTreeSet::new();
+    let mut rejected_tuples = std::collections::BTreeSet::new();
+    let mut rejected_categories = std::collections::BTreeMap::<String, usize>::new();
+    for row in rejected_rows {
+        let columns = c15_ledger_columns(row);
+        if columns.len() != 10 {
+            return Err(format!("invalid rejected-collision row shape: {row}"));
+        }
+        let rejection_id = columns[1];
+        let candidate_id = columns[2];
+        if rejection_id != format!("REJECT-{candidate_id}") {
+            return Err(format!(
+                "rejection ID does not preserve {candidate_id}: {row}"
+            ));
+        }
+        if !rejected_ids.insert(rejection_id.to_owned()) {
+            return Err(format!("duplicate rejected-collision ID {rejection_id}"));
+        }
+        if relationship_ids.contains(candidate_id) {
+            return Err(format!(
+                "rejected candidate {candidate_id} is also an accepted relationship"
+            ));
+        }
+        validate_c15_relationship_endpoint(columns[3], &item_descendants)?;
+        let (source_line, _) = c15_source_line(columns[4], &mut source_cache)?;
+        let token = columns[5]
+            .strip_prefix('`')
+            .and_then(|value| value.strip_suffix('`'))
+            .ok_or_else(|| format!("rejected token must be delimited: {row}"))?;
+        if !source_line.contains(token) {
+            return Err(format!(
+                "{rejection_id} token {token:?} drifted at {}: {source_line}",
+                columns[4]
+            ));
+        }
+        let false_descendant = item_descendants
+            .get(columns[6])
+            .ok_or_else(|| format!("{rejection_id} has unknown false callee {}", columns[6]))?;
+        if false_descendant != columns[7] {
+            return Err(format!(
+                "{rejection_id} false callee {} resolves to {false_descendant}, not {}",
+                columns[6], columns[7]
+            ));
+        }
+        if c15_callable_name(columns[7]) != token {
+            return Err(format!(
+                "{rejection_id} token {token} does not name false target {}",
+                columns[7]
+            ));
+        }
+        if let Some(declaration) = columns[8].strip_prefix("non-call-declaration:") {
+            let listed_caller = columns[3]
+                .split_once(": ")
+                .map_or(columns[3], |(_, descendant)| descendant);
+            if declaration != listed_caller || !source_line.contains(&format!("fn {token}")) {
+                return Err(format!(
+                    "{rejection_id} declaration resolution is not backed by its caller/source: {row}"
+                ));
+            }
+        } else if let Some(actual_targets) = columns[8].strip_prefix("non-ledger:") {
+            let actual_targets = actual_targets
+                .strip_prefix('{')
+                .and_then(|targets| targets.strip_suffix('}'))
+                .unwrap_or(actual_targets);
+            if actual_targets.is_empty() {
+                return Err(format!("{rejection_id} has an empty actual resolution"));
+            }
+            for actual_target in actual_targets.split(',') {
+                if c15_callable_name(actual_target) != token {
+                    return Err(format!(
+                        "{rejection_id} actual target {actual_target} does not match token {token}"
+                    ));
+                }
+                if actual_target == columns[7] {
+                    return Err(format!(
+                        "{rejection_id} resolves to its rejected false target"
+                    ));
+                }
+            }
+        } else {
+            return Err(format!(
+                "{rejection_id} needs an explicit non-ledger resolution: {row}"
+            ));
+        }
+        let rejected_tuple = (
+            columns[3].to_owned(),
+            columns[4].to_owned(),
+            token.to_owned(),
+            columns[7].to_owned(),
+        );
+        if !rejected_tuples.insert(rejected_tuple.clone()) {
+            return Err(format!("duplicate rejected collision tuple: {row}"));
+        }
+        if accepted_tuples.contains(&rejected_tuple) {
+            return Err(format!(
+                "{rejection_id} rejected collision is present as an accepted relationship"
+            ));
+        }
+        *rejected_categories.entry(token.to_owned()).or_default() += 1;
+    }
+    let expected_rejected_categories = std::collections::BTreeMap::from([
+        ("finish".to_owned(), 81),
+        ("from".to_owned(), 174),
+        ("run".to_owned(), 2),
+        ("try_new".to_owned(), 500),
+    ]);
+    if rejected_categories != expected_rejected_categories {
+        return Err(format!(
+            "rejected collision categories drifted: {rejected_categories:?}"
+        ));
+    }
 
     for row in item_rows.iter().chain(&relationship_rows) {
-        assert!(row.contains("92cdd9114046115d45451153c6ebad3b425db36e:"));
-        assert!(
-            row.contains("| retain |")
-                || row.contains("| remediate in C15 |")
-                || row.contains("| already superseded |"),
-            "invalid or missing disposition: {row}"
-        );
-        assert!(!row.contains("too_many_lines") && !row.contains("physical-line"));
+        if !row.contains(&format!("{C15_IMPLEMENTATION_BASELINE}:")) {
+            return Err(format!("row lacks the immutable baseline: {row}"));
+        }
+        if !row.contains("| retain |")
+            && !row.contains("| remediate in C15 |")
+            && !row.contains("| already superseded |")
+        {
+            return Err(format!("invalid or missing disposition: {row}"));
+        }
+        if row.contains("too_many_lines") || row.contains("physical-line") {
+            return Err(format!("row uses a physical-size rationale: {row}"));
+        }
         if row.contains("| remediate in C15 |") {
             let owner_count = ["T02", "T03", "T04"]
                 .into_iter()
                 .filter(|owner| row.contains(owner))
                 .count();
-            assert_eq!(owner_count, 1, "remediation needs exactly one owner: {row}");
+            if owner_count != 1 {
+                return Err(format!("remediation needs exactly one owner: {row}"));
+            }
         }
     }
+    if !item_rows.iter().any(|row| {
+        row.contains("c10_future_backdrop_scene") && row.contains("| already superseded |")
+    }) {
+        return Err(
+            "the absent duplicate helper needs an explicit superseded disposition".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    validate_c15_disposition_ledger(&ledger).unwrap_or_else(|error| panic!("{error}"));
+
+    let run_row = "| ITEM-X2-PA-026: pass::ClosedGraphTraversal::run | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:5628 | `token=run; target=pass::ClosedGraphTraversal::run` |";
+    let retargeted_run_row = "| ITEM-X2-PA-010: pass::C08CustomSpineEncodingProgress::finish | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:5628 | `token=run; target=pass::C08CustomSpineEncodingProgress::finish` |";
+    let retargeted_run = ledger.replacen(run_row, retargeted_run_row, 1);
+    assert_ne!(retargeted_run, ledger, "REL-0220 mutation fixture drifted");
+    let error = validate_c15_disposition_ledger(&retargeted_run)
+        .expect_err("REL-0220 callee-and-target retargeting must be rejected");
     assert!(
-        item_rows
-            .iter()
-            .any(|row| row.contains("c10_future_backdrop_scene")
-                && row.contains("| already superseded |")),
-        "the absent duplicate helper needs an explicit superseded disposition"
+        error.contains("token \"run\" does not name target"),
+        "REL-0220 mutation failed for the wrong reason: {error}"
+    );
+
+    let associated_row = "| ITEM-X2-PA-020: pass::ClosedGraphMaps::try_new | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:5625 | `token=ClosedGraphMaps::try_new; target=pass::ClosedGraphMaps::try_new` |";
+    let retargeted_associated_row = "| ITEM-X2-RS-001: resource::GaussianKernelPlan::try_new | 92cdd9114046115d45451153c6ebad3b425db36e:src/pass.rs:5625 | `token=ClosedGraphMaps::try_new; target=resource::GaussianKernelPlan::try_new` |";
+    let retargeted_associated = ledger.replacen(associated_row, retargeted_associated_row, 1);
+    assert_ne!(
+        retargeted_associated, ledger,
+        "REL-0218 mutation fixture drifted"
+    );
+    let error = validate_c15_disposition_ledger(&retargeted_associated)
+        .expect_err("associated callee-and-target retargeting must be rejected");
+    assert!(
+        error
+            .contains("qualifier ClosedGraphMaps does not name target receiver GaussianKernelPlan"),
+        "REL-0218 mutation failed for the wrong reason: {error}"
     );
 }
