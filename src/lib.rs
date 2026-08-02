@@ -23,8 +23,9 @@
 //! frame. CPU-visible pixels require explicit headless readback through
 //! [`Renderer::read_headless`]; rendering never enters that path implicitly.
 //!
-//! The native window presentation path is host lifecycle owned and exercised by the
-//! `render_window_smoke` example added by the next C14 task. The
+//! The native window presentation path is host lifecycle owned.
+//! The tracked `render_window_smoke` example exercises the public native window lifecycle
+//! and presentation path. The
 //! `wasm32-unknown-unknown` leaf boundary is compile-only under `render-web`;
 //! real canvas execution requires a browser host and is root integration work.
 //! The root `surgeist` repository owns the root facade, cross-crate adapters,

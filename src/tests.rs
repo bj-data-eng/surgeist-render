@@ -40733,6 +40733,11 @@ fn c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries() 
             "gitlink",
         ],
     );
+    let stale_future_example_claim = "`render_window_smoke` example added by the next C14 task";
+    assert!(
+        !crate_front_door.contains(stale_future_example_claim),
+        "src/lib.rs crate documentation must describe the existing tracked example, not retain the stale future-task claim `{stale_future_example_claim}`"
+    );
     assert_document_terms(
         "src/lib.rs crate documentation",
         crate_front_door,
@@ -40748,6 +40753,9 @@ fn c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries() 
             "last successful",
             "explicit headless readback",
             "native window",
+            "tracked `render_window_smoke` example",
+            "public native window lifecycle",
+            "presentation path",
             "wasm32-unknown-unknown",
             "browser host",
             "root facade",
