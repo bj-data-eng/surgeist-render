@@ -40292,98 +40292,99 @@ struct StaticSourceScanForTest {
     code_mask: Vec<bool>,
 }
 
-fn mask_static_non_code(code_only: &mut [u8], code_mask: &mut [bool], start: usize, end: usize) {
-    for (byte, is_code) in code_only[start..end]
-        .iter_mut()
-        .zip(&mut code_mask[start..end])
-    {
-        *is_code = false;
-        if !matches!(*byte, b'\n' | b'\r') {
-            *byte = b' ';
-        }
-    }
-}
-
-fn static_raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let prefix_length = if bytes.get(start) == Some(&b'r') {
-        1
-    } else if matches!(bytes.get(start..start + 2), Some(b"br" | b"cr")) {
-        2
-    } else {
-        return None;
-    };
-    let mut delimiter = start + prefix_length;
-    while bytes.get(delimiter) == Some(&b'#') {
-        delimiter += 1;
-    }
-    if bytes.get(delimiter) != Some(&b'"') {
-        return None;
-    }
-    let hash_count = delimiter - start - prefix_length;
-    let mut cursor = delimiter + 1;
-    while cursor < bytes.len() {
-        if bytes[cursor] == b'"' {
-            let end = cursor + 1 + hash_count;
-            if end <= bytes.len() && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#') {
-                return Some(end);
-            }
-        }
-        cursor += 1;
-    }
-    panic!("static reachability found an unterminated raw string");
-}
-
-fn static_cooked_string_end(bytes: &[u8], start: usize) -> Option<usize> {
-    let quote = if bytes.get(start) == Some(&b'"') {
-        start
-    } else if matches!(bytes.get(start..start + 2), Some(b"b\"" | b"c\"")) {
-        start + 1
-    } else {
-        return None;
-    };
-    let mut cursor = quote + 1;
-    while cursor < bytes.len() {
-        match bytes[cursor] {
-            b'\\' => cursor += 2,
-            b'"' => return Some(cursor + 1),
-            _ => cursor += 1,
-        }
-    }
-    panic!("static reachability found an unterminated cooked string");
-}
-
-fn static_char_literal_end(source: &str, start: usize) -> Option<usize> {
-    let bytes = source.as_bytes();
-    let quote = if bytes.get(start) == Some(&b'\'') {
-        start
-    } else if bytes.get(start..start + 2) == Some(b"b'") {
-        start + 1
-    } else {
-        return None;
-    };
-    let value = quote + 1;
-    let after_value = match bytes.get(value)? {
-        b'\\' => match bytes.get(value + 1)? {
-            b'x' => {
-                let digits = bytes.get(value + 2..value + 4)?;
-                if !digits.iter().all(u8::is_ascii_hexdigit) {
-                    return None;
-                }
-                value + 4
-            }
-            b'u' if bytes.get(value + 2) == Some(&b'{') => {
-                let closing = bytes[value + 3..].iter().position(|byte| *byte == b'}')? + value + 3;
-                closing + 1
-            }
-            _ => value + 2,
-        },
-        b'\'' | b'\n' | b'\r' => return None,
-        _ => value + source[value..].chars().next()?.len_utf8(),
-    };
-    (bytes.get(after_value) == Some(&b'\'')).then_some(after_value + 1)
-}
-
 impl StaticSourceScanForTest {
+    fn mask_non_code(code_only: &mut [u8], code_mask: &mut [bool], start: usize, end: usize) {
+        for (byte, is_code) in code_only[start..end]
+            .iter_mut()
+            .zip(&mut code_mask[start..end])
+        {
+            *is_code = false;
+            if !matches!(*byte, b'\n' | b'\r') {
+                *byte = b' ';
+            }
+        }
+    }
+
+    fn raw_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let prefix_length = if bytes.get(start) == Some(&b'r') {
+            1
+        } else if matches!(bytes.get(start..start + 2), Some(b"br" | b"cr")) {
+            2
+        } else {
+            return None;
+        };
+        let mut delimiter = start + prefix_length;
+        while bytes.get(delimiter) == Some(&b'#') {
+            delimiter += 1;
+        }
+        if bytes.get(delimiter) != Some(&b'"') {
+            return None;
+        }
+        let hash_count = delimiter - start - prefix_length;
+        let mut cursor = delimiter + 1;
+        while cursor < bytes.len() {
+            if bytes[cursor] == b'"' {
+                let end = cursor + 1 + hash_count;
+                if end <= bytes.len() && bytes[cursor + 1..end].iter().all(|byte| *byte == b'#') {
+                    return Some(end);
+                }
+            }
+            cursor += 1;
+        }
+        panic!("static reachability found an unterminated raw string");
+    }
+
+    fn cooked_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let quote = if bytes.get(start) == Some(&b'"') {
+            start
+        } else if matches!(bytes.get(start..start + 2), Some(b"b\"" | b"c\"")) {
+            start + 1
+        } else {
+            return None;
+        };
+        let mut cursor = quote + 1;
+        while cursor < bytes.len() {
+            match bytes[cursor] {
+                b'\\' => cursor += 2,
+                b'"' => return Some(cursor + 1),
+                _ => cursor += 1,
+            }
+        }
+        panic!("static reachability found an unterminated cooked string");
+    }
+
+    fn char_literal_end(source: &str, start: usize) -> Option<usize> {
+        let bytes = source.as_bytes();
+        let quote = if bytes.get(start) == Some(&b'\'') {
+            start
+        } else if bytes.get(start..start + 2) == Some(b"b'") {
+            start + 1
+        } else {
+            return None;
+        };
+        let value = quote + 1;
+        let after_value = match bytes.get(value)? {
+            b'\\' => match bytes.get(value + 1)? {
+                b'x' => {
+                    let digits = bytes.get(value + 2..value + 4)?;
+                    if !digits.iter().all(u8::is_ascii_hexdigit) {
+                        return None;
+                    }
+                    value + 4
+                }
+                b'u' if bytes.get(value + 2) == Some(&b'{') => {
+                    let closing =
+                        bytes[value + 3..].iter().position(|byte| *byte == b'}')? + value + 3;
+                    closing + 1
+                }
+                _ => value + 2,
+            },
+            b'\'' | b'\n' | b'\r' => return None,
+            _ => value + source[value..].chars().next()?.len_utf8(),
+        };
+        (bytes.get(after_value) == Some(&b'\'')).then_some(after_value + 1)
+    }
+
     fn new(source: &str) -> Self {
         let bytes = source.as_bytes();
         let mut code_only = bytes.to_vec();
@@ -40395,7 +40396,7 @@ impl StaticSourceScanForTest {
                     .iter()
                     .position(|byte| *byte == b'\n')
                     .map_or(bytes.len(), |offset| cursor + 2 + offset);
-                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
+                Self::mask_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
@@ -40417,22 +40418,22 @@ impl StaticSourceScanForTest {
                     depth, 0,
                     "static reachability found an unterminated block comment"
                 );
-                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
+                Self::mask_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
-            if let Some(end) = static_raw_string_end(bytes, cursor) {
-                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
+            if let Some(end) = Self::raw_string_end(bytes, cursor) {
+                Self::mask_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
-            if let Some(end) = static_cooked_string_end(bytes, cursor) {
-                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
+            if let Some(end) = Self::cooked_string_end(bytes, cursor) {
+                Self::mask_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
-            if let Some(end) = static_char_literal_end(source, cursor) {
-                mask_static_non_code(&mut code_only, &mut code_mask, cursor, end);
+            if let Some(end) = Self::char_literal_end(source, cursor) {
+                Self::mask_non_code(&mut code_only, &mut code_mask, cursor, end);
                 cursor = end;
                 continue;
             }
@@ -40508,8 +40509,13 @@ fn source_scanner_ignores_non_code_routes_and_braces_and_rejects_duplicate_marke
 fn scanner_target() {
     // .read_render_texture_for_test( }
     /* .read_render_texture_for_test( {}} */
+    /* outer { /* .read_render_texture_for_test( } */ } */
     let cooked = ".read_render_texture_for_test( }";
     let raw = r##".read_render_texture_for_test( {"##;
+    let closing_char = '}';
+    let opening_byte_char = b'{';
+    let unicode_char = 'é';
+    let escaped_char = '\u{7b}';
     renderer.real_download_route();
     let reached_after_non_code_braces = true;
 }
@@ -40518,7 +40524,7 @@ fn scanner_target() {
 
     assert!(
         body.contains("let reached_after_non_code_braces = true;"),
-        "line-comment, block-comment, cooked-string, and raw-string braces must not truncate the selected body"
+        "comment, string, and character-literal braces must not truncate the selected body"
     );
     assert_eq!(
         body.matches(".read_render_texture_for_test(").count(),
@@ -42219,9 +42225,20 @@ fn validate_c15_disposition_ledger(ledger: &str) -> std::result::Result<(), Stri
             .strip_prefix('`')
             .and_then(|value| value.strip_suffix('`'))
             .ok_or_else(|| format!("missing delimited source evidence: {row}"))?;
-        let (token, resolved_target) = evidence
-            .strip_prefix("token=")
-            .and_then(|value| value.split_once("; target="))
+        let (historical_token, token_and_target) =
+            if let Some(value) = evidence.strip_prefix("historical-token=") {
+                let (historical_token, token_and_target) = value
+                    .split_once("; token=")
+                    .ok_or_else(|| format!("invalid historical source evidence: {row}"))?;
+                (Some(historical_token), token_and_target)
+            } else {
+                let token_and_target = evidence
+                    .strip_prefix("token=")
+                    .ok_or_else(|| format!("invalid source evidence: {row}"))?;
+                (None, token_and_target)
+            };
+        let (token, resolved_target) = token_and_target
+            .split_once("; target=")
             .ok_or_else(|| format!("invalid source evidence: {row}"))?;
         if resolved_target != listed_callee {
             return Err(format!(
@@ -42248,10 +42265,14 @@ fn validate_c15_disposition_ledger(ledger: &str) -> std::result::Result<(), Stri
             }
         }
 
-        let (source_line, file) = c15_source_line(columns[4], &mut source_cache)?;
-        if !source_line.contains(token) {
+        let immutable_anchor = columns[4]
+            .split_once("; ")
+            .map_or(columns[4], |(anchor, _)| anchor);
+        let (source_line, file) = c15_source_line(immutable_anchor, &mut source_cache)?;
+        let immutable_token = historical_token.unwrap_or(token);
+        if !source_line.contains(immutable_token) {
             return Err(format!(
-                "{relationship_id} source token {token:?} drifted at {}: {source_line}",
+                "{relationship_id} source token {immutable_token:?} drifted at {}: {source_line}",
                 columns[4]
             ));
         }
@@ -42649,6 +42670,140 @@ fn c15_graph_raster_model_remediations_are_closed() {
         assert!(
             source.contains(named_ownership),
             "the acquisition handoff lacks named ownership: {named_ownership}"
+        );
+    }
+}
+
+#[test]
+fn c15_test_code_remediations_are_closed() {
+    const CLOSURE: &str = "## T04 test-code cohesion closure";
+    const CLOSED_ITEMS: &str =
+        "- Corrected remediation: **10 ITEM occurrences and 4 REL relationships**.";
+    const ZERO_OPEN: &str = "- Open or assigned T04 remediations: **0**.";
+    const ITEM_DESCENDANTS: [(&str, &str); 10] = [
+        ("ITEM-X2-TE-001", "tests::<impl StaticSourceScanForTest>"),
+        ("ITEM-X2-TE-011", "tests::StaticSourceScanForTest::new"),
+        (
+            "ITEM-X2-TE-012",
+            "tests::StaticSourceScanForTest::char_literal_end",
+        ),
+        (
+            "ITEM-X2-TE-013",
+            "tests::StaticSourceScanForTest::cooked_string_end",
+        ),
+        (
+            "ITEM-X2-TE-014",
+            "tests::StaticSourceScanForTest::mask_non_code",
+        ),
+        (
+            "ITEM-X2-TE-015",
+            "tests::StaticSourceScanForTest::raw_string_end",
+        ),
+        (
+            "ITEM-X2-TE-147",
+            "tests::StaticSourceScanForTest::mask_non_code",
+        ),
+        (
+            "ITEM-X2-TE-179",
+            "tests::StaticSourceScanForTest::char_literal_end",
+        ),
+        (
+            "ITEM-X2-TE-180",
+            "tests::StaticSourceScanForTest::cooked_string_end",
+        ),
+        (
+            "ITEM-X2-TE-181",
+            "tests::StaticSourceScanForTest::raw_string_end",
+        ),
+    ];
+
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    validate_c15_disposition_ledger(&ledger).unwrap_or_else(|error| panic!("{error}"));
+
+    for (item_id, descendant) in ITEM_DESCENDANTS {
+        let row = ledger
+            .lines()
+            .find(|line| line.starts_with(&format!("| {item_id} |")))
+            .unwrap_or_else(|| panic!("{item_id} must retain its stable ledger row"));
+        assert!(
+            row.contains(&format!("| {descendant} |")),
+            "{item_id} does not resolve to its cohesive descendant: {row}"
+        );
+        assert!(
+            !row.contains("| remediate in C15 |") && !row.contains("| T04 |"),
+            "T04 ITEM remediation remains open: {row}"
+        );
+        assert!(
+            row.contains("; T04 committed descendant:src/tests.rs:"),
+            "{item_id} lacks semantic current-source evidence: {row}"
+        );
+    }
+    for relationship_id in ["REL-0405", "REL-0406", "REL-0407", "REL-0408"] {
+        let row = ledger
+            .lines()
+            .find(|line| line.starts_with(&format!("| {relationship_id} |")))
+            .unwrap_or_else(|| panic!("{relationship_id} must retain its stable ledger row"));
+        assert!(
+            row.contains("tests::StaticSourceScanForTest::"),
+            "{relationship_id} does not target scanner-owned behavior: {row}"
+        );
+        assert!(
+            !row.contains("| remediate in C15 |") && !row.contains("| T04 |"),
+            "T04 relationship remediation remains open: {row}"
+        );
+        assert!(
+            row.contains("; T04 committed descendant:src/tests.rs:")
+                && row.contains("historical-token=")
+                && row.contains("token=Self::"),
+            "{relationship_id} lacks immutable and semantic current-source evidence: {row}"
+        );
+    }
+    for required_evidence in [CLOSURE, CLOSED_ITEMS, ZERO_OPEN] {
+        assert!(
+            ledger.contains(required_evidence),
+            "the T04 closure record lacks exact evidence: {required_evidence}"
+        );
+    }
+
+    let tests_source =
+        std::fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/tests.rs"))
+            .expect("src/tests.rs must be readable");
+    let scanner_impl =
+        source_braced_block_from_marker(&tests_source, "impl StaticSourceScanForTest");
+    for owned_method in [
+        "fn mask_non_code(",
+        "fn raw_string_end(",
+        "fn cooked_string_end(",
+        "fn char_literal_end(",
+    ] {
+        assert!(
+            scanner_impl.contains(owned_method),
+            "StaticSourceScanForTest does not own {owned_method}"
+        );
+    }
+    for scanner_call in [
+        "Self::mask_non_code(",
+        "Self::raw_string_end(",
+        "Self::cooked_string_end(",
+        "Self::char_literal_end(",
+    ] {
+        assert!(
+            scanner_impl.contains(scanner_call),
+            "StaticSourceScanForTest::new does not call {scanner_call}"
+        );
+    }
+    let code_only = source_code_only_for_static_reachability(&tests_source);
+    for displaced_helper in [
+        "fn mask_static_non_code(",
+        "fn static_raw_string_end(",
+        "fn static_cooked_string_end(",
+        "fn static_char_literal_end(",
+    ] {
+        assert!(
+            !code_only.contains(displaced_helper),
+            "the displaced top-level helper remains: {displaced_helper}"
         );
     }
 }
