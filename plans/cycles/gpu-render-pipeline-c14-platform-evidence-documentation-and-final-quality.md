@@ -101,7 +101,10 @@
   prose use only public names that exist at C13; docs make no browser execution,
   broad-effect support, fallback, or root-ownership overclaim; rustdoc builds
   with warnings denied under the combined native feature surface.
-- Commands: run both named tests separately; run
+- Commands:
+  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries -- --exact`;
+  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_changed_public_items_have_semantic_documentation -- --exact`;
+  run
   `CARGO_NET_OFFLINE=true RUSTDOCFLAGS="-D warnings" cargo doc -p surgeist-render --no-deps --features render-window,render-web`;
   run `C14-CHECK`.
 - Depends on: none.
@@ -123,7 +126,9 @@
   Cargo gates the example to `render-window`; it checks and runs with
   `render-window` and the additive `render-window,render-web` combination; an
   unavailable live graphical host returns the canonical blocker.
-- Commands: run the named test separately; run
+- Commands:
+  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::render_window_smoke_source_covers_direct_and_graph_routes -- --exact`;
+  run
   `CARGO_NET_OFFLINE=true cargo check -p surgeist-render --example render_window_smoke --features render-window`;
   run both required native smoke commands in Section 5; run `C14-CHECK`.
 - Depends on: T01.
@@ -150,8 +155,11 @@
   the native feature matrix, presented smoke, wasm target build, exact Rust-1.97
   checks, rustdoc, C13 inventories/routes/stats, production-path guards, and
   owned-Rust safety scan are green.
-- Commands: run both named tests separately; run every command in Section 5,
-  including dependency trees and the canonical unsafe scan.
+- Commands:
+  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_dependency_feature_and_provenance_contract_is_final -- --exact`;
+  `CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_final_quality_contract_matches_published_gpu_architecture -- --exact`;
+  run every command in Section 5, including dependency trees and the canonical
+  unsafe scan.
 - Depends on: T02.
 - Intended commit: `test(platform): close final compatibility guards`.
 
@@ -162,6 +170,13 @@ Implementation and final commands use only already-installed artifacts with
 
 ```sh
 set -euo pipefail
+cycle_base=2bd2d36638b8a3436b69cb99a905d37b36886d16
+cycle_head=$(git rev-parse HEAD)
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_changed_public_items_have_semantic_documentation -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::render_window_smoke_source_covers_direct_and_graph_routes -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_dependency_feature_and_provenance_contract_is_final -- --exact
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render tests::c14_final_quality_contract_matches_published_gpu_architecture -- --exact
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
@@ -196,13 +211,28 @@ CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i bytemuck
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i vello_shaders
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render --target wasm32-unknown-unknown --features render-web -e features -i getrandom@0.3.4
 test -z "$(git ls-files -- Cargo.lock)"
+owned_rs=("${(@f)$(
+  {
+    git ls-files -- '*.rs'
+    git ls-files --others --exclude-standard -- '*.rs'
+  } | sort -u
+)}")
+test "${#owned_rs[@]}" -gt 0
+if rg -n --pcre2 '#\s*\[\s*(?:unsafe\s*\(|no_mangle\b|export_name\b)|\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|\bstatic\s+mut\b|\bextern\s*(?:"[^"]*")?\s*\{' "${owned_rs[@]}"; then
+  exit 1
+else
+  test "$?" -eq 1
+fi
+git diff --check "$cycle_base..$cycle_head"
+test "$(git rev-parse HEAD)" = "$cycle_head"
+test -z "$(git status --porcelain)"
 ```
 
-The final gate also runs every T01-T03 named test separately, every applicable
-S32-S35 and C13 integrated guard, the canonical tracked/non-ignored owned-Rust
-unsafe scan, dependency-role/source and provenance comparisons, `git diff
---check`, exact-head confirmation, and a clean-worktree check. Structural
-advisories do not become Boolean failures.
+The final gate also runs every applicable S32-S35 and C13 integrated guard plus
+the dependency-role/source and provenance comparisons. The block above is a
+`zsh` command set because the repository's configured shell supplies the
+newline-safe `(@f)` array expansion used for the explicit owned-Rust manifest.
+Structural advisories do not become Boolean failures.
 
 Completion requires all three tasks to have fresh `CLEAN` task reviews and
 coordinator acceptance, a separate status-only `complete` commit, the complete
