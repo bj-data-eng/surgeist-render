@@ -39,6 +39,13 @@ thread_local! {
     static ACTIVE_PRESENTED_CREATION_LOSS_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
 }
 
+/// GPU-only renderer and owner of device-scoped resources and frame transactions.
+///
+/// Effect-free scenes select [`RenderRoute::DirectVello`]. Scenes requiring the
+/// implemented resolved-alpha-mask, composition, or bounded-backdrop subset
+/// select [`RenderRoute::GpuGraph`]. Both routes encode into one
+/// transaction-owned submission. The renderer never retries pixels on a CPU
+/// path and never performs implicit readback.
 pub struct Renderer {
     identity: RendererIdentity,
     options: Options,
@@ -403,6 +410,11 @@ fn ensure_presented_device_available_after_creation(
 }
 
 impl Renderer {
+    /// Creates a GPU-only renderer with the supplied fixed [`Options`].
+    ///
+    /// Device selection is asynchronous. When no compatible adapter is
+    /// available, construction retains a contract-only headless boundary so
+    /// later nonzero operations return typed runtime capability failures.
     pub async fn new(options: Options) -> Result<Self> {
         let mut backend = Backend::new(options.resource_cache_budget());
         let default_device = backend.select_device(None).await?;
@@ -424,12 +436,13 @@ impl Renderer {
         })
     }
 
-    /// Creates a surface and awaits any native or WebGPU surface setup.
+    /// Creates a surface and awaits any native-window or WebGPU host setup.
     ///
     /// The returned surface is ready for its next lifecycle operation when this
     /// future succeeds. Invalid options and unsupported attachments preserve
-    /// their existing diagnostics when the future is awaited. This future does
-    /// not promise to be `Send`.
+    /// their existing diagnostics when the future is awaited. Presented host
+    /// lifecycle remains owned by the caller and its window or browser event
+    /// loop. This future does not promise to be `Send`.
     pub async fn create_surface(
         &mut self,
         attachment: Attachment,
@@ -567,10 +580,12 @@ impl Renderer {
         unreachable!("web canvas support requires the render-web feature on wasm32");
     }
 
-    /// Creates a headless surface for a later asynchronous render operation.
+    /// Creates a headless surface for later asynchronous GPU operations.
     ///
-    /// Await this operation before using the surface. Input and format failures
-    /// are reported when the future is awaited; readback is a separate asynchronous operation.
+    /// `size` is in logical units and `scale` converts it to physical pixels.
+    /// Await this operation before using the surface. Input and `Rgba8` format
+    /// failures are reported when the future is awaited; explicit readback is a
+    /// separate asynchronous operation.
     pub async fn create_headless(&mut self, size: Size, scale: f64) -> Result<Surface> {
         let options = SurfaceOptions {
             size,
@@ -614,6 +629,11 @@ impl Renderer {
         ))
     }
 
+    /// Updates native presented-resize intent after validating surface identity and lifecycle.
+    ///
+    /// The flag is host scheduling input, not a resize by itself. Repeating the
+    /// same value is idempotent; invalid, unavailable, foreign, or stale surfaces
+    /// return their typed diagnostic without changing committed resources.
     pub fn set_surface_resizing(&mut self, surface: &mut Surface, resizing: bool) -> Result<()> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
@@ -1011,10 +1031,13 @@ impl Renderer {
         )))
     }
 
-    /// Submits one render operation for an available surface.
+    /// Submits one failure-atomic GPU render operation for an available surface.
     ///
-    /// Awaiting this future returns render statistics after scene validation and
-    /// submission, or the existing lifecycle, validation, or backend diagnostic.
+    /// Awaiting this future returns [`Stats`] only after validation, resource
+    /// cleanup, submission, and any presentation succeed. On validation,
+    /// lifecycle, capability, backend, cancellation, or presentation failure,
+    /// no draft frame or statistics publish: the surface and [`Self::stats`]
+    /// retain their last successful values. There is no production CPU fallback.
     pub async fn render(
         &mut self,
         surface: &mut Surface,
@@ -1993,10 +2016,11 @@ impl Renderer {
         })
     }
 
-    /// Resumes a compatible surface, awaiting recreation when it is presented.
+    /// Resumes a compatible surface, awaiting host-resource recreation when presented.
     ///
-    /// Await this operation before rendering again. Incompatible attachments and
-    /// identity failures preserve their existing error ordering.
+    /// Await this operation before rendering again. Incompatible attachments,
+    /// foreign/stale identity, terminal-device, configuration, and host failures
+    /// preserve the previously committed surface state and their typed ordering.
     pub async fn resume_surface(
         &mut self,
         surface: &mut Surface,
@@ -2099,11 +2123,13 @@ impl Renderer {
         Ok(())
     }
 
-    /// Reads the current complete publication from a headless surface.
+    /// Performs explicit headless readback of the current complete publication.
     ///
-    /// A zero-area available surface returns an empty validated image without GPU work. A
-    /// nonzero surface without a published frame returns its typed uninitialized diagnostic.
-    /// The returned future is not promised to be `Send`.
+    /// The returned [`ImageBuffer`] contains tightly packed straight-alpha RGBA8
+    /// physical pixels. A zero-area available surface returns an empty validated
+    /// image without GPU work. A nonzero surface without a publication returns
+    /// its typed uninitialized diagnostic. Failed or canceled mapping never
+    /// changes the published frame. The future is not promised to be `Send`.
     pub async fn read_headless(&mut self, surface: &Surface) -> Result<ImageBuffer> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceReadback)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceReadback)?;
@@ -2170,10 +2196,13 @@ impl Renderer {
         .await
     }
 
-    /// Projects immutable capabilities of the device selected by `surface`.
+    /// Projects immutable runtime-phase capabilities of the device selected by `surface`.
     ///
     /// This query observes pending terminal device signals but performs no
     /// allocation, submission, mapping, polling, or Vello/WGPU resource call.
+    /// It is separate from semantic [`Capabilities`] and from any Cargo feature:
+    /// features select compiled host adapters, while this report describes the
+    /// selected device/surface snapshot.
     #[must_use]
     pub fn runtime_capabilities(&mut self, surface: &Surface) -> RuntimeCapabilities {
         if !self.identity.matches(&surface.renderer_identity) {
@@ -2273,6 +2302,9 @@ impl Renderer {
     }
 
     #[must_use]
+    /// Returns statistics for the last successful published frame.
+    ///
+    /// Failed and canceled render attempts do not replace this value.
     pub const fn stats(&self) -> Stats {
         self.stats
     }
@@ -2298,6 +2330,7 @@ impl Renderer {
     }
 
     #[must_use]
+    /// Returns the fixed configuration supplied when this renderer was created.
     pub const fn options(&self) -> Options {
         self.options
     }
@@ -2897,6 +2930,10 @@ impl Renderer {
     }
 
     #[must_use]
+    /// Returns the crate's semantic authored-operation capability contract.
+    ///
+    /// This does not inspect a runtime device or surface; use
+    /// [`Self::runtime_capabilities`] for runtime facts.
     pub const fn capabilities(&self) -> Capabilities {
         Capabilities::CURRENT
     }
@@ -3046,7 +3083,12 @@ pub(crate) fn future_graph_diagnostic_for_test(
     }
 }
 
-/// Renderer configuration that is fixed when a [`Renderer`] is created.
+/// GPU-only renderer configuration that is fixed when a [`Renderer`] is created.
+///
+/// Defaults are [`Antialiasing::Area`], diagnostics disabled,
+/// [`EffectQualityPolicy::RequireHighPrecision`], and a 64 MiB idle
+/// [`ResourceCacheBudget`]. Options select quality and retention policy, never a
+/// CPU renderer or CPU fallback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Options {
     antialiasing: Antialiasing,
@@ -3057,6 +3099,8 @@ pub struct Options {
 
 impl Options {
     /// Creates the default GPU-only renderer configuration.
+    ///
+    /// This is equivalent to [`Self::default`].
     #[must_use]
     pub const fn new() -> Self {
         Self {
@@ -3100,6 +3144,9 @@ impl Options {
     }
 
     /// Returns this configuration with a different effect precision policy.
+    ///
+    /// Allowing reduced precision changes only the GPU working format; it does
+    /// not enable CPU execution.
     #[must_use]
     pub const fn with_effect_quality_policy(
         mut self,
@@ -3132,17 +3179,23 @@ impl Default for Options {
     }
 }
 
-/// Policy for choosing effect precision on a compatible GPU.
+/// Policy for choosing high precision or reduced precision on a compatible GPU.
+///
+/// If the selected GPU cannot satisfy the policy, rendering returns a typed runtime
+/// capability error. Neither policy permits CPU execution or fallback.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum EffectQualityPolicy {
-    /// Require high-precision effect execution.
+    /// Require high-precision `Rgba16Float` effect execution.
     #[default]
     RequireHighPrecision,
-    /// Prefer high precision and allow reduced precision only when it is unavailable.
+    /// Prefer high precision and allow reduced-precision `Rgba8Unorm` only when unavailable.
     AllowReducedPrecision,
 }
 
-/// Byte budget for retaining idle effect resources.
+/// Byte budget for retaining idle, reusable GPU effect resources.
+///
+/// The budget never rejects resources required by the active frame. Allocation
+/// and device-limit failures remain typed runtime failures.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ResourceCacheBudget(u64);
 

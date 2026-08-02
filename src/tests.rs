@@ -40705,6 +40705,470 @@ fn assert_native_and_wasm_poll_paths(readback_source: &str, readback_code: &str)
     assert!(!wasm.contains("spawn_native_poll_helper"));
 }
 
+#[test]
+fn c14_public_docs_describe_gpu_routes_precision_failures_and_host_boundaries() {
+    let readme = include_str!("../README.md");
+    let crate_front_door = include_str!("lib.rs");
+
+    assert_document_terms(
+        "README.md",
+        readme,
+        &[
+            "DirectVello",
+            "GpuGraph",
+            "no production CPU fallback",
+            "RequireHighPrecision",
+            "AllowReducedPrecision",
+            "Capabilities::CURRENT",
+            "runtime_capabilities",
+            "failure-atomic",
+            "last successful",
+            "read_headless",
+            "render_window_smoke",
+            "wasm32-unknown-unknown",
+            "compile-only",
+            "browser",
+            "root `surgeist`",
+            "API artifacts",
+            "gitlink",
+        ],
+    );
+    assert_document_terms(
+        "src/lib.rs crate documentation",
+        crate_front_door,
+        &[
+            "DirectVello",
+            "GpuGraph",
+            "GPU-only",
+            "high precision",
+            "reduced precision",
+            "semantic capabilities",
+            "runtime capabilities",
+            "failure-atomic",
+            "last successful",
+            "explicit headless readback",
+            "native window",
+            "wasm32-unknown-unknown",
+            "browser host",
+            "root facade",
+            "API artifacts",
+            "gitlink",
+        ],
+    );
+}
+
+#[test]
+fn c14_changed_public_items_have_semantic_documentation() {
+    let capability = include_str!("capability.rs");
+    let error = include_str!("error.rs");
+    let image = include_str!("image.rs");
+    let layer = include_str!("layer.rs");
+    let renderer = include_str!("renderer.rs");
+    let stats = include_str!("stats.rs");
+    let surface = include_str!("surface.rs");
+    let text = include_str!("text.rs");
+
+    for (source, path, markers) in [
+        (
+            capability,
+            "src/capability.rs",
+            &[
+                "pub enum RuntimeCapabilities",
+                "    Unavailable(RuntimeCapabilityUnavailableReason),",
+                "    Available(AvailableRuntimeCapabilities),",
+                "    pub const fn available(",
+                "    pub const fn unavailable_reason(",
+                "pub struct AvailableRuntimeCapabilities",
+                "    pub const fn surface_format(",
+                "    pub const fn effect_precisions(",
+                "    pub const fn max_effect_texture_dimension_2d(",
+                "pub struct EffectPrecisionCapabilities",
+                "    pub const fn supports_high_precision(",
+                "    pub const fn supports_reduced_precision(",
+                "pub struct Capabilities",
+                "    pub const CURRENT: Self",
+                "    pub const fn supports_ordered_filter_lists(",
+                "    pub const fn supports_gpu_color_filter_execution(",
+                "    pub const fn supports_gpu_blur_filter_execution(",
+                "    pub const fn supports_gpu_drop_shadow_filter_execution(",
+                "    pub const fn supports_filter_region_planning(",
+                "    pub const fn supports_resolved_alpha_mask_execution(",
+                "    pub const fn supports_persistent_effect_resources(",
+                "    pub const fn supports_bounded_vello_capture(",
+                "    pub const fn supports_image_pass_execution(",
+                "    pub const fn supports_composite_pass_execution(",
+                "    pub const fn supports_nested_opacity_composition(",
+                "    pub const fn supports_layer_filter_execution(",
+                "    pub const fn supports_broad_backdrop_execution(",
+                "    pub const fn supports_bounded_backdrop_filter_execution(",
+            ] as &[&str],
+        ),
+        (
+            error,
+            "src/error.rs",
+            &[
+                "pub type Result<T>",
+                "pub struct Error",
+                "    pub const fn code(",
+                "    pub fn message(",
+                "    pub fn runtime_capability_unavailable(",
+                "    pub const fn runtime_capability_unavailable_diagnostic(",
+                "pub enum ErrorCode",
+                "pub struct RuntimeCapabilityUnavailable",
+                "    pub const fn operation(self) -> RuntimeOperation",
+                "    pub const fn reason(self) -> RuntimeCapabilityUnavailableReason",
+                "pub enum RuntimeOperation",
+                "pub enum RuntimeCapabilityUnavailableReason",
+                "pub enum RenderSurfaceAvailability",
+                "pub enum SurfaceIdentityMismatchKind",
+                "pub enum DeviceLossReason",
+                "pub enum GpuFaultKind",
+            ],
+        ),
+        (
+            image,
+            "src/image.rs",
+            &[
+                "pub struct ImageBuffer",
+                "    pub fn try_new(size: PhysicalSize, rgba: Vec<u8>)",
+                "    pub const fn size(&self) -> PhysicalSize",
+                "    pub fn rgba(&self) -> &[u8]",
+                "    pub fn into_rgba(self) -> Vec<u8>",
+            ],
+        ),
+        (
+            layer,
+            "src/layer.rs",
+            &[
+                "    pub fn with_resolved_alpha_mask(",
+                "pub struct ResolvedLayerAlphaMask",
+                "    pub fn try_new(image: Image, bounds: Rect)",
+                "    pub const fn image(&self) -> &Image",
+                "    pub const fn bounds(&self) -> Rect",
+            ],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            &[
+                "pub struct Renderer",
+                "    pub async fn new(options: Options)",
+                "    pub async fn create_surface(",
+                "    pub async fn create_headless(",
+                "    pub fn set_surface_resizing(",
+                "    pub async fn render(",
+                "    pub async fn resume_surface(",
+                "    pub async fn read_headless(",
+                "    pub fn runtime_capabilities(",
+                "    pub const fn stats(&self) -> Stats",
+                "    pub const fn options(&self) -> Options",
+                "    pub const fn capabilities(&self) -> Capabilities",
+                "pub struct Options",
+                "    pub const fn new() -> Self",
+                "    pub const fn antialiasing(",
+                "    pub const fn with_antialiasing(",
+                "    pub const fn debug(",
+                "    pub const fn with_debug(",
+                "    pub const fn effect_quality_policy(",
+                "    pub const fn with_effect_quality_policy(",
+                "    pub const fn resource_cache_budget(",
+                "    pub const fn with_resource_cache_budget(",
+                "pub enum EffectQualityPolicy",
+                "pub struct ResourceCacheBudget",
+                "    pub const DISABLED: Self",
+                "    pub const DEFAULT: Self",
+                "    pub const fn new(bytes: u64)",
+                "    pub const fn bytes(self) -> u64",
+            ],
+        ),
+        (
+            stats,
+            "src/stats.rs",
+            &[
+                "pub enum RenderRoute",
+                "pub enum EffectPrecision",
+                "pub struct Stats",
+                "    pub route:",
+                "    pub effect_precision:",
+                "    pub vello_passes:",
+                "    pub image_passes:",
+                "    pub composite_passes:",
+                "    pub copy_operations:",
+                "    pub custom_present_passes:",
+                "    pub effect_texture_allocations:",
+                "    pub effect_texture_reuses:",
+                "    pub retained_effect_bytes:",
+                "    pub frame_time:",
+                "    pub encode_time:",
+                "    pub render_time:",
+                "    pub present_time:",
+                "    pub commands:",
+                "    pub fills:",
+                "    pub strokes:",
+                "    pub shadows:",
+                "    pub images:",
+                "    pub glyphs:",
+                "    pub layers:",
+                "    pub cache_hits:",
+                "    pub cache_misses:",
+                "    pub uploaded_bytes:",
+            ],
+        ),
+        (
+            surface,
+            "src/surface.rs",
+            &[
+                "pub struct Surface {",
+                "    pub fn resize(&mut self, size: Size, scale: f64)",
+                "    pub fn suspend(&mut self)",
+                "    pub fn resume(&mut self, attachment: Attachment)",
+                "    pub const fn state(&self) -> SurfaceState",
+                "    pub const fn size(&self) -> Size",
+                "    pub const fn scale(&self) -> f64",
+                "    pub const fn physical_size(&self) -> PhysicalSize",
+                "    pub const fn resource_state(&self) -> SurfaceResourceState",
+                "pub enum SurfaceState",
+                "pub enum SurfaceResourceState",
+                "pub enum Attachment",
+                "pub struct WebCanvas",
+                "pub struct SurfaceOptions",
+                "    pub size: Size",
+                "    pub scale: f64",
+                "    pub present_mode: PresentMode",
+                "    pub format: Format",
+                "pub enum PresentMode",
+                "pub enum Format",
+                "pub struct Parameters",
+                "    pub base_color: Color",
+                "    pub debug: bool",
+            ],
+        ),
+        (
+            text,
+            "src/text.rs",
+            &[
+                "pub struct TextRunBounds",
+                "pub enum TextRunBoundsKind",
+                "    pub const fn unspecified()",
+                "    pub const fn empty()",
+                "    pub fn try_ink(rect: Rect)",
+                "    pub const fn kind(self) -> TextRunBoundsKind",
+                "    pub const fn ink_rect(self) -> Option<Rect>",
+                "pub struct TextRun<'a>",
+                "    pub fn try_new(\n        font: FontRef<'a>",
+                "    pub const fn bounds(&self) -> TextRunBounds",
+                "pub struct FontData",
+                "    pub fn try_from_bytes(bytes: Vec<u8>, index: u32)",
+            ],
+        ),
+    ] {
+        for marker in markers {
+            assert_public_item_document_terms(path, source, marker, &[]);
+        }
+    }
+
+    for (source, path, marker, terms) in [
+        (
+            capability,
+            "src/capability.rs",
+            "pub enum RuntimeCapabilities",
+            &["runtime-phase", "selected device", "not", "semantic"] as &[&str],
+        ),
+        (
+            capability,
+            "src/capability.rs",
+            "pub struct EffectPrecisionCapabilities",
+            &["independent", "high", "reduced", "policy"],
+        ),
+        (
+            capability,
+            "src/capability.rs",
+            "pub struct Capabilities",
+            &["semantic", "authored", "runtime", "Cargo features"],
+        ),
+        (
+            error,
+            "src/error.rs",
+            "pub struct RuntimeCapabilityUnavailable",
+            &["runtime-phase", "operation", "reason", "validated"],
+        ),
+        (
+            error,
+            "src/error.rs",
+            "pub enum RuntimeCapabilityUnavailableReason",
+            &["runtime", "GPU", "no CPU fallback"],
+        ),
+        (
+            image,
+            "src/image.rs",
+            "pub struct ImageBuffer",
+            &[
+                "readback",
+                "physical pixels",
+                "straight-alpha RGBA8",
+                "width * height * 4",
+            ],
+        ),
+        (
+            layer,
+            "src/layer.rs",
+            "pub struct ResolvedLayerAlphaMask",
+            &["resolved", "layer-local logical", "GPU graph", "alpha"],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            "pub struct Renderer",
+            &["GPU-only", "transaction", "DirectVello", "GpuGraph"],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            "    pub async fn render(",
+            &["failure-atomic", "last successful", "CPU fallback", "Stats"],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            "    pub async fn read_headless(",
+            &[
+                "explicit",
+                "headless",
+                "straight-alpha RGBA8",
+                "publication",
+            ],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            "    pub fn runtime_capabilities(",
+            &["runtime-phase", "immutable", "semantic", "Cargo feature"],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            "pub struct Options",
+            &["GPU-only", "RequireHighPrecision", "64 MiB", "fixed"],
+        ),
+        (
+            renderer,
+            "src/renderer.rs",
+            "pub enum EffectQualityPolicy",
+            &[
+                "high precision",
+                "reduced precision",
+                "typed runtime",
+                "CPU",
+            ],
+        ),
+        (
+            stats,
+            "src/stats.rs",
+            "pub struct Stats",
+            &["last successful", "publication", "Duration", "bytes"],
+        ),
+        (
+            stats,
+            "src/stats.rs",
+            "pub enum RenderRoute",
+            &["published frame", "DirectVello", "GpuGraph"],
+        ),
+        (
+            stats,
+            "src/stats.rs",
+            "pub enum EffectPrecision",
+            &["GPU graph", "Rgba16Float", "Rgba8Unorm"],
+        ),
+        (
+            surface,
+            "src/surface.rs",
+            "pub struct Surface {",
+            &["runtime", "renderer", "publication", "host lifecycle"],
+        ),
+        (
+            surface,
+            "src/surface.rs",
+            "pub enum SurfaceResourceState",
+            &["runtime-phase", "headless", "publication", "presented"],
+        ),
+        (
+            surface,
+            "src/surface.rs",
+            "pub struct WebCanvas",
+            &["browser host", "wasm32", "render-web", "native"],
+        ),
+        (
+            text,
+            "src/text.rs",
+            "pub struct TextRunBounds",
+            &["authored", "run-local logical", "direct", "GPU graph"],
+        ),
+        (
+            text,
+            "src/text.rs",
+            "pub struct TextRun<'a>",
+            &["authored", "logical", "ink bounds", "transform"],
+        ),
+        (
+            text,
+            "src/text.rs",
+            "pub struct FontData",
+            &["validated", "OpenType", "collection index", "before GPU"],
+        ),
+    ] {
+        assert_public_item_document_terms(path, source, marker, terms);
+    }
+}
+
+fn assert_document_terms(label: &str, document: &str, required_terms: &[&str]) {
+    let normalized_document = document.to_ascii_lowercase();
+    for term in required_terms {
+        assert!(
+            normalized_document.contains(&term.to_ascii_lowercase()),
+            "{label} must document `{term}`"
+        );
+    }
+}
+
+fn assert_public_item_document_terms(
+    path: &str,
+    source: &str,
+    marker: &str,
+    required_terms: &[&str],
+) {
+    assert_eq!(
+        source.match_indices(marker).count(),
+        1,
+        "{path} must contain exactly one initiative-changed public item marker `{marker}`"
+    );
+    let marker_offset = source
+        .find(marker)
+        .expect("the exact public-item marker count was checked");
+    let prefix = &source[..marker_offset];
+    let mut documentation_lines = Vec::new();
+    for line in prefix.lines().rev() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("///") {
+            documentation_lines.push(trimmed);
+        } else if trimmed.starts_with("#[") {
+            continue;
+        } else {
+            break;
+        }
+    }
+    documentation_lines.reverse();
+    let documentation = documentation_lines.join("\n");
+    assert!(
+        !documentation.is_empty(),
+        "{path} item `{marker}` has no immediate semantic documentation"
+    );
+    assert_document_terms(
+        &format!("{path} item `{marker}`"),
+        &documentation,
+        required_terms,
+    );
+}
+
 fn assert_required_host_download_routes(renderer_routes: [(&'static str, &'static str); 3]) {
     let tests_source = include_str!("tests.rs");
     let tests_code = source_code_only_for_static_reachability(tests_source);

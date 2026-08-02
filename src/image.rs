@@ -199,10 +199,12 @@ pub enum ImageFit {
     None,
 }
 
-/// An intrinsically valid, tightly packed straight-alpha RGBA8 pixel buffer.
+/// An intrinsically valid headless-readback buffer of straight-alpha RGBA8 physical pixels.
 ///
 /// The byte length always equals `width * height * 4`. Zero-area buffers are
-/// represented by an empty byte vector.
+/// represented by an empty byte vector. This resolved CPU-visible value is
+/// produced only by explicit [`crate::Renderer::read_headless`] or by validated
+/// caller construction; production rendering does not consume it as a fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ImageBuffer {
     size: PhysicalSize,
@@ -210,7 +212,10 @@ pub struct ImageBuffer {
 }
 
 impl ImageBuffer {
-    /// Creates an image buffer when its RGBA byte length exactly matches its size.
+    /// Creates a buffer when the straight-alpha RGBA8 byte length matches its physical size.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] when `width * height * 4`
+    /// overflows addressable memory or differs from `rgba.len()`.
     pub fn try_new(size: PhysicalSize, rgba: Vec<u8>) -> Result<Self> {
         let expected_len = usize::try_from(size.width())
             .ok()
@@ -245,13 +250,13 @@ impl ImageBuffer {
         self.size
     }
 
-    /// Returns the tightly packed straight-alpha RGBA8 bytes.
+    /// Returns the tightly packed, row-major straight-alpha RGBA8 bytes.
     #[must_use]
     pub fn rgba(&self) -> &[u8] {
         &self.rgba
     }
 
-    /// Consumes the buffer and returns its tightly packed RGBA8 bytes.
+    /// Consumes the buffer and returns its tightly packed, row-major straight-alpha RGBA8 bytes.
     #[must_use]
     pub fn into_rgba(self) -> Vec<u8> {
         self.rgba

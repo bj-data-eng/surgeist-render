@@ -2,9 +2,15 @@ use std::{error, fmt};
 
 use crate::{EffectQualityPolicy, Format, PhysicalSize};
 
+/// Result type returned by fallible rendering contracts.
 pub type Result<T> = std::result::Result<T, Error>;
 
-/// Stable render diagnostic with optional typed semantic context.
+/// Stable render diagnostic with optional typed semantic or runtime context.
+///
+/// Callers should branch on [`ErrorCode`] and the matching typed payload rather
+/// than parse [`Self::message`]. Frame-operation errors are failure-atomic: the
+/// attempted frame is not published, and any previous complete frame remains
+/// observable.
 #[derive(Debug)]
 pub struct Error {
     code: ErrorCode,
@@ -323,7 +329,11 @@ pub enum ErrorCode {
     UnsupportedBackend,
 }
 
-/// Validated runtime evidence that a render operation cannot use the selected GPU capability.
+/// Validated runtime-phase evidence that an operation cannot use a selected GPU capability.
+///
+/// Each value couples one [`RuntimeOperation`] with a reason permitted for that
+/// operation. Callers receive the validated pair through [`Error`]; backend
+/// failures cannot manufacture an unrelated operation/reason combination.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RuntimeCapabilityUnavailable {
     operation: RuntimeOperation,
@@ -445,6 +455,9 @@ pub enum RuntimeOperation {
 }
 
 /// Runtime reason that a GPU capability cannot serve an operation.
+///
+/// These reasons reject the owning GPU operation; there is no CPU fallback or
+/// production CPU retry. Semantic unsupported-input diagnostics remain separate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum RuntimeCapabilityUnavailableReason {

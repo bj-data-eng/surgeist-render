@@ -26,6 +26,10 @@ impl From<u64> for FontId {
 }
 
 /// Authored ink bounds for a text run in run-local logical coordinates.
+///
+/// Direct rendering permits [`Self::unspecified`]. A text run captured by the
+/// GPU graph must instead carry validated ink bounds or be explicitly empty;
+/// the render crate never estimates ink geometry from glyph advances.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextRunBounds {
     value: TextRunBoundsValue,
@@ -42,6 +46,8 @@ enum TextRunBoundsValue {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextRunBoundsKind {
     /// No ink extent was supplied because direct rendering does not require one.
+    ///
+    /// GPU-graph capture rejects this state with a typed unresolved-bounds error.
     Unspecified,
     /// The run is known to contribute no ink.
     Empty,
@@ -51,6 +57,8 @@ pub enum TextRunBoundsKind {
 
 impl TextRunBounds {
     /// Returns bounds whose ink extent is intentionally not authored.
+    ///
+    /// This is valid for direct rendering but unresolved for GPU-graph capture.
     #[must_use]
     pub const fn unspecified() -> Self {
         Self {
@@ -66,7 +74,9 @@ impl TextRunBounds {
         }
     }
 
-    /// Validates a finite, positive-area run-local ink rectangle.
+    /// Validates a finite, positive-area run-local logical ink rectangle.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] for non-finite or non-positive bounds.
     pub fn try_ink(rect: Rect) -> Result<Self> {
         validate_rect(rect, "text run ink bounds")?;
         validate_positive_f64(rect.width(), "text run ink bounds width")?;
@@ -97,6 +107,10 @@ impl TextRunBounds {
 }
 
 /// An authored text run with a font, glyphs, paint, transform, and ink bounds.
+///
+/// Glyph positions, size, and bounds are logical run-local values before
+/// `transform`. Text shaping and ink-bound calculation belong to the caller;
+/// this crate validates and lowers the supplied authored facts.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextRun<'a> {
     font: FontRef<'a>,
@@ -108,7 +122,9 @@ pub struct TextRun<'a> {
 }
 
 impl<'a> TextRun<'a> {
-    /// Creates a valid authored run with bounds in local coordinates before `transform`.
+    /// Creates a valid authored run with bounds in logical coordinates before `transform`.
+    ///
+    /// Invalid size, transform, glyph values, or paint return typed input diagnostics.
     pub fn try_new(
         font: FontRef<'a>,
         size: f32,
@@ -154,7 +170,7 @@ impl<'a> TextRun<'a> {
         self.glyphs
     }
 
-    /// Returns the authored run-local ink bounds without estimating glyph geometry.
+    /// Returns the authored run-local logical ink bounds without estimating glyph geometry.
     #[must_use]
     pub const fn bounds(&self) -> TextRunBounds {
         self.bounds
@@ -394,6 +410,11 @@ impl<'a> FontRef<'a> {
     }
 }
 
+/// Validated, owned OpenType font bytes and collection index.
+///
+/// Construction verifies that the requested face is readable before GPU scene
+/// lowering. Selected glyph tables receive additional fallible preflight during
+/// rendering; malformed data never becomes an unwrap, fallback font, or silent omission.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontData {
     pub(crate) data: peniko::FontData,
@@ -401,6 +422,9 @@ pub struct FontData {
 
 impl FontData {
     /// Validates and owns OpenType bytes at the requested collection index.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] before GPU work when the bytes
+    /// are malformed or the collection index is out of range.
     pub fn try_from_bytes(bytes: Vec<u8>, index: u32) -> Result<Self> {
         let byte_len = bytes.len();
         skrifa::FontRef::from_index(bytes.as_slice(), index)

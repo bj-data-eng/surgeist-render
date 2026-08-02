@@ -3,10 +3,10 @@ use super::{
     UnsupportedPrimitive,
 };
 
-/// Runtime facts reported for a selected safe WGPU device and surface.
+/// Runtime-phase facts reported for a selected device and surface through safe WGPU.
 ///
-/// These facts describe the selected runtime device/surface rather than semantic
-/// rendering support or enabled Cargo features.
+/// These facts describe the selected runtime device/surface. They are not
+/// semantic rendering support or enabled Cargo features.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RuntimeCapabilities {
     /// The selected device or surface cannot provide a runtime capability report.
@@ -47,7 +47,7 @@ impl RuntimeCapabilities {
     }
 }
 
-/// Available runtime facts for a selected safe WGPU device and surface.
+/// Available runtime-phase facts for a selected safe WGPU device and surface.
 ///
 /// The fields are runtime device/surface facts rather than semantic rendering
 /// support or enabled Cargo features.
@@ -100,7 +100,8 @@ impl AvailableRuntimeCapabilities {
 /// Runtime effect texture precision facts for a selected safe WGPU device.
 ///
 /// Each flag is independent and describes runtime device support rather than
-/// semantic rendering support or enabled Cargo features.
+/// semantic rendering support or enabled Cargo features. Selection between high
+/// and reduced precision is controlled separately by [`crate::EffectQualityPolicy`].
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct EffectPrecisionCapabilities {
     high_precision: bool,
@@ -132,6 +133,11 @@ impl EffectPrecisionCapabilities {
     }
 }
 
+/// Semantic support for normalized authored rendering operations.
+///
+/// This report is fixed by the crate's public contract. It does not describe a
+/// selected runtime device, surface, or enabled Cargo features; use
+/// [`crate::Renderer::runtime_capabilities`] for those runtime facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
     geometry_targets: GeometryTargetCapabilities,
@@ -148,6 +154,12 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
+    /// The current semantic rendering contract.
+    ///
+    /// The value describes which authored operations this crate accepts and how
+    /// it owns them. It is not a backend-name, runtime-device, or Cargo-feature
+    /// probe. Unsupported authored operations fail through
+    /// [`Self::ensure_supported`].
     pub const CURRENT: Self = Self {
         geometry_targets: GeometryTargetCapabilities {
             rect_fill_stroke: true,
@@ -832,6 +844,7 @@ impl ShadowCapabilities {
     }
 }
 
+/// Semantic support for authored filter lists and their GPU execution phases.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterCapabilities {
     layer_filters: bool,
@@ -879,6 +892,7 @@ impl FilterCapabilities {
     }
 }
 
+/// Semantic support for authored clips, masks, and resolved mask execution.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MaskClipCapabilities {
     shape_clips: bool,
@@ -1072,6 +1086,10 @@ impl CompositingCapabilities {
     }
 }
 
+/// Semantic support for direct and GPU-graph offscreen phases.
+///
+/// These flags describe operations implemented by the crate, not formats or
+/// limits available on a selected runtime device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OffscreenPipelineCapabilities {
     direct_vello_opacity_isolation: bool,
@@ -1141,11 +1159,13 @@ impl OffscreenPipelineCapabilities {
         self.mask_execution
     }
 
+    /// Returns whether broad authored layer filters execute through the GPU graph.
     #[must_use]
     pub const fn supports_layer_filter_execution(self) -> bool {
         self.layer_filter_execution
     }
 
+    /// Returns whether unbounded or root/nested backdrop forms execute through the GPU graph.
     #[must_use]
     pub const fn supports_broad_backdrop_execution(self) -> bool {
         self.broad_backdrop_execution
@@ -1156,6 +1176,7 @@ impl OffscreenPipelineCapabilities {
         self.bounded_backdrop_capture
     }
 
+    /// Returns whether the supported bounded backdrop filter subset executes on the GPU.
     #[must_use]
     pub const fn supports_bounded_backdrop_filter_execution(self) -> bool {
         self.bounded_backdrop_filter_execution

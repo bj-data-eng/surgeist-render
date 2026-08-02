@@ -22,6 +22,12 @@ impl RendererIdentity {
     }
 }
 
+/// Runtime surface identity, lifecycle, and complete-publication state.
+///
+/// A surface belongs to the [`crate::Renderer`] that created it and to one
+/// device generation. Foreign or stale use is a typed failure. The render crate
+/// owns GPU resources and failure-atomic publication; an application host owns
+/// native-window or browser host lifecycle and supplies compatible attachments.
 pub struct Surface {
     pub(crate) attachment: Attachment,
     pub(crate) options: SurfaceOptions,
@@ -52,6 +58,11 @@ impl Surface {
         }
     }
 
+    /// Updates requested logical size and logical-to-physical scale.
+    ///
+    /// Invalid or overflowing values fail without changing the request. A
+    /// size-changing headless resize discards its readable publication; a
+    /// presented resize is committed by the next renderer-owned host operation.
     pub fn resize(&mut self, size: Size, scale: f64) -> Result<()> {
         validate_size(size, "surface size")?;
         validate_positive_f64(scale, "surface scale")?;
@@ -84,11 +95,20 @@ impl Surface {
         Ok(())
     }
 
+    /// Marks the surface suspended without discarding committed resources.
+    ///
+    /// Repeating this transition is idempotent. Rendering and readback reject a
+    /// suspended surface until a compatible resume succeeds.
     pub fn suspend(&mut self) -> Result<()> {
         self.state = SurfaceState::Suspended;
         Ok(())
     }
 
+    /// Resumes a non-presented surface with the same attachment kind.
+    ///
+    /// Presented host resources must be resumed asynchronously through
+    /// [`crate::Renderer::resume_surface`]. An incompatible attachment fails
+    /// without changing the committed lifecycle.
     pub fn resume(&mut self, attachment: Attachment) -> Result<()> {
         self.ensure_attachment_compatible(&attachment)?;
         #[cfg(any(
@@ -146,6 +166,7 @@ impl Surface {
     }
 
     #[must_use]
+    /// Returns the caller-visible available or suspended lifecycle state.
     pub const fn state(&self) -> SurfaceState {
         self.state
     }
@@ -196,16 +217,19 @@ impl Surface {
     }
 
     #[must_use]
+    /// Returns the requested logical size.
     pub const fn size(&self) -> Size {
         self.options.size
     }
 
     #[must_use]
+    /// Returns the positive logical-to-physical pixel scale.
     pub const fn scale(&self) -> f64 {
         self.options.scale
     }
 
     #[must_use]
+    /// Returns the requested physical pixel extent.
     pub const fn physical_size(&self) -> PhysicalSize {
         match &self.backend {
             SurfaceBackend::ContractOnly { physical_size }
@@ -219,6 +243,7 @@ impl Surface {
     }
 
     #[must_use]
+    /// Returns the current public resource/publication phase.
     pub const fn resource_state(&self) -> SurfaceResourceState {
         match &self.backend {
             SurfaceBackend::ContractOnly { .. } => SurfaceResourceState::ContractOnly,
@@ -270,18 +295,31 @@ impl Surface {
     }
 }
 
+/// Caller-visible surface lifecycle independent of backend resource phase.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceState {
+    /// Operations may proceed when runtime capabilities also permit them.
     Available,
+    /// Rendering and readback are rejected until a compatible resume succeeds.
     Suspended,
 }
 
+/// Runtime-phase resource and publication state for a headless or presented surface.
+///
+/// This observation does not expose backend resources. In particular,
+/// [`Self::Ready`] means a complete headless publication is readable, while
+/// [`Self::Presented`] remains subject to the external host lifecycle.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SurfaceResourceState {
+    /// No compatible GPU adapter was available when the contract-only surface was created.
     ContractOnly,
+    /// A zero-area headless surface requires no GPU texture.
     Empty,
+    /// A nonzero headless surface has no complete published frame yet.
     PendingAllocation,
+    /// A headless surface owns a complete readable publication.
     Ready,
+    /// The surface is backed by host-presented resources.
     Presented,
 }
 
@@ -1051,11 +1089,15 @@ impl PresentedLifecycle {
     }
 }
 
+/// Host attachment requested for a surface.
 #[derive(Clone, Debug)]
 pub enum Attachment {
+    /// Offscreen GPU rendering with pixels available only through explicit readback.
     Headless,
     #[cfg(feature = "render-window")]
+    /// Native presented host supplied by `surgeist-window`.
     Window(surgeist_window::Handle),
+    /// Browser-canvas descriptor or handle, depending on target and feature.
     WebCanvas(WebCanvas),
 }
 
@@ -1067,6 +1109,12 @@ pub(crate) enum AttachmentKind {
     WebCanvas,
 }
 
+/// Browser-host canvas attachment boundary.
+///
+/// A real canvas handle exists only on `wasm32` with `render-web` and must be
+/// supplied by the browser host through `WebCanvas::from_html_canvas`. On native
+/// targets, or for identifier-only construction, creation remains a typed
+/// platform diagnostic rather than browser execution evidence.
 #[derive(Clone, Debug)]
 pub struct WebCanvas {
     id: String,
@@ -1075,12 +1123,16 @@ pub struct WebCanvas {
 }
 
 impl Attachment {
+    /// Creates an identifier-only web-canvas attachment.
+    ///
+    /// This does not create or discover a browser canvas handle.
     #[must_use]
     pub fn from_web_canvas(id: impl Into<String>) -> Self {
         Self::WebCanvas(WebCanvas::new(id))
     }
 
     #[cfg(all(feature = "render-web", target_arch = "wasm32"))]
+    /// Wraps the browser-host canvas used by WebGPU presentation.
     #[must_use]
     pub fn from_html_canvas(
         id: impl Into<String>,
@@ -1090,6 +1142,7 @@ impl Attachment {
     }
 
     #[cfg(feature = "render-window")]
+    /// Wraps a live native-window handle supplied by the application host.
     #[must_use]
     pub fn from_window(handle: surgeist_window::Handle) -> Self {
         Self::Window(handle)
@@ -1106,6 +1159,7 @@ impl Attachment {
 }
 
 impl WebCanvas {
+    /// Creates an identifier-only canvas descriptor with no browser handle.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self {
@@ -1116,6 +1170,7 @@ impl WebCanvas {
     }
 
     #[cfg(all(feature = "render-web", target_arch = "wasm32"))]
+    /// Creates a canvas attachment from a browser-host `HtmlCanvasElement`.
     #[must_use]
     pub fn from_html_canvas(
         id: impl Into<String>,
@@ -1128,6 +1183,7 @@ impl WebCanvas {
     }
 
     #[must_use]
+    /// Returns the caller-provided diagnostic identifier.
     pub fn id(&self) -> &str {
         &self.id
     }
@@ -1138,11 +1194,20 @@ impl WebCanvas {
     }
 }
 
+/// Surface creation options.
+///
+/// [`Default`] requests one logical unit at scale 1, automatic presentation,
+/// and [`Format::Rgba8`]. Size and scale validation occurs during creation;
+/// headless surfaces reject [`Format::Bgra8`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfaceOptions {
+    /// Requested logical dimensions.
     pub size: Size,
+    /// Positive logical-to-physical pixel scale.
     pub scale: f64,
+    /// Requested host presentation policy.
     pub present_mode: PresentMode,
+    /// Requested surface pixel format.
     pub format: Format,
 }
 
@@ -1157,25 +1222,38 @@ impl Default for SurfaceOptions {
     }
 }
 
+/// Requested host presentation scheduling mode.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum PresentMode {
+    /// Backend-selected vertical-sync policy; the default.
     #[default]
     Auto,
+    /// First-in, first-out presentation.
     Fifo,
+    /// Mailbox presentation when the host supports it.
     Mailbox,
+    /// Immediate presentation when the host supports it.
     Immediate,
 }
 
+/// Public surface color format.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub enum Format {
+    /// Straight-alpha RGBA8 at public upload/readback boundaries; the default.
     #[default]
     Rgba8,
+    /// BGRA8 presented-surface format; unsupported for headless surfaces.
     Bgra8,
 }
 
+/// Per-frame render parameters.
+///
+/// [`Default`] clears to transparent and disables diagnostics.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Parameters {
+    /// Base color used to initialize the frame before authored commands.
     pub base_color: Color,
+    /// Enables renderer diagnostics for this frame.
     pub debug: bool,
 }
 

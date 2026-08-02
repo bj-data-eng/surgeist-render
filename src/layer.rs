@@ -42,7 +42,11 @@ impl Layer {
         Ok(self)
     }
 
-    /// Installs an already validated resolved alpha mask.
+    /// Installs an already validated resolved alpha mask for GPU-graph execution.
+    ///
+    /// This infallible transition accepts only a [`ResolvedLayerAlphaMask`]; use
+    /// its fallible constructor to validate authored bounds first. It replaces
+    /// any previously installed authored or resolved mask.
     #[must_use]
     pub fn with_resolved_alpha_mask(mut self, alpha_mask: ResolvedLayerAlphaMask) -> Self {
         self.mask = Some(LayerMask::ResolvedAlpha(alpha_mask));
@@ -155,7 +159,11 @@ pub(crate) enum LayerMask {
     ResolvedAlpha(ResolvedLayerAlphaMask),
 }
 
-/// An image alpha channel mapped across finite positive layer-local bounds.
+/// A resolved image alpha channel mapped across finite positive layer-local logical bounds.
+///
+/// The render crate owns this resolved input. The GPU graph samples the image's
+/// alpha using its retained identity, quality, and extend policy; it does not
+/// materialize mask pixels on the CPU.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ResolvedLayerAlphaMask {
     image: Image,
@@ -163,7 +171,10 @@ pub struct ResolvedLayerAlphaMask {
 }
 
 impl ResolvedLayerAlphaMask {
-    /// Creates a resolved mask with positive finite bounds in layer-local space.
+    /// Creates a resolved mask with positive finite bounds in layer-local logical space.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] for a non-finite origin or
+    /// maximum, or for a non-positive width or height.
     pub fn try_new(image: Image, bounds: Rect) -> Result<Self> {
         validate_point(bounds.origin(), "resolved layer alpha mask bounds")?;
         validate_positive_f64(bounds.width(), "resolved layer alpha mask bounds width")?;
@@ -178,7 +189,7 @@ impl ResolvedLayerAlphaMask {
         &self.image
     }
 
-    /// Returns the semantic rectangle in the owning layer's local coordinates.
+    /// Returns the semantic rectangle in the owning layer's local logical coordinates.
     #[must_use]
     pub const fn bounds(&self) -> Rect {
         self.bounds
