@@ -4,7 +4,7 @@
 
 - Cycle: `P01/I03/S01/C15`.
 - Owning repository: `surgeist-render`.
-- Status: `planned`.
+- Status: `draft`.
 - Cycle base and published prerequisite:
   `1fd628bbdd5f6e5ed7750a9002aa4be347c90188` (`P01/I03/S01/C14`),
   verified on local `main`, `origin/main`, and the observed authority-remote
