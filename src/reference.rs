@@ -1,14 +1,18 @@
-#![cfg_attr(not(test), allow(dead_code))]
-
 use super::{
-    Error, Extend, Image, ImageQuality, PhysicalSize, Point, Rect, Result,
+    Error, Extend, FilterList, FilteredImagePaint, Image, ImageBuffer, ImageQuality, PhysicalSize,
+    Point, Rect, ResolvedLayerAlphaMask, Result,
     filter::{
-        BlurPolicy, CompiledColorFilterPipeline, CompiledColorFilterStep, StraightColorTransform,
-        TransparentEdgeSamplingPolicy,
+        BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
+        FilterSourceBounds, TransparentEdgeSamplingPolicy,
     },
+    image::{image_dimension, validate_image_buffer_rgba_len, validate_rgba_image},
     layer::BlendMode,
-    style::{ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow},
+    style::{
+        ColorFilterOp, ColorFilterPipeline, FilterBlur, FilterDropShadow, FilterOpKind,
+        UnitFilterAmount,
+    },
 };
+use std::sync::Arc;
 
 const GRAYSCALE_LUMA_RED: f64 = 0.2126;
 const GRAYSCALE_LUMA_GREEN: f64 = 0.7152;
@@ -1567,4 +1571,737 @@ fn round_byte(value: f64) -> u8 {
 const fn scale_channel_by_alpha(channel: u8, alpha: u8) -> u8 {
     let scaled = (channel as u16) * (alpha as u16) + 127;
     (scaled / 255) as u8
+}
+
+/// Test-only reference classifier for materialized image filters.
+///
+/// This is an execution plan shape, not execution itself. Color-only runs are
+/// compiled into the existing color pipeline, while pixel-moving operations
+/// remain named steps for later region planning and byte execution.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterializedImageFilterPipeline {
+    steps: Vec<MaterializedImageFilterStep>,
+}
+
+#[cfg(test)]
+impl MaterializedImageFilterPipeline {
+    pub fn try_from_filter_list(filters: &FilterList) -> Result<Option<Self>> {
+        let ops = filters.ops();
+        if ops.is_empty() {
+            return Ok(None);
+        }
+
+        let mut steps = Vec::new();
+        let mut color_run = Vec::new();
+
+        for op in ops {
+            match op.kind() {
+                FilterOpKind::Blur(blur) => {
+                    flush_materialized_color_run(&mut steps, &mut color_run)?;
+                    steps.push(MaterializedImageFilterStep::Blur(*blur));
+                }
+                FilterOpKind::DropShadow(shadow) => {
+                    flush_materialized_color_run(&mut steps, &mut color_run)?;
+                    steps.push(MaterializedImageFilterStep::DropShadow(*shadow));
+                }
+                FilterOpKind::Brightness(amount) => {
+                    color_run.push(ColorFilterOp::Brightness(*amount));
+                }
+                FilterOpKind::Contrast(amount) => {
+                    color_run.push(ColorFilterOp::Contrast(*amount));
+                }
+                FilterOpKind::Grayscale(amount) => {
+                    color_run.push(ColorFilterOp::Grayscale(*amount));
+                }
+                FilterOpKind::HueRotate(angle) => {
+                    color_run.push(ColorFilterOp::HueRotate(*angle));
+                }
+                FilterOpKind::Invert(amount) => {
+                    color_run.push(ColorFilterOp::Invert(*amount));
+                }
+                FilterOpKind::Opacity(amount) => {
+                    color_run.push(ColorFilterOp::Opacity(*amount));
+                }
+                FilterOpKind::Saturate(amount) => {
+                    color_run.push(ColorFilterOp::Saturate(*amount));
+                }
+                FilterOpKind::Sepia(amount) => {
+                    color_run.push(ColorFilterOp::Sepia(*amount));
+                }
+            }
+        }
+
+        flush_materialized_color_run(&mut steps, &mut color_run)?;
+        Ok(Some(Self { steps }))
+    }
+
+    #[must_use]
+    pub fn steps(&self) -> &[MaterializedImageFilterStep] {
+        &self.steps
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub enum MaterializedImageFilterStep {
+    ColorFilters(CompiledColorFilterPipeline),
+    Blur(FilterBlur),
+    /// Executes an intrinsically valid solid-color filter drop shadow.
+    DropShadow(FilterDropShadow),
+}
+
+#[cfg(test)]
+impl FilterList {
+    pub fn materialized_image_filter_pipeline(
+        &self,
+    ) -> Result<Option<MaterializedImageFilterPipeline>> {
+        MaterializedImageFilterPipeline::try_from_filter_list(self)
+    }
+}
+
+#[cfg(test)]
+fn flush_materialized_color_run(
+    steps: &mut Vec<MaterializedImageFilterStep>,
+    color_run: &mut Vec<ColorFilterOp>,
+) -> Result<()> {
+    if color_run.is_empty() {
+        return Ok(());
+    }
+
+    let compiled = CompiledColorFilterPipeline::try_from_ops(std::mem::take(color_run))?;
+    steps.push(MaterializedImageFilterStep::ColorFilters(compiled));
+    Ok(())
+}
+
+/// Test-only reference executable for color-only filter pipelines.
+///
+/// This is a compiled render/reference phase model, not an authored CSS filter
+/// list and not a layer filter graph. It keeps the source operation order for
+/// diagnostics/proof while executing grouped color-matrix runs and explicit
+/// opacity steps. Opacity is sequenced instead of folded into color runs because
+/// it changes premultiplied alpha at its ordered position.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub struct CompiledColorFilterPipeline {
+    source_ops: Vec<ColorFilterOp>,
+    steps: Vec<CompiledColorFilterStep>,
+}
+
+#[cfg(test)]
+impl CompiledColorFilterPipeline {
+    pub fn try_from_pipeline(pipeline: &ColorFilterPipeline) -> Result<Self> {
+        Self::try_from_ops(pipeline.ops().to_vec())
+    }
+
+    pub fn try_from_ops(source_ops: Vec<ColorFilterOp>) -> Result<Self> {
+        if source_ops.is_empty() {
+            return Err(Error::invalid_value(
+                "compiled color filter pipeline",
+                "[]",
+                "must contain at least one color filter operation",
+            ));
+        }
+
+        Ok(Self {
+            steps: compile_steps(&source_ops),
+            source_ops,
+        })
+    }
+
+    #[must_use]
+    pub fn source_ops(&self) -> &[ColorFilterOp] {
+        &self.source_ops
+    }
+
+    pub(crate) fn executable_steps(&self) -> &[CompiledColorFilterStep] {
+        &self.steps
+    }
+
+    #[cfg(test)]
+    pub(crate) fn executable_step_count(&self) -> usize {
+        self.steps.len()
+    }
+}
+
+/// One ordered executable step in a compiled color-filter pipeline.
+///
+/// Adjacent straight-color filters are fused into `StraightColorRun` so the
+/// executable pipeline no longer interprets authored filter variants. The run
+/// still stores ordered transforms rather than one collapsed matrix because the
+/// reference policy clamps and rounds after each source operation; collapsing
+/// those transforms would change CSS-visible order/rounding for some chains.
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum CompiledColorFilterStep {
+    Identity,
+    TransparentBlack,
+    StraightColorRun(Vec<StraightColorTransform>),
+    Opacity(UnitFilterAmount),
+}
+
+#[cfg(test)]
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct StraightColorTransform {
+    matrix: [[f64; 4]; 3],
+}
+
+#[cfg(test)]
+impl StraightColorTransform {
+    pub(crate) const fn matrix(self) -> [[f64; 4]; 3] {
+        self.matrix
+    }
+
+    fn from_op(op: ColorFilterOp) -> Option<Self> {
+        match op {
+            ColorFilterOp::Brightness(amount) => Some(Self::brightness(amount.value())),
+            ColorFilterOp::Contrast(amount) => Some(Self::contrast(amount.value())),
+            ColorFilterOp::Grayscale(amount) => Some(Self::grayscale(amount.value())),
+            ColorFilterOp::HueRotate(angle) => Some(Self::hue_rotate(angle.radians())),
+            ColorFilterOp::Invert(amount) => Some(Self::invert(amount.value())),
+            ColorFilterOp::Opacity(_) => None,
+            ColorFilterOp::Saturate(amount) => Some(Self::saturate(amount.value())),
+            ColorFilterOp::Sepia(amount) => Some(Self::sepia(amount.value())),
+        }
+    }
+
+    const fn brightness(amount: f64) -> Self {
+        Self {
+            matrix: [
+                [amount, 0.0, 0.0, 0.0],
+                [0.0, amount, 0.0, 0.0],
+                [0.0, 0.0, amount, 0.0],
+            ],
+        }
+    }
+
+    const fn contrast(amount: f64) -> Self {
+        let intercept = 0.5 - amount * 0.5;
+        Self {
+            matrix: [
+                [amount, 0.0, 0.0, intercept],
+                [0.0, amount, 0.0, intercept],
+                [0.0, 0.0, amount, intercept],
+            ],
+        }
+    }
+
+    const fn grayscale(amount: f64) -> Self {
+        let inverse = 1.0 - amount;
+        Self {
+            matrix: [
+                [
+                    inverse + amount * GRAYSCALE_LUMA_RED,
+                    amount * GRAYSCALE_LUMA_GREEN,
+                    amount * GRAYSCALE_LUMA_BLUE,
+                    0.0,
+                ],
+                [
+                    amount * GRAYSCALE_LUMA_RED,
+                    inverse + amount * GRAYSCALE_LUMA_GREEN,
+                    amount * GRAYSCALE_LUMA_BLUE,
+                    0.0,
+                ],
+                [
+                    amount * GRAYSCALE_LUMA_RED,
+                    amount * GRAYSCALE_LUMA_GREEN,
+                    inverse + amount * GRAYSCALE_LUMA_BLUE,
+                    0.0,
+                ],
+            ],
+        }
+    }
+
+    fn hue_rotate(radians: f64) -> Self {
+        let (sin, cos) = radians.sin_cos();
+        Self {
+            matrix: [
+                [
+                    0.213 + cos * 0.787 - sin * 0.213,
+                    0.715 - cos * 0.715 - sin * 0.715,
+                    0.072 - cos * 0.072 + sin * 0.928,
+                    0.0,
+                ],
+                [
+                    0.213 - cos * 0.213 + sin * 0.143,
+                    0.715 + cos * 0.285 + sin * 0.140,
+                    0.072 - cos * 0.072 - sin * 0.283,
+                    0.0,
+                ],
+                [
+                    0.213 - cos * 0.213 - sin * 0.787,
+                    0.715 - cos * 0.715 + sin * 0.715,
+                    0.072 + cos * 0.928 + sin * 0.072,
+                    0.0,
+                ],
+            ],
+        }
+    }
+
+    const fn invert(amount: f64) -> Self {
+        let scale = 1.0 - amount * 2.0;
+        Self {
+            matrix: [
+                [scale, 0.0, 0.0, amount],
+                [0.0, scale, 0.0, amount],
+                [0.0, 0.0, scale, amount],
+            ],
+        }
+    }
+
+    const fn saturate(amount: f64) -> Self {
+        let inverse = 1.0 - amount;
+        Self {
+            matrix: [
+                [
+                    amount + inverse * SATURATION_LUMA_RED,
+                    inverse * SATURATION_LUMA_GREEN,
+                    inverse * SATURATION_LUMA_BLUE,
+                    0.0,
+                ],
+                [
+                    inverse * SATURATION_LUMA_RED,
+                    amount + inverse * SATURATION_LUMA_GREEN,
+                    inverse * SATURATION_LUMA_BLUE,
+                    0.0,
+                ],
+                [
+                    inverse * SATURATION_LUMA_RED,
+                    inverse * SATURATION_LUMA_GREEN,
+                    amount + inverse * SATURATION_LUMA_BLUE,
+                    0.0,
+                ],
+            ],
+        }
+    }
+
+    const fn sepia(amount: f64) -> Self {
+        let inverse = 1.0 - amount;
+        Self {
+            matrix: [
+                [
+                    inverse + amount * 0.393,
+                    amount * 0.769,
+                    amount * 0.189,
+                    0.0,
+                ],
+                [
+                    amount * 0.349,
+                    inverse + amount * 0.686,
+                    amount * 0.168,
+                    0.0,
+                ],
+                [
+                    amount * 0.272,
+                    amount * 0.534,
+                    inverse + amount * 0.131,
+                    0.0,
+                ],
+            ],
+        }
+    }
+}
+
+#[cfg(test)]
+fn compile_steps(source_ops: &[ColorFilterOp]) -> Vec<CompiledColorFilterStep> {
+    if source_ops.iter().any(is_zero_opacity) {
+        return vec![CompiledColorFilterStep::TransparentBlack];
+    }
+
+    let mut steps = Vec::new();
+    let mut color_run = Vec::new();
+
+    for op in source_ops.iter().copied() {
+        if is_identity_op(op) {
+            continue;
+        }
+
+        if let Some(transform) = StraightColorTransform::from_op(op) {
+            color_run.push(transform);
+            continue;
+        }
+
+        flush_color_run(&mut steps, &mut color_run);
+        if let ColorFilterOp::Opacity(amount) = op {
+            steps.push(CompiledColorFilterStep::Opacity(amount));
+        }
+    }
+
+    flush_color_run(&mut steps, &mut color_run);
+    if steps.is_empty() {
+        steps.push(CompiledColorFilterStep::Identity);
+    }
+    steps
+}
+
+#[cfg(test)]
+fn flush_color_run(
+    steps: &mut Vec<CompiledColorFilterStep>,
+    color_run: &mut Vec<StraightColorTransform>,
+) {
+    if !color_run.is_empty() {
+        steps.push(CompiledColorFilterStep::StraightColorRun(std::mem::take(
+            color_run,
+        )));
+    }
+}
+
+#[cfg(test)]
+fn is_zero_opacity(op: &ColorFilterOp) -> bool {
+    matches!(op, ColorFilterOp::Opacity(amount) if amount.value() == 0.0)
+}
+
+#[cfg(test)]
+fn is_identity_op(op: ColorFilterOp) -> bool {
+    match op {
+        ColorFilterOp::Brightness(amount)
+        | ColorFilterOp::Contrast(amount)
+        | ColorFilterOp::Saturate(amount) => amount.value() == 1.0,
+        ColorFilterOp::Grayscale(amount)
+        | ColorFilterOp::Invert(amount)
+        | ColorFilterOp::Sepia(amount) => amount.value() == 0.0,
+        ColorFilterOp::HueRotate(angle) => angle.radians() == 0.0,
+        ColorFilterOp::Opacity(amount) => amount.value() == 1.0,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn execute_transitional_resolved_mask_bridge_for_test(
+    source: &ImageBuffer,
+    source_bounds: Rect,
+    image: Image,
+    mask_bounds: Rect,
+) -> Result<ImageBuffer> {
+    let mask = ResolvedLayerAlphaMask::try_new(image, mask_bounds)?;
+    validate_image_buffer_rgba_len(source.size(), source.rgba().len())?;
+    super::validation::validate_point(source_bounds.origin(), "resolved-mask source bounds")?;
+    super::validation::validate_positive_f64(
+        source_bounds.width(),
+        "resolved-mask source bounds width",
+    )?;
+    super::validation::validate_positive_f64(
+        source_bounds.height(),
+        "resolved-mask source bounds height",
+    )?;
+    let source = straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(source)?;
+    let masked = source.apply_resolved_alpha_mask(source_bounds, mask.image(), mask.bounds())?;
+    premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&masked)
+}
+
+/// Test-only reference boundary for resolved image/filter intent and materialized RGBA bytes.
+///
+/// `FilteredImagePaint` names the resolved resource and authored filter list, but the
+/// bytes come from the paired `Image`. The execution phase converts straight RGBA8
+/// image bytes to premultiplied RGBA8 reference pixels, applies the ordered
+/// materialized-image filter pipeline, then emits straight RGBA8 oracle output.
+#[cfg(test)]
+#[derive(Debug)]
+pub(crate) struct ResolvedMaterializedImageFilterExecution<'a> {
+    source: ResolvedMaterializedImageFilterSource<'a>,
+    pipeline: MaterializedImageFilterPipeline,
+}
+
+#[cfg(test)]
+pub(crate) type ResolvedImageColorFilterExecution<'a> =
+    ResolvedMaterializedImageFilterExecution<'a>;
+
+#[cfg(test)]
+#[derive(Debug)]
+enum ResolvedMaterializedImageFilterSource<'a> {
+    Image(&'a Image),
+    ImageBuffer(&'a ImageBuffer),
+}
+
+#[cfg(test)]
+impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
+    pub(crate) fn try_new(paint: &FilteredImagePaint, image: &'a Image) -> Result<Self> {
+        let pipeline = compile_materialized_image_filter_pipeline(paint.filters())?;
+        if paint.resource().id() != image.id() {
+            return Err(Error::invalid_value(
+                "materialized filtered image id",
+                image.id().get(),
+                "must match the resolved image resource id",
+            ));
+        }
+        if paint.resource().intrinsic_size() != image.size() {
+            return Err(Error::invalid_value(
+                "materialized filtered image size",
+                format!("{:?}", image.size()),
+                "must match the resolved image resource intrinsic size",
+            ));
+        }
+        Ok(Self {
+            source: ResolvedMaterializedImageFilterSource::Image(image),
+            pipeline,
+        })
+    }
+
+    pub(crate) fn try_new_for_image_buffer(
+        filters: &FilterList,
+        image_buffer: &'a ImageBuffer,
+    ) -> Result<Self> {
+        let pipeline = compile_materialized_image_filter_pipeline(filters)?;
+        validate_image_buffer_rgba_len(image_buffer.size(), image_buffer.rgba().len())?;
+        Ok(Self {
+            source: ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer),
+            pipeline,
+        })
+    }
+
+    pub(crate) fn execute_to_image(&self) -> Result<Image> {
+        let ResolvedMaterializedImageFilterSource::Image(image) = self.source else {
+            return Err(Error::invalid_value(
+                "color-filtered image execution source",
+                "image buffer",
+                "must be a materialized Image when producing Image output",
+            ));
+        };
+        let premultiplied = straight_rgba8_image_to_premultiplied_rgba8_reference(image)?;
+        let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
+        let straight = premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)?;
+        let mut filtered_image =
+            Image::from_rgba(image.size(), Arc::<[u8]>::from(straight.into_rgba()))?;
+        filtered_image.quality = image.quality;
+        filtered_image.extend = image.extend;
+        Ok(filtered_image)
+    }
+
+    pub(crate) fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
+        let ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer) = self.source else {
+            return Err(Error::invalid_value(
+                "color-filtered image buffer execution source",
+                "image",
+                "must be an ImageBuffer when producing ImageBuffer output",
+            ));
+        };
+        let premultiplied =
+            straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(image_buffer)?;
+        let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
+        premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn straight_rgba8_image_to_premultiplied_rgba8_reference(
+    image: &Image,
+) -> Result<ReferencePremultipliedRgba8Buffer> {
+    validate_rgba_image(image.size, image.bytes.len())?;
+    let size = PhysicalSize::new(
+        image_dimension(image.size.width(), "width")?,
+        image_dimension(image.size.height(), "height")?,
+    );
+    straight_rgba8_bytes_to_premultiplied_rgba8_reference(size, &image.bytes)
+}
+
+#[cfg(test)]
+pub(crate) fn straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(
+    image_buffer: &ImageBuffer,
+) -> Result<ReferencePremultipliedRgba8Buffer> {
+    validate_image_buffer_rgba_len(image_buffer.size(), image_buffer.rgba().len())?;
+    straight_rgba8_bytes_to_premultiplied_rgba8_reference(image_buffer.size(), image_buffer.rgba())
+}
+
+#[cfg(test)]
+pub(crate) fn premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(
+    buffer: &ReferencePremultipliedRgba8Buffer,
+) -> Result<ImageBuffer> {
+    let mut rgba = Vec::with_capacity(usize::try_from(buffer.byte_len()).map_err(|_| {
+        Error::invalid_value(
+            "premultiplied reference buffer byte length",
+            buffer.byte_len(),
+            "must fit addressable memory",
+        )
+    })?);
+    let size = buffer.physical_size();
+
+    for y in 0..size.height() {
+        for x in 0..size.width() {
+            let pixel = buffer.pixel(x, y)?;
+            rgba.extend_from_slice(&premultiplied_rgba8_pixel_to_straight_rgba8(pixel));
+        }
+    }
+
+    ImageBuffer::try_new(size, rgba)
+}
+
+#[cfg(test)]
+fn compile_materialized_image_filter_pipeline(
+    filters: &FilterList,
+) -> Result<MaterializedImageFilterPipeline> {
+    let pipeline = filters
+        .materialized_image_filter_pipeline()?
+        .ok_or_else(|| {
+            Error::invalid_value(
+                "materialized image filters",
+                "none",
+                "must contain at least one filter operation",
+            )
+        })?;
+    Ok(pipeline)
+}
+
+#[cfg(test)]
+fn execute_materialized_filter_pipeline(
+    source: &ReferencePremultipliedRgba8Buffer,
+    pipeline: &MaterializedImageFilterPipeline,
+) -> Result<ReferencePremultipliedRgba8Buffer> {
+    let mut current = source.clone();
+    for step in pipeline.steps() {
+        current = match step {
+            MaterializedImageFilterStep::ColorFilters(pipeline) => {
+                current.apply_compiled_color_filter_pipeline(pipeline)?
+            }
+            MaterializedImageFilterStep::Blur(blur) => {
+                let planned_size = plan_clipped_materialized_blur_output_size(
+                    current.physical_size(),
+                    *blur,
+                    BlurPolicy::css_filter_default(),
+                )?;
+                let blurred = current.apply_blur(*blur, BlurPolicy::css_filter_default())?;
+                if blurred.physical_size() != planned_size {
+                    return Err(Error::invalid_value(
+                        "materialized blur output size",
+                        format!(
+                            "{}x{}",
+                            blurred.physical_size().width(),
+                            blurred.physical_size().height()
+                        ),
+                        "must match the clipped materialized image filter region",
+                    ));
+                }
+                blurred
+            }
+            MaterializedImageFilterStep::DropShadow(shadow) => {
+                let planned_size = plan_clipped_materialized_drop_shadow_output_size(
+                    current.physical_size(),
+                    shadow,
+                    BlurPolicy::css_filter_default(),
+                )?;
+                let shadowed =
+                    current.apply_drop_shadow(shadow, BlurPolicy::css_filter_default())?;
+                if shadowed.physical_size() != planned_size {
+                    return Err(Error::invalid_value(
+                        "materialized drop-shadow output size",
+                        format!(
+                            "{}x{}",
+                            shadowed.physical_size().width(),
+                            shadowed.physical_size().height()
+                        ),
+                        "must match the clipped materialized image filter region",
+                    ));
+                }
+                shadowed
+            }
+        };
+    }
+    Ok(current)
+}
+
+#[cfg(test)]
+fn plan_clipped_materialized_blur_output_size(
+    size: PhysicalSize,
+    blur: super::FilterBlur,
+    policy: BlurPolicy,
+) -> Result<PhysicalSize> {
+    let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));
+    let source = FilterSourceBounds::try_new(source_rect)?;
+    let outset = FilterOutset::from_blur(blur, policy)?;
+    let clip = FilterClipBounds::try_new(source_rect)?;
+    let region = FilterRegionPlan::try_new(source, outset, Some(clip))?;
+    let device_bounds =
+        DevicePixelConversionPolicy::outward().convert_region(region.execution_region(), 1.0)?;
+    if device_bounds.x() != 0 || device_bounds.y() != 0 {
+        return Err(Error::invalid_value(
+            "materialized blur output origin",
+            format!("{},{}", device_bounds.x(), device_bounds.y()),
+            "must remain anchored to the source image origin after clipping",
+        ));
+    }
+    Ok(PhysicalSize::new(
+        device_bounds.width(),
+        device_bounds.height(),
+    ))
+}
+
+#[cfg(test)]
+fn plan_clipped_materialized_drop_shadow_output_size(
+    size: PhysicalSize,
+    shadow: &super::FilterDropShadow,
+    policy: BlurPolicy,
+) -> Result<PhysicalSize> {
+    let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));
+    let source = FilterSourceBounds::try_new(source_rect)?;
+    let outset = FilterOutset::from_drop_shadow(shadow, policy)?;
+    let clip = FilterClipBounds::try_new(source_rect)?;
+    let region = FilterRegionPlan::try_new(source, outset, Some(clip))?;
+    let device_bounds =
+        DevicePixelConversionPolicy::outward().convert_region(region.execution_region(), 1.0)?;
+    if device_bounds.x() != 0 || device_bounds.y() != 0 {
+        return Err(Error::invalid_value(
+            "materialized drop-shadow output origin",
+            format!("{},{}", device_bounds.x(), device_bounds.y()),
+            "must remain anchored to the source image origin after clipping",
+        ));
+    }
+    Ok(PhysicalSize::new(
+        device_bounds.width(),
+        device_bounds.height(),
+    ))
+}
+
+#[cfg(test)]
+fn straight_rgba8_bytes_to_premultiplied_rgba8_reference(
+    size: PhysicalSize,
+    rgba: &[u8],
+) -> Result<ReferencePremultipliedRgba8Buffer> {
+    validate_image_buffer_rgba_len(size, rgba.len())?;
+    let pixels = rgba
+        .chunks_exact(4)
+        .map(|pixel| {
+            straight_rgba8_pixel_to_premultiplied_rgba8(pixel[0], pixel[1], pixel[2], pixel[3])
+        })
+        .collect::<Result<Vec<_>>>()?;
+    ReferencePremultipliedRgba8Buffer::from_pixels(size, pixels)
+}
+
+#[cfg(test)]
+fn straight_rgba8_pixel_to_premultiplied_rgba8(
+    red: u8,
+    green: u8,
+    blue: u8,
+    alpha: u8,
+) -> Result<PremultipliedRgba8> {
+    if alpha == 0 {
+        return Ok(PremultipliedRgba8::TRANSPARENT);
+    }
+
+    PremultipliedRgba8::try_new(
+        premultiply_straight_rgba8_channel(red, alpha),
+        premultiply_straight_rgba8_channel(green, alpha),
+        premultiply_straight_rgba8_channel(blue, alpha),
+        alpha,
+    )
+}
+
+#[cfg(test)]
+fn premultiplied_rgba8_pixel_to_straight_rgba8(pixel: PremultipliedRgba8) -> [u8; 4] {
+    if pixel.alpha() == 0 {
+        return [0, 0, 0, 0];
+    }
+
+    [
+        unpremultiply_rgba8_channel(pixel.red(), pixel.alpha()),
+        unpremultiply_rgba8_channel(pixel.green(), pixel.alpha()),
+        unpremultiply_rgba8_channel(pixel.blue(), pixel.alpha()),
+        pixel.alpha(),
+    ]
+}
+
+fn premultiply_straight_rgba8_channel(channel: u8, alpha: u8) -> u8 {
+    round_byte(f64::from(channel) * f64::from(alpha) / 255.0)
+}
+
+fn unpremultiply_rgba8_channel(channel: u8, alpha: u8) -> u8 {
+    round_byte(f64::from(channel) * 255.0 / f64::from(alpha))
 }

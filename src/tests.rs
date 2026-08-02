@@ -6,6 +6,7 @@ use super::gpu_transaction::{
     ScopedGpuOperationPostSubmitCheckpointForTest, ScopedGpuOperationSubmissionObservationForTest,
     ScopedInternalVelloPostSubmitControlForTest, ScopedInternalVelloSubmissionObservationForTest,
 };
+use super::image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey};
 #[cfg(not(target_arch = "wasm32"))]
 use super::readback::{
     NativeReadbackObservationForTest, NativeReadbackPhaseForTest,
@@ -42,16 +43,14 @@ use super::{
     command,
     encode::*,
     filter::{
-        BlurPolicy, BlurRadiusInterpretation, CompiledColorFilterPipeline, FilterClipBounds,
-        FilterOutset, FilterRegionPlan, FilterSourceBounds, KernelSupportRadius,
-        LargeBlurRadiusAction, LargeBlurRadiusPolicy, MaterializedImageFilterStep,
+        BlurPolicy, BlurRadiusInterpretation, FilterClipBounds, FilterOutset, FilterRegionPlan,
+        FilterSourceBounds, KernelSupportRadius, LargeBlurRadiusAction, LargeBlurRadiusPolicy,
         TransparentEdgeSamplingPolicy,
     },
-    image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
     pass::pass_spatial_uniform_bytes_for_test,
     reference::{
-        MaterializedDropShadowOffsetQuantizationPolicy, PremultipliedRgba8,
-        ReferencePremultipliedRgba8Buffer,
+        CompiledColorFilterPipeline, MaterializedDropShadowOffsetQuantizationPolicy,
+        MaterializedImageFilterStep, PremultipliedRgba8, ReferencePremultipliedRgba8Buffer,
     },
     resource::{
         AllocationGeneration, GaussianKernelBufferLimits, GaussianKernelKey, GaussianKernelPlan,
@@ -5020,7 +5019,7 @@ fn resolved_alpha_mask_execution_applies_materialized_alpha_buffer() {
     )
     .unwrap();
 
-    let masked = image::execute_transitional_resolved_mask_bridge_for_test(
+    let masked = reference::execute_transitional_resolved_mask_bridge_for_test(
         &source,
         Rect::new(0.0, 0.0, 3.0, 1.0),
         mask,
@@ -5070,7 +5069,7 @@ fn resolved_alpha_mask_execution_accepts_independent_image_extent() {
     .unwrap();
     let mask = Image::from_rgba(Size::new(1.0, 2.0), vec![0, 0, 0, 255, 0, 0, 0, 255]).unwrap();
 
-    let masked = image::execute_transitional_resolved_mask_bridge_for_test(
+    let masked = reference::execute_transitional_resolved_mask_bridge_for_test(
         &source,
         Rect::new(0.0, 0.0, 2.0, 1.0),
         mask,
@@ -5896,7 +5895,7 @@ fn image_straight_rgba8_converts_to_premultiplied_and_back_deterministically() {
     .unwrap();
 
     let premultiplied =
-        image::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
+        reference::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
     assert_eq!(
         premultiplied.pixel(0, 0).unwrap(),
         PremultipliedRgba8::TRANSPARENT
@@ -5911,7 +5910,7 @@ fn image_straight_rgba8_converts_to_premultiplied_and_back_deterministically() {
     );
 
     let straight =
-        image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&premultiplied)
+        reference::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&premultiplied)
             .unwrap();
 
     assert_eq!(straight.size(), PhysicalSize::new(3, 1));
@@ -5935,7 +5934,7 @@ fn image_color_filter_execution_applies_color_chain_to_one_pixel_image() {
     )
     .unwrap();
 
-    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+    let filtered = reference::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -5960,7 +5959,7 @@ fn image_color_filter_execution_applies_color_chain_to_multi_pixel_buffer() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -5987,7 +5986,7 @@ fn image_color_filter_execution_preserves_buffer_size_and_rgba_order() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6010,7 +6009,7 @@ fn image_color_filter_execution_changes_image_identity_when_bytes_change() {
     )
     .unwrap();
 
-    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+    let filtered = reference::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -6030,7 +6029,7 @@ fn image_filter_execution_blurs_one_pixel_transparent_and_opaque_images() {
     )
     .unwrap();
 
-    let transparent = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+    let transparent = reference::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -6051,7 +6050,7 @@ fn image_filter_execution_blurs_one_pixel_transparent_and_opaque_images() {
     )
     .unwrap();
 
-    let blurred = image::ResolvedImageColorFilterExecution::try_new(&opaque_paint, &opaque)
+    let blurred = reference::ResolvedImageColorFilterExecution::try_new(&opaque_paint, &opaque)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -6076,7 +6075,7 @@ fn image_filter_execution_blurs_multi_pixel_image_with_transparent_edges() {
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
 
     let blurred =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6103,7 +6102,7 @@ fn filtered_image_paint_executes_blur_with_matching_materialized_image() {
     )
     .unwrap();
 
-    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+    let filtered = reference::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -6123,14 +6122,14 @@ fn filtered_image_paint_executes_blur_with_matching_materialized_image() {
     .unwrap();
 
     assert_eq!(
-        image::ResolvedImageColorFilterExecution::try_new(&wrong_id, &image)
+        reference::ResolvedImageColorFilterExecution::try_new(&wrong_id, &image)
             .expect_err("materialized image id should match resolved resource id")
             .invalid_value_diagnostic()
             .map(InvalidValue::field),
         Some("materialized filtered image id")
     );
     assert_eq!(
-        image::ResolvedImageColorFilterExecution::try_new(&wrong_size, &image)
+        reference::ResolvedImageColorFilterExecution::try_new(&wrong_size, &image)
             .expect_err("materialized image size should match resolved resource size")
             .invalid_value_diagnostic()
             .map(InvalidValue::field),
@@ -6150,14 +6149,14 @@ fn materialized_image_filters_preserve_color_and_blur_order() {
     let color_before_blur = FilterList::try_ops(vec![brightness.clone(), blur.clone()]).unwrap();
     let blur_before_color = FilterList::try_ops(vec![blur, brightness]).unwrap();
 
-    let color_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+    let color_before = reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &color_before_blur,
         &source,
     )
     .unwrap()
     .execute_to_image_buffer()
     .unwrap();
-    let blur_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+    let blur_before = reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &blur_before_color,
         &source,
     )
@@ -6181,7 +6180,7 @@ fn materialized_image_blur_keeps_output_clipped_to_source_region() {
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(4.0).unwrap())]).unwrap();
 
     let blurred =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6265,7 +6264,7 @@ fn materialized_drop_shadow_uses_alpha_mask_not_source_bounds() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6300,7 +6299,7 @@ fn materialized_drop_shadow_clips_offset_and_blur_to_source_extent() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6326,7 +6325,7 @@ fn materialized_drop_shadow_composites_shadow_behind_source() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6354,7 +6353,7 @@ fn filtered_image_paint_executes_drop_shadow_with_matching_materialized_image() 
     )
     .unwrap();
 
-    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+    let filtered = reference::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -6374,14 +6373,14 @@ fn filtered_image_paint_executes_drop_shadow_with_matching_materialized_image() 
     .unwrap();
 
     assert_eq!(
-        image::ResolvedImageColorFilterExecution::try_new(&wrong_id, &image)
+        reference::ResolvedImageColorFilterExecution::try_new(&wrong_id, &image)
             .expect_err("materialized image id should match resolved resource id")
             .invalid_value_diagnostic()
             .map(InvalidValue::field),
         Some("materialized filtered image id")
     );
     assert_eq!(
-        image::ResolvedImageColorFilterExecution::try_new(&wrong_size, &image)
+        reference::ResolvedImageColorFilterExecution::try_new(&wrong_size, &image)
             .expect_err("materialized image size should match resolved resource size")
             .invalid_value_diagnostic()
             .map(InvalidValue::field),
@@ -6428,7 +6427,7 @@ fn materialized_filters_after_drop_shadow_apply_to_composed_output() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6450,7 +6449,7 @@ fn materialized_filters_before_drop_shadow_shape_current_alpha_mask() {
     .unwrap();
 
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6572,7 +6571,7 @@ fn sequence11_filtered_image_executes_nonzero_blur_then_drop_shadow_with_materia
     )
     .unwrap();
 
-    let filtered = image::ResolvedImageColorFilterExecution::try_new(&paint, &image)
+    let filtered = reference::ResolvedImageColorFilterExecution::try_new(&paint, &image)
         .unwrap()
         .execute_to_image()
         .unwrap();
@@ -6640,14 +6639,14 @@ fn assert_sequence11_filter_order_row() {
         FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
     ])
     .unwrap();
-    let color_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+    let color_before = reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &color_before_pixel,
         &image_buffer,
     )
     .unwrap()
     .execute_to_image_buffer()
     .unwrap();
-    let pixel_before = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+    let pixel_before = reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
         &pixel_before_color,
         &image_buffer,
     )
@@ -6833,14 +6832,15 @@ fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_i
     assert_eq!(compiled.executable_step_count(), 1);
 
     let premultiplied =
-        image::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
+        reference::straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(&source).unwrap();
     let reference = premultiplied
         .apply_compiled_color_filter_pipeline(&compiled)
         .unwrap();
     let expected =
-        image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&reference).unwrap();
+        reference::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&reference)
+            .unwrap();
     let filtered =
-        image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(&filters, &source)
             .unwrap()
             .execute_to_image_buffer()
             .unwrap();
@@ -6881,13 +6881,14 @@ fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
     let drop_shadow =
         FilterList::try_ops(vec![FilterOp::try_drop_shadow(shadow).unwrap()]).unwrap();
 
-    let drop_shadow_output = image::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
-        &drop_shadow,
-        &image_buffer,
-    )
-    .unwrap()
-    .execute_to_image_buffer()
-    .unwrap();
+    let drop_shadow_output =
+        reference::ResolvedImageColorFilterExecution::try_new_for_image_buffer(
+            &drop_shadow,
+            &image_buffer,
+        )
+        .unwrap()
+        .execute_to_image_buffer()
+        .unwrap();
     assert_eq!(drop_shadow_output.size(), image_buffer.size());
 
     let layer_filter_error = normalize_single_layer_error(
@@ -8632,7 +8633,7 @@ fn transitional_resolved_mask_bridge_preserves_bounds_quality_extend_and_transfo
                 .unwrap()
                 .quality(quality)
                 .extend(extend);
-            let output = image::execute_transitional_resolved_mask_bridge_for_test(
+            let output = reference::execute_transitional_resolved_mask_bridge_for_test(
                 &source,
                 source_bounds,
                 image,
@@ -20251,7 +20252,7 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
         vec![255, 255, 255, 255, 0, 0, 0, 128],
     )
     .unwrap();
-    let masked = image::execute_transitional_resolved_mask_bridge_for_test(
+    let masked = reference::execute_transitional_resolved_mask_bridge_for_test(
         &source,
         Rect::new(0.0, 0.0, 2.0, 1.0),
         image_from_buffer(mask.clone()),
@@ -24430,6 +24431,124 @@ fn c13_semantic_capabilities_match_final_gpu_only_contract() {
             .supports_color_filtered_image_paint(),
         "materialized color-filtered image paint must remain diagnostic"
     );
+}
+
+#[test]
+fn c13_gpu_only_cutover_reconciles_capabilities_stats_and_inventories() {
+    let primitive_totals = validate_final_primitive_inventory(&FINAL_PRIMITIVE_INVENTORY)
+        .expect("the GPU-only primitive inventory must agree with executable capability probes");
+    assert_eq!(
+        primitive_totals,
+        FinalPrimitiveInventoryTotals {
+            supported: 69,
+            diagnostic: 24,
+            root: 6,
+            oracle_only: 2,
+        }
+    );
+    validate_final_property_inventory(&FINAL_PROPERTY_INVENTORY)
+        .expect("the 22 property surfaces must agree with the primitive inventory");
+    assert_eq!(
+        validate_final_diagnostic_subcases(&FINAL_DIAGNOSTIC_SUBCASES)
+            .expect("typed failures must agree with the final diagnostic inventory"),
+        FinalDiagnosticSubcaseTotals {
+            unsupported_primitives: 45,
+            native_web_canvas: 1,
+            unresolved_resources: 5,
+            degraded_quality: 2,
+        }
+    );
+    assert!(
+        FINAL_PRIMITIVE_INVENTORY
+            .iter()
+            .all(|row| row.disposition != FinalPrimaryDisposition::FutureRender),
+        "the final inventory retained a FutureRender disposition"
+    );
+
+    let capabilities = Capabilities::CURRENT;
+    assert!(capabilities.filters().supports_gpu_color_filter_execution());
+    assert!(capabilities.filters().supports_gpu_blur_filter_execution());
+    assert!(
+        capabilities
+            .filters()
+            .supports_gpu_drop_shadow_filter_execution()
+    );
+    assert!(
+        !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+            && !capabilities
+                .image_sampling()
+                .supports_color_filtered_image_paint()
+    );
+
+    let production_sources = [
+        include_str!("capability.rs"),
+        include_str!("error.rs"),
+        include_str!("filter.rs"),
+        include_str!("image.rs"),
+        include_str!("lib.rs"),
+        include_str!("renderer.rs"),
+    ];
+    for stale_phase in [
+        "FutureRender",
+        "ResolvedMaterializedImageFilterExecution",
+        "MaterializedImageFilterPipeline",
+        "CompiledColorFilterPipeline",
+    ] {
+        assert!(
+            production_sources
+                .iter()
+                .all(|source| !source.contains(stale_phase)),
+            "production retains stale phase {stale_phase}"
+        );
+    }
+
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("integrated C13 coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+        .expect("integrated C13 coverage requires a headless surface");
+    let mut successful_scene = Scene::new();
+    successful_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    let successful =
+        pollster::block_on(renderer.render(&mut surface, &successful_scene, Parameters::default()))
+            .expect("the final direct GPU route must succeed");
+    assert_eq!(successful.route, Some(RenderRoute::DirectVello));
+    assert_eq!(successful.effect_precision, None);
+    assert_eq!(successful.vello_passes, 1);
+    assert_eq!(
+        (
+            successful.image_passes,
+            successful.composite_passes,
+            successful.copy_operations,
+            successful.custom_present_passes,
+            successful.effect_texture_allocations,
+            successful.effect_texture_reuses,
+            successful.retained_effect_bytes,
+        ),
+        (0, 0, 0, 0, 0, 0, 0)
+    );
+
+    let mut failing_scene = Scene::new();
+    failing_scene.layer(
+        Layer::new()
+            .try_mask(Shape::rect(Rect::new(0.0, 0.0, 1.0, 1.0)))
+            .expect("the diagnostic mask input must be intrinsically valid"),
+        |scene| {
+            scene.fill(Rect::new(0.0, 0.0, 1.0, 1.0), Color::BLACK);
+        },
+    );
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &failing_scene, Parameters::default()))
+            .expect_err("the broad mask boundary must remain an exact failure");
+    assert_eq!(
+        error.unsupported_primitive(),
+        Some(UnsupportedPrimitive::new(
+            PrimitiveFamily::MasksAndClips,
+            PrimitiveOperation::LayerMask,
+        ))
+    );
+    assert_eq!(renderer.stats(), successful);
 }
 
 #[test]
@@ -36664,7 +36783,7 @@ fn c09_reference_solid_for_test(
 }
 
 fn c09_reference_straight_bytes_for_test(buffer: &ReferencePremultipliedRgba8Buffer) -> Vec<u8> {
-    image::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(buffer)
+    reference::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(buffer)
         .unwrap()
         .into_rgba()
 }
@@ -37708,6 +37827,58 @@ fn c13_plus_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
 }
 
 #[test]
+fn reference_module_exclusively_owns_cpu_pixel_execution() {
+    let lib_source = include_str!("lib.rs");
+    let filter_source = include_str!("filter.rs");
+    let image_source = include_str!("image.rs");
+    let reference_source = include_str!("reference.rs");
+
+    assert!(
+        lib_source.contains("#[cfg(test)]\nmod reference;")
+            && reference_source.contains("struct ResolvedMaterializedImageFilterExecution")
+            && reference_source.contains("struct CompiledColorFilterPipeline")
+            && reference_source
+                .contains("fn straight_rgba8_bytes_to_premultiplied_rgba8_reference(")
+            && reference_source.contains("fn execute_materialized_filter_pipeline(")
+            && !image_source.contains("ResolvedMaterializedImageFilterExecution")
+            && !image_source.contains("PremultipliedRgba8")
+            && !filter_source.contains("CompiledColorFilterPipeline")
+            && !filter_source.contains("MaterializedImageFilterPipeline"),
+        "CPU pixel execution or a test-only compiled/oracle phase remains outside the cfg(test) reference owner"
+    );
+}
+
+#[test]
+fn image_and_filter_modules_have_no_materialized_executor_phases() {
+    let image_source = include_str!("image.rs");
+    let filter_source = include_str!("filter.rs");
+
+    for stale_identity in [
+        "ResolvedMaterializedImageFilterExecution",
+        "execute_materialized_filter_pipeline",
+        "straight_rgba8_bytes_to_premultiplied_rgba8_reference",
+        "premultiplied_rgba8_reference_to_straight_rgba8_image_buffer",
+    ] {
+        assert!(
+            !image_source.contains(stale_identity),
+            "image.rs retains materialized executor identity {stale_identity}"
+        );
+    }
+    for stale_identity in [
+        "MaterializedImageFilterPipeline",
+        "MaterializedImageFilterStep",
+        "CompiledColorFilterPipeline",
+        "CompiledColorFilterStep",
+        "materialized_image_filter_pipeline",
+    ] {
+        assert!(
+            !filter_source.contains(stale_identity),
+            "filter.rs retains materialized/compiled executor identity {stale_identity}"
+        );
+    }
+}
+
+#[test]
 fn cpu_reference_algorithms_are_test_only_after_gpu_cutover() {
     let lib_source = include_str!("lib.rs");
     let filter_source = include_str!("filter.rs");
@@ -37719,15 +37890,20 @@ fn cpu_reference_algorithms_are_test_only_after_gpu_cutover() {
     let reference_module_is_test_only = lib_source.contains("#[cfg(test)]\nmod reference;");
     let cpu_imports_are_test_only = !filter_source.contains("reference::")
         && !filter_source.contains("PremultipliedRgba8")
+        && !filter_source.contains("CompiledColorFilterPipeline")
+        && !filter_source.contains("MaterializedImageFilterPipeline")
+        && !image_source.contains("reference::")
+        && !image_source.contains("PremultipliedRgba8")
         && reference_source.contains("CompiledColorFilterPipeline")
-        && image_source.contains("#[cfg(test)]\nuse super::{")
-        && image_source
-            .contains("reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer}");
-    let cpu_execution_is_test_only = image_source.contains(
-        "#[cfg(test)]\n#[derive(Debug)]\npub(crate) struct ResolvedMaterializedImageFilterExecution",
-    ) && filter_source.contains(
-        "#[cfg(test)]\n#[derive(Clone, Debug, PartialEq)]\npub struct CompiledColorFilterPipeline",
-    ) && reference_source.contains("fn apply_compiled_color_filter_pipeline_to_pixel(")
+        && reference_source.contains("ReferencePremultipliedRgba8Buffer");
+    let cpu_execution_is_test_only = reference_source
+        .contains("pub(crate) struct ResolvedMaterializedImageFilterExecution")
+        && reference_source.contains("pub struct CompiledColorFilterPipeline")
+        && reference_source.contains("pub struct MaterializedImageFilterPipeline")
+        && reference_source.contains("fn apply_compiled_color_filter_pipeline_to_pixel(")
+        && reference_source.contains("fn execute_materialized_filter_pipeline(")
+        && !image_source.contains("ResolvedMaterializedImageFilterExecution")
+        && !filter_source.contains("CompiledColorFilterPipeline")
         && !filter_source.contains("fn apply_to_pixel(")
         && !filter_source.contains("fn apply_to_buffer(");
     let production_route_is_gpu_only = !renderer_source.contains("materialize_resolved_layer_mask")

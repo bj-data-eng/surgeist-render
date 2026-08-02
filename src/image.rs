@@ -1,13 +1,4 @@
 use super::{BackendErrorCode, Error, PhysicalSize, Result, Size};
-#[cfg(test)]
-use super::{
-    FilterList, FilteredImagePaint, Rect, ResolvedLayerAlphaMask,
-    filter::{
-        BlurPolicy, DevicePixelConversionPolicy, FilterClipBounds, FilterOutset, FilterRegionPlan,
-        FilterSourceBounds, MaterializedImageFilterPipeline, MaterializedImageFilterStep,
-    },
-    reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
-};
 use std::{
     hash::{Hash, Hasher},
     sync::Arc,
@@ -90,7 +81,7 @@ impl Image {
     }
 }
 
-fn validate_rgba_image(size: Size, byte_len: usize) -> Result<()> {
+pub(crate) fn validate_rgba_image(size: Size, byte_len: usize) -> Result<()> {
     let width = image_dimension(size.width(), "width")?;
     let height = image_dimension(size.height(), "height")?;
     let expected_len = u64::from(width)
@@ -109,7 +100,7 @@ fn validate_rgba_image(size: Size, byte_len: usize) -> Result<()> {
     Ok(())
 }
 
-fn image_dimension(value: f64, name: &str) -> Result<u32> {
+pub(crate) fn image_dimension(value: f64, name: &str) -> Result<u32> {
     if !value.is_finite() || value < 0.0 || value.fract() != 0.0 || value > f64::from(u32::MAX) {
         return Err(Error::new(
             BackendErrorCode::ImageUploadFailed,
@@ -373,339 +364,6 @@ impl ResolvedMaskUploadDescriptor {
 }
 
 #[cfg(test)]
-pub(crate) fn execute_transitional_resolved_mask_bridge_for_test(
-    source: &ImageBuffer,
-    source_bounds: Rect,
-    image: Image,
-    mask_bounds: Rect,
-) -> Result<ImageBuffer> {
-    let mask = ResolvedLayerAlphaMask::try_new(image, mask_bounds)?;
-    validate_image_buffer_rgba_len(source.size(), source.rgba().len())?;
-    super::validation::validate_point(source_bounds.origin(), "resolved-mask source bounds")?;
-    super::validation::validate_positive_f64(
-        source_bounds.width(),
-        "resolved-mask source bounds width",
-    )?;
-    super::validation::validate_positive_f64(
-        source_bounds.height(),
-        "resolved-mask source bounds height",
-    )?;
-    let source = straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(source)?;
-    let masked = source.apply_resolved_alpha_mask(source_bounds, mask.image(), mask.bounds())?;
-    premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&masked)
-}
-
-/// Render-local boundary for a resolved image/filter intent plus materialized RGBA bytes.
-///
-/// `FilteredImagePaint` names the resolved resource and authored filter list, but the
-/// bytes come from the paired `Image`. The execution phase converts straight RGBA8
-/// image bytes to premultiplied RGBA8 reference pixels, applies the ordered
-/// materialized-image filter pipeline, then emits straight RGBA8 again for
-/// paint/upload.
-#[cfg(test)]
-#[derive(Debug)]
-pub(crate) struct ResolvedMaterializedImageFilterExecution<'a> {
-    source: ResolvedMaterializedImageFilterSource<'a>,
-    pipeline: MaterializedImageFilterPipeline,
-}
-
-#[cfg(test)]
-pub(crate) type ResolvedImageColorFilterExecution<'a> =
-    ResolvedMaterializedImageFilterExecution<'a>;
-
-#[cfg(test)]
-#[derive(Debug)]
-enum ResolvedMaterializedImageFilterSource<'a> {
-    Image(&'a Image),
-    ImageBuffer(&'a ImageBuffer),
-}
-
-#[cfg(test)]
-impl<'a> ResolvedMaterializedImageFilterExecution<'a> {
-    pub(crate) fn try_new(paint: &FilteredImagePaint, image: &'a Image) -> Result<Self> {
-        let pipeline = compile_materialized_image_filter_pipeline(paint.filters())?;
-        if paint.resource().id() != image.id() {
-            return Err(Error::invalid_value(
-                "materialized filtered image id",
-                image.id().get(),
-                "must match the resolved image resource id",
-            ));
-        }
-        if paint.resource().intrinsic_size() != image.size() {
-            return Err(Error::invalid_value(
-                "materialized filtered image size",
-                format!("{:?}", image.size()),
-                "must match the resolved image resource intrinsic size",
-            ));
-        }
-        Ok(Self {
-            source: ResolvedMaterializedImageFilterSource::Image(image),
-            pipeline,
-        })
-    }
-
-    pub(crate) fn try_new_for_image_buffer(
-        filters: &FilterList,
-        image_buffer: &'a ImageBuffer,
-    ) -> Result<Self> {
-        let pipeline = compile_materialized_image_filter_pipeline(filters)?;
-        validate_image_buffer_rgba_len(image_buffer.size(), image_buffer.rgba().len())?;
-        Ok(Self {
-            source: ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer),
-            pipeline,
-        })
-    }
-
-    pub(crate) fn execute_to_image(&self) -> Result<Image> {
-        let ResolvedMaterializedImageFilterSource::Image(image) = self.source else {
-            return Err(Error::invalid_value(
-                "color-filtered image execution source",
-                "image buffer",
-                "must be a materialized Image when producing Image output",
-            ));
-        };
-        let premultiplied = straight_rgba8_image_to_premultiplied_rgba8_reference(image)?;
-        let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
-        let straight = premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)?;
-        let mut filtered_image =
-            Image::from_rgba(image.size(), Arc::<[u8]>::from(straight.into_rgba()))?;
-        filtered_image.quality = image.quality;
-        filtered_image.extend = image.extend;
-        Ok(filtered_image)
-    }
-
-    pub(crate) fn execute_to_image_buffer(&self) -> Result<ImageBuffer> {
-        let ResolvedMaterializedImageFilterSource::ImageBuffer(image_buffer) = self.source else {
-            return Err(Error::invalid_value(
-                "color-filtered image buffer execution source",
-                "image",
-                "must be an ImageBuffer when producing ImageBuffer output",
-            ));
-        };
-        let premultiplied =
-            straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(image_buffer)?;
-        let filtered = execute_materialized_filter_pipeline(&premultiplied, &self.pipeline)?;
-        premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(&filtered)
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn straight_rgba8_image_to_premultiplied_rgba8_reference(
-    image: &Image,
-) -> Result<ReferencePremultipliedRgba8Buffer> {
-    validate_rgba_image(image.size, image.bytes.len())?;
-    let size = PhysicalSize::new(
-        image_dimension(image.size.width(), "width")?,
-        image_dimension(image.size.height(), "height")?,
-    );
-    straight_rgba8_bytes_to_premultiplied_rgba8_reference(size, &image.bytes)
-}
-
-#[cfg(test)]
-pub(crate) fn straight_rgba8_image_buffer_to_premultiplied_rgba8_reference(
-    image_buffer: &ImageBuffer,
-) -> Result<ReferencePremultipliedRgba8Buffer> {
-    validate_image_buffer_rgba_len(image_buffer.size(), image_buffer.rgba().len())?;
-    straight_rgba8_bytes_to_premultiplied_rgba8_reference(image_buffer.size(), image_buffer.rgba())
-}
-
-#[cfg(test)]
-pub(crate) fn premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(
-    buffer: &ReferencePremultipliedRgba8Buffer,
-) -> Result<ImageBuffer> {
-    let mut rgba = Vec::with_capacity(usize::try_from(buffer.byte_len()).map_err(|_| {
-        Error::invalid_value(
-            "premultiplied reference buffer byte length",
-            buffer.byte_len(),
-            "must fit addressable memory",
-        )
-    })?);
-    let size = buffer.physical_size();
-
-    for y in 0..size.height() {
-        for x in 0..size.width() {
-            let pixel = buffer.pixel(x, y)?;
-            rgba.extend_from_slice(&premultiplied_rgba8_pixel_to_straight_rgba8(pixel));
-        }
-    }
-
-    ImageBuffer::try_new(size, rgba)
-}
-
-#[cfg(test)]
-fn compile_materialized_image_filter_pipeline(
-    filters: &FilterList,
-) -> Result<MaterializedImageFilterPipeline> {
-    let pipeline = filters
-        .materialized_image_filter_pipeline()?
-        .ok_or_else(|| {
-            Error::invalid_value(
-                "materialized image filters",
-                "none",
-                "must contain at least one filter operation",
-            )
-        })?;
-    Ok(pipeline)
-}
-
-#[cfg(test)]
-fn execute_materialized_filter_pipeline(
-    source: &ReferencePremultipliedRgba8Buffer,
-    pipeline: &MaterializedImageFilterPipeline,
-) -> Result<ReferencePremultipliedRgba8Buffer> {
-    let mut current = source.clone();
-    for step in pipeline.steps() {
-        current = match step {
-            MaterializedImageFilterStep::ColorFilters(pipeline) => {
-                current.apply_compiled_color_filter_pipeline(pipeline)?
-            }
-            MaterializedImageFilterStep::Blur(blur) => {
-                let planned_size = plan_clipped_materialized_blur_output_size(
-                    current.physical_size(),
-                    *blur,
-                    BlurPolicy::css_filter_default(),
-                )?;
-                let blurred = current.apply_blur(*blur, BlurPolicy::css_filter_default())?;
-                if blurred.physical_size() != planned_size {
-                    return Err(Error::invalid_value(
-                        "materialized blur output size",
-                        format!(
-                            "{}x{}",
-                            blurred.physical_size().width(),
-                            blurred.physical_size().height()
-                        ),
-                        "must match the clipped materialized image filter region",
-                    ));
-                }
-                blurred
-            }
-            MaterializedImageFilterStep::DropShadow(shadow) => {
-                let planned_size = plan_clipped_materialized_drop_shadow_output_size(
-                    current.physical_size(),
-                    shadow,
-                    BlurPolicy::css_filter_default(),
-                )?;
-                let shadowed =
-                    current.apply_drop_shadow(shadow, BlurPolicy::css_filter_default())?;
-                if shadowed.physical_size() != planned_size {
-                    return Err(Error::invalid_value(
-                        "materialized drop-shadow output size",
-                        format!(
-                            "{}x{}",
-                            shadowed.physical_size().width(),
-                            shadowed.physical_size().height()
-                        ),
-                        "must match the clipped materialized image filter region",
-                    ));
-                }
-                shadowed
-            }
-        };
-    }
-    Ok(current)
-}
-
-#[cfg(test)]
-fn plan_clipped_materialized_blur_output_size(
-    size: PhysicalSize,
-    blur: super::FilterBlur,
-    policy: BlurPolicy,
-) -> Result<PhysicalSize> {
-    let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));
-    let source = FilterSourceBounds::try_new(source_rect)?;
-    let outset = FilterOutset::from_blur(blur, policy)?;
-    let clip = FilterClipBounds::try_new(source_rect)?;
-    let region = FilterRegionPlan::try_new(source, outset, Some(clip))?;
-    let device_bounds =
-        DevicePixelConversionPolicy::outward().convert_region(region.execution_region(), 1.0)?;
-    if device_bounds.x() != 0 || device_bounds.y() != 0 {
-        return Err(Error::invalid_value(
-            "materialized blur output origin",
-            format!("{},{}", device_bounds.x(), device_bounds.y()),
-            "must remain anchored to the source image origin after clipping",
-        ));
-    }
-    Ok(PhysicalSize::new(
-        device_bounds.width(),
-        device_bounds.height(),
-    ))
-}
-
-#[cfg(test)]
-fn plan_clipped_materialized_drop_shadow_output_size(
-    size: PhysicalSize,
-    shadow: &super::FilterDropShadow,
-    policy: BlurPolicy,
-) -> Result<PhysicalSize> {
-    let source_rect = super::Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height()));
-    let source = FilterSourceBounds::try_new(source_rect)?;
-    let outset = FilterOutset::from_drop_shadow(shadow, policy)?;
-    let clip = FilterClipBounds::try_new(source_rect)?;
-    let region = FilterRegionPlan::try_new(source, outset, Some(clip))?;
-    let device_bounds =
-        DevicePixelConversionPolicy::outward().convert_region(region.execution_region(), 1.0)?;
-    if device_bounds.x() != 0 || device_bounds.y() != 0 {
-        return Err(Error::invalid_value(
-            "materialized drop-shadow output origin",
-            format!("{},{}", device_bounds.x(), device_bounds.y()),
-            "must remain anchored to the source image origin after clipping",
-        ));
-    }
-    Ok(PhysicalSize::new(
-        device_bounds.width(),
-        device_bounds.height(),
-    ))
-}
-
-#[cfg(test)]
-fn straight_rgba8_bytes_to_premultiplied_rgba8_reference(
-    size: PhysicalSize,
-    rgba: &[u8],
-) -> Result<ReferencePremultipliedRgba8Buffer> {
-    validate_image_buffer_rgba_len(size, rgba.len())?;
-    let pixels = rgba
-        .chunks_exact(4)
-        .map(|pixel| {
-            straight_rgba8_pixel_to_premultiplied_rgba8(pixel[0], pixel[1], pixel[2], pixel[3])
-        })
-        .collect::<Result<Vec<_>>>()?;
-    ReferencePremultipliedRgba8Buffer::from_pixels(size, pixels)
-}
-
-#[cfg(test)]
-fn straight_rgba8_pixel_to_premultiplied_rgba8(
-    red: u8,
-    green: u8,
-    blue: u8,
-    alpha: u8,
-) -> Result<PremultipliedRgba8> {
-    if alpha == 0 {
-        return Ok(PremultipliedRgba8::TRANSPARENT);
-    }
-
-    PremultipliedRgba8::try_new(
-        premultiply_straight_rgba8_channel(red, alpha),
-        premultiply_straight_rgba8_channel(green, alpha),
-        premultiply_straight_rgba8_channel(blue, alpha),
-        alpha,
-    )
-}
-
-#[cfg(test)]
-fn premultiplied_rgba8_pixel_to_straight_rgba8(pixel: PremultipliedRgba8) -> [u8; 4] {
-    if pixel.alpha() == 0 {
-        return [0, 0, 0, 0];
-    }
-
-    [
-        unpremultiply_rgba8_channel(pixel.red(), pixel.alpha()),
-        unpremultiply_rgba8_channel(pixel.green(), pixel.alpha()),
-        unpremultiply_rgba8_channel(pixel.blue(), pixel.alpha()),
-        pixel.alpha(),
-    ]
-}
-
-#[cfg(test)]
 pub(crate) fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize) -> Result<()> {
     if size.width() == 0 {
         return Err(Error::invalid_value(
@@ -742,16 +400,6 @@ pub(crate) fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize
     Ok(())
 }
 
-#[cfg(test)]
-fn premultiply_straight_rgba8_channel(channel: u8, alpha: u8) -> u8 {
-    round_byte(f64::from(channel) * f64::from(alpha) / 255.0)
-}
-
-#[cfg(test)]
-fn unpremultiply_rgba8_channel(channel: u8, alpha: u8) -> u8 {
-    round_byte(f64::from(channel) * 255.0 / f64::from(alpha))
-}
-
 impl From<ImageQuality> for peniko::ImageQuality {
     fn from(quality: ImageQuality) -> Self {
         match quality {
@@ -776,9 +424,4 @@ fn stable_hash<T: std::hash::Hash>(value: &T) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
     hasher.finish()
-}
-
-#[cfg(test)]
-fn round_byte(value: f64) -> u8 {
-    value.round().clamp(0.0, 255.0) as u8
 }
