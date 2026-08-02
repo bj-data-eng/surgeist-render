@@ -68,6 +68,15 @@ text-model `.run()` calls.
 - R-SUPERSEDED-DUPLICATE: X2 c10_future_backdrop_scene is absent; X1 c10_future_backdrop_scene_for_test survives with that purpose.
 - R-SUPERSEDED-ABSENCE: later behavior, test, or import evolution removed the historical item and no helper relationship survives.
 
+## T02 lifecycle and resource closure
+
+- Domain: production portions of `src/backend.rs`, `src/frame.rs`, `src/gpu_transaction.rs`, `src/renderer.rs`, and `src/resource.rs`.
+- Historical evidence: both exact first-parent experiment pairs were inspected with function-context and zero-context Rust diffs plus their diff-tree manifests: `fa9c738577110c893b7b156c0e68b68fdeec6e51..9488f2000f0a31485679c39a568ff2a6d9d6f28f` and `93fbc8e59f4b58a26520915ac1285d3fe8f54622..4225fae1466aef093f5f22f69bd8c17c6e4420d7`.
+- Current-source evidence: all 136 T02-domain ITEM occurrences and 92 surviving REL relationships were inspected at immutable baseline `92cdd9114046115d45451153c6ebad3b425db36e`.
+- Accepted T01 schema evidence: 511 ITEM rows, 400 REL rows, and 757 rejected collision rows; no accepted remediation row is unowned or multiply owned.
+- Cohesion result: backend device/surface acquisition and presentation failure paths, frame declaration/scheduling/lowering validation phases, graph transaction submission and headless/presented completion, renderer identity/preparation/execution/publication/resume dispatch, and resource kernel validation/serialization remain genuine governing flows, operation/failure boundaries, models, ownership boundaries, or focused test-intent helpers. Their bundles retain phase-owned state; their relationships preserve ordering, cleanup, publication, or lifetime handoff. No forwarding, bundle, ordering, cleanup, publication, or lifetime regression was found.
+- Open or assigned T02 remediations: **0**.
+
 ## Item occurrences
 
 | ID | Experiment / first parent | File | Historical item / hunk | Current descendant | Related caller/callee entry IDs | Current source anchor | Disposition | Rationale | Owner |

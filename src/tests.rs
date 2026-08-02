@@ -42456,3 +42456,44 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
         "REL-0218 mutation failed for the wrong reason: {error}"
     );
 }
+
+#[test]
+fn c15_lifecycle_resource_remediations_are_closed() {
+    const DOMAIN: &str = "- Domain: production portions of `src/backend.rs`, `src/frame.rs`, `src/gpu_transaction.rs`, `src/renderer.rs`, and `src/resource.rs`.";
+    const ZERO_OPEN: &str = "- Open or assigned T02 remediations: **0**.";
+    const BASELINE_EVIDENCE: &str = "- Current-source evidence: all 136 T02-domain ITEM occurrences and 92 surviving REL relationships were inspected at immutable baseline `92cdd9114046115d45451153c6ebad3b425db36e`.";
+    const T01_EVIDENCE: &str = "- Accepted T01 schema evidence: 511 ITEM rows, 400 REL rows, and 757 rejected collision rows; no accepted remediation row is unowned or multiply owned.";
+
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    validate_c15_disposition_ledger(&ledger).unwrap_or_else(|error| panic!("{error}"));
+
+    assert!(
+        ledger.contains("## T02 lifecycle and resource closure"),
+        "the ledger needs an explicit T02 closure record"
+    );
+    for required_evidence in [DOMAIN, ZERO_OPEN, BASELINE_EVIDENCE, T01_EVIDENCE] {
+        assert!(
+            ledger.contains(required_evidence),
+            "the T02 closure record lacks exact evidence: {required_evidence}"
+        );
+    }
+
+    for row in ledger
+        .lines()
+        .filter(|line| line.starts_with("| ITEM-") || line.starts_with("| REL-"))
+    {
+        if row.contains("| remediate in C15 |") {
+            let owners = ["| T02 |", "| T03 |", "| T04 |"]
+                .into_iter()
+                .filter(|owner| row.contains(owner))
+                .count();
+            assert_eq!(owners, 1, "remediation must have one schema owner: {row}");
+        }
+        assert!(
+            !(row.contains("| remediate in C15 |") && row.contains("| T02 |")),
+            "T02 remediation remains open: {row}"
+        );
+    }
+}
