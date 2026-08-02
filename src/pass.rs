@@ -11979,10 +11979,12 @@ pub(crate) struct PreparedGraph<'device> {
     pass_cache: &'device DevicePassCache,
     _ready_device: PhantomData<&'device ResourceManager>,
 }
+
 struct AcquiredGraphBindings {
     runtime_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     gaussian_kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
 }
+
 fn acquire_prepared_graph_resources(
     plan: &RuntimeGraphPreparationPlan,
     frame_scope: &mut FrameResourceScope,
@@ -12027,6 +12029,7 @@ fn acquire_prepared_graph_resources(
         gaussian_kernel_bindings,
     })
 }
+
 fn create_color_filter_operation_bindings(
     plan: &RuntimeGraphPreparationPlan,
     device: &wgpu::Device,

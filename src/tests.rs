@@ -42045,16 +42045,36 @@ fn c15_source_line<'a>(
     let line_number = line_number
         .parse::<usize>()
         .map_err(|error| format!("invalid line in {anchor}: {error}"))?;
-    let source = source_cache.entry(file.to_owned()).or_insert_with(|| {
-        std::fs::read_to_string(file)
-            .unwrap_or_else(|error| panic!("failed to read {file}: {error}"))
+    if !source_cache.contains_key(file) {
+        let object = format!("{C15_IMPLEMENTATION_BASELINE}:{file}");
+        let output = Command::new("git")
+            .args(["-C", env!("CARGO_MANIFEST_DIR"), "show", &object])
+            .output()
+            .map_err(|error| {
+                format!("failed to invoke Git for immutable C15 baseline object {object}: {error}")
+            })?;
+        if !output.status.success() {
+            return Err(format!(
+                "failed to read immutable C15 baseline object {object}: Git exited with {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
+        }
+        let source = String::from_utf8(output.stdout)
+            .map_err(|error| {
+                format!("immutable C15 baseline object {object} is not UTF-8: {error}")
+            })?
             .lines()
             .map(str::to_owned)
-            .collect()
-    });
+            .collect();
+        source_cache.insert(file.to_owned(), source);
+    }
+    let source = source_cache
+        .get(file)
+        .ok_or_else(|| format!("immutable C15 baseline cache lacks {file}"))?;
     let source_line = source
         .get(line_number - 1)
-        .ok_or_else(|| format!("missing {file}:{line_number}"))?;
+        .ok_or_else(|| format!("missing {C15_IMPLEMENTATION_BASELINE}:{file}:{line_number}"))?;
     Ok((source_line, file.to_owned()))
 }
 
@@ -42454,6 +42474,47 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
         error
             .contains("qualifier ClosedGraphMaps does not name target receiver GaussianKernelPlan"),
         "REL-0218 mutation failed for the wrong reason: {error}"
+    );
+}
+
+#[test]
+fn c15_historical_anchor_loader_uses_immutable_source_after_current_offset_drift() {
+    const ITEM_ID: &str = "| ITEM-X2-PA-108 |";
+    const DESCENDANT_SYMBOL: &str = "fn create_color_filter_operation_bindings(";
+
+    let ledger = std::fs::read_to_string(C15_DISPOSITION_LEDGER_PATH).unwrap_or_else(|error| {
+        panic!("C15 disposition ledger is required at {C15_DISPOSITION_LEDGER_PATH}: {error}")
+    });
+    let item_row = ledger
+        .lines()
+        .find(|line| line.starts_with(ITEM_ID))
+        .expect("ITEM-X2-PA-108 must retain its stable ledger row");
+    let columns = c15_ledger_columns(item_row);
+    let anchor = columns
+        .get(7)
+        .expect("ITEM-X2-PA-108 must retain immutable source evidence");
+    let mut source_cache = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let (baseline_line, file) = c15_source_line(anchor, &mut source_cache)
+        .unwrap_or_else(|error| panic!("immutable anchor must resolve: {error}"));
+    assert!(
+        baseline_line.contains(DESCENDANT_SYMBOL),
+        "the immutable anchor must resolve against its baseline object: {anchor}"
+    );
+
+    let baseline_symbol_line = source_cache[&file]
+        .iter()
+        .position(|line| line.contains(DESCENDANT_SYMBOL))
+        .expect("the immutable baseline must contain the descendant symbol");
+    let current_path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(&file);
+    let current_source = std::fs::read_to_string(&current_path)
+        .unwrap_or_else(|error| panic!("{} must be readable: {error}", current_path.display()));
+    let current_symbol_line = current_source
+        .lines()
+        .position(|line| line.contains(DESCENDANT_SYMBOL))
+        .expect("the current descendant must remain symbol-addressable");
+    assert_ne!(
+        current_symbol_line, baseline_symbol_line,
+        "the regression requires current formatting offsets to differ from immutable evidence"
     );
 }
 
