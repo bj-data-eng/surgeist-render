@@ -180,7 +180,7 @@ impl Capabilities {
             repeat_round: false,
             repeat_space: false,
             filtered_image_paint: false,
-            color_filtered_image_paint: true,
+            color_filtered_image_paint: false,
             image_orientation_conversion: false,
             image_color_profile_conversion: false,
             attachment_coordinate_policy:

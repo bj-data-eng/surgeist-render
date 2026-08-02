@@ -6856,7 +6856,7 @@ fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
     assert!(capabilities.filters().supports_ordered_filter_lists());
     assert!(capabilities.filters().supports_gpu_color_filter_execution());
     assert!(
-        capabilities
+        !capabilities
             .image_sampling()
             .supports_color_filtered_image_paint()
     );
@@ -22332,7 +22332,7 @@ fn image_sampling_capabilities_name_css_sampling_boundaries() {
     assert!(!capabilities.supports_repeat_round());
     assert!(!capabilities.supports_repeat_space());
     assert!(!capabilities.supports_filtered_image_paint());
-    assert!(capabilities.supports_color_filtered_image_paint());
+    assert!(!capabilities.supports_color_filtered_image_paint());
     assert!(!capabilities.supports_image_orientation_conversion());
     assert!(!capabilities.supports_image_color_profile_conversion());
 }
@@ -23203,6 +23203,1183 @@ fn final_primitive_inventory_has_101_unique_capability_consistent_rows() {
     );
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FinalDiagnosticSubcaseProbe {
+    UnsupportedPrimitive(UnsupportedPrimitive),
+    NativeWebCanvas,
+    UnresolvedResource(UnresolvedResourceKind),
+    DegradedQuality(DegradedQualityKind),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalDiagnosticSubcaseRow {
+    parents: &'static [&'static str],
+    key: &'static str,
+    probe: FinalDiagnosticSubcaseProbe,
+}
+
+const fn diagnostic_subcase_operation(
+    parents: &'static [&'static str],
+    key: &'static str,
+    family: PrimitiveFamily,
+    operation: PrimitiveOperation,
+) -> FinalDiagnosticSubcaseRow {
+    FinalDiagnosticSubcaseRow {
+        parents,
+        key,
+        probe: FinalDiagnosticSubcaseProbe::UnsupportedPrimitive(UnsupportedPrimitive::new(
+            family, operation,
+        )),
+    }
+}
+
+const fn diagnostic_subcase_resource(
+    parents: &'static [&'static str],
+    key: &'static str,
+    kind: UnresolvedResourceKind,
+) -> FinalDiagnosticSubcaseRow {
+    FinalDiagnosticSubcaseRow {
+        parents,
+        key,
+        probe: FinalDiagnosticSubcaseProbe::UnresolvedResource(kind),
+    }
+}
+
+const fn diagnostic_subcase_quality(
+    parents: &'static [&'static str],
+    key: &'static str,
+    kind: DegradedQualityKind,
+) -> FinalDiagnosticSubcaseRow {
+    FinalDiagnosticSubcaseRow {
+        parents,
+        key,
+        probe: FinalDiagnosticSubcaseProbe::DegradedQuality(kind),
+    }
+}
+
+const FINAL_DIAGNOSTIC_SUBCASE_KEYS: [&str; 53] = [
+    "PNT-02.UnresolvedSymbolicColor",
+    "PNT-03.ColorMixFunction",
+    "PNT-03.UnsupportedColorSpace",
+    "PNT-03.UnsupportedPaintSpaceConversion",
+    "PNT-07.RepeatingGradient",
+    "PNT-09.FilteredImagePaint",
+    "PNT-09.ColorFilteredImagePaint",
+    "GEO-06.InsideOutsidePathStrokeAlignment",
+    "GEO-07.GeometryBooleanOperation",
+    "GEO-07.GeometryOffsetOperation",
+    "IMG-05.BackgroundRepeatRound",
+    "IMG-06.BackgroundRepeatSpace",
+    "RES-03.ImageOrientationConversion",
+    "RES-03.ImageColorProfileConversion",
+    "SHD-01.EllipsePathShadowShape",
+    "SHD-02.InsetBoxShadow",
+    "TXT-03.TextShadow",
+    "SHD-06.NonSolidShadowPaint",
+    "FLT-01.LayerFilter",
+    "FLT-01.LayerFilterExecution",
+    "FLT-11.FilterResource",
+    "BDP-03.BroadBackdropExecution",
+    "BDP-03.BackdropIsolationComposition",
+    "BDP-04.RootBackdropPolicy",
+    "MSK-03.ClipReferenceExecution",
+    "MSK-03.ClipResource",
+    "BEP-06.LayerMask",
+    "BEP-06.AlphaMaskSourceExecution",
+    "BEP-06.MaskExecution",
+    "MSK-06.LuminanceMaskMode",
+    "MSK-07.MultiLayerMaskComposition",
+    "MSK-08.MaskCompositeMode",
+    "BOX-06.BorderGrooveStyle",
+    "BOX-06.BorderRidgeStyle",
+    "BOX-06.BorderInsetStyle",
+    "BOX-06.BorderOutsetStyle",
+    "BOX-09.OutlineDoubleStyle",
+    "BOX-09.OutlineAutoStyle",
+    "TXT-02.TextDecorationStyle",
+    "CMP-02.AdditionalMixBlendMode",
+    "CMP-03.BackgroundBlendMode",
+    "CMP-05.PorterDuffCompositeMode",
+    "XFM-04.Matrix3dTransform",
+    "XFM-04.PerspectiveTransform",
+    "XFM-04.Rotate3dTransform",
+    "XFM-04.TranslateZTransform",
+    "XFM-04.ScaleZTransform",
+    "BEP-03.OffscreenLayerRendering",
+    "DIA-02.WebCanvasSurface.native",
+    "DIA-03.ImageResource",
+    "DIA-03.MaskResource",
+    "DIA-03.TextRunInkBounds",
+    "DIA-05.ReducedIntermediatePrecision",
+];
+
+const FINAL_FALSE_SEMANTIC_OPERATIONS: [UnsupportedPrimitive; 45] = [
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::UnresolvedSymbolicColor,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::ColorMixFunction,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::UnsupportedColorSpace,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::RepeatingGradient,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::FilteredImagePaint,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::ColorFilteredImagePaint,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryBooleanOperation,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryOffsetOperation,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::BackgroundRepeatRound,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::BackgroundRepeatSpace,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::ImageOrientationConversion,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::ImageColorProfileConversion,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::EllipsePathShadowShape,
+    ),
+    UnsupportedPrimitive::new(PrimitiveFamily::Shadows, PrimitiveOperation::InsetBoxShadow),
+    UnsupportedPrimitive::new(PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::NonSolidShadowPaint,
+    ),
+    UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::LayerFilterExecution,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BroadBackdropExecution,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropIsolationComposition,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::RootBackdropPolicy,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ClipReferenceExecution,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LayerMask,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::AlphaMaskSourceExecution,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::MaskExecution,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LuminanceMaskMode,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::MultiLayerMaskComposition,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::MaskCompositeMode,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderGrooveStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderRidgeStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderInsetStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderOutsetStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::OutlineDoubleStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::OutlineAutoStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::TextDecorations,
+        PrimitiveOperation::TextDecorationStyle,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::AdditionalMixBlendMode,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::BackgroundBlendMode,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::PorterDuffCompositeMode,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::Matrix3dTransform,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::PerspectiveTransform,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::Rotate3dTransform,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::TranslateZTransform,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::ScaleZTransform,
+    ),
+    UnsupportedPrimitive::new(
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::OffscreenLayerRendering,
+    ),
+];
+
+const FINAL_DIAGNOSTIC_SUBCASES: [FinalDiagnosticSubcaseRow; 53] = [
+    diagnostic_subcase_operation(
+        &["PNT-02"],
+        "PNT-02.UnresolvedSymbolicColor",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::UnresolvedSymbolicColor,
+    ),
+    diagnostic_subcase_operation(
+        &["PNT-03"],
+        "PNT-03.ColorMixFunction",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::ColorMixFunction,
+    ),
+    diagnostic_subcase_operation(
+        &["PNT-03"],
+        "PNT-03.UnsupportedColorSpace",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::UnsupportedColorSpace,
+    ),
+    diagnostic_subcase_quality(
+        &["PNT-03", "DIA-05"],
+        "PNT-03.UnsupportedPaintSpaceConversion",
+        DegradedQualityKind::UnsupportedPaintSpaceConversion,
+    ),
+    diagnostic_subcase_operation(
+        &["PNT-07"],
+        "PNT-07.RepeatingGradient",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::RepeatingGradient,
+    ),
+    diagnostic_subcase_operation(
+        &["PNT-09"],
+        "PNT-09.FilteredImagePaint",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::FilteredImagePaint,
+    ),
+    diagnostic_subcase_operation(
+        &["PNT-09"],
+        "PNT-09.ColorFilteredImagePaint",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::ColorFilteredImagePaint,
+    ),
+    diagnostic_subcase_operation(
+        &["GEO-06"],
+        "GEO-06.InsideOutsidePathStrokeAlignment",
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::InsideOutsidePathStrokeAlignment,
+    ),
+    diagnostic_subcase_operation(
+        &["GEO-07"],
+        "GEO-07.GeometryBooleanOperation",
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryBooleanOperation,
+    ),
+    diagnostic_subcase_operation(
+        &["GEO-07"],
+        "GEO-07.GeometryOffsetOperation",
+        PrimitiveFamily::GeometryTargets,
+        PrimitiveOperation::GeometryOffsetOperation,
+    ),
+    diagnostic_subcase_operation(
+        &["IMG-05"],
+        "IMG-05.BackgroundRepeatRound",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::BackgroundRepeatRound,
+    ),
+    diagnostic_subcase_operation(
+        &["IMG-06"],
+        "IMG-06.BackgroundRepeatSpace",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::BackgroundRepeatSpace,
+    ),
+    diagnostic_subcase_operation(
+        &["RES-03"],
+        "RES-03.ImageOrientationConversion",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::ImageOrientationConversion,
+    ),
+    diagnostic_subcase_operation(
+        &["RES-03"],
+        "RES-03.ImageColorProfileConversion",
+        PrimitiveFamily::ImageSampling,
+        PrimitiveOperation::ImageColorProfileConversion,
+    ),
+    diagnostic_subcase_operation(
+        &["SHD-01"],
+        "SHD-01.EllipsePathShadowShape",
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::EllipsePathShadowShape,
+    ),
+    diagnostic_subcase_operation(
+        &["SHD-02"],
+        "SHD-02.InsetBoxShadow",
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::InsetBoxShadow,
+    ),
+    diagnostic_subcase_operation(
+        &["SHD-05", "TXT-03"],
+        "TXT-03.TextShadow",
+        PrimitiveFamily::Shadows,
+        PrimitiveOperation::TextShadow,
+    ),
+    diagnostic_subcase_operation(
+        &["SHD-06"],
+        "SHD-06.NonSolidShadowPaint",
+        PrimitiveFamily::PaintSources,
+        PrimitiveOperation::NonSolidShadowPaint,
+    ),
+    diagnostic_subcase_operation(
+        &["FLT-01"],
+        "FLT-01.LayerFilter",
+        PrimitiveFamily::Filters,
+        PrimitiveOperation::LayerFilter,
+    ),
+    diagnostic_subcase_operation(
+        &["FLT-01"],
+        "FLT-01.LayerFilterExecution",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::LayerFilterExecution,
+    ),
+    diagnostic_subcase_resource(
+        &["FLT-11", "DIA-03"],
+        "FLT-11.FilterResource",
+        UnresolvedResourceKind::Filter,
+    ),
+    diagnostic_subcase_operation(
+        &["BDP-03"],
+        "BDP-03.BroadBackdropExecution",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BroadBackdropExecution,
+    ),
+    diagnostic_subcase_operation(
+        &["BDP-03"],
+        "BDP-03.BackdropIsolationComposition",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::BackdropIsolationComposition,
+    ),
+    diagnostic_subcase_operation(
+        &["BDP-04"],
+        "BDP-04.RootBackdropPolicy",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::RootBackdropPolicy,
+    ),
+    diagnostic_subcase_operation(
+        &["MSK-03"],
+        "MSK-03.ClipReferenceExecution",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::ClipReferenceExecution,
+    ),
+    diagnostic_subcase_resource(
+        &["MSK-03", "DIA-03"],
+        "MSK-03.ClipResource",
+        UnresolvedResourceKind::Clip,
+    ),
+    diagnostic_subcase_operation(
+        &["BEP-06"],
+        "BEP-06.LayerMask",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LayerMask,
+    ),
+    diagnostic_subcase_operation(
+        &["BEP-06"],
+        "BEP-06.AlphaMaskSourceExecution",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::AlphaMaskSourceExecution,
+    ),
+    diagnostic_subcase_operation(
+        &["BEP-06"],
+        "BEP-06.MaskExecution",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::MaskExecution,
+    ),
+    diagnostic_subcase_operation(
+        &["MSK-06"],
+        "MSK-06.LuminanceMaskMode",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::LuminanceMaskMode,
+    ),
+    diagnostic_subcase_operation(
+        &["MSK-07"],
+        "MSK-07.MultiLayerMaskComposition",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::MultiLayerMaskComposition,
+    ),
+    diagnostic_subcase_operation(
+        &["MSK-08"],
+        "MSK-08.MaskCompositeMode",
+        PrimitiveFamily::MasksAndClips,
+        PrimitiveOperation::MaskCompositeMode,
+    ),
+    diagnostic_subcase_operation(
+        &["BOX-06"],
+        "BOX-06.BorderGrooveStyle",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderGrooveStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["BOX-06"],
+        "BOX-06.BorderRidgeStyle",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderRidgeStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["BOX-06"],
+        "BOX-06.BorderInsetStyle",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderInsetStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["BOX-06"],
+        "BOX-06.BorderOutsetStyle",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::BorderOutsetStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["BOX-09"],
+        "BOX-09.OutlineDoubleStyle",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::OutlineDoubleStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["BOX-09"],
+        "BOX-09.OutlineAutoStyle",
+        PrimitiveFamily::BoxDecorations,
+        PrimitiveOperation::OutlineAutoStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["TXT-02"],
+        "TXT-02.TextDecorationStyle",
+        PrimitiveFamily::TextDecorations,
+        PrimitiveOperation::TextDecorationStyle,
+    ),
+    diagnostic_subcase_operation(
+        &["CMP-02"],
+        "CMP-02.AdditionalMixBlendMode",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::AdditionalMixBlendMode,
+    ),
+    diagnostic_subcase_operation(
+        &["CMP-03"],
+        "CMP-03.BackgroundBlendMode",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::BackgroundBlendMode,
+    ),
+    diagnostic_subcase_operation(
+        &["CMP-05"],
+        "CMP-05.PorterDuffCompositeMode",
+        PrimitiveFamily::Compositing,
+        PrimitiveOperation::PorterDuffCompositeMode,
+    ),
+    diagnostic_subcase_operation(
+        &["XFM-04"],
+        "XFM-04.Matrix3dTransform",
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::Matrix3dTransform,
+    ),
+    diagnostic_subcase_operation(
+        &["XFM-04"],
+        "XFM-04.PerspectiveTransform",
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::PerspectiveTransform,
+    ),
+    diagnostic_subcase_operation(
+        &["XFM-04"],
+        "XFM-04.Rotate3dTransform",
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::Rotate3dTransform,
+    ),
+    diagnostic_subcase_operation(
+        &["XFM-04"],
+        "XFM-04.TranslateZTransform",
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::TranslateZTransform,
+    ),
+    diagnostic_subcase_operation(
+        &["XFM-04"],
+        "XFM-04.ScaleZTransform",
+        PrimitiveFamily::TransformsAndCoordinateSpaces,
+        PrimitiveOperation::ScaleZTransform,
+    ),
+    diagnostic_subcase_operation(
+        &["BEP-03"],
+        "BEP-03.OffscreenLayerRendering",
+        PrimitiveFamily::OffscreenPipeline,
+        PrimitiveOperation::OffscreenLayerRendering,
+    ),
+    FinalDiagnosticSubcaseRow {
+        parents: &["DIA-02"],
+        key: "DIA-02.WebCanvasSurface.native",
+        probe: FinalDiagnosticSubcaseProbe::NativeWebCanvas,
+    },
+    diagnostic_subcase_resource(
+        &["DIA-03"],
+        "DIA-03.ImageResource",
+        UnresolvedResourceKind::Image,
+    ),
+    diagnostic_subcase_resource(
+        &["DIA-03"],
+        "DIA-03.MaskResource",
+        UnresolvedResourceKind::Mask,
+    ),
+    diagnostic_subcase_resource(
+        &["DIA-03"],
+        "DIA-03.TextRunInkBounds",
+        UnresolvedResourceKind::TextRunInkBounds,
+    ),
+    diagnostic_subcase_quality(
+        &["DIA-05"],
+        "DIA-05.ReducedIntermediatePrecision",
+        DegradedQualityKind::ReducedIntermediatePrecision,
+    ),
+];
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct FinalDiagnosticSubcaseTotals {
+    unsupported_primitives: usize,
+    native_web_canvas: usize,
+    unresolved_resources: usize,
+    degraded_quality: usize,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum FinalDiagnosticSubcaseError {
+    WrongRowCount(usize),
+    UnknownKey(&'static str),
+    DuplicateKey(&'static str),
+    UnknownParent(&'static str),
+    IncompleteTypedInventory,
+    FailedProbes(Vec<&'static str>),
+}
+
+fn diagnostic_subcase_probe_is_exact(probe: FinalDiagnosticSubcaseProbe) -> bool {
+    match probe {
+        FinalDiagnosticSubcaseProbe::UnsupportedPrimitive(expected) => Capabilities::CURRENT
+            .ensure_supported(expected)
+            .is_err_and(|error| {
+                error.code() == ErrorCode::UnsupportedPrimitive
+                    && error.unsupported_primitive() == Some(expected)
+            }),
+        FinalDiagnosticSubcaseProbe::NativeWebCanvas => {
+            let expected = UnsupportedPrimitive::new(
+                PrimitiveFamily::Surfaces,
+                PrimitiveOperation::WebCanvasSurface,
+            );
+            if cfg!(all(feature = "render-web", target_arch = "wasm32")) {
+                Capabilities::CURRENT.ensure_supported(expected).is_ok()
+            } else {
+                Capabilities::CURRENT
+                    .ensure_supported(expected)
+                    .is_err_and(|error| {
+                        error.code() == ErrorCode::UnsupportedPrimitive
+                            && error.unsupported_primitive() == Some(expected)
+                    })
+            }
+        }
+        FinalDiagnosticSubcaseProbe::UnresolvedResource(kind) => {
+            let expected = UnresolvedResource::new(kind, "diagnostic-inventory");
+            let error = Error::unresolved_resource(expected.clone());
+            error.code() == ErrorCode::UnresolvedResource
+                && error.unresolved_resource_diagnostic() == Some(&expected)
+        }
+        FinalDiagnosticSubcaseProbe::DegradedQuality(kind) => {
+            let expected = DegradedQuality::new(kind, "diagnostic-inventory");
+            let error = Error::degraded_quality(expected.clone());
+            error.code() == ErrorCode::DegradedQuality
+                && error.degraded_quality_diagnostic() == Some(&expected)
+        }
+    }
+}
+
+fn diagnostic_operations_are_complete(rows: &[FinalDiagnosticSubcaseRow]) -> bool {
+    let operations = rows
+        .iter()
+        .filter_map(|row| match row.probe {
+            FinalDiagnosticSubcaseProbe::UnsupportedPrimitive(operation) => Some(operation),
+            FinalDiagnosticSubcaseProbe::NativeWebCanvas
+            | FinalDiagnosticSubcaseProbe::UnresolvedResource(_)
+            | FinalDiagnosticSubcaseProbe::DegradedQuality(_) => None,
+        })
+        .collect::<Vec<_>>();
+
+    operations.len() == FINAL_FALSE_SEMANTIC_OPERATIONS.len()
+        && FINAL_FALSE_SEMANTIC_OPERATIONS.iter().all(|expected| {
+            operations
+                .iter()
+                .filter(|actual| *actual == expected)
+                .count()
+                == 1
+        })
+}
+
+fn diagnostic_payload_kinds_are_complete(rows: &[FinalDiagnosticSubcaseRow]) -> bool {
+    let resources = [
+        UnresolvedResourceKind::Image,
+        UnresolvedResourceKind::Mask,
+        UnresolvedResourceKind::Filter,
+        UnresolvedResourceKind::Clip,
+        UnresolvedResourceKind::TextRunInkBounds,
+    ];
+    let degraded = [
+        DegradedQualityKind::ReducedIntermediatePrecision,
+        DegradedQualityKind::UnsupportedPaintSpaceConversion,
+    ];
+    resources.iter().all(|expected| {
+        rows.iter()
+            .filter(|row| row.probe == FinalDiagnosticSubcaseProbe::UnresolvedResource(*expected))
+            .count()
+            == 1
+    }) && degraded.iter().all(|expected| {
+        rows.iter()
+            .filter(|row| row.probe == FinalDiagnosticSubcaseProbe::DegradedQuality(*expected))
+            .count()
+            == 1
+    })
+}
+
+fn validate_final_diagnostic_subcases(
+    rows: &[FinalDiagnosticSubcaseRow],
+) -> std::result::Result<FinalDiagnosticSubcaseTotals, FinalDiagnosticSubcaseError> {
+    if rows.len() != FINAL_DIAGNOSTIC_SUBCASE_KEYS.len() {
+        return Err(FinalDiagnosticSubcaseError::WrongRowCount(rows.len()));
+    }
+    let mut keys = std::collections::BTreeSet::new();
+    for row in rows {
+        if !FINAL_DIAGNOSTIC_SUBCASE_KEYS.contains(&row.key) {
+            return Err(FinalDiagnosticSubcaseError::UnknownKey(row.key));
+        }
+        if !keys.insert(row.key) {
+            return Err(FinalDiagnosticSubcaseError::DuplicateKey(row.key));
+        }
+        for parent in row.parents {
+            if !FINAL_PRIMITIVE_IDS.contains(parent) {
+                return Err(FinalDiagnosticSubcaseError::UnknownParent(parent));
+            }
+        }
+    }
+    if !diagnostic_operations_are_complete(rows) || !diagnostic_payload_kinds_are_complete(rows) {
+        return Err(FinalDiagnosticSubcaseError::IncompleteTypedInventory);
+    }
+
+    let mut totals = FinalDiagnosticSubcaseTotals::default();
+    let mut failed_probes = Vec::new();
+    for row in rows {
+        match row.probe {
+            FinalDiagnosticSubcaseProbe::UnsupportedPrimitive(_) => {
+                totals.unsupported_primitives += 1;
+            }
+            FinalDiagnosticSubcaseProbe::NativeWebCanvas => totals.native_web_canvas += 1,
+            FinalDiagnosticSubcaseProbe::UnresolvedResource(_) => {
+                totals.unresolved_resources += 1;
+            }
+            FinalDiagnosticSubcaseProbe::DegradedQuality(_) => totals.degraded_quality += 1,
+        }
+        if !diagnostic_subcase_probe_is_exact(row.probe) {
+            failed_probes.push(row.key);
+        }
+    }
+    if failed_probes.is_empty() {
+        Ok(totals)
+    } else {
+        Err(FinalDiagnosticSubcaseError::FailedProbes(failed_probes))
+    }
+}
+
+#[test]
+fn final_diagnostic_subcase_inventory_maps_every_typed_boundary_once() {
+    let totals = validate_final_diagnostic_subcases(&FINAL_DIAGNOSTIC_SUBCASES)
+        .expect("every final typed diagnostic subcase must have one exact probe");
+    assert_eq!(
+        totals,
+        FinalDiagnosticSubcaseTotals {
+            unsupported_primitives: 45,
+            native_web_canvas: 1,
+            unresolved_resources: 5,
+            degraded_quality: 2,
+        }
+    );
+
+    let mut unknown_key = FINAL_DIAGNOSTIC_SUBCASES;
+    unknown_key[0].key = "UNKNOWN-00.Unknown";
+    assert_eq!(
+        validate_final_diagnostic_subcases(&unknown_key),
+        Err(FinalDiagnosticSubcaseError::UnknownKey(
+            "UNKNOWN-00.Unknown"
+        ))
+    );
+
+    let mut duplicate_key = FINAL_DIAGNOSTIC_SUBCASES;
+    duplicate_key[1].key = duplicate_key[0].key;
+    assert_eq!(
+        validate_final_diagnostic_subcases(&duplicate_key),
+        Err(FinalDiagnosticSubcaseError::DuplicateKey(
+            "PNT-02.UnresolvedSymbolicColor"
+        ))
+    );
+
+    let mut unknown_parent = FINAL_DIAGNOSTIC_SUBCASES;
+    unknown_parent[0].parents = &["UNKNOWN-00"];
+    assert_eq!(
+        validate_final_diagnostic_subcases(&unknown_parent),
+        Err(FinalDiagnosticSubcaseError::UnknownParent("UNKNOWN-00"))
+    );
+
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let native_canvas = UnsupportedPrimitive::new(
+            PrimitiveFamily::Surfaces,
+            PrimitiveOperation::WebCanvasSurface,
+        );
+        let error = Capabilities::CURRENT
+            .ensure_supported(native_canvas)
+            .expect_err("native WebCanvas must remain a typed platform diagnostic");
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
+        assert_eq!(error.unsupported_primitive(), Some(native_canvas));
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum FinalPropertyReference {
+    Primary(&'static str),
+    DiagnosticSubcase {
+        parent: &'static str,
+        key: &'static str,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct FinalPropertyInventoryRow {
+    surface: &'static str,
+    blanket_supported: bool,
+    references: &'static [FinalPropertyReference],
+}
+
+const fn property_primary(id: &'static str) -> FinalPropertyReference {
+    FinalPropertyReference::Primary(id)
+}
+
+const fn property_subcase(parent: &'static str, key: &'static str) -> FinalPropertyReference {
+    FinalPropertyReference::DiagnosticSubcase { parent, key }
+}
+
+const FINAL_PROPERTY_INVENTORY: [FinalPropertyInventoryRow; 22] = [
+    FinalPropertyInventoryRow {
+        surface: "color, background-color, border/outline/text-decoration color",
+        blanket_supported: false,
+        references: &[
+            property_primary("PNT-01"),
+            property_primary("PNT-02"),
+            property_primary("PNT-03"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-image",
+        blanket_supported: false,
+        references: &[
+            property_primary("PNT-04"),
+            property_primary("PNT-05"),
+            property_primary("PNT-06"),
+            property_primary("PNT-08"),
+            property_primary("PNT-07"),
+            property_subcase("PNT-09", "PNT-09.FilteredImagePaint"),
+            property_subcase("PNT-09", "PNT-09.ColorFilteredImagePaint"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-position",
+        blanket_supported: true,
+        references: &[property_primary("IMG-02")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-size",
+        blanket_supported: true,
+        references: &[property_primary("IMG-03"), property_primary("RES-02")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-repeat",
+        blanket_supported: false,
+        references: &[
+            property_primary("IMG-04"),
+            property_primary("IMG-05"),
+            property_primary("IMG-06"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-origin",
+        blanket_supported: true,
+        references: &[property_primary("IMG-07")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-clip",
+        blanket_supported: true,
+        references: &[
+            property_primary("IMG-08"),
+            property_primary("MSK-01"),
+            property_primary("MSK-02"),
+            property_primary("MSK-04"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "background-attachment",
+        blanket_supported: true,
+        references: &[property_primary("IMG-09"), property_primary("XFM-05")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "borders, side border style/width",
+        blanket_supported: false,
+        references: &[
+            property_primary("BOX-02"),
+            property_primary("BOX-03"),
+            property_primary("BOX-04"),
+            property_primary("BOX-05"),
+            property_primary("BOX-06"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "border-radius",
+        blanket_supported: true,
+        references: &[property_primary("GEO-02"), property_primary("BOX-07")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "outline and longhands",
+        blanket_supported: false,
+        references: &[
+            property_primary("BOX-08"),
+            property_subcase("BOX-09", "BOX-09.OutlineDoubleStyle"),
+            property_subcase("BOX-09", "BOX-09.OutlineAutoStyle"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "box-decoration-break",
+        blanket_supported: true,
+        references: &[property_primary("BOX-10")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "box-shadow",
+        blanket_supported: false,
+        references: &[
+            property_primary("SHD-01"),
+            property_primary("SHD-03"),
+            property_subcase("SHD-01", "SHD-01.EllipsePathShadowShape"),
+            property_primary("SHD-02"),
+            property_primary("SHD-06"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "opacity",
+        blanket_supported: true,
+        references: &[property_primary("CMP-01"), property_primary("CMP-04")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "filter",
+        blanket_supported: false,
+        references: &[
+            property_primary("FLT-01"),
+            property_primary("FLT-02"),
+            property_primary("FLT-03"),
+            property_primary("FLT-04"),
+            property_primary("FLT-05"),
+            property_primary("FLT-06"),
+            property_primary("FLT-07"),
+            property_primary("FLT-08"),
+            property_primary("FLT-09"),
+            property_primary("FLT-10"),
+            property_primary("FLT-12"),
+            property_primary("FLT-13"),
+            property_primary("SHD-04"),
+            property_primary("FLT-14"),
+            property_subcase("FLT-11", "FLT-11.FilterResource"),
+            property_subcase("FLT-01", "FLT-01.LayerFilter"),
+            property_subcase("FLT-01", "FLT-01.LayerFilterExecution"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "backdrop-filter",
+        blanket_supported: false,
+        references: &[
+            property_primary("BDP-01"),
+            property_primary("BDP-02"),
+            property_primary("BDP-03"),
+            property_primary("BDP-04"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "clip-path",
+        blanket_supported: false,
+        references: &[
+            property_primary("MSK-01"),
+            property_primary("MSK-02"),
+            property_primary("MSK-04"),
+            property_primary("MSK-03"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "mask, mask-image, size/position/repeat",
+        blanket_supported: false,
+        references: &[
+            property_primary("MSK-05"),
+            property_primary("MSK-06"),
+            property_primary("MSK-07"),
+            property_primary("MSK-08"),
+            property_subcase("BEP-06", "BEP-06.LayerMask"),
+            property_subcase("BEP-06", "BEP-06.AlphaMaskSourceExecution"),
+            property_subcase("BEP-06", "BEP-06.MaskExecution"),
+            property_primary("IMG-02"),
+            property_primary("IMG-03"),
+            property_primary("IMG-04"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "transform and transform longhands",
+        blanket_supported: false,
+        references: &[
+            property_primary("XFM-01"),
+            property_primary("XFM-02"),
+            property_primary("XFM-03"),
+            property_primary("XFM-05"),
+            property_primary("XFM-04"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "text-shadow",
+        blanket_supported: false,
+        references: &[
+            property_subcase("TXT-03", "TXT-03.TextShadow"),
+            property_subcase("SHD-05", "TXT-03.TextShadow"),
+        ],
+    },
+    FinalPropertyInventoryRow {
+        surface: "::selection",
+        blanket_supported: false,
+        references: &[property_primary("TXT-04")],
+    },
+    FinalPropertyInventoryRow {
+        surface: "content, pseudo-elements, list markers",
+        blanket_supported: false,
+        references: &[property_primary("TXT-05")],
+    },
+];
+
+const UNKNOWN_PRIMARY_PROPERTY_REFERENCES: &[FinalPropertyReference] =
+    &[property_primary("UNKNOWN-00")];
+const UNKNOWN_SUBCASE_PROPERTY_REFERENCES: &[FinalPropertyReference] =
+    &[property_subcase("BOX-09", "BOX-09.UnknownStyle")];
+const MISMATCHED_PARENT_PROPERTY_REFERENCES: &[FinalPropertyReference] =
+    &[property_subcase("BOX-06", "BOX-09.OutlineDoubleStyle")];
+const DUPLICATE_PROPERTY_REFERENCES: &[FinalPropertyReference] =
+    &[property_primary("IMG-02"), property_primary("IMG-02")];
+
+#[derive(Debug, Eq, PartialEq)]
+enum FinalPropertyInventoryError {
+    WrongRowCount(usize),
+    DuplicateSurface(&'static str),
+    DuplicateReference(&'static str),
+    UnknownPrimary(&'static str),
+    UnknownSubcase(&'static str),
+    ParentMismatch {
+        parent: &'static str,
+        key: &'static str,
+    },
+    IncorrectBlanketSupport(&'static str),
+    FailedReferences(Vec<(&'static str, &'static str)>),
+}
+
+fn final_primary_reference_status(id: &str) -> Option<(bool, bool)> {
+    FINAL_PRIMITIVE_INVENTORY
+        .iter()
+        .find(|row| row.id == id)
+        .map(|row| match row.disposition {
+            FinalPrimaryDisposition::Supported(probe) => {
+                (true, supported_primary_probe_succeeds(probe))
+            }
+            FinalPrimaryDisposition::Diagnostic(probe) => {
+                (false, diagnostic_primary_probe_is_exact(row.id, probe))
+            }
+            FinalPrimaryDisposition::Root(operation_identity) => {
+                (false, root_primary_operation_is_absent(operation_identity))
+            }
+            FinalPrimaryDisposition::OracleOnly(production_identity) => (
+                false,
+                oracle_primary_surface_is_production_absent(production_identity),
+            ),
+            FinalPrimaryDisposition::FutureRender => (false, false),
+        })
+}
+
+fn validate_final_property_inventory(
+    rows: &[FinalPropertyInventoryRow],
+) -> std::result::Result<(), FinalPropertyInventoryError> {
+    if rows.len() != FINAL_PROPERTY_INVENTORY.len() {
+        return Err(FinalPropertyInventoryError::WrongRowCount(rows.len()));
+    }
+    let mut surfaces = std::collections::BTreeSet::new();
+    let mut failed_references = Vec::new();
+    for row in rows {
+        if !surfaces.insert(row.surface) {
+            return Err(FinalPropertyInventoryError::DuplicateSurface(row.surface));
+        }
+        let mut references = std::collections::BTreeSet::new();
+        let mut all_supported = true;
+        for reference in row.references {
+            if !references.insert(*reference) {
+                return Err(FinalPropertyInventoryError::DuplicateReference(row.surface));
+            }
+            let (identity, supported, exact) = match *reference {
+                FinalPropertyReference::Primary(id) => {
+                    let Some((supported, exact)) = final_primary_reference_status(id) else {
+                        return Err(FinalPropertyInventoryError::UnknownPrimary(id));
+                    };
+                    (id, supported, exact)
+                }
+                FinalPropertyReference::DiagnosticSubcase { parent, key } => {
+                    let Some(subcase) = FINAL_DIAGNOSTIC_SUBCASES
+                        .iter()
+                        .find(|subcase| subcase.key == key)
+                    else {
+                        return Err(FinalPropertyInventoryError::UnknownSubcase(key));
+                    };
+                    if !subcase.parents.contains(&parent) {
+                        return Err(FinalPropertyInventoryError::ParentMismatch { parent, key });
+                    }
+                    (key, false, diagnostic_subcase_probe_is_exact(subcase.probe))
+                }
+            };
+            all_supported &= supported;
+            if !exact {
+                failed_references.push((row.surface, identity));
+            }
+        }
+        if row.blanket_supported != all_supported {
+            return Err(FinalPropertyInventoryError::IncorrectBlanketSupport(
+                row.surface,
+            ));
+        }
+    }
+    if failed_references.is_empty() {
+        Ok(())
+    } else {
+        Err(FinalPropertyInventoryError::FailedReferences(
+            failed_references,
+        ))
+    }
+}
+
+#[test]
+fn final_property_inventory_maps_22_surfaces_to_known_primitive_ids() {
+    validate_final_property_inventory(&FINAL_PROPERTY_INVENTORY)
+        .expect("all 22 property surfaces must retain their exact mixed boundary");
+
+    let mut unknown_primary = FINAL_PROPERTY_INVENTORY;
+    unknown_primary[2].references = UNKNOWN_PRIMARY_PROPERTY_REFERENCES;
+    assert_eq!(
+        validate_final_property_inventory(&unknown_primary),
+        Err(FinalPropertyInventoryError::UnknownPrimary("UNKNOWN-00"))
+    );
+
+    let mut unknown_subcase = FINAL_PROPERTY_INVENTORY;
+    unknown_subcase[10].references = UNKNOWN_SUBCASE_PROPERTY_REFERENCES;
+    assert_eq!(
+        validate_final_property_inventory(&unknown_subcase),
+        Err(FinalPropertyInventoryError::UnknownSubcase(
+            "BOX-09.UnknownStyle"
+        ))
+    );
+
+    let mut parent_mismatch = FINAL_PROPERTY_INVENTORY;
+    parent_mismatch[10].references = MISMATCHED_PARENT_PROPERTY_REFERENCES;
+    assert_eq!(
+        validate_final_property_inventory(&parent_mismatch),
+        Err(FinalPropertyInventoryError::ParentMismatch {
+            parent: "BOX-06",
+            key: "BOX-09.OutlineDoubleStyle",
+        })
+    );
+
+    let mut duplicate = FINAL_PROPERTY_INVENTORY;
+    duplicate[2].references = DUPLICATE_PROPERTY_REFERENCES;
+    assert_eq!(
+        validate_final_property_inventory(&duplicate),
+        Err(FinalPropertyInventoryError::DuplicateReference(
+            "background-position"
+        ))
+    );
+
+    let mut blanket_overclaim = FINAL_PROPERTY_INVENTORY;
+    blanket_overclaim[1].blanket_supported = true;
+    assert_eq!(
+        validate_final_property_inventory(&blanket_overclaim),
+        Err(FinalPropertyInventoryError::IncorrectBlanketSupport(
+            "background-image"
+        ))
+    );
+}
+
 #[test]
 fn c13_semantic_capabilities_match_final_gpu_only_contract() {
     let capabilities = Capabilities::CURRENT;
@@ -23248,10 +24425,10 @@ fn c13_semantic_capabilities_match_final_gpu_only_contract() {
             .supports_backdrop_isolation_composition()
     );
     assert!(
-        capabilities
+        !capabilities
             .image_sampling()
             .supports_color_filtered_image_paint(),
-        "T02 owns the remaining materialized filtered-image overclaim"
+        "materialized color-filtered image paint must remain diagnostic"
     );
 }
 
@@ -23325,7 +24502,7 @@ fn color_filter_capability_names_granular_execution_without_broad_effects() {
             .supports_filtered_image_paint()
     );
     assert!(
-        capabilities
+        !capabilities
             .image_sampling()
             .supports_color_filtered_image_paint()
     );
@@ -34808,6 +35985,10 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
             PrimitiveOperation::FilteredImagePaint,
         ),
         (
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::ColorFilteredImagePaint,
+        ),
+        (
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::LayerFilterExecution,
         ),
@@ -34840,7 +36021,7 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
         && !capabilities
             .image_sampling()
             .supports_filtered_image_paint()
-        && capabilities
+        && !capabilities
             .image_sampling()
             .supports_color_filtered_image_paint()
         && !capabilities
