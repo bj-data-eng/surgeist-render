@@ -42009,6 +42009,21 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
         ("src/vello_engine/recording.rs", 0, 4),
         ("src/vello_engine/scene.rs", 0, 5),
     ];
+    const RELATIONSHIP_FILE_COUNTS: [(&str, usize); 13] = [
+        ("src/backend.rs", 29),
+        ("src/capability.rs", 10),
+        ("src/frame.rs", 37),
+        ("src/gpu_transaction.rs", 3),
+        ("src/pass.rs", 138),
+        ("src/renderer.rs", 16),
+        ("src/resource.rs", 7),
+        ("src/shader.rs", 3),
+        ("src/tests.rs", 146),
+        ("src/vello_engine/glyph.rs", 1),
+        ("src/vello_engine/raster.rs", 5),
+        ("src/vello_engine/recording.rs", 2),
+        ("src/vello_engine/scene.rs", 3),
+    ];
 
     let ledger = std::fs::read_to_string(LEDGER_PATH).unwrap_or_else(|error| {
         panic!("C15 disposition ledger is required at {LEDGER_PATH}: {error}")
@@ -42039,11 +42054,188 @@ fn c15_sprawl_disposition_ledger_is_exhaustive_and_source_backed() {
         .lines()
         .filter(|line| line.starts_with("| REL-"))
         .collect::<Vec<_>>();
+
+    for (relationship_id, file, line_number, actual_call, rejected_callee) in [
+        (
+            "REL-0001",
+            "src/backend.rs",
+            3788,
+            "transaction.finish(",
+            "pass::C08CustomSpineEncodingProgress::finish",
+        ),
+        (
+            "REL-0381",
+            "src/renderer.rs",
+            2985,
+            "RuntimeCapabilityUnavailable::try_new(",
+            "pass::ClosedGraphMaps::try_new",
+        ),
+        (
+            "REL-1135",
+            "src/vello_engine/glyph.rs",
+            959,
+            "usize::from(",
+            "renderer::C08ForcedGraphCaptureForTest::from",
+        ),
+        (
+            "REL-1153",
+            "src/vello_engine/recording.rs",
+            860,
+            "fn finish(",
+            "pass::C08CustomSpineEncodingProgress::finish",
+        ),
+        (
+            "REL-1089",
+            "src/tests.rs",
+            4328,
+            ".run(",
+            "pass::ClosedGraphTraversal::run",
+        ),
+    ] {
+        let source = std::fs::read_to_string(file)
+            .unwrap_or_else(|error| panic!("failed to read {file}: {error}"));
+        let source_line = source
+            .lines()
+            .nth(line_number - 1)
+            .unwrap_or_else(|| panic!("missing {file}:{line_number}"));
+        assert!(
+            source_line.contains(actual_call),
+            "regression evidence drifted at {file}:{line_number}: {source_line}"
+        );
+        assert!(
+            !relationship_rows
+                .iter()
+                .any(|row| { row.contains(relationship_id) && row.contains(rejected_callee) }),
+            "{relationship_id} must not assign {actual_call} to {rejected_callee}"
+        );
+    }
+
     assert_eq!(
         relationship_rows.len(),
-        1157,
+        400,
         "every surviving direct call relationship needs one row"
     );
+
+    let mut relationship_ids = std::collections::BTreeSet::new();
+    let mut source_cache = std::collections::BTreeMap::<String, Vec<String>>::new();
+    let mut actual_relationship_file_counts = std::collections::BTreeMap::<String, usize>::new();
+    for row in &relationship_rows {
+        let columns = row.split('|').map(str::trim).collect::<Vec<_>>();
+        assert_eq!(
+            columns.len(),
+            10,
+            "relationship rows need source-backed resolution evidence: {row}"
+        );
+        let relationship_id = columns[1];
+        assert!(
+            relationship_ids.insert(relationship_id),
+            "duplicate {relationship_id}"
+        );
+
+        let listed_callee = columns[3]
+            .split_once(": ")
+            .map_or(columns[3], |(_, callee)| callee);
+        let evidence = columns[5]
+            .strip_prefix('`')
+            .and_then(|value| value.strip_suffix('`'))
+            .unwrap_or_else(|| panic!("missing delimited source evidence: {row}"));
+        let (token, resolved_target) = evidence
+            .strip_prefix("token=")
+            .and_then(|value| value.split_once("; target="))
+            .unwrap_or_else(|| panic!("invalid source evidence: {row}"));
+        assert_eq!(
+            resolved_target, listed_callee,
+            "resolved callee drifted from the relationship target: {row}"
+        );
+
+        let anchor = columns[4]
+            .strip_prefix("92cdd9114046115d45451153c6ebad3b425db36e:")
+            .unwrap_or_else(|| panic!("relationship needs the immutable baseline: {row}"));
+        let (file, line_number) = anchor
+            .rsplit_once(':')
+            .unwrap_or_else(|| panic!("invalid relationship source anchor: {row}"));
+        let line_number = line_number
+            .parse::<usize>()
+            .unwrap_or_else(|error| panic!("invalid line in {row}: {error}"));
+        let source = source_cache.entry(file.to_owned()).or_insert_with(|| {
+            std::fs::read_to_string(file)
+                .unwrap_or_else(|error| panic!("failed to read {file}: {error}"))
+                .lines()
+                .map(str::to_owned)
+                .collect()
+        });
+        let source_line = source
+            .get(line_number - 1)
+            .unwrap_or_else(|| panic!("missing {file}:{line_number}"));
+        assert!(
+            source_line.contains(token),
+            "{relationship_id} source token {token:?} drifted at {file}:{line_number}: {source_line}"
+        );
+        *actual_relationship_file_counts
+            .entry(file.to_owned())
+            .or_default() += 1;
+    }
+    for (file, expected_count) in RELATIONSHIP_FILE_COUNTS {
+        assert_eq!(
+            actual_relationship_file_counts.get(file),
+            Some(&expected_count),
+            "relationship manifest drifted for {file}"
+        );
+        let row = format!("| `{file}` | {expected_count} |");
+        assert!(
+            ledger.contains(&row),
+            "missing relationship manifest row {row}"
+        );
+    }
+
+    let item_relationships = item_rows
+        .iter()
+        .map(|row| {
+            let columns = row.split('|').map(str::trim).collect::<Vec<_>>();
+            let links = columns[6]
+                .split(';')
+                .map(str::trim)
+                .find_map(|part| part.strip_prefix("relationships="))
+                .map_or_else(Vec::new, |ids| ids.split(',').collect::<Vec<_>>());
+            for relationship_id in &links {
+                assert!(
+                    relationship_ids.contains(relationship_id),
+                    "{} links removed relationship {relationship_id}",
+                    columns[1]
+                );
+            }
+            (columns[1], links)
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for row in &relationship_rows {
+        let columns = row.split('|').map(str::trim).collect::<Vec<_>>();
+        for endpoint in [columns[2], columns[3]] {
+            let item_ids = endpoint.split_once(": ").map_or(endpoint, |(ids, _)| ids);
+            if !item_ids.starts_with("ITEM-") {
+                continue;
+            }
+            for item_id in item_ids.split(',') {
+                let links = item_relationships
+                    .get(item_id)
+                    .unwrap_or_else(|| panic!("missing item endpoint {item_id}: {row}"));
+                assert!(
+                    links.contains(&columns[1]),
+                    "{item_id} needs the reverse link to {}",
+                    columns[1]
+                );
+            }
+        }
+    }
+    assert!(relationship_rows.iter().any(|row| {
+        row.contains("REL-0218")
+            && row.contains("token=ClosedGraphMaps::try_new")
+            && row.contains("target=pass::ClosedGraphMaps::try_new")
+    }));
+    assert!(relationship_rows.iter().any(|row| {
+        row.contains("REL-0242")
+            && row.contains("token=progress.finish")
+            && row.contains("target=pass::C08CustomSpineEncodingProgress::finish")
+    }));
 
     for row in item_rows.iter().chain(&relationship_rows) {
         assert!(row.contains("92cdd9114046115d45451153c6ebad3b425db36e:"));
