@@ -29,7 +29,6 @@ use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPass, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
-    prepared_vello_pass_observation_for_test,
     scene::{
         VelloDrawObservationForTest, VelloFillRuleObservationForTest,
         VelloPathDrawObservationForTest, VelloPathElementObservationForTest, VelloRasterScenario,
@@ -139,7 +138,7 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
             parameters.with_antialiasing(antialiasing),
         )
         .expect("recording preparation must not require a runtime resource");
-        let observation = prepared_vello_pass_observation_for_test(&prepared);
+        let observation = prepared.observation_for_test();
         assert_prepared_vello_pass_basics(&observation);
     }
 
@@ -154,7 +153,7 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
     let prepared = scene
         .prepare_raster(parameters)
         .expect("only the validated Vello scene may prepare a pass");
-    let observation = prepared_vello_pass_observation_for_test(&prepared);
+    let observation = prepared.observation_for_test();
     assert_prepared_vello_pass_basics(&observation);
 
     let zero_width = RasterParameters::try_new(
@@ -7617,6 +7616,7 @@ fn reference_composition_buffers_are_deterministic() {
 fn authored_layer_mask_and_filter_inputs_return_typed_diagnostics() {
     let cases = [
         (
+            "layer mask",
             Layer::new()
                 .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
                 .unwrap(),
@@ -7626,6 +7626,7 @@ fn authored_layer_mask_and_filter_inputs_return_typed_diagnostics() {
             ),
         ),
         (
+            "layer filter",
             Layer::new()
                 .try_filter(Filter::try_blur(2.0).unwrap())
                 .unwrap(),
@@ -7633,7 +7634,7 @@ fn authored_layer_mask_and_filter_inputs_return_typed_diagnostics() {
         ),
     ];
 
-    for (layer, unsupported) in cases {
+    for (label, layer, unsupported) in cases {
         let mut scene = Scene::new();
         scene.layer(layer, |scene| {
             scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
@@ -7644,27 +7645,16 @@ fn authored_layer_mask_and_filter_inputs_return_typed_diagnostics() {
             .expect_err("authored inputs must not imply mask or layer-effect execution");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
-        assert_eq!(error.unsupported_primitive(), Some(unsupported));
-        assert!(error.message().contains(unsupported.label()));
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(unsupported),
+            "{label} must retain its typed diagnostic"
+        );
+        assert!(
+            error.message().contains(unsupported.label()),
+            "{label} must retain its diagnostic label"
+        );
     }
-}
-
-#[test]
-fn scene_normalization_rejects_unsupported_commands_before_encoding() {
-    let mut scene = Scene::new();
-    scene.layer(
-        Layer::new()
-            .try_mask(Shape::rect(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap()))
-            .unwrap(),
-        |scene| {
-            scene.fill(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap(), Color::BLACK);
-        },
-    );
-
-    let error = scene
-        .normalize(Capabilities::CURRENT)
-        .expect_err("unsupported masks should fail during normalization");
-    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
 }
 
 #[test]
@@ -20711,36 +20701,6 @@ fn vello_baseline_reports_web_canvas_surface_as_supported_on_wasm_web() {
 }
 
 #[test]
-fn unsupported_layer_masks_report_typed_error() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface =
-        pollster::block_on(renderer.create_headless(Size::try_new(4.0, 2.0).unwrap(), 1.0))
-            .unwrap();
-    let mut scene = Scene::new();
-
-    scene.layer(
-        Layer::new()
-            .try_mask(Shape::rect(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap()))
-            .unwrap(),
-        |scene| {
-            scene.fill(Rect::try_new(0.0, 0.0, 1.0, 1.0).unwrap(), Color::BLACK);
-        },
-    );
-
-    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect_err("unsupported mask should fail render");
-    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::LayerMask,
-        ))
-    );
-    assert!(error.message().contains("layer mask"));
-}
-
-#[test]
 fn geometry_try_constructors_reject_invalid_values() {
     assert!(Point::try_new(f64::NAN, 0.0).is_err());
     assert!(Size::try_new(-1.0, 1.0).is_err());
@@ -21463,7 +21423,13 @@ fn ahem_font_data_renders_ascent_and_descent_glyph_bands() {
         )
         .unwrap(),
     );
-    let output = render_scene_to_required_headless(&scene, Size::new(25.0, 12.0));
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(25.0, 12.0), 1.0)).unwrap();
+    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+        .expect("required headless text rendering needs an available host adapter");
+    let output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("required headless text readback must complete");
 
     assert!(
         pixel_alpha(&output, 6, 5) > 200,
@@ -27959,41 +27925,6 @@ fn nested_layer_pass_plan_aggregates_transformed_child_bounds() {
 }
 
 #[test]
-fn layer_pass_plan_rejects_mask_filter_boundaries_with_typed_diagnostics() {
-    let cases = [
-        (
-            Layer::new()
-                .try_mask(Shape::rect(Rect::new(0.0, 0.0, 2.0, 2.0)))
-                .unwrap(),
-            UnsupportedPrimitive::new(
-                PrimitiveFamily::MasksAndClips,
-                PrimitiveOperation::LayerMask,
-            ),
-        ),
-        (
-            Layer::new()
-                .try_filter(Filter::try_blur(4.0).unwrap())
-                .unwrap(),
-            UnsupportedPrimitive::new(PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
-        ),
-    ];
-
-    for (layer, primitive) in cases {
-        let mut scene = Scene::new();
-        scene.layer(layer, |scene| {
-            scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-        });
-
-        let error = scene
-            .normalize(Capabilities::CURRENT)
-            .expect_err("mask/filter layer pass planning should stop at diagnostic boundary");
-
-        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
-        assert_eq!(error.unsupported_primitive(), Some(primitive));
-    }
-}
-
-#[test]
 fn layer_mask_filter_parent_diagnostics_win_over_unsupported_children() {
     let cases = [
         (
@@ -28761,36 +28692,6 @@ fn centered_path_strokes_support_join_cap_and_dash_inputs() {
 }
 
 #[test]
-fn inside_outside_path_strokes_keep_typed_geometry_diagnostic() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface =
-        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
-    let mut path = Path::new();
-    path.move_to(Point::try_new(1.0, 1.0).unwrap())
-        .line_to(Point::try_new(6.0, 1.0).unwrap())
-        .line_to(Point::try_new(6.0, 6.0).unwrap())
-        .close();
-    let mut scene = Scene::new();
-    scene.stroke(
-        Shape::path(path),
-        Stroke::try_new(1.0).unwrap().align(StrokeAlign::Inside),
-        Color::BLACK,
-    );
-
-    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect_err("inside path stroke alignment requires offset lowering");
-
-    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::GeometryTargets,
-            PrimitiveOperation::InsideOutsidePathStrokeAlignment,
-        ))
-    );
-}
-
-#[test]
 fn unsupported_aligned_path_strokes_report_explicit_error() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
@@ -28916,58 +28817,52 @@ fn unsupported_non_solid_shadow_paint_reports_typed_error() {
 }
 
 #[test]
-fn unsupported_shadow_shapes_report_typed_error() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface =
-        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
-    let mut scene = Scene::new();
-    scene.shadow(
-        Shape::try_ellipse(Point::new(4.0, 4.0), Size::new(2.0, 1.0)).unwrap(),
-        Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
-    );
-
-    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect_err("ellipse shadows should remain unsupported in this milestone");
-
-    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Shadows,
-            PrimitiveOperation::EllipsePathShadowShape,
-        ))
-    );
-    assert!(error.message().contains("ellipse/path shadow shape"));
-}
-
-#[test]
-fn unsupported_path_shadows_report_typed_error() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface =
-        pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
+fn ellipse_and_path_shadows_report_typed_error() {
     let mut path = Path::new();
     path.move_to(Point::new(1.0, 1.0))
         .line_to(Point::new(6.0, 1.0))
         .line_to(Point::new(6.0, 6.0))
         .close();
-    let mut scene = Scene::new();
-    scene.shadow(
-        Shape::path(path),
-        Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
-    );
+    let cases = [
+        (
+            "ellipse",
+            Shape::try_ellipse(Point::new(4.0, 4.0), Size::new(2.0, 1.0)).unwrap(),
+        ),
+        ("path", Shape::path(path)),
+    ];
 
-    let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect_err("path shadows should remain unsupported in this milestone");
+    for (label, shape) in cases {
+        let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+        let mut surface =
+            pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0)).unwrap();
+        let mut scene = Scene::new();
+        scene.shadow(
+            shape,
+            Shadow::try_new(Point::new(0.0, 0.0), 1.0, 0.0, Color::BLACK).unwrap(),
+        );
 
-    assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Shadows,
-            PrimitiveOperation::EllipsePathShadowShape,
-        ))
-    );
-    assert!(error.message().contains("ellipse/path shadow shape"));
+        let error = match pollster::block_on(renderer.render(
+            &mut surface,
+            &scene,
+            Parameters::default(),
+        )) {
+            Err(error) => error,
+            Ok(stats) => panic!("{label} shadow unexpectedly rendered with {stats:?}"),
+        };
+        assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive, "{label}");
+        assert_eq!(
+            error.unsupported_primitive(),
+            Some(UnsupportedPrimitive::new(
+                PrimitiveFamily::Shadows,
+                PrimitiveOperation::EllipsePathShadowShape,
+            )),
+            "{label} shadow must retain its typed diagnostic"
+        );
+        assert!(
+            error.message().contains("ellipse/path shadow shape"),
+            "{label} shadow must retain its diagnostic label"
+        );
+    }
 }
 
 fn headless_direct_publication_fixture_for_test() -> (Renderer, Surface, Scene, ImageBuffer) {
@@ -35691,15 +35586,6 @@ fn assert_transformed_placement_within(actual: AlphaSupport, expected: AlphaSupp
         (actual.centroid_y_hundredths - expected.centroid_y_hundredths).abs() <= 35,
         "transformed rectangle centroid y exceeds the S34 0.35-device-pixel tolerance"
     );
-}
-
-fn render_scene_to_required_headless(scene: &Scene, size: Size) -> ImageBuffer {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
-    let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
-    pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
-        .expect("required headless scene rendering needs an available host adapter");
-    pollster::block_on(renderer.read_headless(&surface))
-        .expect("required headless scene readback must complete")
 }
 
 fn assert_bounded_backdrop_filter_execution_is_public(scene: &Scene, size: Size) {

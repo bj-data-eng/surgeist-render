@@ -343,7 +343,7 @@ fn classify_checked_wgpu_error(failure_message: &'static str, source: wgpu::Erro
 }
 
 #[cfg(test)]
-pub(super) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> Result<()> {
+pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> Result<()> {
     checked_wgpu_build(device, || {
         let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Surgeist deliberate invalid internal Vello WGSL"),
@@ -355,7 +355,7 @@ pub(super) async fn checked_shader_validation_for_test(device: &wgpu::Device) ->
 }
 
 #[cfg(test)]
-pub(super) fn checked_scope_out_of_memory_for_test() -> Error {
+pub(crate) fn checked_scope_out_of_memory_for_test() -> Error {
     classify_checked_wgpu_error(
         "checked internal Vello resource or command encoding failed",
         wgpu::Error::OutOfMemory {

@@ -762,7 +762,7 @@ fn validate_target_dimension(field: &'static str, value: u32) -> Result<()> {
 
 #[cfg(test)]
 impl PreparedVelloPass {
-    pub(super) fn observation_for_test(&self) -> PreparedVelloPassObservation {
+    pub(crate) fn observation_for_test(&self) -> PreparedVelloPassObservation {
         PreparedVelloPassObservation {
             target_extent: self.target_intent.extent,
             transparent_base: self.target_intent.base_color == Color::TRANSPARENT,

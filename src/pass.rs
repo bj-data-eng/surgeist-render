@@ -66,9 +66,7 @@ use super::frame::GraphLoweringView;
 use super::frame::{FrameContext, FramePlan};
 
 #[cfg(test)]
-use super::vello_engine::{
-    prepared_vello_pass_observation_for_test, scene::VelloPathDrawObservationForTest,
-};
+use super::vello_engine::scene::VelloPathDrawObservationForTest;
 
 #[cfg(test)]
 thread_local! {
@@ -8551,7 +8549,7 @@ fn graph_clip_coverage_observation(
                     .ok()?,
                 )
                 .ok()?;
-            let raster = prepared_vello_pass_observation_for_test(&prepared);
+            let raster = prepared.observation_for_test();
             let elements = coverage
                 .elements
                 .iter()

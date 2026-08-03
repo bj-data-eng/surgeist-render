@@ -36,10 +36,9 @@ mod recording {
         VelloBufferKey, VelloImageKey, VelloResourceLeaseAggregate,
     };
     #[cfg(test)]
-    pub(super) use resources::{
-        ScopeResolvedVelloResourceLease, commit_scope_resolved_for_test,
-        no_atlas_abort_outcome_for_test, no_atlas_commit_outcome_for_test,
-        over_limit_buffer_preflight_for_test,
+    pub(crate) use resources::{
+        commit_scope_resolved_for_test, no_atlas_abort_outcome_for_test,
+        no_atlas_commit_outcome_for_test, over_limit_buffer_preflight_for_test,
     };
 }
 mod raster {
@@ -146,49 +145,15 @@ pub(crate) use recording::{
 pub(crate) use recording::VelloResourceAllocationSummaryForTest;
 
 #[cfg(test)]
-pub(crate) async fn checked_shader_validation_for_test(device: &wgpu::Device) -> crate::Result<()> {
-    shaders::checked_shader_validation_for_test(device).await
-}
+pub(crate) use recording::{
+    commit_scope_resolved_for_test, no_atlas_abort_outcome_for_test,
+    no_atlas_commit_outcome_for_test, over_limit_buffer_preflight_for_test,
+};
 
 #[cfg(test)]
-pub(crate) fn checked_scope_out_of_memory_for_test() -> crate::Error {
-    shaders::checked_scope_out_of_memory_for_test()
-}
-
-#[cfg(test)]
-pub(crate) async fn over_limit_buffer_preflight_for_test(
-    device: &wgpu::Device,
-) -> crate::Result<()> {
-    recording::over_limit_buffer_preflight_for_test(device).await
-}
-
-#[cfg(test)]
-pub(crate) async fn no_atlas_commit_outcome_for_test(
-    device: &wgpu::Device,
-) -> crate::Result<VelloAtlasOutcome> {
-    recording::no_atlas_commit_outcome_for_test(device).await
-}
-
-#[cfg(test)]
-pub(crate) fn commit_scope_resolved_for_test(
-    lease: recording::ScopeResolvedVelloResourceLease,
-) -> crate::Result<VelloAtlasOutcome> {
-    recording::commit_scope_resolved_for_test(lease)
-}
-
-#[cfg(test)]
-pub(crate) async fn no_atlas_abort_outcome_for_test(
-    device: &wgpu::Device,
-) -> crate::Result<VelloAtlasOutcome> {
-    recording::no_atlas_abort_outcome_for_test(device).await
-}
-
-#[cfg(test)]
-pub(crate) fn prepared_vello_pass_observation_for_test(
-    pass: &PreparedVelloPass,
-) -> PreparedVelloPassObservation {
-    pass.observation_for_test()
-}
+pub(crate) use shaders::{
+    checked_scope_out_of_memory_for_test, checked_shader_validation_for_test,
+};
 
 #[cfg(test)]
 pub(crate) struct PreparedVelloPassObservation {
