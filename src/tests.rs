@@ -5167,46 +5167,7 @@ fn css_drop_shadow_rejects_non_solid_shadow_paint() {
 }
 
 #[test]
-fn sequence11_capabilities_advertise_narrow_materialized_filters_without_broad_effects() {
-    let capabilities = Capabilities::CURRENT;
-
-    assert!(capabilities.filters().supports_ordered_filter_lists());
-    assert!(capabilities.filters().supports_gpu_blur_filter_execution());
-    assert!(
-        capabilities
-            .filters()
-            .supports_gpu_drop_shadow_filter_execution()
-    );
-    assert!(capabilities.filters().supports_filter_region_planning());
-    assert!(!capabilities.filters().supports_layer_filters());
-    assert!(
-        !capabilities
-            .image_sampling()
-            .supports_filtered_image_paint()
-    );
-    assert!(!capabilities.shadows().supports_inset_box_shadows());
-    assert!(!capabilities.shadows().supports_text_shadows());
-    assert!(!capabilities.masks_clips().supports_layer_masks());
-    assert!(
-        capabilities
-            .masks_clips()
-            .supports_resolved_alpha_mask_execution()
-    );
-    assert!(
-        !capabilities
-            .offscreen_pipeline()
-            .supports_layer_filter_execution()
-    );
-    assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
-    assert!(
-        !capabilities
-            .offscreen_pipeline()
-            .supports_broad_backdrop_execution()
-    );
-}
-
-#[test]
-fn sequence11_filtered_image_executes_nonzero_blur_then_drop_shadow_with_materialized_image() {
+fn materialized_image_filter_reference_preserves_nonzero_blur_then_drop_shadow() {
     let image = Image::from_rgba(
         Size::new(2.0, 1.0),
         Arc::<[u8]>::from([255, 0, 0, 255, 0, 0, 0, 0]),
@@ -5241,13 +5202,7 @@ fn sequence11_filtered_image_executes_nonzero_blur_then_drop_shadow_with_materia
 }
 
 #[test]
-fn sequence11_matrix_guardrails_cover_filter_shadow_and_diagnostic_rows() {
-    assert_sequence11_filter_region_rows();
-    assert_sequence11_filter_order_row();
-    assert_sequence11_shadow_diagnostic_rows();
-}
-
-fn assert_sequence11_filter_region_rows() {
+fn filter_region_models_preserve_blur_and_drop_shadow_bounds() {
     let blur = FilterBlur::try_new(2.0).unwrap();
     let source = FilterSourceBounds::try_new(Rect::new(10.0, 10.0, 4.0, 4.0)).unwrap();
     let clip = FilterClipBounds::try_new(Rect::new(8.0, 8.0, 12.0, 12.0)).unwrap();
@@ -5275,7 +5230,8 @@ fn assert_sequence11_filter_region_rows() {
     assert_eq!(shadow_outset.bottom(), 9.0);
 }
 
-fn assert_sequence11_filter_order_row() {
+#[test]
+fn mixed_color_and_pixel_filters_preserve_authored_order() {
     let image_buffer =
         ImageBuffer::try_new(PhysicalSize::new(2, 1), vec![255, 0, 0, 255, 0, 0, 0, 0]).unwrap();
     let color_before_pixel = FilterList::try_ops(vec![
@@ -5315,7 +5271,8 @@ fn assert_sequence11_filter_order_row() {
     );
 }
 
-fn assert_sequence11_shadow_diagnostic_rows() {
+#[test]
+fn authored_shadow_normalization_preserves_order_and_typed_boundaries() {
     let mut scene = Scene::new();
     scene.shadows(
         Rect::new(1.0, 1.0, 6.0, 6.0),
@@ -5406,7 +5363,7 @@ fn assert_sequence11_shadow_diagnostic_rows() {
 }
 
 #[test]
-fn sequence10_matrix_color_filters_execute_with_cpu_reference_bytes() {
+fn color_filter_operations_match_compiled_and_reference_bytes() {
     let source = PremultipliedRgba8::try_new(100, 150, 200, 255).unwrap();
     let cases = [
         (
@@ -5467,7 +5424,7 @@ fn sequence10_matrix_color_filters_execute_with_cpu_reference_bytes() {
 }
 
 #[test]
-fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_image() {
+fn materialized_color_filter_fusion_matches_reference_bytes() {
     let source = ImageBuffer::try_new(
         PhysicalSize::new(2, 1),
         vec![100, 150, 200, 255, 64, 128, 255, 128],
@@ -5481,7 +5438,7 @@ fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_i
     let pipeline = filters
         .color_filter_pipeline()
         .unwrap()
-        .expect("color-only filters should produce a sequence10 pipeline");
+        .expect("color-only filters should produce an executable color pipeline");
     let compiled = CompiledColorFilterPipeline::try_from_pipeline(&pipeline).unwrap();
 
     assert_eq!(compiled.executable_step_count(), 1);
@@ -5505,31 +5462,7 @@ fn sequence10_matrix_filter_fusion_matches_reference_fallback_for_materialized_i
 }
 
 #[test]
-fn sequence10_capabilities_expose_only_granular_color_filter_execution() {
-    let capabilities = Capabilities::CURRENT;
-
-    assert!(capabilities.filters().supports_ordered_filter_lists());
-    assert!(capabilities.filters().supports_gpu_color_filter_execution());
-    assert!(
-        !capabilities
-            .image_sampling()
-            .supports_color_filtered_image_paint()
-    );
-    assert!(!capabilities.filters().supports_layer_filters());
-    assert!(
-        !capabilities
-            .image_sampling()
-            .supports_filtered_image_paint()
-    );
-    assert!(
-        !capabilities
-            .offscreen_pipeline()
-            .supports_layer_filter_execution()
-    );
-}
-
-#[test]
-fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
+fn materialized_filter_support_does_not_enable_layer_effect_execution() {
     let image_buffer =
         ImageBuffer::try_new(PhysicalSize::new(1, 1), vec![100, 150, 200, 255]).unwrap();
     let shadow = Shadow::try_new(Point::new(1.0, 1.0), 2.0, 0.0, Color::BLACK).unwrap();
@@ -5591,7 +5524,7 @@ fn sequence10_guardrail_layer_effect_execution_stays_unsupported() {
 }
 
 #[test]
-fn sequence10_guardrail_unfiltered_images_stay_on_direct_sampling_path() {
+fn unfiltered_images_preserve_direct_sampling_normalization() {
     let image = Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([255, 0, 0, 255])).unwrap();
     let mut scene = Scene::new();
     scene.image(image, Rect::new(0.0, 0.0, 2.0, 2.0), ImageFit::Stretch);
@@ -5648,7 +5581,7 @@ fn normalize_single_layer_error(layer: Layer) -> Error {
     });
     scene
         .normalize(Capabilities::CURRENT)
-        .expect_err("Sequence 10 guardrail layer should reject during normalization")
+        .expect_err("unsupported layer effects should reject during normalization")
 }
 
 fn assert_premultiplied(pixel: PremultipliedRgba8) {
@@ -8109,7 +8042,7 @@ fn offscreen_no_allocation_when_layer_isolation_is_unnecessary() {
 }
 
 #[test]
-fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_baseline() {
+fn direct_vello_output_matches_ordinary_scene_baseline() {
     let mut scene = Scene::new();
     scene
         .fill(
@@ -8152,7 +8085,7 @@ fn sequence9_offscreen_guardrail_direct_vello_rendering_matches_ordinary_scene_b
 }
 
 #[test]
-fn sequence9_guardrail_layer_pass_plans_keep_finite_bounds_without_offscreen_texture() {
+fn effect_free_layers_keep_finite_bounds_without_offscreen_plan() {
     let mut scene = Scene::new();
     scene.layer(Layer::new().try_opacity(0.5).unwrap(), |scene| {
         scene.fill(Rect::new(1.0, 2.0, 4.0, 3.0), Color::BLACK);
@@ -8233,7 +8166,7 @@ fn retained_capture_texture_lifecycle_is_deterministic_for_nested_layer_bounds()
 }
 
 #[test]
-fn sequence9_guardrail_reference_buffers_are_deterministic_composition_oracles() {
+fn reference_composition_buffers_are_deterministic() {
     let red_half = PremultipliedRgba8::try_new(128, 0, 0, 128).unwrap();
     let blue_half = PremultipliedRgba8::try_new(0, 0, 128, 128).unwrap();
     let green = PremultipliedRgba8::try_new(0, 255, 0, 255).unwrap();
@@ -8265,7 +8198,7 @@ fn sequence9_guardrail_reference_buffers_are_deterministic_composition_oracles()
 }
 
 #[test]
-fn sequence9_guardrail_layer_mask_and_filter_inputs_keep_typed_diagnostics() {
+fn authored_layer_mask_and_filter_inputs_return_typed_diagnostics() {
     let cases = [
         (
             Layer::new()
@@ -8292,7 +8225,7 @@ fn sequence9_guardrail_layer_mask_and_filter_inputs_keep_typed_diagnostics() {
 
         let error = scene
             .normalize(Capabilities::CURRENT)
-            .expect_err("Sequence 9 must not execute mask or layer effect semantics");
+            .expect_err("authored inputs must not imply mask or layer-effect execution");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
@@ -17071,53 +17004,52 @@ fn filter_region_models_reject_invalid_bounds_and_radii() {
 }
 
 #[test]
-fn filter_color_pipeline_rejects_blur_with_typed_diagnostic() {
-    let list = FilterList::try_ops(vec![
-        FilterOp::brightness(FilterAmount::try_new(1.0).unwrap()),
-        FilterOp::blur(FilterBlur::try_new(4.0).unwrap()),
-        FilterOp::contrast(FilterAmount::try_new(1.0).unwrap()),
-    ])
-    .unwrap();
-
-    let unsupported = list
-        .color_filter_pipeline()
-        .expect_err("blur is not a color-only filter operation");
-
-    assert_eq!(
-        unsupported,
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuBlurFilterExecution
-        )
-    );
-    assert_eq!(unsupported.label(), "GPU blur filter execution");
-}
-
-#[test]
-fn filter_color_pipeline_rejects_drop_shadow_with_typed_diagnostic() {
+fn color_filter_pipeline_rejects_pixel_moving_operations_with_typed_diagnostics() {
     let shadow = FilterDropShadow::try_from_shadow(
         Shadow::try_new(Point::new(1.0, 2.0), 3.0, 0.0, Color::BLACK).unwrap(),
     )
     .unwrap();
-    let list = FilterList::try_ops(vec![
-        FilterOp::saturate(FilterAmount::try_new(1.0).unwrap()),
-        FilterOp::drop_shadow(shadow),
-        FilterOp::sepia(UnitFilterAmount::try_new(0.25).unwrap()),
-    ])
-    .unwrap();
+    let cases = [
+        (
+            "blur",
+            FilterList::try_ops(vec![
+                FilterOp::brightness(FilterAmount::try_new(1.0).unwrap()),
+                FilterOp::blur(FilterBlur::try_new(4.0).unwrap()),
+                FilterOp::contrast(FilterAmount::try_new(1.0).unwrap()),
+            ])
+            .unwrap(),
+            PrimitiveOperation::GpuBlurFilterExecution,
+            "GPU blur filter execution",
+        ),
+        (
+            "drop shadow",
+            FilterList::try_ops(vec![
+                FilterOp::saturate(FilterAmount::try_new(1.0).unwrap()),
+                FilterOp::drop_shadow(shadow),
+                FilterOp::sepia(UnitFilterAmount::try_new(0.25).unwrap()),
+            ])
+            .unwrap(),
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+            "GPU drop-shadow filter execution",
+        ),
+    ];
 
-    let unsupported = list
-        .color_filter_pipeline()
-        .expect_err("drop-shadow is not a color-only filter operation");
+    for (case, list, operation, label) in cases {
+        let unsupported = list
+            .color_filter_pipeline()
+            .expect_err("pixel-moving operations are not color-only filters");
 
-    assert_eq!(
-        unsupported,
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuDropShadowFilterExecution
-        )
-    );
-    assert_eq!(unsupported.label(), "GPU drop-shadow filter execution");
+        assert_eq!(
+            unsupported,
+            UnsupportedPrimitive::new(PrimitiveFamily::Filters, operation),
+            "{case} returned the wrong typed diagnostic",
+        );
+        assert_eq!(
+            unsupported.label(),
+            label,
+            "{case} returned the wrong label"
+        );
+    }
 }
 
 #[test]
@@ -17304,7 +17236,7 @@ fn backdrop_layer_normalization_plans_bounded_capture_without_broad_execution() 
 }
 
 #[test]
-fn bounded_backdrop_capture_stays_future_before_filter_execution() {
+fn bounded_backdrop_capture_normalizes_and_executes_through_public_route() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -17339,7 +17271,7 @@ fn bounded_backdrop_capture_stays_future_before_filter_execution() {
 }
 
 #[test]
-fn authored_backdrop_filter_orders_stay_future_gpu_passes() {
+fn authored_backdrop_filter_orders_execute_through_public_route() {
     let source_rect = Rect::new(0.0, 0.0, 3.0, 1.0);
     let bounds = BackdropCaptureBounds::try_new(source_rect).unwrap();
     let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
@@ -17391,7 +17323,7 @@ fn authored_backdrop_filter_orders_stay_future_gpu_passes() {
 }
 
 #[test]
-fn clipped_backdrop_filter_stays_a_future_gpu_pass() {
+fn clipped_backdrop_filter_executes_through_public_route() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -17417,7 +17349,7 @@ fn clipped_backdrop_filter_stays_a_future_gpu_pass() {
 }
 
 #[test]
-fn backdrop_foreground_composition_stays_a_future_gpu_pass() {
+fn backdrop_foreground_composition_executes_through_public_route() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -17645,7 +17577,7 @@ fn backdrop_layer_normalization_carries_rounded_and_path_clip_planning() {
 }
 
 #[test]
-fn sequence13_bounded_backdrop_order_stays_planned_before_future_execution() {
+fn bounded_backdrop_normalization_orders_capture_before_execution() {
     let filters = FilterList::try_ops(vec![FilterOp::invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )])
@@ -17699,7 +17631,7 @@ fn sequence13_bounded_backdrop_order_stays_planned_before_future_execution() {
 }
 
 #[test]
-fn sequence13_backdrop_filter_chain_preserves_future_pass_inputs() {
+fn backdrop_filter_chain_preserves_authored_inputs() {
     let source_rect = Rect::new(0.0, 0.0, 3.0, 1.0);
     let bounds = BackdropCaptureBounds::try_new(source_rect).unwrap();
     let brightness = FilterOp::brightness(FilterAmount::try_new(2.0).unwrap());
@@ -17778,7 +17710,7 @@ fn sequence13_backdrop_filter_chain_preserves_future_pass_inputs() {
 }
 
 #[test]
-fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
+fn backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
     let unsupported_isolation = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BackdropIsolationComposition,
@@ -17810,7 +17742,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
     });
     let nested = nested_scene
         .normalize(Capabilities::CURRENT)
-        .expect_err("nested backdrop capture crosses the bounded Sequence 13 path");
+        .expect_err("nested backdrop capture crosses the bounded execution path");
     assert_eq!(nested.unsupported_primitive(), Some(unsupported_broad));
     assert!(nested.message().contains("nested backdrop capture"));
 
@@ -17848,7 +17780,7 @@ fn sequence13_backdrop_isolation_and_bounded_group_diagnostics_are_explicit() {
 }
 
 #[test]
-fn sequence13_mix_blend_set_is_direct_vello_only_with_extra_modes_diagnostic() {
+fn supported_mix_blend_modes_use_direct_vello_and_extra_modes_are_typed() {
     let blend_modes = [
         BlendMode::Normal,
         BlendMode::Multiply,
@@ -17885,7 +17817,7 @@ fn sequence13_mix_blend_set_is_direct_vello_only_with_extra_modes_diagnostic() {
             output,
             source.blend_over(destination, mode),
             2,
-            &format!("Sequence 13 direct Vello blend mode {mode:?} should match reference"),
+            &format!("direct Vello blend mode {mode:?} should match reference"),
         );
     }
 
@@ -17938,7 +17870,7 @@ fn sequence13_mix_blend_set_is_direct_vello_only_with_extra_modes_diagnostic() {
 }
 
 #[test]
-fn sequence13_root_background_and_composite_boundaries_remain_typed() {
+fn root_background_and_composite_boundaries_remain_typed() {
     let filters =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap();
     let root = BackdropFilterInput::try_root_backdrop(filters, None)
@@ -18012,98 +17944,6 @@ fn sequence13_root_background_and_composite_boundaries_remain_typed() {
                 PrimitiveOperation::MaskCompositeMode,
             ))
         );
-    }
-}
-
-#[test]
-fn sequence13_vello_0_9_advertises_exact_narrow_backdrop_and_compositing_contract() {
-    let capabilities = Capabilities::CURRENT;
-    let offscreen = capabilities.offscreen_pipeline();
-    assert!(offscreen.supports_direct_vello_opacity_isolation());
-    assert!(offscreen.supports_direct_vello_blend_isolation());
-    assert!(offscreen.supports_bounded_backdrop_capture());
-    assert!(offscreen.supports_bounded_backdrop_filter_execution());
-    assert!(!offscreen.supports_offscreen_layer_rendering());
-    assert!(offscreen.supports_persistent_effect_resources());
-    assert!(offscreen.supports_bounded_vello_capture());
-    assert!(offscreen.supports_image_pass_execution());
-    assert!(offscreen.supports_composite_pass_execution());
-    assert!(offscreen.supports_nested_opacity_composition());
-    assert!(!offscreen.supports_mask_execution());
-    assert!(!offscreen.supports_layer_filter_execution());
-    assert!(!offscreen.supports_broad_backdrop_execution());
-    assert!(!offscreen.supports_backdrop_isolation_composition());
-
-    let compositing = capabilities.compositing();
-    assert!(compositing.supports_layer_opacity());
-    assert!(compositing.supports_blend_modes());
-    assert!(!compositing.supports_root_backdrop_policy());
-    assert!(!compositing.supports_background_blend_modes());
-    assert!(!compositing.supports_additional_mix_blend_modes());
-    assert!(!compositing.supports_porter_duff_composite_modes());
-
-    let masks = capabilities.masks_clips();
-    assert!(masks.supports_shape_clips());
-    assert!(masks.supports_resolved_alpha_mask_execution());
-    assert!(!masks.supports_clip_reference_execution());
-    assert!(!masks.supports_layer_masks());
-    assert!(!masks.supports_luminance_mask_mode());
-    assert!(!masks.supports_multi_layer_mask_composition());
-    assert!(!masks.supports_mask_composite_modes());
-
-    for supported in [
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropCapture,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BoundedBackdropFilterExecution,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::ResolvedAlphaMaskExecution,
-        ),
-    ] {
-        capabilities
-            .ensure_supported(supported)
-            .unwrap_or_panic_for_test("narrow Sequence 13 capability should be advertised");
-    }
-
-    for unsupported in [
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BroadBackdropExecution,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BackdropIsolationComposition,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::Compositing,
-            PrimitiveOperation::RootBackdropPolicy,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::Compositing,
-            PrimitiveOperation::BackgroundBlendMode,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::Compositing,
-            PrimitiveOperation::AdditionalMixBlendMode,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::Compositing,
-            PrimitiveOperation::PorterDuffCompositeMode,
-        ),
-        UnsupportedPrimitive::new(
-            PrimitiveFamily::MasksAndClips,
-            PrimitiveOperation::MaskCompositeMode,
-        ),
-    ] {
-        let error = capabilities
-            .ensure_supported(unsupported)
-            .expect_err("broader Sequence 13 behavior must not be advertised");
-        assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
 }
 
@@ -18457,7 +18297,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
 
     let luminance_error = luminance_mask
         .ensure_supported(Capabilities::CURRENT)
-        .expect_err("luminance mask mode is not implemented in Task 1");
+        .expect_err("luminance mask mode remains unsupported");
     assert_eq!(
         luminance_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -18478,7 +18318,7 @@ fn mask_inputs_diagnose_current_unexecuted_boundaries() {
 }
 
 #[test]
-fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() {
+fn shape_and_basic_shape_clips_normalize_and_render_from_owned_geometry() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
     let rounded = Shape::try_rounded_rect(rect, Radii::try_all(0.5).unwrap()).unwrap();
     let circle = Shape::try_circle(Point::new(1.0, 1.0), 1.0).unwrap();
@@ -18524,7 +18364,7 @@ fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() 
         });
 
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-            .expect("Sequence 12 shape/basic-shape clips should execute through layer clipping");
+            .expect("authored shape clips should render through layer clipping");
         let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
         assert!(pixel_alpha(&output, 0, 0) > 0);
@@ -18533,7 +18373,7 @@ fn sequence12_executes_shape_and_basic_shape_clips_from_render_owned_geometry() 
 }
 
 #[test]
-fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
+fn path_clip_rendering_preserves_authored_fill_rule() {
     fn nested_rect_path() -> Path {
         let mut path = Path::new();
         path.move_to(Point::new(0.0, 0.0))
@@ -18575,7 +18415,7 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
         );
 
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-            .expect("Sequence 12 path clips should execute with their authored fill rule");
+            .expect("path clips should render with their authored fill rule");
         outputs.push(pollster::block_on(renderer.read_headless(&surface)).unwrap());
     }
 
@@ -18584,7 +18424,7 @@ fn sequence12_path_clip_execution_preserves_fill_rule_behavior() {
 }
 
 #[test]
-fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_inputs() {
+fn unresolved_and_unmaterialized_clip_mask_inputs_return_typed_diagnostics() {
     let clip = ClipInput::reference(StyleResourceRef::try_new("#clip").unwrap());
     let clip_error = clip
         .normalize(Capabilities::CURRENT)
@@ -18606,7 +18446,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
     );
     let luminance_error = luminance_stack
         .ensure_supported(Capabilities::CURRENT)
-        .expect_err("luminance mask conversion is outside Sequence 12");
+        .expect_err("luminance mask conversion is unsupported");
     assert_eq!(
         luminance_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -18634,7 +18474,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
     ])
     .unwrap()
     .ensure_supported(Capabilities::CURRENT)
-    .expect_err("multi-layer mask composition has a typed Sequence 12 boundary");
+    .expect_err("multi-layer mask composition has a typed boundary");
     assert_eq!(
         multi_layer_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -18646,7 +18486,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
     let composite_error =
         MaskLayerStack::single(MaskLayer::try_new(alpha_mask, MaskCompositeMode::Exclude).unwrap())
             .ensure_supported(Capabilities::CURRENT)
-            .expect_err("non-default mask composites have a typed Sequence 12 boundary");
+            .expect_err("non-default mask composites have a typed boundary");
     assert_eq!(
         composite_error.unsupported_primitive(),
         Some(UnsupportedPrimitive::new(
@@ -18657,7 +18497,7 @@ fn sequence12_reports_typed_clip_and_mask_diagnostics_for_unresolved_or_later_in
 }
 
 #[test]
-fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers() {
+fn resolved_alpha_masks_match_reference_and_rendered_layer_output() {
     let source = ImageBuffer::try_new(
         PhysicalSize::new(2, 1),
         vec![255, 0, 0, 255, 0, 255, 0, 255],
@@ -18689,68 +18529,11 @@ fn sequence12_executes_materialized_alpha_masks_for_resolved_buffers_and_layers(
     );
 
     pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect("Sequence 12 resolved layer alpha masks should execute");
+        .expect("resolved layer alpha masks should render");
     let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
 
     assert!(pixel_alpha(&output, 0, 0) > 200);
     assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
-}
-
-#[test]
-fn sequence12_capabilities_claim_only_implemented_mask_clip_and_no_broad_backdrop_behavior() {
-    let capabilities = Capabilities::CURRENT;
-    let masks_clips = capabilities.masks_clips();
-    assert!(masks_clips.supports_shape_clips());
-    assert!(masks_clips.supports_resolved_alpha_mask_execution());
-    assert!(!masks_clips.supports_clip_reference_execution());
-    assert!(!masks_clips.supports_layer_masks());
-    assert!(!masks_clips.supports_luminance_mask_mode());
-    assert!(!masks_clips.supports_multi_layer_mask_composition());
-    assert!(!masks_clips.supports_mask_composite_modes());
-
-    assert!(
-        capabilities
-            .ensure_supported(UnsupportedPrimitive::new(
-                PrimitiveFamily::MasksAndClips,
-                PrimitiveOperation::ResolvedAlphaMaskExecution,
-            ))
-            .is_ok(),
-        "resolved alpha-mask execution is the narrow supported mask execution path"
-    );
-    for operation in [
-        PrimitiveOperation::ClipReferenceExecution,
-        PrimitiveOperation::LayerMask,
-        PrimitiveOperation::AlphaMaskSourceExecution,
-        PrimitiveOperation::LuminanceMaskMode,
-        PrimitiveOperation::MultiLayerMaskComposition,
-        PrimitiveOperation::MaskCompositeMode,
-    ] {
-        let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::MasksAndClips, operation);
-        assert_eq!(
-            capabilities
-                .ensure_supported(unsupported)
-                .expect_err("broader mask/clip behavior must not be claimed early")
-                .unsupported_primitive(),
-            Some(unsupported)
-        );
-    }
-
-    let offscreen = capabilities.offscreen_pipeline();
-    assert!(offscreen.supports_direct_vello_opacity_isolation());
-    assert!(offscreen.supports_direct_vello_blend_isolation());
-    assert!(!offscreen.supports_offscreen_layer_rendering());
-    assert!(!offscreen.supports_mask_execution());
-    assert!(!offscreen.supports_layer_filter_execution());
-    assert!(!offscreen.supports_broad_backdrop_execution());
-
-    assert!(capabilities.filters().supports_gpu_blur_filter_execution());
-    assert!(
-        capabilities
-            .filters()
-            .supports_gpu_drop_shadow_filter_execution()
-    );
-    assert!(!capabilities.filters().supports_layer_filters());
-    assert!(!capabilities.shadows().supports_text_shadows());
 }
 
 #[test]
@@ -19375,64 +19158,46 @@ fn background_normalization_rejects_clip_override_length_mismatch() {
 }
 
 #[test]
-fn background_normalization_accepts_shape_clip_overrides() {
-    let layer = BackgroundLayer::new(
-        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
-            .unwrap(),
-    );
-    let shape = Shape::rect(Rect::new(1.0, 1.0, 8.0, 8.0));
-    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
-    let normalized = BackgroundNormalizationInput::try_new(
-        stack,
-        BackgroundAreas::try_new(
-            Rect::new(0.0, 0.0, 20.0, 20.0),
-            Rect::new(0.0, 0.0, 20.0, 20.0),
-            Rect::new(0.0, 0.0, 20.0, 20.0),
-        )
-        .unwrap(),
-    )
-    .unwrap()
-    .with_layer_clip_overrides(vec![Some(
-        BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
-    )])
-    .unwrap()
-    .normalize(Capabilities::CURRENT)
-    .unwrap();
-
-    assert_eq!(normalized.commands()[0].clip().shape(), Some(&shape));
-}
-
-#[test]
-fn background_normalization_accepts_path_clip_overrides() {
-    let layer = BackgroundLayer::new(
-        StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
-            .unwrap(),
-    );
+fn background_normalization_preserves_authored_clip_override_geometry() {
     let mut path = Path::new();
     path.move_to(Point::new(0.0, 0.0))
         .line_to(Point::new(10.0, 0.0))
         .line_to(Point::new(10.0, 10.0))
         .close();
-    let shape = Shape::path(path);
-    let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
-    let normalized = BackgroundNormalizationInput::try_new(
-        stack,
-        BackgroundAreas::try_new(
-            Rect::new(0.0, 0.0, 20.0, 20.0),
-            Rect::new(0.0, 0.0, 20.0, 20.0),
-            Rect::new(0.0, 0.0, 20.0, 20.0),
-        )
-        .unwrap(),
-    )
-    .unwrap()
-    .with_layer_clip_overrides(vec![Some(
-        BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
-    )])
-    .unwrap()
-    .normalize(Capabilities::CURRENT)
-    .unwrap();
+    let cases = [
+        ("rectangle", Shape::rect(Rect::new(1.0, 1.0, 8.0, 8.0))),
+        ("path", Shape::path(path)),
+    ];
 
-    assert_eq!(normalized.commands()[0].clip().shape(), Some(&shape));
+    for (case, shape) in cases {
+        let layer = BackgroundLayer::new(
+            StyleImageLayer::try_new(StyleImageSource::paint(Paint::from(Color::BLACK)).unwrap())
+                .unwrap(),
+        );
+        let stack = BackgroundStack::try_new(None, vec![layer]).unwrap();
+        let normalized = BackgroundNormalizationInput::try_new(
+            stack,
+            BackgroundAreas::try_new(
+                Rect::new(0.0, 0.0, 20.0, 20.0),
+                Rect::new(0.0, 0.0, 20.0, 20.0),
+                Rect::new(0.0, 0.0, 20.0, 20.0),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+        .with_layer_clip_overrides(vec![Some(
+            BackgroundClipGeometry::try_shape(shape.clone()).unwrap(),
+        )])
+        .unwrap()
+        .normalize(Capabilities::CURRENT)
+        .unwrap();
+
+        assert_eq!(
+            normalized.commands()[0].clip().shape(),
+            Some(&shape),
+            "{case} clip geometry was not preserved",
+        );
+    }
 }
 
 #[test]
@@ -20814,7 +20579,7 @@ fn blend_capability_accessors_preserve_direct_vello_claims_without_background_bl
 }
 
 #[test]
-fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution() {
+fn mask_clip_capabilities_name_narrow_alpha_execution_boundaries() {
     let capabilities = Capabilities::CURRENT.masks_clips();
 
     assert!(capabilities.supports_shape_clips());
@@ -21091,7 +20856,7 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
 
         let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
-            .expect_err("later sequence diagnostics stay named without execution");
+            .expect_err("unsupported shadow operations stay named without execution");
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
         assert!(error.message().contains(label));
@@ -21287,7 +21052,7 @@ fn backdrop_and_advanced_compositing_diagnostics_have_granular_names() {
 
         let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
-            .expect_err("Sequence 13 Task 1 only names future compositing boundaries");
+            .expect_err("advanced compositing operations remain typed boundaries");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
@@ -21297,7 +21062,7 @@ fn backdrop_and_advanced_compositing_diagnostics_have_granular_names() {
 }
 
 #[test]
-fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
+fn mask_clip_capability_diagnostics_report_unsupported_operations() {
     for operation in [
         PrimitiveOperation::ClipReferenceExecution,
         PrimitiveOperation::LayerMask,
@@ -21309,7 +21074,7 @@ fn mask_clip_capability_diagnostics_report_sequence12_unsupported_operations() {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::MasksAndClips, operation);
         let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
-            .expect_err("Sequence 12 Task 1 should only name unsupported mask/clip boundaries");
+            .expect_err("unsupported mask and clip operations remain typed boundaries");
 
         assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
