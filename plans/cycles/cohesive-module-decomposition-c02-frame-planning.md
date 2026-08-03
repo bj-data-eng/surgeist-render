@@ -248,3 +248,9 @@ The live smoke executables must render and exit on the native host. Every
 unsafe-scan match is classified; any executable match blocks completion. The
 publication head is immutable after holistic review. Root integration remains
 excluded.
+
+The C02-to-C03 leaf handoff reports the immutable published C02 candidate and
+authority-remote readback SHA, the exact planning revision and clean task and
+holistic verdicts, and the stable semantic-planning and graph-lowering front
+doors now available to C03 shader/resource work. It confirms clean status and
+retains the explicit exclusion of root integration.
