@@ -9,13 +9,6 @@ use vello_encoding::ConfigUniform;
 
 use crate::{BackendErrorCode, Error, PhysicalSize, Result};
 
-#[cfg(test)]
-use super::{
-    VelloPassBindingForTest, VelloPassBufferRoleForTest, VelloPassDispatchObservation,
-    VelloPassImageRoleForTest, VelloPassIndirectDispatchForTest, VelloPassOperationForTest,
-    VelloPassPhaseForTest, VelloPassResourceForTest, VelloPassResourceLifetimeObservation,
-};
-
 /// A symbolic resource identity within one prepared Vello pass.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ResourceId(u64);
@@ -28,7 +21,7 @@ pub(super) struct BufferHandle(ResourceId);
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) struct ImageHandle(ResourceId);
 
-/// The only image format required by the pinned Vello raster path.
+/// The only image format required by the Vello raster path.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(super) enum RasterImageFormat {
     Rgba8Unorm,
@@ -49,7 +42,7 @@ pub(super) enum FineRasterVariant {
     Msaa16,
 }
 
-/// The closed set of compute programs used by the pinned Vello schedule.
+/// The closed set of compute programs used by the raster schedule.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum RasterKernel {
     PathTagReduce,
@@ -648,8 +641,6 @@ pub(super) struct BufferIntent {
     resource: BufferHandle,
     role: BufferRole,
     byte_len: u64,
-    #[cfg(test)]
-    allocation_command_index: usize,
 }
 
 pub(super) struct ImageIntent {
@@ -879,8 +870,6 @@ impl RecordingBuilder {
                 resource: buffer,
                 role,
                 byte_len,
-                #[cfg(test)]
-                allocation_command_index: self.commands.len(),
             }));
         Ok(buffer)
     }
@@ -969,111 +958,6 @@ impl DispatchIntent {
 
 #[cfg(test)]
 impl Recording {
-    pub(super) fn schedule_observations_for_test(
-        &self,
-        intents: &[ResourceIntent],
-    ) -> (
-        Vec<VelloPassDispatchObservation>,
-        Vec<(
-            VelloPassResourceForTest,
-            VelloPassResourceLifetimeObservation,
-        )>,
-    ) {
-        let resource_roles = ResourceRoleResolverForTest { intents };
-        let mut released = Vec::new();
-        let mut dispatches = Vec::new();
-        for command in &self.commands {
-            match command {
-                RasterCommand::Dispatch(dispatch) => dispatches.push(
-                    dispatch_observation_for_test(dispatch, &resource_roles, &released),
-                ),
-                RasterCommand::Release(reference) => {
-                    released.push(resource_reference_id(*reference));
-                }
-                _ => {}
-            }
-        }
-        let lifetimes = [
-            (
-                VelloPassResourceForTest::LargePathReduced2,
-                BufferRole::PathReduced2,
-            ),
-            (
-                VelloPassResourceForTest::LargePathReducedScan,
-                BufferRole::PathReducedScan,
-            ),
-            (VelloPassResourceForTest::ClipInputs, BufferRole::ClipInputs),
-            (
-                VelloPassResourceForTest::ClipElements,
-                BufferRole::ClipElements,
-            ),
-            (VelloPassResourceForTest::ClipBics, BufferRole::ClipBics),
-            (VelloPassResourceForTest::ClipBboxes, BufferRole::ClipBboxes),
-        ]
-        .into_iter()
-        .filter_map(|(observed_resource, role)| {
-            let (resource, allocation_command_index) = buffer_for_role_for_test(intents, role)?;
-            Some((
-                observed_resource,
-                self.resource_lifetime_for_test(buffer_id(resource), allocation_command_index),
-            ))
-        })
-        .collect();
-        (dispatches, lifetimes)
-    }
-
-    fn resource_lifetime_for_test(
-        &self,
-        resource: ResourceId,
-        allocation_command_index: usize,
-    ) -> VelloPassResourceLifetimeObservation {
-        let allocation_after = self.previous_dispatch_for_test(allocation_command_index);
-        let (first_use, last_use) = self
-            .commands
-            .iter()
-            .filter_map(|command| match command {
-                RasterCommand::Dispatch(dispatch)
-                    if dispatch_references_resource_for_test(dispatch, resource) =>
-                {
-                    Some(operation_for_test(dispatch.kernel))
-                }
-                _ => None,
-            })
-            .fold((None, None), |(first, _), operation| {
-                (first.or(Some(operation)), Some(operation))
-            });
-        let release_after = self
-            .commands
-            .iter()
-            .position(|command| {
-                matches!(
-                    command,
-                    RasterCommand::Release(reference)
-                        if resource_reference_id(*reference) == resource
-                )
-            })
-            .and_then(|index| self.previous_dispatch_for_test(index));
-        VelloPassResourceLifetimeObservation {
-            allocation_after,
-            first_use,
-            last_use,
-            release_after,
-        }
-    }
-
-    fn previous_dispatch_for_test(
-        &self,
-        command_index: usize,
-    ) -> Option<VelloPassOperationForTest> {
-        self.commands[..command_index]
-            .iter()
-            .rev()
-            .find_map(|command| match command {
-                RasterCommand::Dispatch(dispatch) => Some(operation_for_test(dispatch.kernel)),
-                _ => None,
-            })
-    }
-
     pub(super) fn is_self_consistent_for_test(&self, intents: &[ResourceIntent]) -> bool {
         let Some((known, persistent)) = validated_resource_ids_for_test(intents) else {
             return false;
@@ -1201,228 +1085,6 @@ fn commands_are_self_consistent_for_test(
         }
     }
     released.len() + persistent.len() == known.len()
-}
-
-#[cfg(test)]
-struct ResourceRoleResolverForTest<'a> {
-    intents: &'a [ResourceIntent],
-}
-
-#[cfg(test)]
-impl ResourceRoleResolverForTest<'_> {
-    fn binding_for_test(
-        &self,
-        binding: &ResourceBinding,
-        released: &[ResourceId],
-    ) -> VelloPassBindingForTest {
-        match binding {
-            ResourceBinding::Buffer(buffer) => {
-                VelloPassBindingForTest::Buffer(self.buffer_role_for_test(*buffer, released))
-            }
-            ResourceBinding::Image(image) => {
-                VelloPassBindingForTest::Image(self.image_role_for_test(*image, released))
-            }
-            ResourceBinding::TargetOutput => VelloPassBindingForTest::TargetOutput,
-        }
-    }
-
-    fn indirect_for_test(
-        &self,
-        indirect: &IndirectDispatch,
-        released: &[ResourceId],
-    ) -> VelloPassIndirectDispatchForTest {
-        VelloPassIndirectDispatchForTest::new(
-            self.buffer_role_for_test(indirect.buffer, released),
-            indirect.offset,
-        )
-    }
-
-    fn buffer_role_for_test(
-        &self,
-        buffer: BufferHandle,
-        released: &[ResourceId],
-    ) -> VelloPassBufferRoleForTest {
-        match self.live_intent_for_test(buffer_id(buffer), "buffer", released) {
-            ResourceIntent::Buffer(BufferIntent { role, .. }) => buffer_role_for_test(*role),
-            ResourceIntent::Image(_) => {
-                panic!("Vello recording bound an image allocation as a buffer at dispatch")
-            }
-        }
-    }
-
-    fn image_role_for_test(
-        &self,
-        image: ImageHandle,
-        released: &[ResourceId],
-    ) -> VelloPassImageRoleForTest {
-        match self.live_intent_for_test(image_id(image), "image", released) {
-            ResourceIntent::Buffer(_) => {
-                panic!("Vello recording bound a buffer allocation as an image at dispatch")
-            }
-            ResourceIntent::Image(ImageIntent { role, .. }) => image_role_for_test(*role),
-        }
-    }
-
-    fn live_intent_for_test(
-        &self,
-        resource: ResourceId,
-        binding_kind: &str,
-        released: &[ResourceId],
-    ) -> &ResourceIntent {
-        if released.contains(&resource) {
-            panic!(
-                "Vello recording observed a released {binding_kind} allocation at dispatch: {resource:?}"
-            );
-        }
-        let mut matching = self
-            .intents
-            .iter()
-            .filter(|intent| resource_intent_id_for_test(intent) == resource);
-        let Some(intent) = matching.next() else {
-            panic!(
-                "Vello recording observed a {binding_kind} allocation without a resource intent: {resource:?}"
-            );
-        };
-        if matching.next().is_some() {
-            panic!(
-                "Vello recording observed an ambiguous {binding_kind} allocation role at dispatch: {resource:?}"
-            );
-        }
-        intent
-    }
-}
-
-#[cfg(test)]
-fn dispatch_observation_for_test(
-    dispatch: &DispatchIntent,
-    resource_roles: &ResourceRoleResolverForTest<'_>,
-    released: &[ResourceId],
-) -> VelloPassDispatchObservation {
-    VelloPassDispatchObservation {
-        phase: phase_for_test(dispatch.phase),
-        operation: operation_for_test(dispatch.kernel),
-        bindings: dispatch
-            .bindings
-            .iter()
-            .map(|binding| resource_roles.binding_for_test(binding, released))
-            .collect(),
-        indirect: dispatch
-            .indirect
-            .as_ref()
-            .map(|indirect| resource_roles.indirect_for_test(indirect, released)),
-    }
-}
-
-#[cfg(test)]
-const fn phase_for_test(phase: RasterPhase) -> VelloPassPhaseForTest {
-    match phase {
-        RasterPhase::Coarse => VelloPassPhaseForTest::Coarse,
-        RasterPhase::Fine => VelloPassPhaseForTest::Fine,
-    }
-}
-
-#[cfg(test)]
-const fn operation_for_test(kernel: RasterKernel) -> VelloPassOperationForTest {
-    match kernel {
-        RasterKernel::PathTagReduce => VelloPassOperationForTest::PathTagReduce,
-        RasterKernel::PathTagReduce2 => VelloPassOperationForTest::PathTagReduce2,
-        RasterKernel::PathTagScan1 => VelloPassOperationForTest::PathTagScan1,
-        RasterKernel::PathTagScan => VelloPassOperationForTest::PathTagScan,
-        RasterKernel::PathTagScanLarge => VelloPassOperationForTest::PathTagScanLarge,
-        RasterKernel::BboxClear => VelloPassOperationForTest::BboxClear,
-        RasterKernel::Flatten => VelloPassOperationForTest::Flatten,
-        RasterKernel::DrawReduce => VelloPassOperationForTest::DrawReduce,
-        RasterKernel::DrawLeaf => VelloPassOperationForTest::DrawLeaf,
-        RasterKernel::ClipReduce => VelloPassOperationForTest::ClipReduce,
-        RasterKernel::ClipLeaf => VelloPassOperationForTest::ClipLeaf,
-        RasterKernel::Binning => VelloPassOperationForTest::Binning,
-        RasterKernel::TileAlloc => VelloPassOperationForTest::TileAlloc,
-        RasterKernel::PathCountSetup => VelloPassOperationForTest::PathCountSetup,
-        RasterKernel::PathCount => VelloPassOperationForTest::PathCount,
-        RasterKernel::Backdrop => VelloPassOperationForTest::Backdrop,
-        RasterKernel::Coarse => VelloPassOperationForTest::Coarse,
-        RasterKernel::PathTilingSetup => VelloPassOperationForTest::PathTilingSetup,
-        RasterKernel::PathTiling => VelloPassOperationForTest::PathTiling,
-        RasterKernel::FineArea => VelloPassOperationForTest::FineArea,
-        RasterKernel::FineMsaa8 => VelloPassOperationForTest::FineMsaa8,
-        RasterKernel::FineMsaa16 => VelloPassOperationForTest::FineMsaa16,
-    }
-}
-
-#[cfg(test)]
-const fn buffer_role_for_test(role: BufferRole) -> VelloPassBufferRoleForTest {
-    match role {
-        BufferRole::Scene => VelloPassBufferRoleForTest::Scene,
-        BufferRole::Config => VelloPassBufferRoleForTest::Config,
-        BufferRole::InfoBinData => VelloPassBufferRoleForTest::InfoBinData,
-        BufferRole::Tile => VelloPassBufferRoleForTest::Tile,
-        BufferRole::Segments => VelloPassBufferRoleForTest::Segments,
-        BufferRole::PerTileCommandList => VelloPassBufferRoleForTest::PerTileCommandList,
-        BufferRole::PathReduced => VelloPassBufferRoleForTest::PathReduced,
-        BufferRole::PathReduced2 => VelloPassBufferRoleForTest::PathReduced2,
-        BufferRole::PathReducedScan => VelloPassBufferRoleForTest::PathReducedScan,
-        BufferRole::PathMonoids => VelloPassBufferRoleForTest::PathMonoids,
-        BufferRole::PathBboxes => VelloPassBufferRoleForTest::PathBboxes,
-        BufferRole::Bump => VelloPassBufferRoleForTest::Bump,
-        BufferRole::Lines => VelloPassBufferRoleForTest::Lines,
-        BufferRole::DrawReduced => VelloPassBufferRoleForTest::DrawReduced,
-        BufferRole::DrawMonoids => VelloPassBufferRoleForTest::DrawMonoids,
-        BufferRole::ClipInputs => VelloPassBufferRoleForTest::ClipInputs,
-        BufferRole::ClipElements => VelloPassBufferRoleForTest::ClipElements,
-        BufferRole::ClipBics => VelloPassBufferRoleForTest::ClipBics,
-        BufferRole::ClipBboxes => VelloPassBufferRoleForTest::ClipBboxes,
-        BufferRole::DrawBboxes => VelloPassBufferRoleForTest::DrawBboxes,
-        BufferRole::BinHeaders => VelloPassBufferRoleForTest::BinHeaders,
-        BufferRole::Paths => VelloPassBufferRoleForTest::Paths,
-        BufferRole::IndirectCount => VelloPassBufferRoleForTest::IndirectCount,
-        BufferRole::SegmentCounts => VelloPassBufferRoleForTest::SegmentCounts,
-        BufferRole::BlendSpill => VelloPassBufferRoleForTest::BlendSpill,
-        BufferRole::MaskLut => VelloPassBufferRoleForTest::MaskLut,
-    }
-}
-
-#[cfg(test)]
-const fn image_role_for_test(role: ImageRole) -> VelloPassImageRoleForTest {
-    match role {
-        ImageRole::GradientRamp => VelloPassImageRoleForTest::GradientRamp,
-        ImageRole::ImageAtlas => VelloPassImageRoleForTest::ImageAtlas,
-    }
-}
-
-#[cfg(test)]
-const fn resource_intent_id_for_test(intent: &ResourceIntent) -> ResourceId {
-    match intent {
-        ResourceIntent::Buffer(BufferIntent { resource, .. }) => buffer_id(*resource),
-        ResourceIntent::Image(ImageIntent { resource, .. }) => image_id(*resource),
-    }
-}
-
-#[cfg(test)]
-fn buffer_for_role_for_test(
-    intents: &[ResourceIntent],
-    expected_role: BufferRole,
-) -> Option<(BufferHandle, usize)> {
-    intents.iter().find_map(|intent| match intent {
-        ResourceIntent::Buffer(BufferIntent {
-            resource,
-            role,
-            allocation_command_index,
-            ..
-        }) if *role == expected_role => Some((*resource, *allocation_command_index)),
-        _ => None,
-    })
-}
-
-#[cfg(test)]
-fn dispatch_references_resource_for_test(dispatch: &DispatchIntent, resource: ResourceId) -> bool {
-    dispatch.bindings.iter().any(|binding| match binding {
-        ResourceBinding::Buffer(buffer) => buffer_id(*buffer) == resource,
-        ResourceBinding::Image(image) => image_id(*image) == resource,
-        ResourceBinding::TargetOutput => false,
-    }) || dispatch
-        .indirect
-        .as_ref()
-        .is_some_and(|indirect| buffer_id(indirect.buffer) == resource)
 }
 
 #[cfg(test)]

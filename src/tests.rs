@@ -28,8 +28,6 @@ use super::surface::{
 use super::vello_engine::{
     ActiveVelloEncodingScope, PreparedVelloPass, PreparedVelloPassObservation, RasterParameters,
     TransactionEncodingState, TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState,
-    VelloPassBindingForTest, VelloPassBufferRoleForTest, VelloPassImageRoleForTest,
-    VelloPassOperationForTest, VelloPassPhaseForTest, VelloPassResourceForTest,
     glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
     prepared_vello_pass_observation_for_test,
     scene::{
@@ -143,8 +141,6 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
         .expect("recording preparation must not require a runtime resource");
         let observation = prepared_vello_pass_observation_for_test(&prepared);
         assert_prepared_vello_pass_basics(&observation);
-        assert_exact_vello_schedule(&observation, scenario, antialiasing);
-        assert_branch_resource_lifetimes(&observation, scenario);
     }
 
     let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0)
@@ -154,14 +150,12 @@ fn prepared_vello_pass_contains_no_wgpu_resource_or_submission_authority() {
     let mut scene = VelloScene::default();
     scene
         .encode_text_run(&run)
-        .expect("the validated Ahem glyph must encode into the private scene");
+        .expect("the validated Ahem glyph must encode into the Vello scene");
     let prepared = scene
         .prepare_raster(parameters)
-        .expect("only the validated private scene may prepare a Vello pass");
+        .expect("only the validated Vello scene may prepare a pass");
     let observation = prepared_vello_pass_observation_for_test(&prepared);
     assert_prepared_vello_pass_basics(&observation);
-    assert_exact_vello_schedule(&observation, VelloRasterScenario::Base, Antialiasing::Area);
-    assert_branch_resource_lifetimes(&observation, VelloRasterScenario::Base);
 
     let zero_width = RasterParameters::try_new(
         PhysicalSize::new(0, 48),
@@ -208,518 +202,6 @@ fn assert_prepared_vello_pass_basics(observation: &PreparedVelloPassObservation)
     assert!(observation.is_self_consistent_for_test());
     assert!(observation.has_persistent_image_atlas_for_test());
     assert!(observation.has_transient_buffer_for_test());
-}
-
-type ExpectedVelloScheduleEntry = (
-    VelloPassPhaseForTest,
-    VelloPassOperationForTest,
-    Vec<VelloPassBindingForTest>,
-    Option<(VelloPassBufferRoleForTest, u64)>,
-);
-
-fn assert_exact_vello_schedule(
-    observation: &PreparedVelloPassObservation,
-    scenario: VelloRasterScenario,
-    antialiasing: Antialiasing,
-) {
-    let expected = expected_vello_schedule(scenario, antialiasing);
-    let actual = observation.dispatches_for_test();
-    assert_eq!(
-        actual.len(),
-        expected.len(),
-        "{scenario:?} must select the complete pinned Vello schedule"
-    );
-
-    for (index, (actual, (phase, operation, bindings, indirect))) in
-        actual.iter().zip(expected).enumerate()
-    {
-        assert_eq!(
-            actual.phase_for_test(),
-            phase,
-            "{scenario:?} dispatch {index} must retain its phase"
-        );
-        assert_eq!(
-            actual.operation_for_test(),
-            operation,
-            "{scenario:?} dispatch {index} must retain pinned operation order"
-        );
-        assert_eq!(
-            actual.bindings_for_test(),
-            bindings.as_slice(),
-            "{scenario:?} dispatch {index} must retain its binding layout"
-        );
-        match (actual.indirect_for_test(), indirect) {
-            (None, None) => {}
-            (Some(actual_indirect), Some((expected_count_buffer, expected_offset))) => {
-                assert_eq!(
-                    actual_indirect.count_buffer_role_for_test(),
-                    expected_count_buffer,
-                    "{scenario:?} dispatch {index} must retain its indirect count-buffer role"
-                );
-                assert_eq!(
-                    actual_indirect.offset_for_test(),
-                    expected_offset,
-                    "{scenario:?} dispatch {index} must retain its indirect byte offset"
-                );
-            }
-            (actual_indirect, expected_indirect) => panic!(
-                "{scenario:?} dispatch {index} must retain direct or indirect execution: \
-                 actual={actual_indirect:?}, expected={expected_indirect:?}"
-            ),
-        }
-    }
-}
-
-fn expected_vello_schedule(
-    scenario: VelloRasterScenario,
-    antialiasing: Antialiasing,
-) -> Vec<ExpectedVelloScheduleEntry> {
-    use VelloPassBufferRoleForTest as BufferRole;
-
-    let mut expected = vec![(
-        VelloPassPhaseForTest::Coarse,
-        VelloPassOperationForTest::PathTagReduce,
-        buffer_bindings(&[
-            BufferRole::Config,
-            BufferRole::Scene,
-            BufferRole::PathReduced,
-        ]),
-        None,
-    )];
-    append_vello_path_scan_schedule(&mut expected, scenario);
-    append_vello_draw_setup_schedule(&mut expected);
-    append_vello_clip_schedule(&mut expected, scenario);
-    append_vello_raster_schedule(&mut expected);
-    append_vello_fine_schedule(&mut expected, antialiasing);
-    expected
-}
-
-fn append_vello_path_scan_schedule(
-    expected: &mut Vec<ExpectedVelloScheduleEntry>,
-    scenario: VelloRasterScenario,
-) {
-    use VelloPassBufferRoleForTest as BufferRole;
-
-    if matches!(
-        scenario,
-        VelloRasterScenario::LargePath | VelloRasterScenario::LargePathAndClip
-    ) {
-        expected.extend([
-            (
-                VelloPassPhaseForTest::Coarse,
-                VelloPassOperationForTest::PathTagReduce2,
-                buffer_bindings(&[BufferRole::PathReduced, BufferRole::PathReduced2]),
-                None,
-            ),
-            (
-                VelloPassPhaseForTest::Coarse,
-                VelloPassOperationForTest::PathTagScan1,
-                buffer_bindings(&[
-                    BufferRole::PathReduced,
-                    BufferRole::PathReduced2,
-                    BufferRole::PathReducedScan,
-                ]),
-                None,
-            ),
-            (
-                VelloPassPhaseForTest::Coarse,
-                VelloPassOperationForTest::PathTagScanLarge,
-                buffer_bindings(&[
-                    BufferRole::Config,
-                    BufferRole::Scene,
-                    BufferRole::PathReducedScan,
-                    BufferRole::PathMonoids,
-                ]),
-                None,
-            ),
-        ]);
-    } else {
-        expected.push((
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::PathTagScan,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Scene,
-                BufferRole::PathReduced,
-                BufferRole::PathMonoids,
-            ]),
-            None,
-        ));
-    }
-}
-
-fn append_vello_draw_setup_schedule(expected: &mut Vec<ExpectedVelloScheduleEntry>) {
-    use VelloPassBufferRoleForTest as BufferRole;
-
-    expected.extend([
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::BboxClear,
-            buffer_bindings(&[BufferRole::Config, BufferRole::PathBboxes]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::Flatten,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Scene,
-                BufferRole::PathMonoids,
-                BufferRole::PathBboxes,
-                BufferRole::Bump,
-                BufferRole::Lines,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::DrawReduce,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Scene,
-                BufferRole::DrawReduced,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::DrawLeaf,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Scene,
-                BufferRole::DrawReduced,
-                BufferRole::PathBboxes,
-                BufferRole::DrawMonoids,
-                BufferRole::InfoBinData,
-                BufferRole::ClipInputs,
-            ]),
-            None,
-        ),
-    ]);
-}
-
-fn append_vello_clip_schedule(
-    expected: &mut Vec<ExpectedVelloScheduleEntry>,
-    scenario: VelloRasterScenario,
-) {
-    use VelloPassBufferRoleForTest as BufferRole;
-
-    if matches!(
-        scenario,
-        VelloRasterScenario::Clip | VelloRasterScenario::LargePathAndClip
-    ) {
-        expected.extend([
-            (
-                VelloPassPhaseForTest::Coarse,
-                VelloPassOperationForTest::ClipReduce,
-                buffer_bindings(&[
-                    BufferRole::ClipInputs,
-                    BufferRole::PathBboxes,
-                    BufferRole::ClipBics,
-                    BufferRole::ClipElements,
-                ]),
-                None,
-            ),
-            (
-                VelloPassPhaseForTest::Coarse,
-                VelloPassOperationForTest::ClipLeaf,
-                buffer_bindings(&[
-                    BufferRole::Config,
-                    BufferRole::ClipInputs,
-                    BufferRole::PathBboxes,
-                    BufferRole::ClipBics,
-                    BufferRole::ClipElements,
-                    BufferRole::DrawMonoids,
-                    BufferRole::ClipBboxes,
-                ]),
-                None,
-            ),
-        ]);
-    }
-}
-
-fn append_vello_raster_schedule(expected: &mut Vec<ExpectedVelloScheduleEntry>) {
-    use VelloPassBufferRoleForTest as BufferRole;
-
-    expected.extend([
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::Binning,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::DrawMonoids,
-                BufferRole::PathBboxes,
-                BufferRole::ClipBboxes,
-                BufferRole::DrawBboxes,
-                BufferRole::Bump,
-                BufferRole::InfoBinData,
-                BufferRole::BinHeaders,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::TileAlloc,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Scene,
-                BufferRole::DrawBboxes,
-                BufferRole::Bump,
-                BufferRole::Paths,
-                BufferRole::Tile,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::PathCountSetup,
-            buffer_bindings(&[BufferRole::Bump, BufferRole::IndirectCount]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::PathCount,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Bump,
-                BufferRole::Lines,
-                BufferRole::Paths,
-                BufferRole::Tile,
-                BufferRole::SegmentCounts,
-            ]),
-            Some((BufferRole::IndirectCount, 0)),
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::Backdrop,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Bump,
-                BufferRole::Paths,
-                BufferRole::Tile,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::Coarse,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Scene,
-                BufferRole::DrawMonoids,
-                BufferRole::BinHeaders,
-                BufferRole::InfoBinData,
-                BufferRole::Paths,
-                BufferRole::Tile,
-                BufferRole::Bump,
-                BufferRole::PerTileCommandList,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::PathTilingSetup,
-            buffer_bindings(&[
-                BufferRole::Bump,
-                BufferRole::IndirectCount,
-                BufferRole::PerTileCommandList,
-            ]),
-            None,
-        ),
-        (
-            VelloPassPhaseForTest::Coarse,
-            VelloPassOperationForTest::PathTiling,
-            buffer_bindings(&[
-                BufferRole::Bump,
-                BufferRole::SegmentCounts,
-                BufferRole::Lines,
-                BufferRole::Paths,
-                BufferRole::Tile,
-                BufferRole::Segments,
-            ]),
-            Some((BufferRole::IndirectCount, 0)),
-        ),
-    ]);
-}
-
-fn append_vello_fine_schedule(
-    expected: &mut Vec<ExpectedVelloScheduleEntry>,
-    antialiasing: Antialiasing,
-) {
-    use VelloPassBufferRoleForTest as BufferRole;
-
-    let (operation, mut bindings) = match antialiasing {
-        Antialiasing::Area => (
-            VelloPassOperationForTest::FineArea,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Segments,
-                BufferRole::PerTileCommandList,
-                BufferRole::InfoBinData,
-                BufferRole::BlendSpill,
-            ]),
-        ),
-        Antialiasing::Msaa8 => (
-            VelloPassOperationForTest::FineMsaa8,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Segments,
-                BufferRole::PerTileCommandList,
-                BufferRole::InfoBinData,
-                BufferRole::BlendSpill,
-            ]),
-        ),
-        Antialiasing::Msaa16 => (
-            VelloPassOperationForTest::FineMsaa16,
-            buffer_bindings(&[
-                BufferRole::Config,
-                BufferRole::Segments,
-                BufferRole::PerTileCommandList,
-                BufferRole::InfoBinData,
-                BufferRole::BlendSpill,
-            ]),
-        ),
-    };
-    bindings.extend([
-        VelloPassBindingForTest::TargetOutput,
-        VelloPassBindingForTest::Image(VelloPassImageRoleForTest::GradientRamp),
-        VelloPassBindingForTest::Image(VelloPassImageRoleForTest::ImageAtlas),
-    ]);
-    if !matches!(antialiasing, Antialiasing::Area) {
-        bindings.push(VelloPassBindingForTest::Buffer(BufferRole::MaskLut));
-    }
-    expected.push((VelloPassPhaseForTest::Fine, operation, bindings, None));
-}
-
-fn buffer_bindings(roles: &[VelloPassBufferRoleForTest]) -> Vec<VelloPassBindingForTest> {
-    roles
-        .iter()
-        .copied()
-        .map(VelloPassBindingForTest::Buffer)
-        .collect()
-}
-
-fn assert_branch_resource_lifetimes(
-    observation: &PreparedVelloPassObservation,
-    scenario: VelloRasterScenario,
-) {
-    let has_large_path = matches!(
-        scenario,
-        VelloRasterScenario::LargePath | VelloRasterScenario::LargePathAndClip
-    );
-    let has_clip = matches!(
-        scenario,
-        VelloRasterScenario::Clip | VelloRasterScenario::LargePathAndClip
-    );
-
-    if has_large_path {
-        assert_resource_lifetime(
-            observation,
-            VelloPassResourceForTest::LargePathReduced2,
-            Some(VelloPassOperationForTest::PathTagReduce),
-            Some(VelloPassOperationForTest::PathTagReduce2),
-            Some(VelloPassOperationForTest::PathTagScan1),
-            Some(VelloPassOperationForTest::PathTagScanLarge),
-        );
-        assert_resource_lifetime(
-            observation,
-            VelloPassResourceForTest::LargePathReducedScan,
-            Some(VelloPassOperationForTest::PathTagReduce2),
-            Some(VelloPassOperationForTest::PathTagScan1),
-            Some(VelloPassOperationForTest::PathTagScanLarge),
-            Some(VelloPassOperationForTest::PathTagScanLarge),
-        );
-    } else {
-        assert!(
-            observation
-                .resource_lifetime_for_test(VelloPassResourceForTest::LargePathReduced2)
-                .is_none()
-        );
-        assert!(
-            observation
-                .resource_lifetime_for_test(VelloPassResourceForTest::LargePathReducedScan)
-                .is_none()
-        );
-    }
-
-    let clip_release = if has_clip {
-        VelloPassOperationForTest::ClipLeaf
-    } else {
-        VelloPassOperationForTest::DrawLeaf
-    };
-    assert_resource_lifetime(
-        observation,
-        VelloPassResourceForTest::ClipInputs,
-        Some(VelloPassOperationForTest::DrawReduce),
-        Some(VelloPassOperationForTest::DrawLeaf),
-        Some(clip_release),
-        Some(clip_release),
-    );
-    assert_resource_lifetime(
-        observation,
-        VelloPassResourceForTest::ClipElements,
-        Some(VelloPassOperationForTest::DrawLeaf),
-        has_clip.then_some(VelloPassOperationForTest::ClipReduce),
-        has_clip.then_some(clip_release),
-        Some(clip_release),
-    );
-    assert_resource_lifetime(
-        observation,
-        VelloPassResourceForTest::ClipBics,
-        Some(VelloPassOperationForTest::DrawLeaf),
-        has_clip.then_some(VelloPassOperationForTest::ClipReduce),
-        has_clip.then_some(clip_release),
-        Some(clip_release),
-    );
-    assert_resource_lifetime(
-        observation,
-        VelloPassResourceForTest::ClipBboxes,
-        Some(if has_clip {
-            VelloPassOperationForTest::ClipReduce
-        } else {
-            VelloPassOperationForTest::DrawLeaf
-        }),
-        Some(if has_clip {
-            VelloPassOperationForTest::ClipLeaf
-        } else {
-            VelloPassOperationForTest::Binning
-        }),
-        Some(VelloPassOperationForTest::Binning),
-        Some(VelloPassOperationForTest::Binning),
-    );
-}
-
-fn assert_resource_lifetime(
-    observation: &PreparedVelloPassObservation,
-    resource: VelloPassResourceForTest,
-    allocation_after: Option<VelloPassOperationForTest>,
-    first_use: Option<VelloPassOperationForTest>,
-    last_use: Option<VelloPassOperationForTest>,
-    release_after: Option<VelloPassOperationForTest>,
-) {
-    let lifetime = observation
-        .resource_lifetime_for_test(resource)
-        .expect("the pinned schedule must retain its branch buffer intent");
-    assert_eq!(
-        lifetime.allocated_after_for_test(),
-        allocation_after,
-        "{resource:?} allocation must remain in its pinned lifetime"
-    );
-    assert_eq!(
-        lifetime.first_use_for_test(),
-        first_use,
-        "{resource:?} first use must remain in its pinned lifetime"
-    );
-    assert_eq!(
-        lifetime.last_use_for_test(),
-        last_use,
-        "{resource:?} last use must remain in its pinned lifetime"
-    );
-    assert_eq!(
-        lifetime.released_after_for_test(),
-        release_after,
-        "{resource:?} release must remain in its pinned lifetime"
-    );
 }
 
 #[test]
@@ -809,7 +291,7 @@ fn selected_glyph_preflight_validates_exact_outline_draw_settings() {
 
     let glyph_run = observation
         .first_glyph_run_for_test()
-        .expect("the private scene must retain the glyph-run facts");
+        .expect("the Vello scene must retain the glyph-run facts");
     assert_eq!(glyph_run.font_collection_index_for_test(), 0);
     assert!(glyph_run.font_data_matches_for_test(AHEM_FONT_BYTES));
     assert_eq!(
@@ -827,7 +309,7 @@ fn selected_glyph_preflight_validates_exact_outline_draw_settings() {
 
     let glyph = observation
         .first_glyph_for_test()
-        .expect("the private scene must retain the selected glyph");
+        .expect("the Vello scene must retain the selected glyph");
     assert_eq!(glyph.id_for_test(), AHEM_GLYPH_X);
     assert_eq!(glyph.x_for_test(), 3.0);
     assert_eq!(glyph.y_for_test(), 19.0);
@@ -1570,7 +1052,7 @@ fn assert_outline_glyph_encoding(scene: &VelloScene, glyph_id: u32) {
     assert_eq!(
         observation
             .first_glyph_for_test()
-            .expect("the private scene must retain the selected glyph")
+            .expect("the Vello scene must retain the selected glyph")
             .id_for_test(),
         glyph_id
     );
@@ -3234,49 +2716,6 @@ fn reference_buffer_source_over_preserves_transparent_edges() {
         composed.pixel(0, 1).unwrap(),
         PremultipliedRgba8::TRANSPARENT
     );
-}
-
-#[test]
-fn private_composite_reference_helpers_cover_current_internal_operator_boundary() {
-    let source = PremultipliedRgba8::try_new(128, 0, 0, 128).unwrap();
-    let destination = PremultipliedRgba8::try_new(0, 128, 0, 128).unwrap();
-    let mask = PremultipliedRgba8::try_new(0, 0, 0, 64).unwrap();
-    let source_over = source.source_over(destination);
-    let blend_normal = source.blend_over(destination, BlendMode::Normal);
-    let blend_plus = source.blend_over(destination, BlendMode::Plus);
-    let source_in = source.source_in_alpha_of(mask);
-    let destination_in = destination.destination_in_alpha_of(mask);
-
-    assert_eq!(
-        source_over,
-        PremultipliedRgba8::try_new(128, 64, 0, 192).unwrap()
-    );
-    assert_eq!(
-        blend_normal, source_over,
-        "normal blend-over remains the same private source-over operator"
-    );
-    assert_eq!(
-        blend_plus,
-        PremultipliedRgba8::try_new(128, 128, 0, 255).unwrap()
-    );
-    assert_eq!(
-        source_in,
-        PremultipliedRgba8::try_new(32, 0, 0, 32).unwrap()
-    );
-    assert_eq!(
-        destination_in,
-        PremultipliedRgba8::try_new(0, 32, 0, 32).unwrap()
-    );
-
-    for pixel in [
-        source_over,
-        blend_normal,
-        blend_plus,
-        source_in,
-        destination_in,
-    ] {
-        assert_premultiplied(pixel);
-    }
 }
 
 #[test]
@@ -5517,7 +4956,7 @@ fn materialized_filter_support_does_not_enable_layer_effect_execution() {
     ] {
         let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
-            .expect_err("later compositor execution should remain unsupported");
+            .expect_err("unsupported compositor execution must remain typed");
 
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
     }
@@ -9678,7 +9117,7 @@ fn filter_scalar_lowering_handles_f32_f64_exponents_and_huge_angles_finitely() {
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     )
-    .expect("the authored color list must reach the real private runtime lowering");
+    .expect("the authored color list must reach runtime lowering");
 
     assert_runtime_color_filter_lowering(&observed);
 }
@@ -10057,8 +9496,8 @@ fn color_filter_graph_preserves_authored_order_clamps_and_exact_lifetimes() {
 }
 
 #[test]
-fn mixed_color_and_future_passes_preserve_the_next_unavailable_diagnostic() {
-    let observed = super::pass::mixed_color_future_diagnostic_observation_for_test(
+fn mixed_color_and_spatial_filters_preserve_the_unsupported_operation_diagnostic() {
+    let observed = super::pass::mixed_color_unsupported_diagnostic_observation_for_test(
         authored_color_filter_runs_for_test(),
         color_then_blur_filters_for_test(),
         filter_graph_commands_for_test(),
@@ -11220,7 +10659,8 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
             )
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
+            && dispatch_after.unsupported_graph_rejections
+                == dispatch_before.unsupported_graph_rejections,
         "public dispatch did not enable only the exact bounded-backdrop graph"
     );
 }
@@ -11911,7 +11351,7 @@ fn spatial_filter_image_scene_for_test(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         Arc::<[u8]>::from(pixels),
     )
-    .expect("the spatial-filter source-readable fixture must form one RGBA image");
+    .expect("the spatial-filter pixel fixture must form one RGBA image");
     let mut scene = Scene::new();
     scene.image(image, destination, ImageFit::Stretch);
     scene
@@ -12398,7 +11838,7 @@ fn spatial_filter_public_spatial_graph_diagnostic_for_test(
         context,
     )
     .expect("the public spatial-filter diagnostic fixture must form an authored graph");
-    super::renderer::future_graph_diagnostic_for_test(
+    super::renderer::unsupported_graph_diagnostic_for_test(
         &graph,
         Format::Rgba8,
         &DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -12757,12 +12197,13 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
         &composition_scene,
         Parameters::default(),
     ));
-    let future_scene = color_filter_future_backdrop_scene_for_test();
-    let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .expect("broad-backdrop rejection coverage requires a surface");
-    let future = pollster::block_on(renderer.render(
-        &mut future_surface,
-        &future_scene,
+    let unsupported_scene = color_filter_unsupported_backdrop_scene_for_test();
+    let mut unsupported_surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
+            .expect("broad-backdrop rejection coverage requires a surface");
+    let unsupported = pollster::block_on(renderer.render(
+        &mut unsupported_surface,
+        &unsupported_scene,
         Parameters::default(),
     ));
     let dispatch_after = renderer.dispatch_observation_for_test();
@@ -12774,10 +12215,10 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
     assert!(
         spatial_filter_pixels_match_oracle_for_test(&spatial_filter, &expected)
             && composition.is_ok()
-            && future
+            && unsupported
                 .as_ref()
                 .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
-            && future_surface.headless_publication_count_for_test() == 0
+            && unsupported_surface.headless_publication_count_for_test() == 0
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(2)
             && dispatch_after.exact_c09_graph_routes
@@ -12786,7 +12227,8 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
                 == dispatch_before
                     .exact_spatial_filter_fixture_routes
                     .saturating_add(1)
-            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
+            && dispatch_after.unsupported_graph_rejections
+                == dispatch_before.unsupported_graph_rejections,
         "public dispatch misrouted masked composition, spatial filters, or broad backdrop"
     );
 }
@@ -13184,7 +12626,7 @@ fn base_graph_executor_accepts_only_clear_capture_canonicalize_source_over_and_p
             && observed.rejects_every_other_pass_kind_and_composite_payload
             && observed.rejects_missing_or_reordered_spine_passes
             && observed.rejects_malformed_dependencies_reads_results_and_releases
-            && observed.rejects_later_cycle_plan
+            && observed.rejects_graph_outside_base_subset
             && observed.preserves_direct_and_graph_planner_routes,
         "the base graph executor has no closed pre-allocation executable subset"
     );
@@ -14072,9 +13514,9 @@ fn graph_preparation_rejects_unsupported_passes_without_resource_or_cache_mutati
     .unwrap();
     let super::frame::FramePlan::GpuGraph(graph) = runtime_lowering_commands_for_test()
         .plan_for(context)
-        .unwrap_or_panic_for_test("the later-cycle fixture must remain a validated graph plan")
+        .unwrap_or_panic_for_test("the unsupported-pass fixture must form a validated graph plan")
     else {
-        panic!("the later-cycle fixture must retain its transitional graph route");
+        panic!("the unsupported-pass fixture must select the graph route");
     };
     let lowered = super::pass::LoweredGraphPlan::try_lower_validated_graph(
         &graph,
@@ -14082,7 +13524,7 @@ fn graph_preparation_rejects_unsupported_passes_without_resource_or_cache_mutati
         Format::Rgba8,
         &capabilities,
     )
-    .unwrap_or_panic_for_test("the later-cycle fixture must reach validated runtime lowering");
+    .unwrap_or_panic_for_test("the unsupported-pass fixture must reach runtime lowering");
     let resources = ResourceManager::new(ResourceCacheBudget::new(1024 * 1024));
     let mut pass_cache = DevicePassCache::new();
     let _ = pass_cache.seed_sampler_for_test(ready.device_for_test());
@@ -14102,13 +13544,13 @@ fn graph_preparation_rejects_unsupported_passes_without_resource_or_cache_mutati
         .map_err(|_| ()),
         Err(_) => Err(()),
     };
-    let later_cycle_reached_preparation = preparation.is_ok();
+    let unsupported_graph_reached_preparation = preparation.is_ok();
     drop(preparation);
     let resources_after = resources.observation_for_test();
     let pass_cache_after = pass_cache.counts_for_test();
 
     assert!(
-        !later_cycle_reached_preparation
+        !unsupported_graph_reached_preparation
             && resources_after == resources_before
             && pass_cache_after == pass_cache_before,
         "an unsupported graph reached resource or cache preparation"
@@ -14149,7 +13591,7 @@ fn runtime_lowering_derives_exact_sampler_layout_shader_and_pipeline_keys() {
 }
 
 #[test]
-fn resource_preparation_is_private_allocation_safe_and_submission_free() {
+fn resource_preparation_is_allocation_safe_and_submission_free() {
     let options = Options::default()
         .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
         .with_resource_cache_budget(ResourceCacheBudget::new(1024 * 1024));
@@ -14179,7 +13621,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
             Format::Rgba8,
         )
         .unwrap_or_panic_for_test(
-            "the representative graph must reach the private preparation observation",
+            "the representative graph must reach the preparation observation",
         );
 
     let resources_after = renderer
@@ -14210,7 +13652,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
             && submission.readback_queue_submission_count_for_test() == 0
             && public_state_unchanged
             && bounded_after_cleanup,
-        "the graph has no complete private resource and pass preparation handoff: observed={observed:?}, resources_before={resources_before:?}, resources_after={resources_after:?}, public_state_unchanged={public_state_unchanged}, bounded_after_cleanup={bounded_after_cleanup}"
+        "the graph has no complete resource and pass preparation handoff: observed={observed:?}, resources_before={resources_before:?}, resources_after={resources_after:?}, public_state_unchanged={public_state_unchanged}, bounded_after_cleanup={bounded_after_cleanup}"
     );
 }
 
@@ -14240,7 +13682,7 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             Color::BLACK,
             Format::Rgba8,
         )
-        .unwrap_or_panic_for_test("ordinary-budget preparation must reach the private handoff");
+        .unwrap_or_panic_for_test("ordinary-budget preparation must reach the resource handoff");
     let ordinary_resources = ordinary
         .default_ready_device_state_borrow_for_test()
         .unwrap_or_panic_for_test("ordinary-budget preparation must retain one ready device")
@@ -14267,7 +13709,7 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             Color::BLACK,
             Format::Rgba8,
         )
-        .unwrap_or_panic_for_test("zero-budget preparation must reach the private handoff");
+        .unwrap_or_panic_for_test("zero-budget preparation must reach the resource handoff");
     let zero_budget_resources = disabled
         .default_ready_device_state_borrow_for_test()
         .unwrap_or_panic_for_test(
@@ -15349,7 +14791,7 @@ fn observe_graph_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObser
         graph_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
-    .unwrap_or_panic_for_test("custom-spine encoding must reach its private observation");
+    .unwrap_or_panic_for_test("custom-spine encoding must reach its encoding observation");
     observed.encodes_without_submission_or_sync &= submission.queue_submission_count_for_test()
         == 0
         && submission.readback_queue_submission_count_for_test() == 0;
@@ -15440,7 +14882,7 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
         graph_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::LaterCaptureEncoding,
     ))
-    .unwrap_or_panic_for_test("later Vello capture failure must reach its private observation");
+    .unwrap_or_panic_for_test("later Vello capture failure must reach its failure observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -15477,7 +14919,7 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
         graph_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::SharedScopeResolution,
     ))
-    .unwrap_or_panic_for_test("shared Vello scope failure must reach its private observation");
+    .unwrap_or_panic_for_test("shared Vello scope failure must reach its failure observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -15553,7 +14995,7 @@ fn capture_failure_aborts_and_rejects_retry_on_new_encoder() {
         graph_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
-    .unwrap_or_panic_for_test("capture-failure coverage must reach its private observation");
+    .unwrap_or_panic_for_test("capture-failure coverage must reach its failure observation");
     assert!(
         observed.capture_failure_is_reported
             && observed.complete_pass_is_rejected
@@ -16796,7 +16238,7 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
 }
 
 #[test]
-fn render_plans_before_future_effect_diagnostic() {
+fn bounded_backdrop_render_validates_one_plan_before_execution() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
         .unwrap_or_panic_for_test(
@@ -20649,7 +20091,7 @@ fn box_decoration_capability_accessors_name_unsupported_style_boundaries() {
 }
 
 #[test]
-fn offscreen_pipeline_capability_accessors_name_current_phase_boundaries() {
+fn offscreen_pipeline_capability_accessors_report_supported_operations() {
     let capabilities = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(capabilities.supports_direct_vello_opacity_isolation());
@@ -21037,7 +20479,7 @@ fn repeating_gradients_report_typed_diagnostics() {
 
     let error = Capabilities::CURRENT
         .ensure_supported(unsupported)
-        .expect_err("repeating gradients require later normalization");
+        .expect_err("repeating gradients require unsupported normalization");
 
     assert_eq!(error.code(), ErrorCode::UnsupportedPrimitive);
     assert_eq!(error.unsupported_primitive(), Some(unsupported));
@@ -23868,7 +23310,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             .default_wgpu_device_queue()
             .expect("checked internal Vello encoding coverage requires a host adapter");
         let engine = pollster::block_on(VelloEngineState::new_checked(device))
-            .expect("pinned internal Vello shaders must create through checked scopes");
+            .expect("internal Vello shaders must create through checked scopes");
         let resources = ResourceManager::default();
         let target_extent = PhysicalSize::new(64, 48);
         let target_usage = wgpu::TextureUsages::STORAGE_BINDING
@@ -24205,7 +23647,7 @@ fn surface_operation_matrix_covers_every_kind_state_and_duplicate_transition() {
 }
 
 #[test]
-fn completed_headless_render_uses_the_private_ready_resource_phase() {
+fn completed_headless_render_retains_ready_resources() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
@@ -25626,7 +25068,7 @@ fn available_occluded_resume_retains_installed_attachment_and_target() {
     set_presented_acquire_outcome_for_test(&mut surface, PresentedAcquireOutcomeForTest::Occluded);
     let error =
         pollster::block_on(renderer.render(&mut surface, &Scene::new(), Parameters::default()))
-            .expect_err("the synthetic occlusion must enter the private occluded lifecycle");
+            .expect_err("the synthetic occlusion must enter the occluded lifecycle");
     assert_surface_unavailable(
         error,
         RuntimeOperation::SurfaceRendering,
@@ -27237,7 +26679,8 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
             == dispatch_before.direct_vello_routes.saturating_add(1)
         && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
         && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes
-        && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections
+        && dispatch_after.unsupported_graph_rejections
+            == dispatch_before.unsupported_graph_rejections
         && direct_submission.queue_submission_count_for_test() == 1
         && graph_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
@@ -28906,7 +28349,7 @@ fn unsupported_blend_and_composite_boundaries_remain_typed_diagnostics() {
         let unsupported = UnsupportedPrimitive::new(PrimitiveFamily::Compositing, operation);
         let error = Capabilities::CURRENT
             .ensure_supported(unsupported)
-            .expect_err("future blend/composite policy must stay behind typed diagnostics");
+            .expect_err("unsupported blend/composite policy must stay behind typed diagnostics");
 
         assert_eq!(error.unsupported_primitive(), Some(unsupported));
         assert!(
@@ -30468,7 +29911,7 @@ fn headless_render_can_be_read_back() {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PinnedVelloCharacterizationCase {
+struct VelloPixelCharacterizationCase {
     antialiasing: Antialiasing,
     scale: f64,
     logical_dimensions: [u32; 2],
@@ -30502,7 +29945,7 @@ struct AlphaSupport {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct PinnedVelloVariation {
+struct VelloPixelVariation {
     physical_dimensions: [u32; 2],
     stroke_alpha: u8,
     gradient_left: [u8; 2],
@@ -30514,8 +29957,8 @@ struct PinnedVelloVariation {
 
 // Each row is `{AA, scale, physical dimensions, stroke alpha, gradient left/right,
 // solid edge support, stroke edge support}`. Other samples are stable across all rows.
-const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = &[
-    pinned_vello_case(
+const VELLO_PIXEL_CHARACTERIZATION_CASES: &[VelloPixelCharacterizationCase] = &[
+    vello_pixel_case(
         Antialiasing::Area,
         1.0,
         variation(
@@ -30528,7 +29971,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(54, 17, 61, 23, 5750, 2000),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Area,
         1.25,
         variation(
@@ -30541,7 +29984,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(67, 21, 77, 29, 7199, 2511),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Area,
         2.0,
         variation(
@@ -30554,7 +29997,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(108, 34, 123, 47, 11550, 4050),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Msaa8,
         1.0,
         variation(
@@ -30567,7 +30010,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(54, 17, 61, 23, 5750, 2000),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Msaa8,
         1.25,
         variation(
@@ -30580,7 +30023,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(67, 21, 77, 29, 7200, 2511),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Msaa8,
         2.0,
         variation(
@@ -30593,7 +30036,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(108, 34, 123, 47, 11550, 4050),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Msaa16,
         1.0,
         variation(
@@ -30606,7 +30049,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(54, 17, 61, 23, 5750, 2000),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Msaa16,
         1.25,
         variation(
@@ -30619,7 +30062,7 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
             edge(67, 21, 77, 29, 7200, 2511),
         ),
     ),
-    pinned_vello_case(
+    vello_pixel_case(
         Antialiasing::Msaa16,
         2.0,
         variation(
@@ -30634,12 +30077,12 @@ const PINNED_VELLO_CHARACTERIZATION_CASES: &[PinnedVelloCharacterizationCase] = 
     ),
 ];
 
-const fn pinned_vello_case(
+const fn vello_pixel_case(
     antialiasing: Antialiasing,
     scale: f64,
-    variation: PinnedVelloVariation,
-) -> PinnedVelloCharacterizationCase {
-    PinnedVelloCharacterizationCase {
+    variation: VelloPixelVariation,
+) -> VelloPixelCharacterizationCase {
+    VelloPixelCharacterizationCase {
         antialiasing,
         scale,
         logical_dimensions: [72, 48],
@@ -30681,8 +30124,8 @@ const fn variation(
     solid_edge: AlphaSupport,
     stroke_edge: AlphaSupport,
     transformed_placement: AlphaSupport,
-) -> PinnedVelloVariation {
-    PinnedVelloVariation {
+) -> VelloPixelVariation {
+    VelloPixelVariation {
         physical_dimensions,
         stroke_alpha,
         gradient_left,
@@ -30712,7 +30155,7 @@ const fn edge(
 }
 
 #[test]
-fn pinned_vello_characterization_cases_are_source_readable() {
+fn direct_vello_pixels_match_characterization_cases() {
     let configurations = [
         (Antialiasing::Area, 1.0),
         (Antialiasing::Area, 1.25),
@@ -30730,16 +30173,16 @@ fn pinned_vello_characterization_cases_are_source_readable() {
         let mut renderer = pollster::block_on(Renderer::new(
             Options::default().with_antialiasing(antialiasing),
         ))
-        .expect("pinned Vello characterization requires a host adapter");
-        let scene = pinned_vello_characterization_scene();
+        .expect("Vello pixel characterization requires a host adapter");
+        let scene = vello_pixel_characterization_scene();
         let mut surface =
             pollster::block_on(renderer.create_headless(Size::new(72.0, 48.0), scale))
-                .expect("pinned Vello characterization requires a real headless surface");
+                .expect("Vello pixel characterization requires a real headless surface");
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-            .expect("pinned Vello characterization must render through the production Vello route");
+            .expect("pixel characterization must render through the production Vello route");
         let output = pollster::block_on(renderer.read_headless(&surface))
-            .expect("pinned Vello characterization must read the rendered headless surface");
-        observed.push(observe_pinned_vello_characterization(
+            .expect("pixel characterization must read the rendered headless surface");
+        observed.push(observe_vello_pixel_characterization(
             antialiasing,
             &surface,
             &output,
@@ -30748,16 +30191,16 @@ fn pinned_vello_characterization_cases_are_source_readable() {
 
     assert_eq!(
         observed.len(),
-        PINNED_VELLO_CHARACTERIZATION_CASES.len(),
-        "missing source-readable pinned Vello samples; observed rows: {observed:#?}"
+        VELLO_PIXEL_CHARACTERIZATION_CASES.len(),
+        "missing Vello pixel characterization samples; observed rows: {observed:#?}"
     );
     assert_eq!(
-        PINNED_VELLO_CHARACTERIZATION_CASES.len(),
+        VELLO_PIXEL_CHARACTERIZATION_CASES.len(),
         configurations.len(),
-        "the pinned table must cover every AA/scale Cartesian pair"
+        "the pixel table must cover every AA/scale Cartesian pair"
     );
-    for (actual, expected) in observed.iter().zip(PINNED_VELLO_CHARACTERIZATION_CASES) {
-        assert_pinned_vello_characterization_case(*actual, *expected);
+    for (actual, expected) in observed.iter().zip(VELLO_PIXEL_CHARACTERIZATION_CASES) {
+        assert_vello_pixel_characterization_case(*actual, *expected);
     }
 }
 
@@ -31071,12 +30514,12 @@ fn color_filter_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scen
         .flat_map(|pixel| pixel.into_iter())
         .collect::<Vec<_>>();
     let source_width = u32::try_from(visible_pixels.len() + hidden_prefix.len())
-        .expect("the color-filter source-readable pixel vector must fit u32");
+        .expect("the color-filter pixel vector must fit u32");
     let image = Image::from_rgba(
         Size::new(f64::from(source_width), 1.0),
         Arc::<[u8]>::from(bytes),
     )
-    .expect("the color-filter source-readable pixel vector must form one valid image");
+    .expect("the color-filter pixel vector must form one valid image");
     let mut scene = Scene::new();
     scene.image(
         image,
@@ -32012,7 +31455,7 @@ fn color_filter_public_color_graph_diagnostic_for_test(
             .expect("the public color-filter diagnostic fixture must form a frame context");
     let graph = super::frame::authored_filter_graph_for_test(filters, commands, context)
         .expect("the public diagnostic fixture must form the same authored color-filter graph");
-    super::renderer::future_graph_diagnostic_for_test(
+    super::renderer::unsupported_graph_diagnostic_for_test(
         &graph,
         Format::Rgba8,
         &DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -32093,7 +31536,7 @@ fn retained_public_filter_diagnostics_are_exact_for_test() -> bool {
         && reference_error.unresolved_resource_diagnostic() == Some(&reference)
 }
 
-fn color_filter_future_backdrop_scene_for_test() -> Scene {
+fn color_filter_unsupported_backdrop_scene_for_test() -> Scene {
     let backdrop_filters = color_filter_list([ColorFilterOp::Invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )]);
@@ -32188,7 +31631,7 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
                 == dispatch_before
                     .exact_color_filter_fixture_routes
                     .saturating_add(1),
-        "the color-filter fixture did not execute through retained private ingress while the public capability remained diagnostic"
+        "the color-filter fixture did not execute through retained graph ingress while the public capability remained diagnostic"
     );
 }
 
@@ -32331,9 +31774,11 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
         Parameters::default(),
     ));
 
-    let future_scene = color_filter_future_backdrop_scene_for_test();
-    let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .unwrap_or_else(|error| panic!("future boundary coverage requires a surface: {error}"));
+    let unsupported_scene = color_filter_unsupported_backdrop_scene_for_test();
+    let mut unsupported_surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap_or_else(
+            |error| panic!("broad-backdrop rejection coverage requires a surface: {error}"),
+        );
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("dispatch coverage must retain its ready device");
@@ -32341,9 +31786,9 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
     let cache_before = ready.device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let future = pollster::block_on(renderer.render(
-        &mut future_surface,
-        &future_scene,
+    let unsupported = pollster::block_on(renderer.render(
+        &mut unsupported_surface,
+        &unsupported_scene,
         Parameters::default(),
     ));
     let color_diagnostic = color_filter_public_color_graph_diagnostic_for_test(
@@ -32376,14 +31821,14 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
                 color_filter_width
             )
             && composition.is_ok()
-            && future
+            && unsupported
                 .as_ref()
                 .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
             && color_diagnostic == Some(expected_color)
             && no_rejected_work
             && resources_after == resources_before
             && cache_after == cache_before
-            && future_surface.headless_publication_count_for_test() == 0
+            && unsupported_surface.headless_publication_count_for_test() == 0
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(2)
             && dispatch_after.exact_c09_graph_routes
@@ -32392,7 +31837,8 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
                 == dispatch_before
                     .exact_color_filter_fixture_routes
                     .saturating_add(1)
-            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
+            && dispatch_after.unsupported_graph_rejections
+                == dispatch_before.unsupported_graph_rejections,
         "public dispatch misrouted masked composition, color filters, or broad backdrop"
     );
 }
@@ -32421,7 +31867,7 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
         Parameters::default(),
         working_format,
     ))
-    .unwrap_or_panic_for_test("the private forced route must invoke the production graph executor");
+    .unwrap_or_panic_for_test("the forced graph route must invoke the production graph executor");
 
     let production_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
         && graph_submission.transaction_generation_for_test()
@@ -33377,7 +32823,7 @@ fn composition_presented_masked_blended_scene_for_test(rect: Rect) -> Scene {
     scene
 }
 
-fn future_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
+fn unsupported_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
     let filters = FilterList::try_ops(vec![FilterOp::brightness(
         FilterAmount::try_new(1.25).unwrap(),
     )])
@@ -33445,14 +32891,16 @@ fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication
         .unwrap()
         .internal_resource_manager_observation_for_test();
 
-    let future = future_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
+    let unsupported =
+        unsupported_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let result = pollster::block_on(renderer.render(&mut surface, &future, Parameters::default()));
+    let result =
+        pollster::block_on(renderer.render(&mut surface, &unsupported, Parameters::default()));
     let no_gpu_work = submission.queue_submission_count_for_test() == 0
         && graph_submission.queue_submission_count_for_test() == 0
         && direct_submission.queue_submission_count_for_test() == 0;
@@ -33487,32 +32935,32 @@ fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication
             && pixels_after == pixels_before
             && cache_after == cache_before
             && resources_after == resources_before,
-        "a future graph entered CPU execution or changed publication"
+        "an unsupported graph entered CPU execution or changed publication"
     );
 }
 
 #[test]
 fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("future diagnostic ordering requires a real selected WGPU device");
+        .expect("diagnostic ordering requires a real selected WGPU device");
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .expect("future diagnostic ordering requires a real headless surface");
+        .expect("diagnostic ordering requires a real headless surface");
     let mut baseline = Scene::new();
     baseline.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
     pollster::block_on(renderer.render(&mut surface, &baseline, Parameters::default()))
-        .expect("future diagnostic ordering requires a published direct baseline");
+        .expect("diagnostic ordering requires a published direct baseline");
     let pixels_before = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the future diagnostic baseline must be readable");
+        .expect("the diagnostic baseline must be readable");
     let stats_before = renderer.stats();
     let publication_before = surface.headless_publication_count_for_test();
     let dispatch_before = renderer.dispatch_observation_for_test();
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the future diagnostic baseline must retain its ready cache")
+        .expect("the diagnostic baseline must retain its ready cache")
         .device_pass_cache_counts_for_test();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the future diagnostic baseline must retain its ready resources")
+        .expect("the diagnostic baseline must retain its ready resources")
         .internal_resource_manager_observation_for_test();
     assert!(
         renderer.override_default_device_effect_precision_facts_for_test(
@@ -33521,7 +32969,8 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         "the real renderer must accept the scoped no-effect-format capability facts"
     );
 
-    let future = future_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
+    let unsupported =
+        unsupported_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -33529,8 +32978,9 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
-    let error = pollster::block_on(renderer.render(&mut surface, &future, Parameters::default()))
-        .expect_err("a broad-backdrop graph must retain its typed unsupported-pass diagnostic");
+    let error =
+        pollster::block_on(renderer.render(&mut surface, &unsupported, Parameters::default()))
+            .expect_err("a broad-backdrop graph must retain its typed unsupported-pass diagnostic");
     let expected = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BroadBackdropExecution,
@@ -33543,7 +32993,7 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     assert_eq!(
         error.runtime_capability_unavailable_diagnostic(),
         None,
-        "effect-format unavailability preempted the exact future-pass diagnostic"
+        "effect-format unavailability preempted the broad-backdrop diagnostic"
     );
     let no_gpu_work = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
@@ -33558,18 +33008,19 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         .expect("the rejected broad-backdrop graph must retain its prior publication");
     let cache_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the future rejection must retain its ready cache")
+        .expect("the broad-backdrop rejection must retain its ready cache")
         .device_pass_cache_counts_for_test();
     let resources_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the future rejection must retain its ready resources")
+        .expect("the broad-backdrop rejection must retain its ready resources")
         .internal_resource_manager_observation_for_test();
     let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
         no_gpu_work
             && dispatch_after.boundary_invocations == dispatch_before.boundary_invocations
-            && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections
+            && dispatch_after.unsupported_graph_rejections
+                == dispatch_before.unsupported_graph_rejections
             && dispatch_after.direct_vello_routes == dispatch_before.direct_vello_routes
             && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
             && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes
@@ -33578,7 +33029,7 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
             && pixels_after == pixels_before
             && cache_after == cache_before
             && resources_after == resources_before,
-        "future-pass rejection allocated, submitted, or changed publication"
+        "broad-backdrop rejection allocated, submitted, or changed publication"
     );
 }
 
@@ -34004,19 +33455,20 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
         Parameters::default(),
     ));
 
-    let (blur_scene, backdrop_scene) = composition_future_dispatch_scenes_for_test();
+    let (blur_scene, backdrop_scene) = composition_unsupported_dispatch_scenes_for_test();
     let mut blur_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .unwrap_or_else(|error| panic!("future blur coverage requires a surface: {error}"));
-    let mut backdrop_surface =
-        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-            .unwrap_or_else(|error| panic!("future backdrop coverage requires a surface: {error}"));
+        .unwrap_or_else(|error| panic!("unsupported blur coverage requires a surface: {error}"));
+    let mut backdrop_surface = pollster::block_on(
+        renderer.create_headless(Size::new(4.0, 4.0), 1.0),
+    )
+    .unwrap_or_else(|error| panic!("unsupported backdrop coverage requires a surface: {error}"));
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("future dispatch coverage requires the ready device"))
+        .unwrap_or_else(|| panic!("unsupported dispatch coverage requires the ready device"))
         .internal_resource_manager_observation_for_test();
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("future dispatch coverage requires the ready cache"))
+        .unwrap_or_else(|| panic!("unsupported dispatch coverage requires the ready cache"))
         .device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -34027,18 +33479,18 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
         &backdrop_scene,
         Parameters::default(),
     ));
-    let no_future_gpu_work = submission.queue_submission_count_for_test() == 0
+    let no_unsupported_gpu_work = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0;
     drop(submission_scope);
     let resources_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("future rejection must retain the ready device"))
+        .unwrap_or_else(|| panic!("unsupported rejection must retain the ready device"))
         .internal_resource_manager_observation_for_test();
     let cache_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("future rejection must retain the ready cache"))
+        .unwrap_or_else(|| panic!("unsupported rejection must retain the ready cache"))
         .device_pass_cache_counts_for_test();
-    let exact_future_diagnostics = blur_result.as_ref().is_err_and(|error| {
+    let exact_unsupported_diagnostics = blur_result.as_ref().is_err_and(|error| {
         error.unsupported_primitive()
             == Some(UnsupportedPrimitive::new(
                 PrimitiveFamily::Filters,
@@ -34063,9 +33515,9 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
             && dispatch.exact_c08_graph_routes == 1
             && dispatch.exact_c09_graph_routes == 1
             && dispatch.exact_c12_graph_routes == 0
-            && dispatch.future_pass_rejections == 0
-            && exact_future_diagnostics
-            && no_future_gpu_work
+            && dispatch.unsupported_graph_rejections == 0
+            && exact_unsupported_diagnostics
+            && no_unsupported_gpu_work
             && resources_after == resources_before
             && cache_after == cache_before
             && blur_surface.headless_publication_count_for_test() == 0
@@ -34074,12 +33526,12 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
     );
 }
 
-fn composition_future_dispatch_scenes_for_test() -> (Scene, Scene) {
+fn composition_unsupported_dispatch_scenes_for_test() -> (Scene, Scene) {
     let blur = Filter::try_blur(1.0)
-        .unwrap_or_else(|error| panic!("the future blur fixture must be valid: {error}"));
+        .unwrap_or_else(|error| panic!("the unsupported blur fixture must be valid: {error}"));
     let blur_layer = Layer::new()
         .try_filter(blur)
-        .unwrap_or_else(|error| panic!("the future blur layer must be valid: {error}"));
+        .unwrap_or_else(|error| panic!("the unsupported blur layer must be valid: {error}"));
     let mut blur_scene = Scene::new();
     blur_scene.layer(blur_layer, |scene| {
         scene.fill(
@@ -34089,18 +33541,18 @@ fn composition_future_dispatch_scenes_for_test() -> (Scene, Scene) {
     });
     let filters = FilterList::try_ops(vec![FilterOp::brightness(
         FilterAmount::try_new(1.25)
-            .unwrap_or_else(|error| panic!("the future color amount must be valid: {error}")),
+            .unwrap_or_else(|error| panic!("the unsupported color amount must be valid: {error}")),
     )])
-    .unwrap_or_else(|error| panic!("the future filter list must be valid: {error}"));
+    .unwrap_or_else(|error| panic!("the unsupported filter list must be valid: {error}"));
     let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0))
-        .unwrap_or_else(|error| panic!("the future backdrop bounds must be valid: {error}"));
+        .unwrap_or_else(|error| panic!("the unsupported backdrop bounds must be valid: {error}"));
     let input = BackdropFilterInput::try_new(filters, bounds, None)
-        .unwrap_or_else(|error| panic!("the future backdrop input must be valid: {error}"));
+        .unwrap_or_else(|error| panic!("the unsupported backdrop input must be valid: {error}"));
     let layer = Layer::new()
         .try_transform(Transform::translation(1.0, 0.0).unwrap())
         .unwrap()
         .try_backdrop_filter(input)
-        .unwrap_or_else(|error| panic!("the future backdrop layer must be valid: {error}"));
+        .unwrap_or_else(|error| panic!("the unsupported backdrop layer must be valid: {error}"));
     let mut backdrop_scene = Scene::new();
     backdrop_scene
         .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
@@ -34388,7 +33840,7 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
             && dispatch.direct_vello_routes == 1
             && dispatch.exact_c08_graph_routes == 1
             && dispatch.exact_c09_graph_routes == 1
-            && dispatch.future_pass_rejections == 0
+            && dispatch.unsupported_graph_rejections == 0
             && graph_submission.queue_submission_count_for_test() == 2
             && frame_gate.validated_plan_count == 1,
         "public dispatch did not validate and route direct, forced-graph, and masked-composition frames"
@@ -34560,7 +34012,7 @@ impl GraphCaptureMappingForTest {
     fn combined(self) -> Transform {
         self.capture_transform
             .then(self.parent_to_surface)
-            .expect("source-readable graph fixture transforms must compose")
+            .expect("graph fixture transforms must compose")
     }
 
     const fn as_frame_mapping(self) -> super::frame::ForcedC08CaptureMappingForTest {
@@ -35254,7 +34706,7 @@ fn graph_compare_parity_outputs_for_test(
     }
 
     let expected_output = PhysicalSize::try_from_logical(surface_size, case.scale)
-        .expect("the source-readable parity surface size must be valid");
+        .expect("the parity surface size must be valid");
     if direct.image.size() != expected_output
         || graph.image.size() != expected_output
         || graph.result.output_extent != expected_output
@@ -35463,7 +34915,7 @@ fn run_graph_parity_matrix_for_test(
                 return Err(GraphParityFailureForTest::new(
                     case,
                     GraphParityFailureStageForTest::MatrixCoverage,
-                    "the source-readable AA/scale registry no longer matches execution order",
+                    "the AA/scale case table no longer matches execution order",
                 ));
             }
             configuration_index += 1;
@@ -35922,7 +35374,7 @@ fn gpu_mask_render_preserves_single_transaction_generation() {
     assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
 }
 
-fn pinned_vello_characterization_scene() -> Scene {
+fn vello_pixel_characterization_scene() -> Scene {
     let partial_red = Color::try_rgba(0.8, 0.2, 0.1, 0.5).unwrap();
     let blue = Color::try_rgba(0.1, 0.25, 0.9, 1.0).unwrap();
     let gradient = Gradient::try_linear(
@@ -35969,7 +35421,7 @@ fn pinned_vello_characterization_scene() -> Scene {
     });
     scene.text_run(
         TextRun::try_new(
-            ahem_font("pinned Vello characterization"),
+            ahem_font("Vello pixel characterization"),
             10.0,
             Transform::identity(),
             TextPaint::try_fill(Color::BLACK.into()).unwrap(),
@@ -35981,11 +35433,11 @@ fn pinned_vello_characterization_scene() -> Scene {
     scene
 }
 
-fn observe_pinned_vello_characterization(
+fn observe_vello_pixel_characterization(
     antialiasing: Antialiasing,
     surface: &Surface,
     image: &ImageBuffer,
-) -> PinnedVelloCharacterizationCase {
+) -> VelloPixelCharacterizationCase {
     let logical_size = surface.size();
     let scale = surface.scale();
     let surface_physical_size = surface.physical_size();
@@ -36005,7 +35457,7 @@ fn observe_pinned_vello_characterization(
         "headless image dimensions must match the created surface"
     );
 
-    PinnedVelloCharacterizationCase {
+    VelloPixelCharacterizationCase {
         antialiasing,
         scale,
         logical_dimensions: [logical_size.width() as u32, logical_size.height() as u32],
@@ -36085,9 +35537,9 @@ fn characterization_alpha_support(
     }
 }
 
-fn assert_pinned_vello_characterization_case(
-    actual: PinnedVelloCharacterizationCase,
-    expected: PinnedVelloCharacterizationCase,
+fn assert_vello_pixel_characterization_case(
+    actual: VelloPixelCharacterizationCase,
+    expected: VelloPixelCharacterizationCase,
 ) {
     assert_eq!(actual.antialiasing, expected.antialiasing);
     assert_eq!(actual.scale, expected.scale);

@@ -75,7 +75,7 @@ thread_local! {
     static ACTIVE_COLOR_FILTER_SHADER_FAILURE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Private deterministic failure at the checked color-filter shader boundary.
+/// Test-only deterministic failure at the checked color-filter shader boundary.
 #[cfg(test)]
 pub(crate) struct ScopedColorFilterShaderFailureForTest {
     previous: bool,
@@ -114,7 +114,7 @@ pub(crate) struct C08ExecutableSubsetObservationForTest {
     pub(crate) rejects_every_other_pass_kind_and_composite_payload: bool,
     pub(crate) rejects_missing_or_reordered_spine_passes: bool,
     pub(crate) rejects_malformed_dependencies_reads_results_and_releases: bool,
-    pub(crate) rejects_later_cycle_plan: bool,
+    pub(crate) rejects_graph_outside_base_subset: bool,
     pub(crate) preserves_direct_and_graph_planner_routes: bool,
 }
 
@@ -300,7 +300,7 @@ pub(crate) struct ColorFilterGraphObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct MixedColorFutureDiagnosticObservationForTest {
+pub(crate) struct MixedColorUnsupportedDiagnosticObservationForTest {
     pub(crate) pure_color_retains_gpu_color_diagnostic: bool,
     pub(crate) color_then_blur_reports_gpu_blur_diagnostic: bool,
     pub(crate) mixed_graph_stays_outside_c10_preparation: bool,
@@ -541,14 +541,14 @@ pub(crate) fn color_filter_graph_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn mixed_color_future_diagnostic_observation_for_test(
+pub(crate) fn mixed_color_unsupported_diagnostic_observation_for_test(
     color_filters: Vec<super::FilterList>,
     mixed_filters: Vec<super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> MixedColorFutureDiagnosticObservationForTest {
-    mixed_color_future_diagnostic_observation(
+) -> MixedColorUnsupportedDiagnosticObservationForTest {
+    mixed_color_unsupported_diagnostic_observation(
         color_filters,
         mixed_filters,
         commands,
@@ -2386,11 +2386,11 @@ fn c09_typed_vocabulary_is_preserved_for_test() -> bool {
 #[cfg(test)]
 pub(crate) fn c08_executable_subset_observation_for_test(
     c08_commands: RenderCommands,
-    later_cycle_commands: RenderCommands,
+    expanded_graph_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
 ) -> C08ExecutableSubsetObservationForTest {
-    c08_executable_subset_observation(c08_commands, later_cycle_commands, context, capabilities)
+    c08_executable_subset_observation(c08_commands, expanded_graph_commands, context, capabilities)
         .unwrap_or_default()
 }
 
@@ -7005,7 +7005,7 @@ fn executable_vello_capture_facts(
 #[cfg(test)]
 fn c08_executable_subset_observation(
     c08_commands: RenderCommands,
-    later_cycle_commands: RenderCommands,
+    expanded_graph_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
 ) -> Option<C08ExecutableSubsetObservationForTest> {
@@ -7013,9 +7013,9 @@ fn c08_executable_subset_observation(
         c08_commands.clone().plan_for(context),
         Ok(FramePlan::DirectVello(_))
     );
-    let later_cycle_plan = later_cycle_commands.clone().plan_for(context).ok()?;
-    let graph_route = matches!(&later_cycle_plan, FramePlan::GpuGraph(_));
-    let FramePlan::GpuGraph(later_cycle_graph) = later_cycle_plan else {
+    let expanded_graph_plan = expanded_graph_commands.clone().plan_for(context).ok()?;
+    let graph_route = matches!(&expanded_graph_plan, FramePlan::GpuGraph(_));
+    let FramePlan::GpuGraph(expanded_graph) = expanded_graph_plan else {
         return None;
     };
     let c08_graph = super::frame::forced_c08_graph_for_test(c08_commands, context).ok()?;
@@ -7033,8 +7033,8 @@ fn c08_executable_subset_observation(
         &capabilities,
     )
     .ok()?;
-    let later_cycle = LoweredGraphPlan::try_lower_validated_graph(
-        &later_cycle_graph,
+    let expanded_graph = LoweredGraphPlan::try_lower_validated_graph(
+        &expanded_graph,
         WorkingFormat::HighPrecision,
         Format::Rgba8,
         &capabilities,
@@ -7067,7 +7067,8 @@ fn c08_executable_subset_observation(
         rejects_malformed_dependencies_reads_results_and_releases: c08_rejects_malformed_bindings(
             &rgba,
         ),
-        rejects_later_cycle_plan: C08PreparableGraph::try_from_lowered(later_cycle).is_err(),
+        rejects_graph_outside_base_subset: C08PreparableGraph::try_from_lowered(expanded_graph)
+            .is_err(),
         preserves_direct_and_graph_planner_routes: direct_route && graph_route,
     })
 }
@@ -7561,13 +7562,13 @@ fn color_filter_graph_observation(
 }
 
 #[cfg(test)]
-fn mixed_color_future_diagnostic_observation(
+fn mixed_color_unsupported_diagnostic_observation(
     color_filters: Vec<super::FilterList>,
     mixed_filters: Vec<super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<MixedColorFutureDiagnosticObservationForTest> {
+) -> Option<MixedColorUnsupportedDiagnosticObservationForTest> {
     let (color_graph, _) = lower_authored_c10_graph_for_test(
         color_filters,
         commands.clone(),
@@ -7584,19 +7585,19 @@ fn mixed_color_future_diagnostic_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let color_diagnostic = super::renderer::future_graph_diagnostic_for_test(
+    let color_diagnostic = super::renderer::unsupported_graph_diagnostic_for_test(
         &color_graph,
         Format::Rgba8,
         &capabilities,
     )
     .ok()??;
-    let mixed_diagnostic = super::renderer::future_graph_diagnostic_for_test(
+    let mixed_diagnostic = super::renderer::unsupported_graph_diagnostic_for_test(
         &mixed_graph,
         Format::Rgba8,
         &capabilities,
     )
     .ok()??;
-    Some(MixedColorFutureDiagnosticObservationForTest {
+    Some(MixedColorUnsupportedDiagnosticObservationForTest {
         pure_color_retains_gpu_color_diagnostic: color_diagnostic
             == super::UnsupportedPrimitive::new(
                 super::PrimitiveFamily::Filters,

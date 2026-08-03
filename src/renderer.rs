@@ -90,7 +90,7 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) exact_spatial_filter_fixture_routes: usize,
     pub(crate) exact_c12_graph_routes: usize,
     pub(crate) exact_bounded_backdrop_fixture_routes: usize,
-    pub(crate) future_pass_rejections: usize,
+    pub(crate) unsupported_graph_rejections: usize,
 }
 
 #[cfg(test)]
@@ -935,9 +935,9 @@ impl Renderer {
                 ExecutableGraphDispatchEligibility::FuturePasses => {
                     #[cfg(test)]
                     {
-                        self.dispatch_observation.future_pass_rejections = self
+                        self.dispatch_observation.unsupported_graph_rejections = self
                             .dispatch_observation
-                            .future_pass_rejections
+                            .unsupported_graph_rejections
                             .saturating_add(1);
                     }
                     reject_future_graph_with_typed_diagnostic(&graph)?;
@@ -1284,8 +1284,8 @@ impl Renderer {
         Ok(stats)
     }
 
-    /// Private T5 entry for forcing ordinary commands through the exact
-    /// production C08 graph executor without adding a public route or option.
+    /// Test-only entry for forcing ordinary commands through the exact
+    /// production graph executor without adding a public route or option.
     #[cfg(test)]
     pub(crate) async fn render_forced_c08_graph_for_test(
         &mut self,
@@ -1304,8 +1304,8 @@ impl Renderer {
         .await
     }
 
-    /// Private T6 entry that keeps capture and parent mappings distinct while
-    /// executing the same production C08 graph path.
+    /// Test-only entry that keeps capture and parent mappings distinct while
+    /// executing the same production graph path.
     #[cfg(test)]
     pub(crate) async fn render_forced_c08_graph_with_capture_mapping_for_test(
         &mut self,
@@ -1537,7 +1537,7 @@ impl Renderer {
         })
     }
 
-    /// Private color-filter ingress into the shared exact graph executor.
+    /// Test-only color-filter ingress into the shared exact graph executor.
     #[cfg(test)]
     pub(crate) async fn render_color_filter_fixture_for_test(
         &mut self,
@@ -1726,7 +1726,7 @@ impl Renderer {
         })
     }
 
-    /// Private spatial-filter ingress into the shared exact graph executor.
+    /// Test-only spatial-filter ingress into the shared exact graph executor.
     #[cfg(test)]
     pub(crate) async fn render_spatial_filter_fixture_for_test(
         &mut self,
@@ -1882,7 +1882,7 @@ impl Renderer {
         })
     }
 
-    /// Private bounded-backdrop ingress into the shared exact graph executor.
+    /// Test-only bounded-backdrop ingress into the shared exact graph executor.
     #[cfg(test)]
     pub(crate) async fn render_bounded_backdrop_fixture_for_test(
         &mut self,
@@ -3064,7 +3064,7 @@ fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<(
 }
 
 #[cfg(test)]
-pub(crate) fn future_graph_diagnostic_for_test(
+pub(crate) fn unsupported_graph_diagnostic_for_test(
     graph: &GpuRenderGraph,
     output_format: Format,
     capabilities: &DeviceCapabilities,
@@ -3077,7 +3077,7 @@ pub(crate) fn future_graph_diagnostic_for_test(
     )? {
         ExecutableGraphDispatchEligibility::FuturePasses => {
             let error = reject_future_graph_with_typed_diagnostic(graph)
-                .expect_err("a future graph diagnostic probe must reject before execution");
+                .expect_err("an unsupported graph diagnostic probe must reject before execution");
             Ok(error.unsupported_primitive())
         }
         ExecutableGraphDispatchEligibility::ExactC08(_)
