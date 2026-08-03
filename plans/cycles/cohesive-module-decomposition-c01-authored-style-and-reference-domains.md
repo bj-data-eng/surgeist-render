@@ -90,8 +90,15 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render border_
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render outlines_
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render filter_lists_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render filter_none_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render drop_shadow_model_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render filter_blur_rejects_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render filter_unit_amount_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render filter_angle_
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render filtered_image_paint_
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render backdrop_filter_input_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render backdrop_capture_bounds_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render backdrop_filter_root_policy_
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render clip_input
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render mask_input
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render mask_layer_stack
