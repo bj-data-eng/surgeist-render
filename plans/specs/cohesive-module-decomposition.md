@@ -282,21 +282,47 @@ inventory.
 
 ## M06 Dependency And Cycle Discipline
 
-Child dependencies follow the phase direction already present in source:
+Within each new module directory, child dependencies follow the phase direction
+already present in source:
 
 ```text
 authored/model -> semantic plan -> lowering -> runtime model
                -> preparation -> encoding -> backend submission/publication
 ```
 
-Validation may depend on the model it validates. Models do not depend on
-preparation, encoding, backend, test-support, or higher phases. Production
-children never depend on `test_support`. Reference modules remain test-only.
+Validation may depend on the model it validates. Within one module directory,
+models do not depend on preparation, encoding, backend, test-support, or higher
+phases. Production children never depend on `test_support`. Reference modules
+remain test-only.
 
-If two proposed children would require a cycle, the worker must move the shared
-owner downward or retain the inseparable group in `mod.rs`; it must not introduce
-indirection, a trait, dynamic dispatch, duplicated data, or a generic helper
-module to disguise the cycle.
+This mechanical initiative does not eliminate the following existing
+crate-level mutual coordination edges:
+
+- `backend::execute` consumes transactions and commit payloads owned by
+  `gpu_transaction::{mod,graph,vello}`, while those transaction owners consume
+  device signals owned by `backend::device`;
+- `pass::{model,parameters}` supplies runtime facts serialized or keyed by
+  `shader::{parameters,key,validate}`, while `pass::prepare` consumes the
+  realization/cache contracts owned by `shader::{pipeline,cache}`;
+- `frame::mod` consumes public `renderer::options::Antialiasing`, while
+  `renderer::dispatch` consumes the frame-planning front door;
+- `resource::{manager,lease}` consumes public
+  `renderer::options::ResourceCacheBudget`, while renderer/backend orchestration
+  consumes the resource front door.
+
+Those types remain with the exact owners above because relocating the public
+option types or transaction, pass, shader, device, and resource contracts would
+be an architectural change rather than a file move. Their imports must name the
+owning front door or child explicitly; no compatibility shim is added. These
+four baseline edges are allowed and are not evidence of an incomplete move.
+The initiative may not introduce another crate-level mutual edge.
+
+If two proposed children within one module directory would require a cycle, the
+worker must move the shared owner downward or retain the inseparable group in
+`mod.rs`; it must not introduce indirection, a trait, dynamic dispatch,
+duplicated data, or a generic helper module to disguise the cycle. If a cycle
+cannot be resolved without changing semantics, the cycle plan must revise this
+specification before implementation rather than improvise an architecture.
 
 ## M07 Test And Verification Contract
 
@@ -319,14 +345,28 @@ CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-web
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-web -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
+CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window
+CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window,render-web
+CARGO_NET_OFFLINE=true cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
+rustc +1.97.0 --version
+CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets
+CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets --features render-window,render-web
+CARGO_NET_OFFLINE=true RUSTDOCFLAGS="-D warnings" cargo doc -p surgeist-render --no-deps --features render-window,render-web
 ```
 
-The current installed wasm target, Rust 1.97 toolchain, dependency inspections,
-warning-denied rustdoc, native presentation smoke, and canonical owned-Rust
-unsafe scan remain applicable final evidence when available. I02 does not
-install or update missing tooling.
+The dependency inspections from the published P02-I01 matrix, absence of a
+tracked `Cargo.lock`, and the canonical tracked/untracked owned-Rust unsafe scan
+also remain required final evidence. I02 does not install or update missing
+tooling. The installed wasm target, Rust 1.97 toolchain, and native presentation
+host are verified prerequisites before a cycle starts. If one later becomes
+unavailable, the affected cycle is blocked and is neither reviewed as complete
+nor published; a native host run is not replaced by a headless or compile-only
+check.
 
 ## M08 Product Impacts
 
