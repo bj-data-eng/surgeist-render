@@ -7281,7 +7281,7 @@ fn lower_authored_c10_graph_for_test(
     output_format: Format,
     capabilities: &DeviceCapabilities,
 ) -> Option<(GpuRenderGraph, LoweredGraphPlan)> {
-    let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context).ok()?;
+    let graph = super::frame::authored_filter_graph_for_test(filters, commands, context).ok()?;
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
         &graph,
         working_format,

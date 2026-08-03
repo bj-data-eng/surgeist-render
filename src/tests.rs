@@ -1186,7 +1186,7 @@ fn text_run_for<'a>(
 ) -> TextRun<'a> {
     TextRun::try_new(
         FontRef::new(AHEM_FONT_ID)
-            .named("C03 selected glyph preflight")
+            .named("selected glyph preflight")
             .with_data(font_data),
         size,
         transform,
@@ -9782,7 +9782,7 @@ fn assert_runtime_color_filter_lowering(
     }
 }
 
-fn c10_color_filter_commands_for_shader_test() -> command::RenderCommands {
+fn color_filter_commands_for_shader_test() -> command::RenderCommands {
     let filters = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(0.0).unwrap()),
         FilterOp::contrast(FilterAmount::try_new(f64::from_bits(1)).unwrap()),
@@ -9816,7 +9816,7 @@ fn c10_color_filter_commands_for_shader_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c10_color_filter_frame_context_for_shader_test() -> super::frame::FrameContext {
+fn color_filter_frame_context_for_shader_test() -> super::frame::FrameContext {
     super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.0,
@@ -9826,7 +9826,7 @@ fn c10_color_filter_frame_context_for_shader_test() -> super::frame::FrameContex
     .unwrap()
 }
 
-fn c10_expected_color_filter_operation_bytes_for_test() -> Vec<u8> {
+fn color_filter_expected_operation_bytes_for_test() -> Vec<u8> {
     let mut bytes = Vec::with_capacity(16 + 8 * 32);
     bytes.extend_from_slice(&8_u32.to_le_bytes());
     bytes.extend_from_slice(&[0_u8; 12]);
@@ -9855,8 +9855,8 @@ fn c10_expected_color_filter_operation_bytes_for_test() -> Vec<u8> {
 #[test]
 fn color_filter_operation_bytes_preserve_tags_scalars_and_clamp_boundaries() {
     let observed = super::pass::color_filter_operation_bytes_observation_for_test(
-        c10_color_filter_commands_for_shader_test(),
-        c10_color_filter_frame_context_for_shader_test(),
+        color_filter_commands_for_shader_test(),
+        color_filter_frame_context_for_shader_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     )
     .unwrap_or_panic_for_test(
@@ -9864,7 +9864,7 @@ fn color_filter_operation_bytes_preserve_tags_scalars_and_clamp_boundaries() {
     );
 
     assert!(
-        observed.bytes == c10_expected_color_filter_operation_bytes_for_test()
+        observed.bytes == color_filter_expected_operation_bytes_for_test()
             && observed.preserves_one_clamp_per_record,
         "color operation bytes lost an authored finite scalar or clamp"
     );
@@ -9904,8 +9904,8 @@ fn color_filter_cache_realizes_checked_high_and_reduced_programs() {
     let observed = pollster::block_on(
         super::pass::c10_color_filter_cache_realization_observation_for_test(
             ready.device_for_test(),
-            c10_color_filter_commands_for_shader_test(),
-            c10_color_filter_frame_context_for_shader_test(),
+            color_filter_commands_for_shader_test(),
+            color_filter_frame_context_for_shader_test(),
             capabilities,
         ),
     )
@@ -9923,8 +9923,8 @@ fn color_filter_cache_realizes_checked_high_and_reduced_programs() {
 #[test]
 fn color_filter_layout_binds_exact_source_spatial_and_operations() {
     let observed = super::pass::c10_color_filter_layout_observation_for_test(
-        c10_color_filter_commands_for_shader_test(),
-        c10_color_filter_frame_context_for_shader_test(),
+        color_filter_commands_for_shader_test(),
+        color_filter_frame_context_for_shader_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -9939,7 +9939,7 @@ fn color_filter_layout_binds_exact_source_spatial_and_operations() {
     );
 }
 
-fn c10_authored_color_graph_commands_for_test() -> command::RenderCommands {
+fn filter_graph_commands_for_test() -> command::RenderCommands {
     let mut scene = Scene::new();
     scene.fill(
         Rect::new(-2.25, 1.5, 4.0, 3.0),
@@ -9947,10 +9947,10 @@ fn c10_authored_color_graph_commands_for_test() -> command::RenderCommands {
     );
     scene
         .normalize(Capabilities::CURRENT)
-        .expect("ordinary C10 capture input must normalize")
+        .expect("ordinary color-filter capture input must normalize")
 }
 
-fn c10_authored_color_runs_for_test() -> Vec<FilterList> {
+fn authored_color_filter_runs_for_test() -> Vec<FilterList> {
     vec![
         FilterList::try_ops(vec![
             FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
@@ -9967,7 +9967,7 @@ fn c10_authored_color_runs_for_test() -> Vec<FilterList> {
     ]
 }
 
-fn c10_authored_color_graph_context_for_test() -> super::frame::FrameContext {
+fn filter_graph_context_for_test() -> super::frame::FrameContext {
     super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.25,
@@ -9977,16 +9977,16 @@ fn c10_authored_color_graph_context_for_test() -> super::frame::FrameContext {
     .unwrap()
 }
 
-fn c10_color_then_blur_filters_for_test() -> Vec<FilterList> {
+fn color_then_blur_filters_for_test() -> Vec<FilterList> {
     vec![
-        c10_authored_color_runs_for_test()[0].clone(),
+        authored_color_filter_runs_for_test()[0].clone(),
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.0).unwrap())]).unwrap(),
     ]
 }
 
-fn c10_color_then_drop_shadow_filters_for_test() -> Vec<FilterList> {
+fn color_then_drop_shadow_filters_for_test() -> Vec<FilterList> {
     vec![
-        c10_authored_color_runs_for_test()[0].clone(),
+        authored_color_filter_runs_for_test()[0].clone(),
         FilterList::try_ops(vec![FilterOp::drop_shadow(
             FilterDropShadow::try_new(
                 Point::new(0.5, -0.25),
@@ -10002,11 +10002,11 @@ fn c10_color_then_drop_shadow_filters_for_test() -> Vec<FilterList> {
 #[test]
 fn gpu_graph_executor_accepts_only_spine_composition_and_ordered_color_filters() {
     let observed = super::pass::c10_executable_graph_observation_for_test(
-        c10_authored_color_runs_for_test(),
-        c10_color_then_blur_filters_for_test(),
-        c10_color_then_drop_shadow_filters_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        authored_color_filter_runs_for_test(),
+        color_then_blur_filters_for_test(),
+        color_then_drop_shadow_filters_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -10026,9 +10026,9 @@ fn color_filter_graph_preserves_authored_order_clamps_and_exact_lifetimes() {
     use super::pass::RuntimeColorOperationTagForTest as Tag;
 
     let observed = super::pass::color_filter_graph_observation_for_test(
-        c10_authored_color_runs_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        authored_color_filter_runs_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
     let expected_operations = vec![
@@ -10059,10 +10059,10 @@ fn color_filter_graph_preserves_authored_order_clamps_and_exact_lifetimes() {
 #[test]
 fn mixed_color_and_future_passes_preserve_the_next_unavailable_diagnostic() {
     let observed = super::pass::mixed_color_future_diagnostic_observation_for_test(
-        c10_authored_color_runs_for_test(),
-        c10_color_then_blur_filters_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        authored_color_filter_runs_for_test(),
+        color_then_blur_filters_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -10074,9 +10074,9 @@ fn mixed_color_and_future_passes_preserve_the_next_unavailable_diagnostic() {
     );
 }
 
-fn c11_authored_filter_steps_for_test() -> Vec<FilterList> {
+fn spatial_filter_authored_filter_steps_for_test() -> Vec<FilterList> {
     vec![
-        c10_authored_color_runs_for_test()[0].clone(),
+        authored_color_filter_runs_for_test()[0].clone(),
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(1.25).unwrap())]).unwrap(),
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(0.0).unwrap())]).unwrap(),
         FilterList::try_ops(vec![FilterOp::drop_shadow(
@@ -10088,16 +10088,16 @@ fn c11_authored_filter_steps_for_test() -> Vec<FilterList> {
             .unwrap(),
         )])
         .unwrap(),
-        c10_authored_color_runs_for_test()[1].clone(),
+        authored_color_filter_runs_for_test()[1].clone(),
     ]
 }
 
 #[test]
 fn gpu_graph_executor_accepts_only_color_blur_and_drop_shadow_filter_graphs() {
     let observed = super::pass::c11_executable_graph_observation_for_test(
-        c11_authored_filter_steps_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -10117,9 +10117,9 @@ fn blur_and_drop_shadow_graph_preserves_order_edges_and_lifetimes() {
     use super::pass::C11FilterPassTagForTest as Tag;
 
     let observed = super::pass::c11_filter_graph_observation_for_test(
-        c11_authored_filter_steps_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -10146,7 +10146,7 @@ fn blur_and_drop_shadow_graph_preserves_order_edges_and_lifetimes() {
     );
 }
 
-fn c12_bounded_scene_for_test() -> Scene {
+fn bounded_backdrop_scene_for_test() -> Scene {
     let filters = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
         FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
@@ -10192,28 +10192,28 @@ fn c12_bounded_scene_for_test() -> Scene {
     scene
 }
 
-fn c12_bounded_graph_commands_for_test() -> command::RenderCommands {
-    c12_bounded_scene_for_test()
+fn bounded_backdrop_graph_commands_for_test() -> command::RenderCommands {
+    bounded_backdrop_scene_for_test()
         .normalize(Capabilities::CURRENT)
-        .expect("the exact C12 bounded backdrop fixture must normalize")
+        .expect("the exact bounded-backdrop fixture must normalize")
 }
 
-struct C12ProductionFrameForTest {
+struct BoundedBackdropProductionFrameForTest {
     output: ImageBuffer,
-    result: super::renderer::C12BackdropRenderResultForTest,
+    result: super::renderer::BoundedBackdropRenderResultForTest,
     queue_submissions: usize,
     graph_submissions: usize,
     direct_submissions: usize,
     publication_count: usize,
 }
 
-fn render_c12_fixture_for_test(
+fn render_bounded_backdrop_fixture_for_test(
     scene: &Scene,
     size: PhysicalSize,
     parameters: Parameters,
     working_format: WorkingFormat,
-) -> C12ProductionFrameForTest {
-    let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+) -> BoundedBackdropProductionFrameForTest {
+    let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -10221,16 +10221,19 @@ fn render_c12_fixture_for_test(
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let result = pollster::block_on(renderer.render_c12_backdrop_fixture_for_test(
+    let result = pollster::block_on(renderer.render_bounded_backdrop_fixture_for_test(
         &mut surface,
         scene,
         parameters,
         working_format,
     ))
-    .unwrap_or_else(|error| panic!("the C12 fixture must use the production graph: {error}"));
-    let frame = C12ProductionFrameForTest {
-        output: pollster::block_on(renderer.read_headless(&surface))
-            .unwrap_or_else(|error| panic!("the published C12 fixture must be readable: {error}")),
+    .unwrap_or_else(|error| {
+        panic!("the bounded-backdrop fixture must use the production graph: {error}")
+    });
+    let frame = BoundedBackdropProductionFrameForTest {
+        output: pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the published bounded-backdrop fixture must be readable: {error}")
+        }),
         result,
         queue_submissions: submission.queue_submission_count_for_test(),
         graph_submissions: graph_submission.queue_submission_count_for_test(),
@@ -10245,7 +10248,7 @@ fn render_c12_fixture_for_test(
     frame
 }
 
-fn c12_reference_rect_for_test(
+fn bounded_backdrop_reference_rect_for_test(
     size: PhysicalSize,
     rect: (u32, u32, u32, u32),
     straight: [u8; 4],
@@ -10254,14 +10257,14 @@ fn c12_reference_rect_for_test(
     for y in rect.1..rect.1 + rect.3 {
         for x in rect.0..rect.0 + rect.2 {
             buffer
-                .set_pixel(x, y, c09_premultiplied_pixel_for_test(straight))
+                .set_pixel(x, y, reference_premultiplied_pixel_for_test(straight))
                 .unwrap();
         }
     }
     buffer
 }
 
-fn c12_capture_reference_for_test(
+fn bounded_backdrop_capture_reference_for_test(
     source: &ReferencePremultipliedRgba8Buffer,
     origin: (i32, i32),
     extent: PhysicalSize,
@@ -10294,7 +10297,7 @@ fn c12_capture_reference_for_test(
     capture
 }
 
-fn c12_place_capture_for_test(
+fn bounded_backdrop_place_capture_for_test(
     capture: &ReferencePremultipliedRgba8Buffer,
     origin: (i32, i32),
     output_size: PhysicalSize,
@@ -10322,7 +10325,7 @@ fn c12_place_capture_for_test(
     placed
 }
 
-fn c12_clip_reference_for_test(
+fn bounded_backdrop_clip_reference_for_test(
     source: &ReferencePremultipliedRgba8Buffer,
     rect: (u32, u32, u32, u32),
 ) -> ReferencePremultipliedRgba8Buffer {
@@ -10337,15 +10340,15 @@ fn c12_clip_reference_for_test(
     clipped
 }
 
-fn c12_frame_matches_for_test(
-    frame: &C12ProductionFrameForTest,
+fn bounded_backdrop_frame_matches_for_test(
+    frame: &BoundedBackdropProductionFrameForTest,
     expected: &ReferencePremultipliedRgba8Buffer,
     origin: (i32, i32),
     extent: PhysicalSize,
     tolerance: u8,
 ) -> bool {
     let expected_size = expected.physical_size();
-    let expected = c09_reference_straight_bytes_for_test(expected);
+    let expected = reference_straight_bytes_for_test(expected);
     let energy_tolerance = match frame.result.working_format {
         WorkingFormat::HighPrecision => 0.015,
         WorkingFormat::ReducedPrecision => 0.025,
@@ -10373,8 +10376,9 @@ fn c12_frame_matches_for_test(
         && frame.graph_submissions == 1
         && frame.direct_submissions == 0
         && frame.publication_count == 1
-        && c11_alpha_energy_error_for_test(frame.output.rgba(), &expected) <= energy_tolerance
-        && c09_pixels_match_for_test(
+        && spatial_filter_alpha_energy_error_for_test(frame.output.rgba(), &expected)
+            <= energy_tolerance
+        && graph_pixels_match_for_test(
             frame.output.rgba(),
             &expected,
             frame.result.working_format,
@@ -10393,17 +10397,17 @@ fn backdrop_blur_mirrors_at_semantic_bounds_not_allocation_padding() {
     scene
         .fill(
             Rect::new(2.0, 1.0, 1.0, 4.0),
-            c09_color_for_test([240, 32, 16, 255]),
+            color_from_straight_rgba8_for_test([240, 32, 16, 255]),
         )
         .fill(
             Rect::new(3.0, 1.0, 3.0, 4.0),
-            c09_color_for_test([16, 80, 224, 255]),
+            color_from_straight_rgba8_for_test([16, 80, 224, 255]),
         )
         .layer(
             Layer::new()
                 .try_backdrop_filter(
                     BackdropFilterInput::try_new(
-                        c11_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
+                        single_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
                         BackdropCaptureBounds::try_new(Rect::new(2.0, 1.0, 4.0, 4.0)).unwrap(),
                         Some(
                             ClipInput::try_shape(Shape::rect(Rect::new(2.0, 1.0, 4.0, 4.0)))
@@ -10415,34 +10419,34 @@ fn backdrop_blur_mirrors_at_semantic_bounds_not_allocation_padding() {
                 .unwrap(),
             |_| {},
         );
-    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
-    let parent = c12_reference_rect_for_test(size, (2, 1, 1, 4), [240, 32, 16, 255])
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = bounded_backdrop_reference_rect_for_test(size, (2, 1, 1, 4), [240, 32, 16, 255])
         .source_over(&parent)
         .unwrap();
-    let parent = c12_reference_rect_for_test(size, (3, 1, 3, 4), [16, 80, 224, 255])
+    let parent = bounded_backdrop_reference_rect_for_test(size, (3, 1, 3, 4), [16, 80, 224, 255])
         .source_over(&parent)
         .unwrap();
-    let filtered = c12_capture_reference_for_test(&parent, origin, extent)
+    let filtered = bounded_backdrop_capture_reference_for_test(&parent, origin, extent)
         .apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
         .unwrap();
-    let expected = c12_place_capture_for_test(&filtered, origin, size)
+    let expected = bounded_backdrop_place_capture_for_test(&filtered, origin, size)
         .source_over(&parent)
         .unwrap();
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let frame = render_c12_fixture_for_test(
+        let frame = render_bounded_backdrop_fixture_for_test(
             &scene,
             size,
             Parameters {
-                base_color: c09_color_for_test(base),
+                base_color: color_from_straight_rgba8_for_test(base),
                 ..Parameters::default()
             },
             working_format,
         );
         assert!(
-            c12_frame_matches_for_test(&frame, &expected, origin, extent, 4),
+            bounded_backdrop_frame_matches_for_test(&frame, &expected, origin, extent, 4),
             "semantic-edge backdrop blur differs from its mirrored oracle: format={working_format:?}"
         );
     }
@@ -10462,7 +10466,10 @@ fn backdrop_reads_only_completed_prior_content_and_base_once() {
     ];
     let mut scene = Scene::new();
     scene
-        .fill(Rect::new(0.0, 1.0, 3.0, 4.0), c09_color_for_test(prior))
+        .fill(
+            Rect::new(0.0, 1.0, 3.0, 4.0),
+            color_from_straight_rgba8_for_test(prior),
+        )
         .layer(
             Layer::new()
                 .try_backdrop_filter(
@@ -10476,35 +10483,38 @@ fn backdrop_reads_only_completed_prior_content_and_base_once() {
                 .unwrap(),
             |_| {},
         )
-        .fill(Rect::new(4.0, 2.0, 3.0, 2.0), c09_color_for_test(later));
-    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
-    let parent = c12_reference_rect_for_test(size, (0, 1, 3, 4), prior)
+        .fill(
+            Rect::new(4.0, 2.0, 3.0, 2.0),
+            color_from_straight_rgba8_for_test(later),
+        );
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 1, 3, 4), prior)
         .source_over(&parent)
         .unwrap();
-    let filtered = c12_capture_reference_for_test(&parent, origin, extent)
+    let filtered = bounded_backdrop_capture_reference_for_test(&parent, origin, extent)
         .apply_color_filter_pipeline(&color_filter_pipeline(operations))
         .unwrap();
-    let completed = c12_place_capture_for_test(&filtered, origin, size)
+    let completed = bounded_backdrop_place_capture_for_test(&filtered, origin, size)
         .source_over(&parent)
         .unwrap();
-    let expected = c12_reference_rect_for_test(size, (4, 2, 3, 2), later)
+    let expected = bounded_backdrop_reference_rect_for_test(size, (4, 2, 3, 2), later)
         .source_over(&completed)
         .unwrap();
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let frame = render_c12_fixture_for_test(
+        let frame = render_bounded_backdrop_fixture_for_test(
             &scene,
             size,
             Parameters {
-                base_color: c09_color_for_test(base),
+                base_color: color_from_straight_rgba8_for_test(base),
                 ..Parameters::default()
             },
             working_format,
         );
         assert!(
-            c12_frame_matches_for_test(&frame, &expected, origin, extent, 2),
+            bounded_backdrop_frame_matches_for_test(&frame, &expected, origin, extent, 2),
             "bounded backdrop capture included a later sibling, omitted a prior sibling, or changed the signed base mapping: format={working_format:?}"
         );
     }
@@ -10522,7 +10532,7 @@ fn backdrop_foreground_is_not_filtered_and_composites_above_backdrop() {
         Layer::new()
             .try_backdrop_filter(
                 BackdropFilterInput::try_new(
-                    c11_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
+                    single_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
                     BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
                     None,
                 )
@@ -10532,15 +10542,15 @@ fn backdrop_foreground_is_not_filtered_and_composites_above_backdrop() {
         |scene| {
             scene.fill(
                 Rect::new(3.0, 2.0, 2.0, 2.0),
-                c09_color_for_test(foreground),
+                color_from_straight_rgba8_for_test(foreground),
             );
         },
     );
-    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
     let filtered = parent
         .apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
         .unwrap();
-    let group = c12_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
+    let group = bounded_backdrop_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
         .source_over(&filtered)
         .unwrap();
     let expected = group.source_over(&parent).unwrap();
@@ -10548,17 +10558,17 @@ fn backdrop_foreground_is_not_filtered_and_composites_above_backdrop() {
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let frame = render_c12_fixture_for_test(
+        let frame = render_bounded_backdrop_fixture_for_test(
             &scene,
             size,
             Parameters {
-                base_color: c09_color_for_test(base),
+                base_color: color_from_straight_rgba8_for_test(base),
                 ..Parameters::default()
             },
             working_format,
         );
         assert!(
-            c12_frame_matches_for_test(&frame, &expected, origin, size, 4),
+            bounded_backdrop_frame_matches_for_test(&frame, &expected, origin, size, 4),
             "bounded backdrop execution filtered or under-composited its foreground: format={working_format:?}"
         );
     }
@@ -10588,37 +10598,40 @@ fn later_siblings_observe_completed_backdrop_group() {
             |scene| {
                 scene.fill(
                     Rect::new(2.0, 2.0, 2.0, 2.0),
-                    c09_color_for_test(foreground),
+                    color_from_straight_rgba8_for_test(foreground),
                 );
             },
         )
-        .fill(Rect::new(3.0, 1.0, 3.0, 4.0), c09_color_for_test(later));
-    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
+        .fill(
+            Rect::new(3.0, 1.0, 3.0, 4.0),
+            color_from_straight_rgba8_for_test(later),
+        );
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
     let filtered = parent
         .apply_color_filter_pipeline(&color_filter_pipeline([invert]))
         .unwrap();
-    let group = c12_reference_rect_for_test(size, (2, 2, 2, 2), foreground)
+    let group = bounded_backdrop_reference_rect_for_test(size, (2, 2, 2, 2), foreground)
         .source_over(&filtered)
         .unwrap();
     let completed = group.source_over(&parent).unwrap();
-    let expected = c12_reference_rect_for_test(size, (3, 1, 3, 4), later)
+    let expected = bounded_backdrop_reference_rect_for_test(size, (3, 1, 3, 4), later)
         .source_over(&completed)
         .unwrap();
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let frame = render_c12_fixture_for_test(
+        let frame = render_bounded_backdrop_fixture_for_test(
             &scene,
             size,
             Parameters {
-                base_color: c09_color_for_test(base),
+                base_color: color_from_straight_rgba8_for_test(base),
                 ..Parameters::default()
             },
             working_format,
         );
         assert!(
-            c12_frame_matches_for_test(&frame, &expected, origin, size, 2),
+            bounded_backdrop_frame_matches_for_test(&frame, &expected, origin, size, 2),
             "a later sibling failed to observe the complete bounded backdrop group: format={working_format:?}"
         );
     }
@@ -10631,7 +10644,7 @@ fn outer_clip_precedes_mask_and_opacity_but_follows_filter() {
     let prior = [240, 32, 16, 255];
     let blur = FilterBlur::try_new(1.0).unwrap();
     let mask_alpha = 128_u8;
-    let mask = c09_mask_image_from_alpha_for_test(
+    let mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
         &[mask_alpha],
         ImageQuality::Low,
@@ -10647,7 +10660,7 @@ fn outer_clip_precedes_mask_and_opacity_but_follows_filter() {
         )
         .try_backdrop_filter(
             BackdropFilterInput::try_new(
-                c11_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
+                single_filter_list_for_test(FilterOp::blur(blur))[0].clone(),
                 BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
                 None,
             )
@@ -10656,16 +10669,19 @@ fn outer_clip_precedes_mask_and_opacity_but_follows_filter() {
         .unwrap();
     let mut scene = Scene::new();
     scene
-        .fill(Rect::new(1.0, 0.0, 1.0, 6.0), c09_color_for_test(prior))
+        .fill(
+            Rect::new(1.0, 0.0, 1.0, 6.0),
+            color_from_straight_rgba8_for_test(prior),
+        )
         .layer(layer, |_| {});
-    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
-    let parent = c12_reference_rect_for_test(size, (1, 0, 1, 6), prior)
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = bounded_backdrop_reference_rect_for_test(size, (1, 0, 1, 6), prior)
         .source_over(&parent)
         .unwrap();
     let filtered = parent
         .apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
         .unwrap();
-    let clipped = c12_clip_reference_for_test(&filtered, (2, 1, 4, 4));
+    let clipped = bounded_backdrop_clip_reference_for_test(&filtered, (2, 1, 4, 4));
     let masked = clipped
         .apply_opacity(f32::from(mask_alpha) / 255.0)
         .unwrap()
@@ -10676,23 +10692,23 @@ fn outer_clip_precedes_mask_and_opacity_but_follows_filter() {
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let frame = render_c12_fixture_for_test(
+        let frame = render_bounded_backdrop_fixture_for_test(
             &scene,
             size,
             Parameters {
-                base_color: c09_color_for_test(base),
+                base_color: color_from_straight_rgba8_for_test(base),
                 ..Parameters::default()
             },
             working_format,
         );
         assert!(
-            c12_frame_matches_for_test(&frame, &expected, (0, 0), size, 4),
+            bounded_backdrop_frame_matches_for_test(&frame, &expected, (0, 0), size, 4),
             "bounded backdrop outer clip, mask, opacity, or filter order differs from the oracle: format={working_format:?}"
         );
     }
 }
 
-fn c12_integration_fixture_for_test() -> (
+fn bounded_backdrop_integration_fixture_for_test() -> (
     Scene,
     PhysicalSize,
     Parameters,
@@ -10722,16 +10738,22 @@ fn c12_integration_fixture_for_test() -> (
         .unwrap();
     let mut scene = Scene::new();
     scene
-        .fill(Rect::new(0.0, 1.0, 3.0, 4.0), c09_color_for_test(prior))
+        .fill(
+            Rect::new(0.0, 1.0, 3.0, 4.0),
+            color_from_straight_rgba8_for_test(prior),
+        )
         .layer(layer, |scene| {
             scene.fill(
                 Rect::new(3.0, 2.0, 2.0, 2.0),
-                c09_color_for_test(foreground),
+                color_from_straight_rgba8_for_test(foreground),
             );
         })
-        .fill(Rect::new(5.0, 1.0, 2.0, 4.0), c09_color_for_test(later));
-    let parent = c12_reference_rect_for_test(size, (0, 0, 8, 6), base);
-    let parent = c12_reference_rect_for_test(size, (0, 1, 3, 4), prior)
+        .fill(
+            Rect::new(5.0, 1.0, 2.0, 4.0),
+            color_from_straight_rgba8_for_test(later),
+        );
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
+    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 1, 3, 4), prior)
         .source_over(&parent)
         .unwrap();
     let filtered = parent
@@ -10740,25 +10762,25 @@ fn c12_integration_fixture_for_test() -> (
             buffer.apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
         })
         .unwrap();
-    let group = c12_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
+    let group = bounded_backdrop_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
         .source_over(&filtered)
         .unwrap();
     let completed = group.source_over(&parent).unwrap();
-    let expected = c12_reference_rect_for_test(size, (5, 1, 2, 4), later)
+    let expected = bounded_backdrop_reference_rect_for_test(size, (5, 1, 2, 4), later)
         .source_over(&completed)
         .unwrap();
     (
         scene,
         size,
         Parameters {
-            base_color: c09_color_for_test(base),
+            base_color: color_from_straight_rgba8_for_test(base),
             ..Parameters::default()
         },
         expected,
     )
 }
 
-fn c12_broad_capabilities_remain_diagnostic_for_test() -> bool {
+fn bounded_backdrop_broad_capabilities_remain_diagnostic_for_test() -> bool {
     let capabilities = Capabilities::CURRENT;
     let offscreen = capabilities.offscreen_pipeline();
     let unsupported = [
@@ -10798,7 +10820,7 @@ fn c12_broad_capabilities_remain_diagnostic_for_test() -> bool {
         })
 }
 
-fn c12_repeated_resources_stabilize_for_test(
+fn bounded_backdrop_repeated_resources_stabilize_for_test(
     scene: &Scene,
     size: PhysicalSize,
     parameters: Parameters,
@@ -10809,22 +10831,22 @@ fn c12_repeated_resources_stabilize_for_test(
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(512 * 1024 * 1024)),
     ))
-    .expect("C12 retained-resource coverage requires a renderer");
+    .expect("bounded-backdrop retained-resource coverage requires a renderer");
     renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
-    .expect("C12 retained-resource coverage requires a surface");
+    .expect("bounded-backdrop retained-resource coverage requires a surface");
     for _ in 0..2 {
         pollster::block_on(renderer.render(&mut surface, scene, parameters))
-            .expect("C12 retained-resource warm-up must succeed");
+            .expect("bounded-backdrop retained-resource warm-up must succeed");
     }
     let warmed_output = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the warmed C12 publication must be readable");
+        .expect("the warmed bounded-backdrop publication must be readable");
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the warmed C12 device must remain ready");
+        .expect("the warmed bounded-backdrop device must remain ready");
     let warmed_resources = ready.internal_resource_manager_observation_for_test();
     let warmed_cache = ready.device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -10838,11 +10860,11 @@ fn c12_repeated_resources_stabilize_for_test(
     let mut stats = Vec::new();
     for _ in 0..3 {
         let frame = pollster::block_on(renderer.render(&mut surface, scene, parameters))
-            .expect("repeated public C12 frames must succeed");
-        stats.push(C08PublicStatsForTest::from(frame));
+            .expect("repeated public bounded-backdrop frames must succeed");
+        stats.push(GraphPublicStatsForTest::from(frame));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("repeated public C12 frames must retain the ready device");
+            .expect("repeated public bounded-backdrop frames must retain the ready device");
         resources.push(ready.internal_resource_manager_observation_for_test());
         caches.push(ready.device_pass_cache_counts_for_test());
     }
@@ -10856,16 +10878,16 @@ fn c12_repeated_resources_stabilize_for_test(
     drop(graph_scope);
     drop(submission_scope);
     let output = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the repeated C12 publication must remain readable");
-    let expected = c09_reference_straight_bytes_for_test(expected);
-    c10_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
+        .expect("the repeated bounded-backdrop publication must remain readable");
+    let expected = reference_straight_bytes_for_test(expected);
+    color_filter_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
         && resources.iter().all(|actual| {
             actual.gaussian_kernel_count_for_test()
                 == warmed_resources.gaussian_kernel_count_for_test()
         })
         && warmed_resources.gaussian_kernel_count_for_test() > 0
         && warmed_resources.effect_texture_count_for_test() > 0
-        && c10_prepared_resource_identities_are_stable_for_test(&prepared)
+        && color_filter_prepared_resource_identities_are_stable_for_test(&prepared)
         && retention == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3]
         && warmed_cache.has_render_pipelines()
         && caches.iter().all(|actual| *actual == warmed_cache)
@@ -10874,10 +10896,10 @@ fn c12_repeated_resources_stabilize_for_test(
             .is_some_and(|first| stats.iter().all(|actual| actual == first))
         && one_submission_per_frame
         && output.rgba() == warmed_output.rgba()
-        && c09_pixels_match_for_test(output.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
+        && graph_pixels_match_for_test(output.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
 }
 
-fn c12_zero_budget_releases_idle_resources_for_test(
+fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
     scene: &Scene,
     size: PhysicalSize,
     parameters: Parameters,
@@ -10888,20 +10910,20 @@ fn c12_zero_budget_releases_idle_resources_for_test(
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("C12 zero-budget coverage requires a renderer");
+    .expect("bounded-backdrop zero-budget coverage requires a renderer");
     renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
-    .expect("C12 zero-budget coverage requires a surface");
+    .expect("bounded-backdrop zero-budget coverage requires a surface");
     pollster::block_on(renderer.render(&mut surface, scene, parameters))
-        .expect("the first C12 zero-budget frame must succeed");
+        .expect("the first bounded-backdrop zero-budget frame must succeed");
     let first = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the first C12 zero-budget publication must be readable");
+        .expect("the first bounded-backdrop zero-budget publication must be readable");
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the first C12 zero-budget frame must retain its device")
+        .expect("the first bounded-backdrop zero-budget frame must retain its device")
         .device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -10910,10 +10932,10 @@ fn c12_zero_budget_releases_idle_resources_for_test(
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     pollster::block_on(renderer.render(&mut surface, scene, parameters))
-        .expect("the repeated C12 zero-budget frame must succeed");
+        .expect("the repeated bounded-backdrop zero-budget frame must succeed");
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the repeated C12 zero-budget frame must retain its device");
+        .expect("the repeated bounded-backdrop zero-budget frame must retain its device");
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
     let one_submission = submission.queue_submission_count_for_test() == 1
@@ -10924,8 +10946,8 @@ fn c12_zero_budget_releases_idle_resources_for_test(
     drop(graph_scope);
     drop(submission_scope);
     let second = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the repeated C12 zero-budget publication must be readable");
-    let expected = c09_reference_straight_bytes_for_test(expected);
+        .expect("the repeated bounded-backdrop zero-budget publication must be readable");
+    let expected = reference_straight_bytes_for_test(expected);
 
     resources.leased_count == 0
         && resources.idle_count == 0
@@ -10942,14 +10964,14 @@ fn c12_zero_budget_releases_idle_resources_for_test(
         && cache_after.has_render_pipelines()
         && one_submission
         && first.rgba() == second.rgba()
-        && c09_pixels_match_for_test(second.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
+        && graph_pixels_match_for_test(second.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
 }
 
-fn c12_diagnostic_backdrop_layer_for_test() -> Layer {
+fn bounded_backdrop_diagnostic_backdrop_layer_for_test() -> Layer {
     Layer::new()
         .try_backdrop_filter(
             BackdropFilterInput::try_new(
-                c11_filter_list_for_test(FilterOp::blur(FilterBlur::try_new(0.5).unwrap()))[0]
+                single_filter_list_for_test(FilterOp::blur(FilterBlur::try_new(0.5).unwrap()))[0]
                     .clone(),
                 BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
                 None,
@@ -10959,25 +10981,34 @@ fn c12_diagnostic_backdrop_layer_for_test() -> Layer {
         .unwrap()
 }
 
-fn c12_broad_inputs_reject_before_allocation_for_test(
+fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     renderer: &mut Renderer,
     surface: &mut Surface,
 ) -> bool {
     let mut nested = Scene::new();
     nested.layer(Layer::new(), |scene| {
-        scene.layer(c12_diagnostic_backdrop_layer_for_test(), |_| {});
+        scene.layer(
+            bounded_backdrop_diagnostic_backdrop_layer_for_test(),
+            |_| {},
+        );
     });
     let mut transformed = Scene::new();
     transformed.layer(
-        c12_diagnostic_backdrop_layer_for_test()
+        bounded_backdrop_diagnostic_backdrop_layer_for_test()
             .try_transform(Transform::translation(1.0, 0.0).unwrap())
             .unwrap(),
         |_| {},
     );
     let mut repeated = Scene::new();
     repeated
-        .layer(c12_diagnostic_backdrop_layer_for_test(), |_| {})
-        .layer(c12_diagnostic_backdrop_layer_for_test(), |_| {});
+        .layer(
+            bounded_backdrop_diagnostic_backdrop_layer_for_test(),
+            |_| {},
+        )
+        .layer(
+            bounded_backdrop_diagnostic_backdrop_layer_for_test(),
+            |_| {},
+        );
     let mut layer_filter = Scene::new();
     layer_filter.layer(
         Layer::new()
@@ -10987,7 +11018,7 @@ fn c12_broad_inputs_reject_before_allocation_for_test(
     );
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("C12 broad diagnostic coverage requires a ready device");
+        .expect("bounded-backdrop broad diagnostic coverage requires a ready device");
     let resources_before = ready.internal_resource_manager_observation_for_test();
     let cache_before = ready.device_pass_cache_counts_for_test();
     let publication_before = surface.headless_publication_count_for_test();
@@ -11004,10 +11035,11 @@ fn c12_broad_inputs_reject_before_allocation_for_test(
     let layer_filter =
         pollster::block_on(renderer.render(surface, &layer_filter, Parameters::default()));
     let root = BackdropFilterInput::try_root_backdrop(
-        c11_filter_list_for_test(FilterOp::blur(FilterBlur::try_new(0.5).unwrap()))[0].clone(),
+        single_filter_list_for_test(FilterOp::blur(FilterBlur::try_new(0.5).unwrap()))[0].clone(),
         None,
     );
-    let reference = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#c13-filter");
+    let reference =
+        UnresolvedResource::new(UnresolvedResourceKind::Filter, "#broad_backdrop-filter");
     let reference_error = Error::unresolved_resource(reference.clone());
     let no_gpu_work = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
@@ -11018,7 +11050,7 @@ fn c12_broad_inputs_reject_before_allocation_for_test(
     drop(submission_scope);
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("C12 broad rejections must preserve the ready device");
+        .expect("bounded-backdrop broad rejections must preserve the ready device");
     let resources_after = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
     let broad = UnsupportedPrimitive::new(
@@ -11056,30 +11088,36 @@ fn c12_broad_inputs_reject_before_allocation_for_test(
 
 #[test]
 fn bounded_backdrop_fixture_executes_while_broad_capabilities_remain_diagnostic() {
-    let (scene, size, parameters, expected) = c12_integration_fixture_for_test();
-    let frame =
-        render_c12_fixture_for_test(&scene, size, parameters, WorkingFormat::ReducedPrecision);
+    let (scene, size, parameters, expected) = bounded_backdrop_integration_fixture_for_test();
+    let frame = render_bounded_backdrop_fixture_for_test(
+        &scene,
+        size,
+        parameters,
+        WorkingFormat::ReducedPrecision,
+    );
 
-    assert!(c12_frame_matches_for_test(
+    assert!(bounded_backdrop_frame_matches_for_test(
         &frame,
         &expected,
         (0, 0),
         size,
         4
     ));
-    assert!(c12_broad_capabilities_remain_diagnostic_for_test());
-    assert!(c12_repeated_resources_stabilize_for_test(
+    assert!(bounded_backdrop_broad_capabilities_remain_diagnostic_for_test());
+    assert!(bounded_backdrop_repeated_resources_stabilize_for_test(
         &scene, size, parameters, &expected,
     ));
-    assert!(c12_zero_budget_releases_idle_resources_for_test(
-        &scene, size, parameters, &expected,
-    ));
+    assert!(
+        bounded_backdrop_zero_budget_releases_idle_resources_for_test(
+            &scene, size, parameters, &expected,
+        )
+    );
 }
 
 #[cfg(feature = "render-window")]
 #[test]
 fn render_window_smoke_executes_bounded_backdrop_fixture() {
-    let (scene, size, parameters, expected) = c12_integration_fixture_for_test();
+    let (scene, size, parameters, expected) = bounded_backdrop_integration_fixture_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -11118,7 +11156,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
         })
         .map(|image| image.into_rgba());
     let presentation = presentation.snapshot_for_test();
-    let expected = c09_reference_straight_bytes_for_test(&expected);
+    let expected = reference_straight_bytes_for_test(&expected);
 
     assert!(
         rendered.is_ok()
@@ -11127,7 +11165,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
             && presentation.present_count_for_test() == 1
             && presentation.discarded_count_for_test() == 0
             && presented.as_deref().is_some_and(|actual| {
-                c09_pixels_match_for_test(actual, &expected, WorkingFormat::ReducedPrecision, 4)
+                graph_pixels_match_for_test(actual, &expected, WorkingFormat::ReducedPrecision, 4)
             }),
         "the presented bounded backdrop did not execute atomically"
     );
@@ -11135,7 +11173,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
 
 #[test]
 fn public_dispatch_enables_only_bounded_backdrop_execution() {
-    let (scene, size, parameters, expected) = c12_integration_fixture_for_test();
+    let (scene, size, parameters, expected) = bounded_backdrop_integration_fixture_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -11163,20 +11201,23 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
     drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
         .expect("the public bounded-backdrop publication must be readable");
-    let expected = c09_reference_straight_bytes_for_test(&expected);
+    let expected = reference_straight_bytes_for_test(&expected);
     let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
         rendered.is_ok()
             && one_submission
-            && c09_pixels_match_for_test(
+            && graph_pixels_match_for_test(
                 actual.rgba(),
                 &expected,
                 WorkingFormat::ReducedPrecision,
                 4,
             )
-            && c12_broad_capabilities_remain_diagnostic_for_test()
-            && c12_broad_inputs_reject_before_allocation_for_test(&mut renderer, &mut surface)
+            && bounded_backdrop_broad_capabilities_remain_diagnostic_for_test()
+            && bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
+                &mut renderer,
+                &mut surface
+            )
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(1)
             && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
@@ -11187,7 +11228,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
 #[test]
 fn gpu_graph_executor_accepts_only_bounded_top_level_backdrop_graphs() {
     let observed = super::pass::c12_executable_graph_observation_for_test(
-        c12_bounded_graph_commands_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
         super::frame::FrameContext::try_new(
             Size::new(16.0, 12.0),
             1.0,
@@ -11209,7 +11250,7 @@ fn gpu_graph_executor_accepts_only_bounded_top_level_backdrop_graphs() {
 #[test]
 fn backdrop_graph_reads_completed_parent_once_and_preserves_group_order() {
     let observed = super::pass::c12_backdrop_graph_observation_for_test(
-        c12_bounded_graph_commands_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
         super::frame::FrameContext::try_new(
             Size::new(16.0, 12.0),
             1.0,
@@ -11234,7 +11275,7 @@ fn backdrop_graph_reads_completed_parent_once_and_preserves_group_order() {
 #[test]
 fn copy_backdrop_layout_binds_parent_and_spatial_mapping() {
     let observed = super::pass::c12_copy_backdrop_layout_observation_for_test(
-        c12_bounded_graph_commands_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
         super::frame::FrameContext::try_new(
             Size::new(16.0, 12.0),
             1.0,
@@ -11270,7 +11311,7 @@ fn copy_backdrop_cache_realizes_checked_working_format_programs() {
     let observed = pollster::block_on(
         super::pass::c12_copy_backdrop_cache_realization_observation_for_test(
             ready.device_for_test(),
-            c12_bounded_graph_commands_for_test(),
+            bounded_backdrop_graph_commands_for_test(),
             super::frame::FrameContext::try_new(
                 Size::new(16.0, 12.0),
                 1.0,
@@ -11318,10 +11359,10 @@ fn backdrop_blur_cache_separates_transparent_and_mirrored_edge_programs() {
     let observed = pollster::block_on(
         super::pass::c12_blur_cache_realization_observation_for_test(
             ready.device_for_test(),
-            c11_authored_filter_steps_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c12_bounded_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            bounded_backdrop_graph_commands_for_test(),
+            filter_graph_context_for_test(),
             capabilities,
         ),
     )
@@ -11341,8 +11382,8 @@ fn backdrop_blur_cache_separates_transparent_and_mirrored_edge_programs() {
 #[test]
 fn backdrop_blur_layout_carries_semantic_mirror_bounds() {
     let observed = super::pass::c12_backdrop_blur_layout_observation_for_test(
-        c12_bounded_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -11363,8 +11404,8 @@ fn backdrop_filter_chain_preserves_authored_order_and_clamp_boundaries() {
     use super::pass::C11FilterPassTagForTest as Tag;
 
     let observed = super::pass::c12_backdrop_filter_chain_observation_for_test(
-        c12_bounded_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -11390,11 +11431,11 @@ fn backdrop_filter_chain_preserves_authored_order_and_clamp_boundaries() {
 
 #[test]
 fn backdrop_graph_encodes_copy_filter_clip_foreground_and_group_in_order() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
         identity,
-        c12_bounded_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
+        filter_graph_context_for_test(),
     ))
     .unwrap_or_panic_for_test(
         "the bounded backdrop fixture must reach its shared GPU graph executor",
@@ -11410,11 +11451,11 @@ fn backdrop_graph_encodes_copy_filter_clip_foreground_and_group_in_order() {
 
 #[test]
 fn backdrop_copy_filter_and_group_use_distinct_resources() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
         identity,
-        c12_bounded_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
+        filter_graph_context_for_test(),
     ))
     .unwrap_or_panic_for_test(
         "the backdrop alias fixture must reach its shared GPU graph executor",
@@ -11428,12 +11469,12 @@ fn backdrop_copy_filter_and_group_use_distinct_resources() {
 
 #[test]
 fn later_sibling_dependency_follows_completed_backdrop_group() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
         identity,
-        c12_bounded_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
+        filter_graph_context_for_test(),
     ))
     .unwrap_or_panic_for_test(
         "the backdrop dependency fixture must reach its shared GPU graph executor",
@@ -11454,12 +11495,12 @@ fn later_sibling_dependency_follows_completed_backdrop_group() {
 
 #[test]
 fn backdrop_encode_failure_preserves_resources_cache_and_publication() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(backend.c12_failure_preservation_observation_for_test(
         identity,
-        c12_bounded_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        bounded_backdrop_graph_commands_for_test(),
+        filter_graph_context_for_test(),
     ))
     .unwrap_or_panic_for_test("the backdrop failure fixture must reach its atomic abort path");
     let submission = submission_scope.observation_for_test();
@@ -11510,9 +11551,9 @@ fn gaussian_kernel_bytes_are_symmetric_normalized_and_exactly_cached() {
 #[test]
 fn blur_layout_binds_exact_source_spatial_and_kernel() {
     let observed = super::pass::c11_blur_layout_observation_for_test(
-        c11_authored_filter_steps_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -11541,9 +11582,9 @@ fn blur_cache_realizes_checked_axis_input_and_precision_programs() {
     let observed = pollster::block_on(
         super::pass::c11_blur_cache_realization_observation_for_test(
             ready.device_for_test(),
-            c11_authored_filter_steps_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
             capabilities,
         ),
     )
@@ -11586,9 +11627,9 @@ fn drop_shadow_parameter_bytes_preserve_fractional_offset_and_solid_color() {
 #[test]
 fn drop_shadow_layout_binds_blurred_alpha_spatial_and_parameters() {
     let observed = super::pass::c11_drop_shadow_layout_observation_for_test(
-        c11_authored_filter_steps_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -11617,9 +11658,9 @@ fn drop_shadow_cache_realizes_checked_colorize_and_merge_programs() {
     let observed = pollster::block_on(
         super::pass::c11_drop_shadow_cache_realization_observation_for_test(
             ready.device_for_test(),
-            c11_authored_filter_steps_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
             capabilities,
         ),
     )
@@ -11658,15 +11699,15 @@ fn prepared_spatial_filter_objects_expose_exact_encoding_handles() {
 fn spatial_filter_graph_encodes_blur_and_drop_shadow_in_authored_order() {
     use super::pass::C11FilterPassTagForTest as Tag;
 
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let observed = pollster::block_on(
         backend.c11_spatial_filter_graph_encoding_observation_for_test(
             identity,
-            c11_authored_filter_steps_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test(
@@ -11702,13 +11743,13 @@ fn spatial_filter_graph_encodes_blur_and_drop_shadow_in_authored_order() {
 
 #[test]
 fn blur_passes_use_distinct_source_intermediate_and_result() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(
         backend.c11_spatial_filter_graph_encoding_observation_for_test(
             identity,
-            c11_authored_filter_steps_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test("the blur fixture must reach its shared GPU graph executor");
@@ -11724,13 +11765,13 @@ fn blur_passes_use_distinct_source_intermediate_and_result() {
 
 #[test]
 fn drop_shadow_reads_source_twice_and_releases_after_merge() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(
         backend.c11_spatial_filter_graph_encoding_observation_for_test(
             identity,
-            c11_authored_filter_steps_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test("the drop-shadow fixture must reach its shared GPU graph executor");
@@ -11748,12 +11789,12 @@ fn drop_shadow_reads_source_twice_and_releases_after_merge() {
 
 #[test]
 fn spatial_filter_encode_and_scope_failures_preserve_resources_cache_and_publication() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(backend.c11_failure_preservation_observation_for_test(
         identity,
-        c11_authored_filter_steps_for_test(),
-        c10_authored_color_graph_commands_for_test(),
-        c10_authored_color_graph_context_for_test(),
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
     ))
     .unwrap_or_panic_for_test("the spatial-filter failure fixture must exercise both abort paths");
 
@@ -11768,46 +11809,53 @@ fn spatial_filter_encode_and_scope_failures_preserve_resources_cache_and_publica
     );
 }
 
-struct C11ProductionFrameForTest {
+struct SpatialFilterProductionFrameForTest {
     output: ImageBuffer,
-    result: super::renderer::C11SpatialFilterRenderResultForTest,
+    result: super::renderer::SpatialFilterRenderResultForTest,
     queue_submissions: usize,
     graph_submissions: usize,
     direct_submissions: usize,
     publication_count: usize,
 }
 
-fn c11_filter_list_for_test(operation: FilterOp) -> Vec<FilterList> {
-    vec![FilterList::try_ops(vec![operation]).expect("the C11 operation must form one filter")]
+fn single_filter_list_for_test(operation: FilterOp) -> Vec<FilterList> {
+    vec![
+        FilterList::try_ops(vec![operation])
+            .expect("the spatial-filter operation must form one filter"),
+    ]
 }
 
-fn c11_pixel_renderer_for_test(
+fn graph_pixel_renderer_for_test(
     working_format: WorkingFormat,
     size: PhysicalSize,
 ) -> (Renderer, Surface) {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("C11 pixel execution requires a real renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("spatial-filter pixel execution requires a real renderer: {error}")
+    });
     assert!(
-        c08_supported_working_formats_for_test(&mut renderer).contains(&working_format),
-        "C11 pixel execution requires the requested real working format"
+        graph_supported_working_formats_for_test(&mut renderer).contains(&working_format),
+        "spatial-filter pixel execution requires the requested real working format"
     );
     let surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
-    .unwrap_or_else(|error| panic!("C11 pixel execution requires a headless surface: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("spatial-filter pixel execution requires a headless surface: {error}")
+    });
     (renderer, surface)
 }
 
-fn render_c11_fixture_for_test(
+fn render_spatial_filter_fixture_for_test(
     renderer: &mut Renderer,
     surface: &mut Surface,
     scene: &Scene,
     filters: Vec<FilterList>,
     working_format: WorkingFormat,
-) -> C11ProductionFrameForTest {
+) -> SpatialFilterProductionFrameForTest {
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -11815,17 +11863,20 @@ fn render_c11_fixture_for_test(
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let result = pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+    let result = pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
         surface,
         scene,
         filters,
         Parameters::default(),
         working_format,
     ))
-    .unwrap_or_else(|error| panic!("the C11 fixture must use the production graph: {error}"));
-    let frame = C11ProductionFrameForTest {
-        output: pollster::block_on(renderer.read_headless(surface))
-            .unwrap_or_else(|error| panic!("the published C11 fixture must be readable: {error}")),
+    .unwrap_or_else(|error| {
+        panic!("the spatial-filter fixture must use the production graph: {error}")
+    });
+    let frame = SpatialFilterProductionFrameForTest {
+        output: pollster::block_on(renderer.read_headless(surface)).unwrap_or_else(|error| {
+            panic!("the published spatial-filter fixture must be readable: {error}")
+        }),
         result,
         queue_submissions: submission.queue_submission_count_for_test(),
         graph_submissions: graph_submission.queue_submission_count_for_test(),
@@ -11840,7 +11891,7 @@ fn render_c11_fixture_for_test(
     frame
 }
 
-fn c11_reference_buffer_for_test(
+fn spatial_filter_reference_buffer_for_test(
     size: PhysicalSize,
     opaque_pixels: &[(u32, u32, PremultipliedRgba8)],
 ) -> ReferencePremultipliedRgba8Buffer {
@@ -11851,34 +11902,39 @@ fn c11_reference_buffer_for_test(
     source
 }
 
-fn c11_image_scene_for_test(size: PhysicalSize, pixels: Vec<u8>, destination: Rect) -> Scene {
+fn spatial_filter_image_scene_for_test(
+    size: PhysicalSize,
+    pixels: Vec<u8>,
+    destination: Rect,
+) -> Scene {
     let image = Image::from_rgba(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         Arc::<[u8]>::from(pixels),
     )
-    .expect("the C11 source-readable fixture must form one RGBA image");
+    .expect("the spatial-filter source-readable fixture must form one RGBA image");
     let mut scene = Scene::new();
     scene.image(image, destination, ImageFit::Stretch);
     scene
 }
 
-fn c11_maximum_error_for_test(
+fn spatial_filter_maximum_error_for_test(
     actual: &[u8],
     expected: &[u8],
     working_format: WorkingFormat,
 ) -> (u8, u8) {
     match working_format {
         WorkingFormat::HighPrecision => (
-            c10_high_terminal_error_for_test(actual, expected).unwrap_or(u8::MAX),
+            high_precision_terminal_error_for_test(actual, expected).unwrap_or(u8::MAX),
             0,
         ),
         WorkingFormat::ReducedPrecision => {
-            c10_reduced_error_for_test(actual, expected).unwrap_or((u8::MAX, u8::MAX))
+            reduced_precision_terminal_error_for_test(actual, expected)
+                .unwrap_or((u8::MAX, u8::MAX))
         }
     }
 }
 
-fn c11_alpha_energy_error_for_test(actual: &[u8], expected: &[u8]) -> f64 {
+fn spatial_filter_alpha_energy_error_for_test(actual: &[u8], expected: &[u8]) -> f64 {
     let actual = actual
         .chunks_exact(4)
         .map(|pixel| u64::from(pixel[3]))
@@ -11890,7 +11946,7 @@ fn c11_alpha_energy_error_for_test(actual: &[u8], expected: &[u8]) -> f64 {
     actual.abs_diff(expected) as f64 / expected.max(1) as f64
 }
 
-fn c11_alpha_energy_relative_to_for_test(actual: &[u8], expected_energy: u64) -> f64 {
+fn spatial_filter_alpha_energy_relative_to_for_test(actual: &[u8], expected_energy: u64) -> f64 {
     let actual = actual
         .chunks_exact(4)
         .map(|pixel| u64::from(pixel[3]))
@@ -11898,8 +11954,8 @@ fn c11_alpha_energy_relative_to_for_test(actual: &[u8], expected_energy: u64) ->
     actual.abs_diff(expected_energy) as f64 / expected_energy.max(1) as f64
 }
 
-fn c11_frame_has_exact_execution_for_test(
-    frame: &C11ProductionFrameForTest,
+fn spatial_filter_frame_has_exact_execution_for_test(
+    frame: &SpatialFilterProductionFrameForTest,
     size: PhysicalSize,
     working_format: WorkingFormat,
 ) -> bool {
@@ -11914,10 +11970,16 @@ fn c11_frame_has_exact_execution_for_test(
         && terminal_straight_rgba8_is_canonical_for_test(frame.output.rgba())
 }
 
-fn c11_pixels_match_oracle_for_test(frame: &C11ProductionFrameForTest, expected: &[u8]) -> bool {
-    let (alpha_error, color_error) =
-        c11_maximum_error_for_test(frame.output.rgba(), expected, frame.result.working_format);
-    let energy_error = c11_alpha_energy_error_for_test(frame.output.rgba(), expected);
+fn spatial_filter_pixels_match_oracle_for_test(
+    frame: &SpatialFilterProductionFrameForTest,
+    expected: &[u8],
+) -> bool {
+    let (alpha_error, color_error) = spatial_filter_maximum_error_for_test(
+        frame.output.rgba(),
+        expected,
+        frame.result.working_format,
+    );
+    let energy_error = spatial_filter_alpha_energy_error_for_test(frame.output.rgba(), expected);
     let energy_tolerance = match frame.result.working_format {
         WorkingFormat::HighPrecision => 0.015,
         WorkingFormat::ReducedPrecision => 0.025,
@@ -11925,13 +11987,13 @@ fn c11_pixels_match_oracle_for_test(frame: &C11ProductionFrameForTest, expected:
     alpha_error <= 4 && color_error <= 4 && energy_error <= energy_tolerance
 }
 
-fn c11_alpha_centroid_for_test(bytes: &[u8], size: PhysicalSize) -> Point {
+fn spatial_filter_alpha_centroid_for_test(bytes: &[u8], size: PhysicalSize) -> Point {
     let mut weighted_x = 0.0;
     let mut weighted_y = 0.0;
     let mut energy = 0.0;
     for (index, pixel) in bytes.chunks_exact(4).enumerate() {
         let alpha = f64::from(pixel[3]);
-        let index = u32::try_from(index).expect("the C11 centroid index must fit u32");
+        let index = u32::try_from(index).expect("the spatial-filter centroid index must fit u32");
         weighted_x += (f64::from(index % size.width()) + 0.5) * alpha;
         weighted_y += (f64::from(index / size.width()) + 0.5) * alpha;
         energy += alpha;
@@ -11939,15 +12001,15 @@ fn c11_alpha_centroid_for_test(bytes: &[u8], size: PhysicalSize) -> Point {
     Point::new(weighted_x / energy, weighted_y / energy)
 }
 
-fn c11_blur_identity_and_transparency_are_exact_for_test(
+fn spatial_filter_blur_identity_and_transparency_are_exact_for_test(
     working_format: WorkingFormat,
     size: PhysicalSize,
     scene: &Scene,
-    blurred: &C11ProductionFrameForTest,
+    blurred: &SpatialFilterProductionFrameForTest,
 ) -> bool {
-    let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
+    let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
     let blur = FilterBlur::try_new(1.0).unwrap();
-    let with_identity = render_c11_fixture_for_test(
+    let with_identity = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         scene,
@@ -11957,28 +12019,28 @@ fn c11_blur_identity_and_transparency_are_exact_for_test(
         ],
         working_format,
     );
-    if !c11_frame_has_exact_execution_for_test(&with_identity, size, working_format)
+    if !spatial_filter_frame_has_exact_execution_for_test(&with_identity, size, working_format)
         || with_identity.output.rgba() != blurred.output.rgba()
     {
         return false;
     }
-    let transparent = c11_image_scene_for_test(
+    let transparent = spatial_filter_image_scene_for_test(
         PhysicalSize::new(1, 1),
         vec![17, 31, 47, 0],
         Rect::new(6.0, 6.0, 1.0, 1.0),
     );
-    let transparent = render_c11_fixture_for_test(
+    let transparent = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         &transparent,
-        c11_filter_list_for_test(FilterOp::blur(blur)),
+        single_filter_list_for_test(FilterOp::blur(blur)),
         working_format,
     );
-    c11_frame_has_exact_execution_for_test(&transparent, size, working_format)
+    spatial_filter_frame_has_exact_execution_for_test(&transparent, size, working_format)
         && transparent.output.rgba().iter().all(|byte| *byte == 0)
 }
 
-fn c11_drop_shadow_order_is_authored_for_test(
+fn spatial_filter_drop_shadow_order_is_authored_for_test(
     working_format: WorkingFormat,
     size: PhysicalSize,
     scene: &Scene,
@@ -11987,23 +12049,27 @@ fn c11_drop_shadow_order_is_authored_for_test(
     let shadow = FilterList::try_ops(vec![FilterOp::drop_shadow(shadow)]).unwrap();
     let blur =
         FilterList::try_ops(vec![FilterOp::blur(FilterBlur::try_new(0.5).unwrap())]).unwrap();
-    let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
-    let shadow_then_blur = render_c11_fixture_for_test(
+    let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
+    let shadow_then_blur = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         scene,
         vec![shadow.clone(), blur.clone()],
         working_format,
     );
-    let blur_then_shadow = render_c11_fixture_for_test(
+    let blur_then_shadow = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         scene,
         vec![blur, shadow],
         working_format,
     );
-    c11_frame_has_exact_execution_for_test(&shadow_then_blur, size, working_format)
-        && c11_frame_has_exact_execution_for_test(&blur_then_shadow, size, working_format)
+    spatial_filter_frame_has_exact_execution_for_test(&shadow_then_blur, size, working_format)
+        && spatial_filter_frame_has_exact_execution_for_test(
+            &blur_then_shadow,
+            size,
+            working_format,
+        )
         && shadow_then_blur.output.rgba() != blur_then_shadow.output.rgba()
 }
 
@@ -12012,7 +12078,7 @@ fn blur_impulse_is_symmetric_normalized_and_matches_oracle() {
     let size = PhysicalSize::new(17, 17);
     let center = (8, 8);
     let blur = FilterBlur::try_new(1.0).unwrap();
-    let source = c11_reference_buffer_for_test(
+    let source = spatial_filter_reference_buffer_for_test(
         size,
         &[(
             center.0,
@@ -12022,11 +12088,11 @@ fn blur_impulse_is_symmetric_normalized_and_matches_oracle() {
     );
     let expected = source
         .apply_blur(blur, BlurPolicy::css_filter_default())
-        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .map(|buffer| reference_straight_bytes_for_test(&buffer))
         .unwrap();
     let mut impulse_pixels = vec![0; 7 * 7 * 4];
     impulse_pixels[(3 * 7 + 3) * 4..][..4].copy_from_slice(&[255; 4]);
-    let scene = c11_image_scene_for_test(
+    let scene = spatial_filter_image_scene_for_test(
         PhysicalSize::new(7, 7),
         impulse_pixels,
         Rect::new(5.0, 5.0, 7.0, 7.0),
@@ -12036,12 +12102,12 @@ fn blur_impulse_is_symmetric_normalized_and_matches_oracle() {
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
-        let frame = render_c11_fixture_for_test(
+        let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
+        let frame = render_spatial_filter_fixture_for_test(
             &mut renderer,
             &mut surface,
             &scene,
-            c11_filter_list_for_test(FilterOp::blur(blur)),
+            single_filter_list_for_test(FilterOp::blur(blur)),
             working_format,
         );
         let alpha = |x: u32, y: u32| frame.output.rgba()[((y * 17 + x) * 4 + 3) as usize];
@@ -12050,13 +12116,13 @@ fn blur_impulse_is_symmetric_normalized_and_matches_oracle() {
                 && alpha(center.0, coordinate) == alpha(center.0, 16 - coordinate)
         });
         let (alpha_error, color_error) =
-            c11_maximum_error_for_test(frame.output.rgba(), &expected, working_format);
+            spatial_filter_maximum_error_for_test(frame.output.rgba(), &expected, working_format);
         let energy_tolerance = match working_format {
             WorkingFormat::HighPrecision => 0.015,
             WorkingFormat::ReducedPrecision => 0.025,
         };
         assert!(
-            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+            spatial_filter_frame_has_exact_execution_for_test(&frame, size, working_format)
                 && frame.result.source_spatial.device_origin == (5, 5)
                 && frame.result.source_spatial.device_extent == PhysicalSize::new(7, 7)
                 && frame.result.result_spatial.device_origin == (2, 2)
@@ -12064,7 +12130,7 @@ fn blur_impulse_is_symmetric_normalized_and_matches_oracle() {
                 && symmetric
                 && alpha_error <= 4
                 && color_error <= 4
-                && c11_alpha_energy_relative_to_for_test(frame.output.rgba(), 255)
+                && spatial_filter_alpha_energy_relative_to_for_test(frame.output.rgba(), 255)
                     <= energy_tolerance,
             "blur impulse production-GPU comparison exceeds its exact grid, symmetry, or oracle tolerance"
         );
@@ -12079,7 +12145,7 @@ fn ordinary_blur_samples_transparent_black_at_all_edges() {
     let pixels = (5..=7)
         .flat_map(|y| (5..=7).map(move |x| (x, y, opaque)))
         .collect::<Vec<_>>();
-    let source = c11_reference_buffer_for_test(size, &pixels);
+    let source = spatial_filter_reference_buffer_for_test(size, &pixels);
     let expected_high = source
         .apply_blur_to_high_precision_straight_rgba8_for_gpu_oracle(
             blur,
@@ -12088,7 +12154,7 @@ fn ordinary_blur_samples_transparent_black_at_all_edges() {
         .unwrap();
     let expected_reduced = source
         .apply_blur(blur, BlurPolicy::css_filter_default())
-        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .map(|buffer| reference_straight_bytes_for_test(&buffer))
         .unwrap();
     let mut edge_pixels = vec![0; 9 * 9 * 4];
     for y in 3..=5 {
@@ -12096,7 +12162,7 @@ fn ordinary_blur_samples_transparent_black_at_all_edges() {
             edge_pixels[(y * 9 + x) * 4..][..4].copy_from_slice(&[64, 128, 255, 255]);
         }
     }
-    let scene = c11_image_scene_for_test(
+    let scene = spatial_filter_image_scene_for_test(
         PhysicalSize::new(9, 9),
         edge_pixels,
         Rect::new(2.0, 2.0, 9.0, 9.0),
@@ -12106,12 +12172,12 @@ fn ordinary_blur_samples_transparent_black_at_all_edges() {
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
-        let frame = render_c11_fixture_for_test(
+        let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
+        let frame = render_spatial_filter_fixture_for_test(
             &mut renderer,
             &mut surface,
             &scene,
-            c11_filter_list_for_test(FilterOp::blur(blur)),
+            single_filter_list_for_test(FilterOp::blur(blur)),
             working_format,
         );
         let expected = match working_format {
@@ -12131,18 +12197,18 @@ fn ordinary_blur_samples_transparent_black_at_all_edges() {
                 && alpha[coordinate * 13 + 12] == 0
         });
         assert!(
-            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+            spatial_filter_frame_has_exact_execution_for_test(&frame, size, working_format)
                 && frame.result.source_spatial.device_origin == (2, 2)
                 && frame.result.result_spatial.device_origin == (-1, -1)
                 && frame.result.result_spatial.device_extent == PhysicalSize::new(15, 15)
                 && transparent_surface_edge
-                && c11_blur_identity_and_transparency_are_exact_for_test(
+                && spatial_filter_blur_identity_and_transparency_are_exact_for_test(
                     working_format,
                     size,
                     &scene,
                     &frame,
                 )
-                && c11_pixels_match_oracle_for_test(&frame, expected),
+                && spatial_filter_pixels_match_oracle_for_test(&frame, expected),
             "ordinary blur edge production-GPU comparison violates transparent-black sampling"
         );
     }
@@ -12152,7 +12218,10 @@ fn ordinary_blur_samples_transparent_black_at_all_edges() {
 fn drop_shadow_preserves_source_uses_fractional_offset_and_expands_signed_bounds() {
     let size = PhysicalSize::new(17, 17);
     let source_pixel = PremultipliedRgba8::try_new(224, 64, 16, 255).unwrap();
-    let source = c11_reference_buffer_for_test(size, &[(3, 7, source_pixel), (4, 7, source_pixel)]);
+    let source = spatial_filter_reference_buffer_for_test(
+        size,
+        &[(3, 7, source_pixel), (4, 7, source_pixel)],
+    );
     let shadow = FilterDropShadow::try_new(
         Point::new(-1.5, 0.75),
         FilterBlur::try_new(1.0).unwrap(),
@@ -12167,12 +12236,12 @@ fn drop_shadow_preserves_source_uses_fractional_offset_and_expands_signed_bounds
         .unwrap();
     let expected_reduced = source
         .apply_fractional_drop_shadow_for_gpu_oracle(&shadow, BlurPolicy::css_filter_default())
-        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .map(|buffer| reference_straight_bytes_for_test(&buffer))
         .unwrap();
     let mut shadow_pixels = vec![0; 8 * 7 * 4];
     shadow_pixels[(3 * 8 + 3) * 4..][..4].copy_from_slice(&[224, 64, 16, 255]);
     shadow_pixels[(3 * 8 + 4) * 4..][..4].copy_from_slice(&[224, 64, 16, 255]);
-    let scene = c11_image_scene_for_test(
+    let scene = spatial_filter_image_scene_for_test(
         PhysicalSize::new(8, 7),
         shadow_pixels,
         Rect::new(0.0, 4.0, 8.0, 7.0),
@@ -12182,12 +12251,12 @@ fn drop_shadow_preserves_source_uses_fractional_offset_and_expands_signed_bounds
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
-        let frame = render_c11_fixture_for_test(
+        let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
+        let frame = render_spatial_filter_fixture_for_test(
             &mut renderer,
             &mut surface,
             &scene,
-            c11_filter_list_for_test(FilterOp::drop_shadow(shadow)),
+            single_filter_list_for_test(FilterOp::drop_shadow(shadow)),
             working_format,
         );
         let expected = match working_format {
@@ -12198,13 +12267,18 @@ fn drop_shadow_preserves_source_uses_fractional_offset_and_expands_signed_bounds
             frame.output.rgba()[((y * 17 + x) * 4) as usize..][..4] == [224, 64, 16, 255]
         });
         assert!(
-            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+            spatial_filter_frame_has_exact_execution_for_test(&frame, size, working_format)
                 && frame.result.source_spatial.device_origin == (0, 4)
                 && frame.result.result_spatial.device_origin.0 < 0
                 && frame.result.result_spatial.logical_bounds[0] < 0.0
                 && source_is_unchanged
-                && c11_drop_shadow_order_is_authored_for_test(working_format, size, &scene, shadow,)
-                && c11_pixels_match_oracle_for_test(&frame, expected),
+                && spatial_filter_drop_shadow_order_is_authored_for_test(
+                    working_format,
+                    size,
+                    &scene,
+                    shadow,
+                )
+                && spatial_filter_pixels_match_oracle_for_test(&frame, expected),
             "drop-shadow production-GPU comparison loses SourceAlpha, fractional offset, signed bounds, or source merge"
         );
     }
@@ -12215,7 +12289,7 @@ fn nonuniform_scale_and_skew_preserve_local_blur_shape() {
     let size = PhysicalSize::new(25, 21);
     let transform = Transform::try_new([2.0, 0.0, 0.5, 1.25, 4.0, 3.0]).unwrap();
     let local_bounds = Rect::new(2.0, 4.0, 2.0, 2.0);
-    let expected_center = c08_transform_point_for_test(transform, Point::new(3.0, 5.0));
+    let expected_center = graph_transform_point_for_test(transform, Point::new(3.0, 5.0));
     let blur = FilterBlur::try_new(1.0).unwrap();
     let mut scene = Scene::new();
     scene.transform(transform, |scene| {
@@ -12226,21 +12300,21 @@ fn nonuniform_scale_and_skew_preserve_local_blur_shape() {
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let (mut renderer, mut surface) = c11_pixel_renderer_for_test(working_format, size);
-        let frame = render_c11_fixture_for_test(
+        let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
+        let frame = render_spatial_filter_fixture_for_test(
             &mut renderer,
             &mut surface,
             &scene,
-            c11_filter_list_for_test(FilterOp::blur(blur)),
+            single_filter_list_for_test(FilterOp::blur(blur)),
             working_format,
         );
-        let centroid = c11_alpha_centroid_for_test(frame.output.rgba(), size);
+        let centroid = spatial_filter_alpha_centroid_for_test(frame.output.rgba(), size);
         let tolerance = match working_format {
             WorkingFormat::HighPrecision => 0.25,
             WorkingFormat::ReducedPrecision => 0.35,
         };
         assert!(
-            c11_frame_has_exact_execution_for_test(&frame, size, working_format)
+            spatial_filter_frame_has_exact_execution_for_test(&frame, size, working_format)
                 && frame.result.source_spatial.raster_scale == 1.0
                 && frame.result.result_spatial.raster_scale == 1.0
                 && (centroid.x() - expected_center.x()).abs() <= tolerance
@@ -12250,9 +12324,10 @@ fn nonuniform_scale_and_skew_preserve_local_blur_shape() {
     }
 }
 
-fn c11_mixed_filter_fixture_for_test() -> (Scene, Vec<FilterList>, PhysicalSize, Vec<u8>) {
+fn spatial_filter_mixed_filter_fixture_for_test() -> (Scene, Vec<FilterList>, PhysicalSize, Vec<u8>)
+{
     let size = PhysicalSize::new(15, 13);
-    let source = c11_reference_buffer_for_test(
+    let source = spatial_filter_reference_buffer_for_test(
         size,
         &[
             (5, 5, PremultipliedRgba8::try_new(224, 64, 16, 255).unwrap()),
@@ -12283,11 +12358,11 @@ fn c11_mixed_filter_fixture_for_test() -> (Scene, Vec<FilterList>, PhysicalSize,
                 opacity,
             )]))
         })
-        .map(|buffer| c09_reference_straight_bytes_for_test(&buffer))
+        .map(|buffer| reference_straight_bytes_for_test(&buffer))
         .unwrap();
-    let scene = c11_image_scene_for_test(
+    let scene = spatial_filter_image_scene_for_test(
         size,
-        c09_reference_straight_bytes_for_test(&source),
+        reference_straight_bytes_for_test(&source),
         Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
     );
     let filters = vec![
@@ -12302,36 +12377,36 @@ fn c11_mixed_filter_fixture_for_test() -> (Scene, Vec<FilterList>, PhysicalSize,
     (scene, filters, size, expected)
 }
 
-fn c11_public_spatial_graph_diagnostic_for_test(
+fn spatial_filter_public_spatial_graph_diagnostic_for_test(
     scene: &Scene,
     operation: FilterOp,
     size: PhysicalSize,
 ) -> Option<UnsupportedPrimitive> {
     let commands = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the public C11 diagnostic fixture must normalize capture input");
+        .expect("the public spatial-filter diagnostic fixture must normalize capture input");
     let context = super::frame::FrameContext::try_new(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
         Antialiasing::Area,
         Color::TRANSPARENT,
     )
-    .expect("the public C11 diagnostic fixture must form a frame context");
-    let graph = super::frame::authored_c10_color_graph_for_test(
-        c11_filter_list_for_test(operation),
+    .expect("the public spatial-filter diagnostic fixture must form a frame context");
+    let graph = super::frame::authored_filter_graph_for_test(
+        single_filter_list_for_test(operation),
         commands,
         context,
     )
-    .expect("the public C11 diagnostic fixture must form an authored graph");
+    .expect("the public spatial-filter diagnostic fixture must form an authored graph");
     super::renderer::future_graph_diagnostic_for_test(
         &graph,
         Format::Rgba8,
         &DeviceCapabilities::from_test_facts(true, true, 4_096),
     )
-    .expect("the retained public dispatch classifier must diagnose a C11 graph")
+    .expect("the retained public dispatch classifier must diagnose a spatial-filter graph")
 }
 
-fn c11_repeated_fixture_resources_are_stable_for_test(
+fn repeated_spatial_filter_resources_are_stable_for_test(
     scene: &Scene,
     filters: &[FilterList],
     size: PhysicalSize,
@@ -12342,25 +12417,25 @@ fn c11_repeated_fixture_resources_are_stable_for_test(
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .expect("C11 retained-resource coverage requires a renderer");
+    .expect("spatial-filter retained-resource coverage requires a renderer");
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
-    .expect("C11 retained-resource coverage requires a surface");
+    .expect("spatial-filter retained-resource coverage requires a surface");
     for _ in 0..2 {
-        pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+        pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
             &mut surface,
             scene,
             filters.to_vec(),
             Parameters::default(),
             WorkingFormat::ReducedPrecision,
         ))
-        .expect("C11 retained-resource warm-up must succeed");
+        .expect("spatial-filter retained-resource warm-up must succeed");
     }
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("C11 retained-resource warm-up must keep its device");
+        .expect("spatial-filter retained-resource warm-up must keep its device");
     let warmed_resources = ready.internal_resource_manager_observation_for_test();
     let warmed_cache = ready.device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -12372,17 +12447,17 @@ fn c11_repeated_fixture_resources_are_stable_for_test(
     let mut resources = Vec::new();
     let mut caches = Vec::new();
     for _ in 0..3 {
-        pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+        pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
             &mut surface,
             scene,
             filters.to_vec(),
             Parameters::default(),
             WorkingFormat::ReducedPrecision,
         ))
-        .expect("repeated C11 retained-resource frames must succeed");
+        .expect("repeated spatial-filter retained-resource frames must succeed");
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("repeated C11 frames must keep their device");
+            .expect("repeated spatial-filter frames must keep their device");
         resources.push(ready.internal_resource_manager_observation_for_test());
         caches.push(ready.device_pass_cache_counts_for_test());
     }
@@ -12396,25 +12471,28 @@ fn c11_repeated_fixture_resources_are_stable_for_test(
     drop(graph_scope);
     drop(submission_scope);
     let output = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the repeated C11 publication must remain readable");
+        .expect("the repeated spatial-filter publication must remain readable");
 
-    c10_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
+    color_filter_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
         && resources.iter().all(|actual| {
             actual.gaussian_kernel_count_for_test()
                 == warmed_resources.gaussian_kernel_count_for_test()
         })
         && warmed_resources.gaussian_kernel_count_for_test() > 0
         && warmed_resources.effect_texture_count_for_test() > 0
-        && c10_prepared_resource_identities_are_stable_for_test(&prepared)
+        && color_filter_prepared_resource_identities_are_stable_for_test(&prepared)
         && retention == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3]
         && warmed_cache.has_render_pipelines()
         && caches.iter().all(|actual| *actual == warmed_cache)
         && one_submission_per_frame
-        && c11_maximum_error_for_test(output.rgba(), expected, WorkingFormat::ReducedPrecision)
-            <= (4, 4)
+        && spatial_filter_maximum_error_for_test(
+            output.rgba(),
+            expected,
+            WorkingFormat::ReducedPrecision,
+        ) <= (4, 4)
 }
 
-fn c11_zero_budget_releases_all_frame_resources_for_test(
+fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
     scene: &Scene,
     filters: &[FilterList],
     size: PhysicalSize,
@@ -12425,25 +12503,25 @@ fn c11_zero_budget_releases_all_frame_resources_for_test(
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("C11 zero-budget coverage requires a renderer");
+    .expect("spatial-filter zero-budget coverage requires a renderer");
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
-    .expect("C11 zero-budget coverage requires a surface");
-    pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+    .expect("spatial-filter zero-budget coverage requires a surface");
+    pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
         &mut surface,
         scene,
         filters.to_vec(),
         Parameters::default(),
         WorkingFormat::ReducedPrecision,
     ))
-    .expect("the first C11 zero-budget frame must succeed");
+    .expect("the first spatial-filter zero-budget frame must succeed");
     let first = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the first C11 zero-budget publication must be readable");
+        .expect("the first spatial-filter zero-budget publication must be readable");
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the first C11 zero-budget frame must keep its device")
+        .expect("the first spatial-filter zero-budget frame must keep its device")
         .device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -12451,17 +12529,17 @@ fn c11_zero_budget_releases_all_frame_resources_for_test(
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+    pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
         &mut surface,
         scene,
         filters.to_vec(),
         Parameters::default(),
         WorkingFormat::ReducedPrecision,
     ))
-    .expect("the repeated C11 zero-budget frame must succeed");
+    .expect("the repeated spatial-filter zero-budget frame must succeed");
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the repeated C11 zero-budget frame must keep its device");
+        .expect("the repeated spatial-filter zero-budget frame must keep its device");
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
     let retention = graph_submission.resource_retention_history_for_test();
@@ -12473,7 +12551,7 @@ fn c11_zero_budget_releases_all_frame_resources_for_test(
     drop(graph_scope);
     drop(submission_scope);
     let second = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the repeated C11 zero-budget publication must be readable");
+        .expect("the repeated spatial-filter zero-budget publication must be readable");
 
     resources.leased_count == 0
         && resources.idle_count == 0
@@ -12491,17 +12569,20 @@ fn c11_zero_budget_releases_all_frame_resources_for_test(
         && cache_after.has_render_pipelines()
         && one_submission
         && first.rgba() == second.rgba()
-        && c11_maximum_error_for_test(second.rgba(), expected, WorkingFormat::ReducedPrecision)
-            <= (4, 4)
+        && spatial_filter_maximum_error_for_test(
+            second.rgba(),
+            expected,
+            WorkingFormat::ReducedPrecision,
+        ) <= (4, 4)
 }
 
 #[test]
 fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic() {
-    let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
+    let (scene, filters, size, expected) = spatial_filter_mixed_filter_fixture_for_test();
     let (mut renderer, mut surface) =
-        c11_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
+        graph_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let frame = render_c11_fixture_for_test(
+    let frame = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         &scene,
@@ -12514,12 +12595,12 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
     let resources_before = ready.internal_resource_manager_observation_for_test();
     let cache_before = ready.device_pass_cache_counts_for_test();
     let publication_before = surface.headless_publication_count_for_test();
-    let blur = c11_public_spatial_graph_diagnostic_for_test(
+    let blur = spatial_filter_public_spatial_graph_diagnostic_for_test(
         &scene,
         FilterOp::blur(FilterBlur::try_new(0.75).unwrap()),
         size,
     );
-    let shadow = c11_public_spatial_graph_diagnostic_for_test(
+    let shadow = spatial_filter_public_spatial_graph_diagnostic_for_test(
         &scene,
         FilterOp::drop_shadow(
             FilterDropShadow::try_new(
@@ -12540,8 +12621,11 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
     let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
-        c11_frame_has_exact_execution_for_test(&frame, size, WorkingFormat::ReducedPrecision)
-            && c11_pixels_match_oracle_for_test(&frame, &expected)
+        spatial_filter_frame_has_exact_execution_for_test(
+            &frame,
+            size,
+            WorkingFormat::ReducedPrecision
+        ) && spatial_filter_pixels_match_oracle_for_test(&frame, &expected)
             && blur
                 == Some(UnsupportedPrimitive::new(
                     PrimitiveFamily::Filters,
@@ -12552,18 +12636,20 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
                     PrimitiveFamily::Filters,
                     PrimitiveOperation::GpuDropShadowFilterExecution,
                 ))
-            && c10_retained_public_filter_diagnostics_are_exact_for_test()
-            && c11_repeated_fixture_resources_are_stable_for_test(
+            && retained_public_filter_diagnostics_are_exact_for_test()
+            && repeated_spatial_filter_resources_are_stable_for_test(
                 &scene, &filters, size, &expected,
             )
-            && c11_zero_budget_releases_all_frame_resources_for_test(
+            && spatial_filter_zero_budget_releases_all_frame_resources_for_test(
                 &scene, &filters, size, &expected,
             )
             && resources_after == resources_before
             && cache_after == cache_before
             && surface.headless_publication_count_for_test() == publication_before
-            && dispatch_after.exact_c11_fixture_routes
-                == dispatch_before.exact_c11_fixture_routes.saturating_add(1),
+            && dispatch_after.exact_spatial_filter_fixture_routes
+                == dispatch_before
+                    .exact_spatial_filter_fixture_routes
+                    .saturating_add(1),
         "the spatial-filter fixture did not execute while public capabilities remained diagnostic"
     );
 }
@@ -12571,7 +12657,7 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
 #[cfg(feature = "render-window")]
 #[test]
 fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
-    let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
+    let (scene, filters, size, expected) = spatial_filter_mixed_filter_fixture_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -12597,7 +12683,7 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let rendered = pollster::block_on(renderer.render_c11_spatial_filter_fixture_for_test(
+    let rendered = pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
         &mut surface,
         &scene,
         filters,
@@ -12621,7 +12707,8 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
     let presentation = presentation.snapshot_for_test();
     let dispatch_after = renderer.dispatch_observation_for_test();
     let pixels_match = presented.as_deref().is_some_and(|actual| {
-        c11_maximum_error_for_test(actual, &expected, WorkingFormat::ReducedPrecision) <= (4, 4)
+        spatial_filter_maximum_error_for_test(actual, &expected, WorkingFormat::ReducedPrecision)
+            <= (4, 4)
     });
 
     assert!(
@@ -12634,35 +12721,43 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
             && presentation.present_count_for_test() == 1
             && presentation.discarded_count_for_test() == 0
             && pixels_match
-            && dispatch_after.exact_c11_fixture_routes
-                == dispatch_before.exact_c11_fixture_routes.saturating_add(1),
+            && dispatch_after.exact_spatial_filter_fixture_routes
+                == dispatch_before
+                    .exact_spatial_filter_fixture_routes
+                    .saturating_add(1),
         "the presented fixture did not execute Gaussian blur and drop shadow atomically"
     );
 }
 
 #[test]
 fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_backdrop() {
-    let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
-    let (mut renderer, mut c11_surface) =
-        c11_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
+    let (scene, filters, size, expected) = spatial_filter_mixed_filter_fixture_for_test();
+    let (mut renderer, mut spatial_filter_surface) =
+        graph_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
     renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let c11 = render_c11_fixture_for_test(
+    let spatial_filter = render_spatial_filter_fixture_for_test(
         &mut renderer,
-        &mut c11_surface,
+        &mut spatial_filter_surface,
         &scene,
         filters,
         WorkingFormat::ReducedPrecision,
     );
-    let (c09_scene, c09_size, _, _) = c09_reuse_scene_and_oracle_for_test();
-    let mut c09_surface = pollster::block_on(renderer.create_headless(
-        Size::new(f64::from(c09_size.width()), f64::from(c09_size.height())),
+    let (composition_scene, composition_size, _, _) = composition_reuse_scene_and_oracle_for_test();
+    let mut composition_surface = pollster::block_on(renderer.create_headless(
+        Size::new(
+            f64::from(composition_size.width()),
+            f64::from(composition_size.height()),
+        ),
         1.0,
     ))
     .expect("masked-composition dispatch coverage requires a surface");
-    let c09 =
-        pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
-    let future_scene = c10_future_backdrop_scene_for_test();
+    let composition = pollster::block_on(renderer.render(
+        &mut composition_surface,
+        &composition_scene,
+        Parameters::default(),
+    ));
+    let future_scene = color_filter_future_backdrop_scene_for_test();
     let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .expect("broad-backdrop rejection coverage requires a surface");
     let future = pollster::block_on(renderer.render(
@@ -12677,8 +12772,8 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
     );
 
     assert!(
-        c11_pixels_match_oracle_for_test(&c11, &expected)
-            && c09.is_ok()
+        spatial_filter_pixels_match_oracle_for_test(&spatial_filter, &expected)
+            && composition.is_ok()
             && future
                 .as_ref()
                 .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
@@ -12687,30 +12782,32 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
                 == dispatch_before.boundary_invocations.saturating_add(2)
             && dispatch_after.exact_c09_graph_routes
                 == dispatch_before.exact_c09_graph_routes.saturating_add(1)
-            && dispatch_after.exact_c11_fixture_routes
-                == dispatch_before.exact_c11_fixture_routes.saturating_add(1)
+            && dispatch_after.exact_spatial_filter_fixture_routes
+                == dispatch_before
+                    .exact_spatial_filter_fixture_routes
+                    .saturating_add(1)
             && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
         "public dispatch misrouted masked composition, spatial filters, or broad backdrop"
     );
 }
 
-fn c10_selected_backend_for_encoding_test() -> (Backend, DeviceSlotIdentity) {
+fn graph_encoding_backend_for_test() -> (Backend, DeviceSlotIdentity) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .unwrap_or_panic_for_test("C10 ordered encoding requires backend selection")
-        .unwrap_or_panic_for_test("C10 ordered encoding requires a host adapter");
+        .unwrap_or_panic_for_test("color-filter ordered encoding requires backend selection")
+        .unwrap_or_panic_for_test("color-filter ordered encoding requires a host adapter");
     (backend, identity)
 }
 
 #[test]
 fn color_filter_graph_encodes_fused_operations_in_authored_order() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(
         backend.c10_ordered_color_graph_encoding_observation_for_test(
             identity,
-            c10_authored_color_runs_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            authored_color_filter_runs_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test("the color-filter fixture must reach its shared GPU graph executor");
@@ -12727,13 +12824,13 @@ fn color_filter_graph_encodes_fused_operations_in_authored_order() {
 
 #[test]
 fn color_filter_pass_uses_distinct_source_and_result() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(
         backend.c10_ordered_color_graph_encoding_observation_for_test(
             identity,
-            c10_authored_color_runs_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            authored_color_filter_runs_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test(
@@ -12750,14 +12847,14 @@ fn color_filter_pass_uses_distinct_source_and_result() {
 
 #[test]
 fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(
         backend.c10_ordered_color_graph_encoding_observation_for_test(
             identity,
-            c10_authored_color_runs_for_test(),
-            c09_composition_commands_for_test(),
-            c09_composition_frame_context_for_test(),
+            authored_color_filter_runs_for_test(),
+            composition_commands_for_test(),
+            composition_frame_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test(
@@ -12782,14 +12879,14 @@ fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
 
 #[test]
 fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
-    let (mut backend, identity) = c10_selected_backend_for_encoding_test();
+    let (mut backend, identity) = graph_encoding_backend_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(
         backend.c10_oversized_buffer_preservation_observation_for_test(
             identity,
-            c10_authored_color_runs_for_test(),
-            c10_authored_color_graph_commands_for_test(),
-            c10_authored_color_graph_context_for_test(),
+            authored_color_filter_runs_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test(
@@ -13059,15 +13156,15 @@ fn observe_runtime_lowering_for_test() -> super::pass::RuntimeLoweringObservatio
 
 #[test]
 fn base_graph_executor_accepts_only_clear_capture_canonicalize_source_over_and_present() {
-    let mut c08_scene = Scene::new();
-    c08_scene
+    let mut base_graph_scene = Scene::new();
+    base_graph_scene
         .fill(Rect::new(-1.25, -0.75, 2.0, 1.5), Color::BLACK)
         .stroke(
             Shape::rect(Rect::new(2.0, 1.0, 3.0, 2.0)),
             Stroke::try_new(0.5).unwrap(),
             Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
         );
-    let c08_commands = c08_scene.normalize(Capabilities::CURRENT).unwrap();
+    let base_graph_commands = base_graph_scene.normalize(Capabilities::CURRENT).unwrap();
     let context = super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.0,
@@ -13076,7 +13173,7 @@ fn base_graph_executor_accepts_only_clear_capture_canonicalize_source_over_and_p
     )
     .unwrap();
     let observed = super::pass::c08_executable_subset_observation_for_test(
-        c08_commands,
+        base_graph_commands,
         runtime_lowering_commands_for_test(),
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -13093,7 +13190,7 @@ fn base_graph_executor_accepts_only_clear_capture_canonicalize_source_over_and_p
     );
 }
 
-fn c09_composition_commands_for_test() -> command::RenderCommands {
+fn composition_commands_for_test() -> command::RenderCommands {
     let outer_mask = opaque_planning_mask(PhysicalSize::new(4, 4));
     let inner_mask = opaque_planning_mask(PhysicalSize::new(4, 4));
     let outer_clip_transform = Transform::translation(0.5, 0.25).unwrap();
@@ -13149,7 +13246,7 @@ fn c09_composition_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c09_ordered_nonzero_clip_path_for_test() -> Path {
+fn composition_ordered_nonzero_clip_path_for_test() -> Path {
     let mut path = Path::new();
     path.move_to(Point::new(1.0, 1.0))
         .line_to(Point::new(7.0, 1.0))
@@ -13164,7 +13261,7 @@ fn c09_ordered_nonzero_clip_path_for_test() -> Path {
     path
 }
 
-fn c09_signed_even_odd_clip_path_for_test() -> Path {
+fn composition_signed_even_odd_clip_path_for_test() -> Path {
     let mut path = Path::new();
     path.move_to(Point::new(-2.0, -1.0))
         .line_to(Point::new(1.0, -1.0))
@@ -13258,7 +13355,7 @@ fn emitted_vello_end_clip_is_exact_for_test(observed: &VelloPathDrawObservationF
     observed.geometry.is_empty() && observed.draw == VelloDrawObservationForTest::EndClip
 }
 
-fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
+fn composition_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
     let transforms = [
         Transform::translation(0.25, 0.5).unwrap(),
         Transform::translation(0.5, 0.25).unwrap(),
@@ -13266,7 +13363,7 @@ fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
         Transform::translation(0.25, 0.125).unwrap(),
         Transform::translation(0.125, 0.125).unwrap(),
     ];
-    let path = c09_ordered_nonzero_clip_path_for_test();
+    let path = composition_ordered_nonzero_clip_path_for_test();
     let path_clip =
         ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::NonZero).unwrap()).unwrap();
 
@@ -13335,9 +13432,9 @@ fn c09_ordered_clip_coverage_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c09_signed_path_clip_coverage_commands_for_test() -> (command::RenderCommands, CoordinateSpaceTag)
-{
-    let path = c09_signed_even_odd_clip_path_for_test();
+fn composition_signed_path_clip_coverage_commands_for_test()
+-> (command::RenderCommands, CoordinateSpaceTag) {
+    let path = composition_signed_even_odd_clip_path_for_test();
     let coordinate_space =
         CoordinateSpaceTag::surface(Transform::translation(0.25, -0.25).unwrap()).unwrap();
     let clip = ClipInput::try_filled_path(FilledPath::try_new(path, FillRule::EvenOdd).unwrap())
@@ -13372,7 +13469,7 @@ fn graph_clip_coverage_is_one_vello_capture_of_ordered_render_clips() {
     )
     .unwrap();
     let observed = super::pass::graph_clip_coverage_observation_for_test(
-        c09_ordered_clip_coverage_commands_for_test(),
+        composition_ordered_clip_coverage_commands_for_test(),
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
@@ -13400,7 +13497,9 @@ fn assert_ordered_graph_clip_coverage(observed: &super::pass::GraphClipCoverageO
         )),
         emitted_vello_fill_geometry_for_test(&kurbo::Circle::new((4.0, 4.0), 3.5)),
         emitted_vello_fill_geometry_for_test(&kurbo::Ellipse::new((4.0, 4.0), (3.25, 3.0), 0.0)),
-        emitted_vello_fill_geometry_for_test(&c09_ordered_nonzero_clip_path_for_test().to_kurbo()),
+        emitted_vello_fill_geometry_for_test(
+            &composition_ordered_nonzero_clip_path_for_test().to_kurbo(),
+        ),
     ];
     let expected_fill_rules = [
         VelloFillRuleObservationForTest::NonZero,
@@ -13482,7 +13581,7 @@ fn assert_ordered_graph_clip_coverage(observed: &super::pass::GraphClipCoverageO
 #[test]
 fn clip_coverage_preserves_fill_rule_antialiasing_and_signed_mapping() {
     let antialiasing = Antialiasing::Msaa16;
-    let (commands, coordinate_space) = c09_signed_path_clip_coverage_commands_for_test();
+    let (commands, coordinate_space) = composition_signed_path_clip_coverage_commands_for_test();
     let context = super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.25,
@@ -13504,8 +13603,9 @@ fn clip_coverage_preserves_fill_rule_antialiasing_and_signed_mapping() {
         .transform()
         .then(expected_initial_transform)
         .unwrap();
-    let expected_geometry =
-        emitted_vello_fill_geometry_for_test(&c09_signed_even_odd_clip_path_for_test().to_kurbo());
+    let expected_geometry = emitted_vello_fill_geometry_for_test(
+        &composition_signed_even_odd_clip_path_for_test().to_kurbo(),
+    );
     let preserves_geometry_and_grid = observed.captures.as_slice().first().is_some_and(|capture| {
         let emitted_clip_is_exact = capture.emitted_draws.first().is_some_and(|draw| {
             emitted_vello_clip_is_exact_for_test(
@@ -13569,7 +13669,7 @@ fn clip_coverage_is_bound_before_mask_and_opacity() {
     )
     .unwrap();
     let observed = super::pass::composition_graph_observation_for_test(
-        c09_composition_commands_for_test(),
+        composition_commands_for_test(),
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
@@ -13598,9 +13698,9 @@ fn clip_coverage_is_bound_before_mask_and_opacity() {
 
 #[test]
 fn composition_graph_executor_accepts_only_spine_and_ordered_layer_composition() {
-    let mut c08_scene = Scene::new();
-    c08_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
-    let c08_commands = c08_scene.normalize(Capabilities::CURRENT).unwrap();
+    let mut base_graph_scene = Scene::new();
+    base_graph_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
+    let base_graph_commands = base_graph_scene.normalize(Capabilities::CURRENT).unwrap();
     let context = super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.0,
@@ -13609,8 +13709,8 @@ fn composition_graph_executor_accepts_only_spine_and_ordered_layer_composition()
     )
     .unwrap();
     let observed = super::pass::c09_executable_graph_observation_for_test(
-        c08_commands,
-        c09_composition_commands_for_test(),
+        base_graph_commands,
+        composition_commands_for_test(),
         runtime_lowering_commands_for_test(),
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -13643,7 +13743,7 @@ fn composition_graph_orders_clip_mask_opacity_blend_and_nested_layers() {
     )
     .unwrap();
     let observed = super::pass::composition_graph_observation_for_test(
-        c09_composition_commands_for_test(),
+        composition_commands_for_test(),
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
@@ -13712,7 +13812,7 @@ fn composition_isolation_starts_from_transparent_black() {
     )
     .unwrap();
     let observed = super::pass::composition_graph_observation_for_test(
-        c09_composition_commands_for_test(),
+        composition_commands_for_test(),
         context,
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
@@ -13726,7 +13826,7 @@ fn composition_isolation_starts_from_transparent_black() {
     );
 }
 
-fn c09_mask_image_for_composition_test(
+fn composition_mask_image_for_test(
     size: PhysicalSize,
     byte_seed: u8,
     quality: ImageQuality,
@@ -13750,7 +13850,7 @@ fn c09_mask_image_for_composition_test(
     .extend(extend)
 }
 
-fn c09_single_mask_composition_commands_for_test(
+fn composition_single_mask_composition_commands_for_test(
     image: Image,
     bounds: Rect,
     transform: Transform,
@@ -13777,7 +13877,7 @@ fn c09_single_mask_composition_commands_for_test(
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c09_composition_frame_context_for_test() -> super::frame::FrameContext {
+fn composition_frame_context_for_test() -> super::frame::FrameContext {
     super::frame::FrameContext::try_new(
         Size::new(64.0, 48.0),
         1.0,
@@ -13789,7 +13889,7 @@ fn c09_composition_frame_context_for_test() -> super::frame::FrameContext {
 
 #[test]
 fn mask_upload_allocation_uses_image_extent_not_local_bounds() {
-    let image = c09_mask_image_for_composition_test(
+    let image = composition_mask_image_for_test(
         PhysicalSize::new(3, 2),
         17,
         ImageQuality::Medium,
@@ -13817,7 +13917,7 @@ fn mask_upload_allocation_uses_image_extent_not_local_bounds() {
     }
     let observed = super::pass::mask_upload_allocation_observation_for_test(
         scene.normalize(Capabilities::CURRENT).unwrap(),
-        c09_composition_frame_context_for_test(),
+        composition_frame_context_for_test(),
     );
 
     assert!(
@@ -13827,7 +13927,7 @@ fn mask_upload_allocation_uses_image_extent_not_local_bounds() {
     );
 }
 
-fn expected_c09_composite_parameter_bytes_for_test() -> [u8; 112] {
+fn expected_composite_parameter_bytes_for_test() -> [u8; 112] {
     fn write_f32(bytes: &mut [u8; 112], offset: usize, value: f32) {
         bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
     }
@@ -13863,13 +13963,13 @@ fn expected_c09_composite_parameter_bytes_for_test() -> [u8; 112] {
 
 #[test]
 fn composite_parameter_bytes_preserve_affine_mask_mapping_quality_and_extend() {
-    let image = c09_mask_image_for_composition_test(
+    let image = composition_mask_image_for_test(
         PhysicalSize::new(3, 2),
         41,
         ImageQuality::High,
         Extend::Reflect,
     );
-    let commands = c09_single_mask_composition_commands_for_test(
+    let commands = composition_single_mask_composition_commands_for_test(
         image,
         Rect::new(-2.5, 1.25, 7.5, 3.75),
         Transform::try_new([2.0, 0.5, -0.25, 1.5, 3.0, -4.0]).unwrap(),
@@ -13879,11 +13979,11 @@ fn composite_parameter_bytes_preserve_affine_mask_mapping_quality_and_extend() {
     );
     let observed = super::pass::composite_parameter_bytes_for_test(
         commands,
-        c09_composition_frame_context_for_test(),
+        composition_frame_context_for_test(),
     );
 
     assert!(
-        observed == Some(expected_c09_composite_parameter_bytes_for_test()),
+        observed == Some(expected_composite_parameter_bytes_for_test()),
         "composite bytes lost typed mask mapping or sampling"
     );
 }
@@ -13903,8 +14003,8 @@ fn zero_sized_mask_image_annihilates_without_texture_allocation() {
 
 #[test]
 fn mask_pipeline_keys_exclude_image_identity() {
-    let first = c09_single_mask_composition_commands_for_test(
-        c09_mask_image_for_composition_test(
+    let first = composition_single_mask_composition_commands_for_test(
+        composition_mask_image_for_test(
             PhysicalSize::new(4, 3),
             13,
             ImageQuality::Medium,
@@ -13916,8 +14016,8 @@ fn mask_pipeline_keys_exclude_image_identity() {
         BlendMode::Screen,
         false,
     );
-    let second = c09_single_mask_composition_commands_for_test(
-        c09_mask_image_for_composition_test(
+    let second = composition_single_mask_composition_commands_for_test(
+        composition_mask_image_for_test(
             PhysicalSize::new(4, 3),
             29,
             ImageQuality::Medium,
@@ -13934,7 +14034,7 @@ fn mask_pipeline_keys_exclude_image_identity() {
         super::pass::mask_pipeline_keys_exclude_image_identity_for_test(
             first,
             second,
-            c09_composition_frame_context_for_test(),
+            composition_frame_context_for_test(),
         ),
         "pipeline caching is keyed by retained image identity"
     );
@@ -14072,7 +14172,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
 
     let observed = renderer
         .resource_preparation_observation_for_test(
-            c09_composition_commands_for_test(),
+            composition_commands_for_test(),
             Size::new(16.0, 12.0),
             1.0,
             Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
@@ -14116,7 +14216,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
 
 #[test]
 fn resource_budget_and_device_loss_preserve_public_stats_contract() {
-    let commands = c09_composition_commands_for_test();
+    let commands = composition_commands_for_test();
     let route_before = resource_lifecycle_route_for_test(commands.clone());
 
     let ordinary_options = Options::default()
@@ -14389,7 +14489,7 @@ fn device_pass_cache_starts_with_no_realized_entries() {
     assert!(device_pass_cache_owns_exact_key_spaces_for_test());
 }
 
-fn c08_shader_commands_for_test() -> command::RenderCommands {
+fn graph_shader_commands_for_test() -> command::RenderCommands {
     let mut scene = Scene::new();
     scene
         .fill(Rect::new(-1.25, -0.75, 2.0, 1.5), Color::BLACK)
@@ -14401,10 +14501,10 @@ fn c08_shader_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c08_vello_capture_commands_for_test() -> command::RenderCommands {
+fn graph_vello_capture_commands_for_test() -> command::RenderCommands {
     let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 1.5, 9.5, 5.0).unwrap()];
     let run = TextRun::try_new(
-        ahem_font("C08 Vello capture raster contract"),
+        ahem_font("Vello capture raster contract"),
         8.0,
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
@@ -14417,7 +14517,7 @@ fn c08_vello_capture_commands_for_test() -> command::RenderCommands {
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c08_shader_frame_context_for_test() -> super::frame::FrameContext {
+fn graph_shader_frame_context_for_test() -> super::frame::FrameContext {
     super::frame::FrameContext::try_new(
         Size::new(16.0, 12.0),
         1.0,
@@ -14427,7 +14527,7 @@ fn c08_shader_frame_context_for_test() -> super::frame::FrameContext {
     .unwrap()
 }
 
-fn c09_shader_composite_commands_for_test(
+fn composition_shader_composite_commands_for_test(
     blend: BlendMode,
     has_clip: bool,
     has_mask: bool,
@@ -14439,7 +14539,7 @@ fn c09_shader_composite_commands_for_test(
             .unwrap();
     }
     if has_mask {
-        let mask = c09_mask_image_for_composition_test(
+        let mask = composition_mask_image_for_test(
             PhysicalSize::new(4, 1),
             53,
             ImageQuality::High,
@@ -14458,7 +14558,7 @@ fn c09_shader_composite_commands_for_test(
     });
     if !has_mask {
         let graph_trigger = ResolvedLayerAlphaMask::try_new(
-            c09_mask_image_for_composition_test(
+            composition_mask_image_for_test(
                 PhysicalSize::new(1, 1),
                 97,
                 ImageQuality::Low,
@@ -14477,11 +14577,11 @@ fn c09_shader_composite_commands_for_test(
     scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
-fn c09_shader_composite_command_variants_for_test() -> Vec<command::RenderCommands> {
+fn composition_shader_composite_command_variants_for_test() -> Vec<command::RenderCommands> {
     let mut variants = Vec::with_capacity(8);
     for blend in [BlendMode::Normal, BlendMode::Multiply] {
         for (has_clip, has_mask) in [(false, false), (true, false), (false, true), (true, true)] {
-            variants.push(c09_shader_composite_commands_for_test(
+            variants.push(composition_shader_composite_commands_for_test(
                 blend, has_clip, has_mask,
             ));
         }
@@ -14489,20 +14589,20 @@ fn c09_shader_composite_command_variants_for_test() -> Vec<command::RenderComman
     variants
 }
 
-fn c09_composite_requests_for_test(
+fn composition_composite_requests_for_test(
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
 ) -> super::pass::C09CompositeCacheRequestsForTest {
     super::pass::c09_composite_cache_requests_for_test(
-        &c09_shader_composite_command_variants_for_test(),
-        c09_composition_frame_context_for_test(),
+        &composition_shader_composite_command_variants_for_test(),
+        composition_frame_context_for_test(),
         capabilities,
         working_format,
     )
     .unwrap()
 }
 
-fn c09_selected_backend_and_requests_for_test() -> (
+fn composition_selected_backend_and_requests_for_test() -> (
     Backend,
     DeviceSlotIdentity,
     super::pass::C09CompositeCacheRequestsForTest,
@@ -14520,18 +14620,18 @@ fn c09_selected_backend_and_requests_for_test() -> (
     let working_format = capabilities
         .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)
         .unwrap();
-    let requests = c09_composite_requests_for_test(capabilities, working_format);
+    let requests = composition_composite_requests_for_test(capabilities, working_format);
     (backend, identity, requests)
 }
 
 #[test]
 fn composition_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
-    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
     let observed = match pollster::block_on(
         backend.c09_ordered_graph_encoding_observation_for_test(
             identity,
-            c09_composition_commands_for_test(),
-            c09_composition_frame_context_for_test(),
+            composition_commands_for_test(),
+            composition_frame_context_for_test(),
         ),
     ) {
         Ok(observed) => observed,
@@ -14548,12 +14648,12 @@ fn composition_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
 
 #[test]
 fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
-    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
     let observed =
         match pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
             identity,
-            c09_shader_composite_commands_for_test(BlendMode::Normal, true, true),
-            c09_composition_frame_context_for_test(),
+            composition_shader_composite_commands_for_test(BlendMode::Normal, true, true),
+            composition_frame_context_for_test(),
         )) {
             Ok(observed) => observed,
             Err(error) => panic!(
@@ -14569,12 +14669,12 @@ fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
 
 #[test]
 fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
-    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
     let observed = match pollster::block_on(
         backend.c09_ordered_graph_encoding_observation_for_test(
             identity,
-            c09_shader_composite_commands_for_test(BlendMode::Multiply, true, true),
-            c09_composition_frame_context_for_test(),
+            composition_shader_composite_commands_for_test(BlendMode::Multiply, true, true),
+            composition_frame_context_for_test(),
         ),
     ) {
         Ok(observed) => observed,
@@ -14591,13 +14691,13 @@ fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
 
 #[test]
 fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
-    let (mut backend, identity, _) = c09_selected_backend_and_requests_for_test();
+    let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let observed = match pollster::block_on(
         backend.c09_ordered_graph_encoding_observation_for_test(
             identity,
-            c09_composition_commands_for_test(),
-            c09_composition_frame_context_for_test(),
+            composition_commands_for_test(),
+            composition_frame_context_for_test(),
         ),
     ) {
         Ok(observed) => observed,
@@ -14643,8 +14743,8 @@ fn base_graph_shader_cache_realizes_checked_programs_without_publishing_failed_e
         .unwrap_or_panic_for_test(
             "checked base-graph shader realization requires one supported working format",
         );
-    let commands = c08_shader_commands_for_test();
-    let context = c08_shader_frame_context_for_test();
+    let commands = graph_shader_commands_for_test();
+    let context = graph_shader_frame_context_for_test();
     let rgba_requests = super::pass::c08_pass_cache_requests_for_test(
         commands.clone(),
         context,
@@ -14689,7 +14789,7 @@ fn base_graph_shader_cache_realizes_checked_programs_without_publishing_failed_e
 
 #[test]
 fn composite_cache_realizes_exact_normal_and_destination_sampling_programs() {
-    let (mut backend, identity, requests) = c09_selected_backend_and_requests_for_test();
+    let (mut backend, identity, requests) = composition_selected_backend_and_requests_for_test();
     let observed = pollster::block_on(
         backend.c09_composite_cache_realization_observation_for_test(identity, &requests),
     )
@@ -14711,7 +14811,7 @@ fn composite_cache_realizes_exact_normal_and_destination_sampling_programs() {
 
 #[test]
 fn composite_layouts_bind_no_dummy_parent_clip_or_mask() {
-    let requests = c09_composite_requests_for_test(
+    let requests = composition_composite_requests_for_test(
         DeviceCapabilities::from_test_facts(true, true, 4_096),
         WorkingFormat::HighPrecision,
     );
@@ -14730,7 +14830,7 @@ fn composite_layouts_bind_no_dummy_parent_clip_or_mask() {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn c09_f16_to_f32_for_test(bits: u16) -> f32 {
+fn composition_f16_to_f32_for_test(bits: u16) -> f32 {
     let sign = u32::from(bits & 0x8000) << 16;
     let exponent = u32::from((bits >> 10) & 0x1f);
     let mantissa = u32::from(bits & 0x03ff);
@@ -14753,7 +14853,7 @@ fn c09_f16_to_f32_for_test(bits: u16) -> f32 {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn c09_read_gpu_vectors_for_test(
+fn composition_read_gpu_vectors_for_test(
     device: &wgpu::Device,
     staging: &wgpu::Buffer,
     working_format: WorkingFormat,
@@ -14813,7 +14913,7 @@ fn c09_read_gpu_vectors_for_test(
                 let mut pixel = [0.0; 4];
                 for (channel, pair) in bytes.chunks_exact(2).enumerate() {
                     pixel[channel] =
-                        c09_f16_to_f32_for_test(u16::from_le_bytes([pair[0], pair[1]]));
+                        composition_f16_to_f32_for_test(u16::from_le_bytes([pair[0], pair[1]]));
                 }
                 pixel
             }
@@ -14901,7 +15001,8 @@ async fn c09_submit_and_read_gpu_vectors_for_test(
         .submit_command_buffer(&queue, encoder.finish(), RuntimeOperation::EffectRendering)
         .await?;
     backend.commit_checked_pass_cache_update_for_test(identity, pass_cache_update)?;
-    let rgba = c09_read_gpu_vectors_for_test(&device, &staging, working_format, outputs.len())?;
+    let rgba =
+        composition_read_gpu_vectors_for_test(&device, &staging, working_format, outputs.len())?;
     Ok(C09GpuVectorResultsForTest {
         working_format,
         rgba,
@@ -14909,7 +15010,8 @@ async fn c09_submit_and_read_gpu_vectors_for_test(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn c09_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorForTest>, Vec<[f32; 4]>) {
+fn composition_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorForTest>, Vec<[f32; 4]>)
+{
     let mut vectors = Vec::new();
     let mut expected = Vec::new();
     let rows = [
@@ -14976,7 +15078,7 @@ fn c09_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorForTest>, V
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn c09_gpu_vectors_match(
+fn composition_gpu_vectors_match(
     observed: &C09GpuVectorResultsForTest,
     expected: &[[f32; 4]],
     tolerance: f32,
@@ -15003,8 +15105,8 @@ fn c09_gpu_vectors_match(
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn mask_sampling_shader_matches_independent_boundary_vectors() {
-    let (mut backend, identity, requests) = c09_selected_backend_and_requests_for_test();
-    let (vectors, expected) = c09_mask_boundary_vectors_for_test();
+    let (mut backend, identity, requests) = composition_selected_backend_and_requests_for_test();
+    let (vectors, expected) = composition_mask_boundary_vectors_for_test();
     let observed = pollster::block_on(async {
         let transaction = backend.begin_gpu_operation(
             identity,
@@ -15031,7 +15133,7 @@ fn mask_sampling_shader_matches_independent_boundary_vectors() {
     };
 
     assert!(
-        c09_gpu_vectors_match(&observed, &expected, tolerance),
+        composition_gpu_vectors_match(&observed, &expected, tolerance),
         "GPU mask sampling differs from independent constants"
     );
 }
@@ -15039,7 +15141,7 @@ fn mask_sampling_shader_matches_independent_boundary_vectors() {
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn blend_shaders_match_independent_known_vectors() {
-    let (backend, identity, requests) = c09_selected_backend_and_requests_for_test();
+    let (backend, identity, requests) = composition_selected_backend_and_requests_for_test();
     let source = [0.4, 0.1, 0.3, 0.5];
     let parent = [0.2, 0.6, 0.32, 0.8];
     let vectors = [
@@ -15130,11 +15232,11 @@ fn blend_shaders_match_independent_known_vectors() {
         [0.0; 4],
         parent,
     ];
-    assert_c09_blend_gpu_vectors(backend, identity, &requests, &vectors, &expected);
+    assert_composition_blend_gpu_vectors(backend, identity, &requests, &vectors, &expected);
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn assert_c09_blend_gpu_vectors(
+fn assert_composition_blend_gpu_vectors(
     mut backend: Backend,
     identity: DeviceSlotIdentity,
     requests: &super::pass::C09CompositeCacheRequestsForTest,
@@ -15158,7 +15260,7 @@ fn assert_c09_blend_gpu_vectors(
     };
 
     assert!(
-        c09_gpu_vectors_match(&observed, expected, tolerance),
+        composition_gpu_vectors_match(&observed, expected, tolerance),
         "GPU blend math differs from independent constants"
     );
 }
@@ -15166,8 +15268,8 @@ fn assert_c09_blend_gpu_vectors(
 #[test]
 fn base_graph_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
     let observed = super::pass::c08_pass_layout_observation_for_test(
-        c08_shader_commands_for_test(),
-        c08_shader_frame_context_for_test(),
+        graph_shader_commands_for_test(),
+        graph_shader_frame_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
     );
 
@@ -15208,8 +15310,8 @@ fn zero_capture_graph_spine_is_rejected_before_preparation() {
     let pass_cache_before = pass_cache.counts_for_test();
 
     let lowered = super::pass::c08_zero_capture_spine_lowered_for_test(
-        c08_shader_commands_for_test(),
-        c08_shader_frame_context_for_test(),
+        graph_shader_commands_for_test(),
+        graph_shader_frame_context_for_test(),
         capabilities,
         policy,
     )
@@ -15234,7 +15336,7 @@ fn zero_capture_graph_spine_is_rejected_before_preparation() {
     );
 }
 
-fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObservationForTest {
+fn observe_graph_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObservationForTest {
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
@@ -15243,8 +15345,8 @@ fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObserva
         .unwrap_or_panic_for_test("custom-spine encoding requires a host adapter");
     let mut observed = pollster::block_on(backend.c08_custom_spine_encoding_observation_for_test(
         identity,
-        c08_shader_commands_for_test(),
-        c08_shader_frame_context_for_test(),
+        graph_shader_commands_for_test(),
+        graph_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
     .unwrap_or_panic_for_test("custom-spine encoding must reach its private observation");
@@ -15256,7 +15358,7 @@ fn observe_c08_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObserva
 
 #[test]
 fn custom_spine_encodes_clear_canonicalize_copy_source_over_and_present_in_order() {
-    let observed = observe_c08_custom_spine_encoding_for_test();
+    let observed = observe_graph_custom_spine_encoding_for_test();
 
     assert!(
         observed.encodes_custom_passes_in_order
@@ -15274,7 +15376,7 @@ fn custom_spine_encodes_clear_canonicalize_copy_source_over_and_present_in_order
 
 #[test]
 fn span_source_over_copies_parent_then_uses_fixed_premultiplied_blend() {
-    let observed = observe_c08_custom_spine_encoding_for_test();
+    let observed = observe_graph_custom_spine_encoding_for_test();
 
     assert!(
         observed.parent_and_result_are_distinct
@@ -15298,9 +15400,9 @@ fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
     let observed = pollster::block_on(
         backend.c08_multiple_vello_capture_encoding_observation_for_test(
             identity,
-            c08_shader_commands_for_test(),
+            graph_shader_commands_for_test(),
             runtime_lowering_commands_for_test(),
-            c08_shader_frame_context_for_test(),
+            graph_shader_frame_context_for_test(),
         ),
     )
     .unwrap_or_panic_for_test("the validated two-capture fixture must reach graph encoding");
@@ -15333,9 +15435,9 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
         .unwrap_or_panic_for_test("later Vello capture failure requires a host adapter");
     let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
         identity,
-        c08_shader_commands_for_test(),
+        graph_shader_commands_for_test(),
         runtime_lowering_commands_for_test(),
-        c08_shader_frame_context_for_test(),
+        graph_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::LaterCaptureEncoding,
     ))
     .unwrap_or_panic_for_test("later Vello capture failure must reach its private observation");
@@ -15370,9 +15472,9 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
         .unwrap_or_panic_for_test("shared Vello scope failure requires a host adapter");
     let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
         identity,
-        c08_shader_commands_for_test(),
+        graph_shader_commands_for_test(),
         runtime_lowering_commands_for_test(),
-        c08_shader_frame_context_for_test(),
+        graph_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::SharedScopeResolution,
     ))
     .unwrap_or_panic_for_test("shared Vello scope failure must reach its private observation");
@@ -15401,7 +15503,7 @@ fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
     let identity = pollster::block_on(backend.select_device(None))
         .unwrap_or_panic_for_test("capture raster contracts require backend selection")
         .unwrap_or_panic_for_test("capture raster contracts require a host adapter");
-    let commands = c08_vello_capture_commands_for_test();
+    let commands = graph_vello_capture_commands_for_test();
     let mut contract_is_exact = true;
     for antialiasing in [
         Antialiasing::Area,
@@ -15447,8 +15549,8 @@ fn capture_failure_aborts_and_rejects_retry_on_new_encoder() {
         .unwrap_or_panic_for_test("capture-failure coverage requires a host adapter");
     let observed = pollster::block_on(backend.c08_capture_failure_observation_for_test(
         identity,
-        c08_shader_commands_for_test(),
-        c08_shader_frame_context_for_test(),
+        graph_shader_commands_for_test(),
+        graph_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
     .unwrap_or_panic_for_test("capture-failure coverage must reach its private observation");
@@ -15504,7 +15606,7 @@ fn observe_frame_plan(
 fn add_planning_text(scene: &mut Scene, bounds: TextRunBounds) {
     let glyphs = [TextGlyph::try_new(1, 1.0, 2.0, 5.0).unwrap()];
     let run = TextRun::try_new(
-        FontRef::new(41).named("C06 frame planning text"),
+        FontRef::new(41).named("frame planning text"),
         16.0,
         Transform::identity(),
         TextPaint::try_fill(Color::BLACK.into()).unwrap(),
@@ -21028,7 +21130,9 @@ fn offscreen_pipeline_capability_diagnostics_report_unsupported_operations() {
             PrimitiveFamily::OffscreenPipeline,
             PrimitiveOperation::BoundedBackdropFilterExecution,
         ))
-        .expect("bounded backdrop filter execution is the narrow implemented C12 subset");
+        .expect(
+            "bounded backdrop filter execution is the narrow implemented bounded-backdrop subset",
+        );
 }
 
 #[test]
@@ -24468,7 +24572,7 @@ fn render_window_smoke_executes_direct_and_graph_presented_frames() {
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("presented direct-and-graph smoke coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let observation = presented_observation_handle_for_test(&surface);
     let mut scene = Scene::new();
@@ -24520,7 +24624,7 @@ fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
                 .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
         ))
         .expect("presented format coverage requires a compatible device");
-        let working_format = default_c08_working_format_for_test(&mut renderer);
+        let working_format = default_graph_working_format_for_test(&mut renderer);
         let mut surface = display_free_presented_surface_for_test(
             &mut renderer,
             SurfaceOptions {
@@ -24592,7 +24696,7 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("presented acquire-failure coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
     let cache_before = renderer
@@ -24662,7 +24766,7 @@ fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("presented scope-failure coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
     let mut scene = Scene::new();
@@ -24710,7 +24814,7 @@ fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .expect("presented accounting-fault coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
     let parameters_before = surface.last_parameters;
@@ -24801,7 +24905,7 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("presented present-failure coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
     let parameters_before = surface.last_parameters;
@@ -24881,7 +24985,7 @@ fn presented_graph_cancellation_after_submit_discards_without_presentation() {
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("presented cancellation coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
     let observation = presented_observation_handle_for_test(&surface);
@@ -24937,7 +25041,7 @@ fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("presented terminal-loss coverage requires a compatible device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
@@ -26553,7 +26657,7 @@ fn foreign_and_stale_surfaces_fail_before_device_slot_access() {
 
 #[test]
 fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
-    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let (scene, filters, expected) = color_filter_retention_fixture_for_test();
     let width = u32::try_from(expected.len() / 4).expect("the loss fixture width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -26561,11 +26665,11 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .unwrap();
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap();
-    let warmed = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+    let warmed = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
         filters,
@@ -27620,14 +27724,15 @@ fn non_render_operations_do_not_mutate_last_successful_stats() {
 
 #[test]
 fn gpu_graph_stats_count_exact_backdrop_passes_copies_resources_and_precision() {
-    let (scene, size, parameters, _) = c12_integration_fixture_for_test();
+    let (scene, size, parameters, _) = bounded_backdrop_integration_fixture_for_test();
     for (working_format, precision) in [
         (WorkingFormat::HighPrecision, EffectPrecision::High),
         (WorkingFormat::ReducedPrecision, EffectPrecision::Reduced),
     ] {
-        let stats = render_c12_fixture_for_test(&scene, size, parameters, working_format)
-            .result
-            .stats;
+        let stats =
+            render_bounded_backdrop_fixture_for_test(&scene, size, parameters, working_format)
+                .result
+                .stats;
         assert_eq!(
             (
                 stats.route,
@@ -27654,10 +27759,10 @@ fn resource_stats_report_acquisition_source_and_post_trim_retention() {
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .expect("resource-stat coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
         .expect("resource-stat coverage requires a headless surface");
-    let scene = repeated_c08_scene_for_test();
+    let scene = repeated_graph_scene_for_test();
 
     let first = pollster::block_on(renderer.render_forced_c08_graph_for_test(
         &mut surface,
@@ -27694,10 +27799,10 @@ fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .expect("graph stats failure coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
         .expect("graph stats failure coverage requires a headless surface");
-    let scene = repeated_c08_scene_for_test();
+    let scene = repeated_graph_scene_for_test();
     let successful = pollster::block_on(renderer.render_forced_c08_graph_for_test(
         &mut surface,
         &scene,
@@ -29537,7 +29642,7 @@ fn headless_graph_post_submit_failure_leaves_first_frame_unpublished() {
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("first-frame graph failure coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut uninitialized = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
         .expect("first-frame graph failure coverage requires a headless surface");
     let replacement = graph_white_replacement_scene_for_test();
@@ -29582,7 +29687,7 @@ fn headless_accounting_fault_after_submit_suppresses_publication_and_commits() {
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .expect("headless accounting coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
         .expect("headless accounting coverage requires a real surface");
     let mut baseline_scene = Scene::new();
@@ -29746,7 +29851,7 @@ fn graph_abort_fixture_for_test(
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .expect(renderer_expectation);
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
         .expect(surface_expectation);
     let mut baseline_scene = Scene::new();
@@ -30712,7 +30817,7 @@ fn direct_render_submits_one_transaction_owned_raster_pass() {
     );
 }
 
-fn c08_alpha_extreme_pixels_for_test() -> Vec<[u8; 4]> {
+fn graph_alpha_extreme_pixels_for_test() -> Vec<[u8; 4]> {
     let mut pixels = vec![[128, 0, 0, 1]];
     for alpha in [0, 1, 2, 15, 16, 127, 254, 255] {
         for rgb in [
@@ -30728,7 +30833,7 @@ fn c08_alpha_extreme_pixels_for_test() -> Vec<[u8; 4]> {
     pixels
 }
 
-fn c08_alpha_extreme_scene_for_test(pixels: &[[u8; 4]]) -> Scene {
+fn graph_alpha_extreme_scene_for_test(pixels: &[[u8; 4]]) -> Scene {
     let bytes = pixels
         .iter()
         .flat_map(|pixel| pixel.iter().copied())
@@ -30745,26 +30850,26 @@ fn c08_alpha_extreme_scene_for_test(pixels: &[[u8; 4]]) -> Scene {
     scene
 }
 
-fn c08_canonical_pixel_for_test(pixel: [u8; 4]) -> [u8; 4] {
+fn graph_canonical_pixel_for_test(pixel: [u8; 4]) -> [u8; 4] {
     if pixel[3] == 0 { [0, 0, 0, 0] } else { pixel }
 }
 
-fn c08_premul8_for_test(color: u8, alpha: u8) -> u8 {
+fn premultiply_u8_channel_for_test(color: u8, alpha: u8) -> u8 {
     ((u16::from(color) * u16::from(alpha) + 127) / 255) as u8
 }
 
-fn c08_channel_error_for_test(actual: u8, expected: u8) -> u8 {
+fn graph_channel_error_for_test(actual: u8, expected: u8) -> u8 {
     actual.abs_diff(expected)
 }
 
-struct C08AlphaVectorOutputForTest {
+struct GraphAlphaVectorOutputForTest {
     output: ImageBuffer,
     graph: super::renderer::C08ForcedGraphRenderResultForTest,
     used_graph_transaction: bool,
     publication_count: usize,
 }
 
-fn default_c08_working_format_for_test(renderer: &mut Renderer) -> WorkingFormat {
+fn default_graph_working_format_for_test(renderer: &mut Renderer) -> WorkingFormat {
     let precisions = renderer
         .default_device_capabilities_for_test()
         .effect_precisions();
@@ -30779,14 +30884,14 @@ fn default_c08_working_format_for_test(renderer: &mut Renderer) -> WorkingFormat
     }
 }
 
-fn render_c08_alpha_vector_for_test(
+fn render_graph_alpha_vector_for_test(
     expected: &[[u8; 4]],
     requested_working_format: Option<WorkingFormat>,
-) -> C08AlphaVectorOutputForTest {
+) -> GraphAlphaVectorOutputForTest {
     let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let graph_submission = graph_submission_scope.observation_for_test();
-    let c08_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let c08_submission = c08_submission_scope.observation_for_test();
+    let graph_transaction_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_transaction = graph_transaction_scope.observation_for_test();
     let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_submission_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
@@ -30794,13 +30899,13 @@ fn render_c08_alpha_vector_for_test(
     ))
     .expect("alpha-vector graph execution requires a renderer");
     let working_format = requested_working_format
-        .unwrap_or_else(|| default_c08_working_format_for_test(&mut renderer));
+        .unwrap_or_else(|| default_graph_working_format_for_test(&mut renderer));
     let width = u32::try_from(expected.len()).expect("the graph pixel vector must fit in u32");
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .expect("alpha-vector graph execution requires a headless surface");
     let publication_before = surface.headless_publication_count_for_test();
-    let scene = c08_alpha_extreme_scene_for_test(expected);
+    let scene = graph_alpha_extreme_scene_for_test(expected);
     let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
         &mut surface,
         &scene,
@@ -30816,17 +30921,17 @@ fn render_c08_alpha_vector_for_test(
     let used_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
         && graph_submission.transaction_generation_for_test()
             == graph_submission.active_generation_for_test()
-        && c08_submission.queue_submission_count_for_test() == 1
-        && c08_submission.transaction_generation_for_test()
-            == c08_submission.active_generation_for_test()
-        && c08_submission.capture_lease_count_for_test() == 1
-        && c08_submission.scopes_resolved_for_test()
-        && c08_submission.prepared_frame_committed_for_test()
-        && c08_submission.capture_resources_committed_for_test()
-        && c08_submission.headless_draft_released_for_test()
+        && graph_transaction.queue_submission_count_for_test() == 1
+        && graph_transaction.transaction_generation_for_test()
+            == graph_transaction.active_generation_for_test()
+        && graph_transaction.capture_lease_count_for_test() == 1
+        && graph_transaction.scopes_resolved_for_test()
+        && graph_transaction.prepared_frame_committed_for_test()
+        && graph_transaction.capture_resources_committed_for_test()
+        && graph_transaction.headless_draft_released_for_test()
         && direct_submission.queue_submission_count_for_test() == 0
         && graph.working_format == working_format;
-    C08AlphaVectorOutputForTest {
+    GraphAlphaVectorOutputForTest {
         output,
         graph,
         used_graph_transaction,
@@ -30834,7 +30939,7 @@ fn render_c08_alpha_vector_for_test(
     }
 }
 
-fn c08_alpha_vector_has_exact_grid_for_test(
+fn graph_alpha_vector_has_exact_grid_for_test(
     graph: &super::renderer::C08ForcedGraphRenderResultForTest,
     width: u32,
 ) -> bool {
@@ -30850,11 +30955,11 @@ fn c08_alpha_vector_has_exact_grid_for_test(
 
 #[test]
 fn capture_canonicalize_present_round_trips_transparent_partial_and_opaque_pixels() {
-    let expected = c08_alpha_extreme_pixels_for_test();
-    let rendered = render_c08_alpha_vector_for_test(&expected, None);
-    let width = u32::try_from(expected.len()).expect("the C08 pixel vector must fit in u32");
+    let expected = graph_alpha_extreme_pixels_for_test();
+    let rendered = render_graph_alpha_vector_for_test(&expected, None);
+    let width = u32::try_from(expected.len()).expect("the graph pixel vector must fit in u32");
     let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
-        && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
+        && graph_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
     let canonical_pixels =
         rendered
             .output
@@ -30862,19 +30967,21 @@ fn capture_canonicalize_present_round_trips_transparent_partial_and_opaque_pixel
             .chunks_exact(4)
             .zip(&expected)
             .all(|(actual, expected)| {
-                let expected = c08_canonical_pixel_for_test(*expected);
+                let expected = graph_canonical_pixel_for_test(*expected);
                 if rendered.graph.working_format == WorkingFormat::HighPrecision {
                     actual
                         .iter()
                         .copied()
                         .zip(expected)
-                        .all(|(actual, expected)| c08_channel_error_for_test(actual, expected) <= 2)
+                        .all(|(actual, expected)| {
+                            graph_channel_error_for_test(actual, expected) <= 2
+                        })
                 } else {
-                    c08_channel_error_for_test(actual[3], expected[3]) <= 1
+                    graph_channel_error_for_test(actual[3], expected[3]) <= 1
                         && (0..3).all(|channel| {
-                            c08_channel_error_for_test(
-                                c08_premul8_for_test(actual[channel], actual[3]),
-                                c08_premul8_for_test(expected[channel], expected[3]),
+                            graph_channel_error_for_test(
+                                premultiply_u8_channel_for_test(actual[channel], actual[3]),
+                                premultiply_u8_channel_for_test(expected[channel], expected[3]),
                             ) <= 1
                         })
                 }
@@ -30891,12 +30998,12 @@ fn capture_canonicalize_present_round_trips_transparent_partial_and_opaque_pixel
 
 #[test]
 fn reduced_precision_low_alpha_pixels_use_alpha_and_premul8_tolerances() {
-    let expected = c08_alpha_extreme_pixels_for_test();
+    let expected = graph_alpha_extreme_pixels_for_test();
     let rendered =
-        render_c08_alpha_vector_for_test(&expected, Some(WorkingFormat::ReducedPrecision));
+        render_graph_alpha_vector_for_test(&expected, Some(WorkingFormat::ReducedPrecision));
     let width = u32::try_from(expected.len()).expect("the graph pixel vector must fit in u32");
     let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
-        && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
+        && graph_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
     let reduced_pixels =
         rendered
             .output
@@ -30904,12 +31011,12 @@ fn reduced_precision_low_alpha_pixels_use_alpha_and_premul8_tolerances() {
             .chunks_exact(4)
             .zip(&expected)
             .all(|(actual, expected)| {
-                let expected = c08_canonical_pixel_for_test(*expected);
-                c08_channel_error_for_test(actual[3], expected[3]) <= 1
+                let expected = graph_canonical_pixel_for_test(*expected);
+                graph_channel_error_for_test(actual[3], expected[3]) <= 1
                     && (0..3).all(|channel| {
-                        c08_channel_error_for_test(
-                            c08_premul8_for_test(actual[channel], actual[3]),
-                            c08_premul8_for_test(expected[channel], expected[3]),
+                        graph_channel_error_for_test(
+                            premultiply_u8_channel_for_test(actual[channel], actual[3]),
+                            premultiply_u8_channel_for_test(expected[channel], expected[3]),
                         ) <= 1
                     })
             });
@@ -30926,12 +31033,13 @@ fn reduced_precision_low_alpha_pixels_use_alpha_and_premul8_tolerances() {
 
 #[test]
 fn high_precision_low_alpha_pixels_preserve_straight_rgb() {
-    let expected = c08_alpha_extreme_pixels_for_test();
-    let rendered = render_c08_alpha_vector_for_test(&expected, Some(WorkingFormat::HighPrecision));
+    let expected = graph_alpha_extreme_pixels_for_test();
+    let rendered =
+        render_graph_alpha_vector_for_test(&expected, Some(WorkingFormat::HighPrecision));
     let width = u32::try_from(expected.len())
         .unwrap_or_panic_for_test("the graph pixel vector must fit in u32");
     let exact_extent_and_origin = rendered.output.size() == PhysicalSize::new(width, 1)
-        && c08_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
+        && graph_alpha_vector_has_exact_grid_for_test(&rendered.graph, width);
     let stable_straight_rgb = rendered
         .output
         .rgba()
@@ -30939,9 +31047,9 @@ fn high_precision_low_alpha_pixels_preserve_straight_rgb() {
         .zip(&expected)
         .filter(|(_, expected)| expected[3] > 0 && expected[3] <= 16)
         .all(|(actual, expected)| {
-            c08_channel_error_for_test(actual[3], expected[3]) <= 2
+            graph_channel_error_for_test(actual[3], expected[3]) <= 2
                 && (0..3).all(|channel| {
-                    c08_channel_error_for_test(actual[channel], expected[channel]) <= 2
+                    graph_channel_error_for_test(actual[channel], expected[channel]) <= 2
                 })
         });
 
@@ -30955,9 +31063,9 @@ fn high_precision_low_alpha_pixels_preserve_straight_rgb() {
     );
 }
 
-const C10_PIXEL_FIXTURE_SIGNED_X: i32 = -2;
+const COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X: i32 = -2;
 
-struct C10ProductionFrameForTest {
+struct ColorFilterProductionFrameForTest {
     output: ImageBuffer,
     stats: Stats,
     working_format: WorkingFormat,
@@ -30972,11 +31080,11 @@ struct C10ProductionFrameForTest {
     publication_count: usize,
 }
 
-fn c10_boundary_pixels_for_test() -> Vec<[u8; 4]> {
-    c08_alpha_extreme_pixels_for_test()
+fn color_filter_boundary_pixels_for_test() -> Vec<[u8; 4]> {
+    graph_alpha_extreme_pixels_for_test()
 }
 
-fn c10_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
+fn color_filter_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
     let hidden_prefix = [[17, 31, 47, 255], [233, 199, 151, 127]];
     let bytes = hidden_prefix
         .into_iter()
@@ -30984,17 +31092,17 @@ fn c10_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
         .flat_map(|pixel| pixel.into_iter())
         .collect::<Vec<_>>();
     let source_width = u32::try_from(visible_pixels.len() + hidden_prefix.len())
-        .expect("the C10 source-readable pixel vector must fit u32");
+        .expect("the color-filter source-readable pixel vector must fit u32");
     let image = Image::from_rgba(
         Size::new(f64::from(source_width), 1.0),
         Arc::<[u8]>::from(bytes),
     )
-    .expect("the C10 source-readable pixel vector must form one valid image");
+    .expect("the color-filter source-readable pixel vector must form one valid image");
     let mut scene = Scene::new();
     scene.image(
         image,
         Rect::new(
-            f64::from(C10_PIXEL_FIXTURE_SIGNED_X),
+            f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X),
             0.0,
             f64::from(source_width),
             1.0,
@@ -31004,7 +31112,7 @@ fn c10_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
     scene
 }
 
-fn c10_color_operation_matrix_for_test() -> [(&'static str, ColorFilterOp); 8] {
+fn color_filter_operation_matrix_for_test() -> [(&'static str, ColorFilterOp); 8] {
     [
         (
             "brightness",
@@ -31043,13 +31151,13 @@ fn c10_color_operation_matrix_for_test() -> [(&'static str, ColorFilterOp); 8] {
     ]
 }
 
-fn c10_reference_straight_pixels_for_test(
+fn color_filter_reference_straight_pixels_for_test(
     source_pixels: &[[u8; 4]],
     operations: &[ColorFilterOp],
     working_format: WorkingFormat,
 ) -> Vec<u8> {
     let size = PhysicalSize::new(
-        u32::try_from(source_pixels.len()).expect("the C10 oracle width must fit u32"),
+        u32::try_from(source_pixels.len()).expect("the color-filter oracle width must fit u32"),
         1,
     );
     let premultiplied_source = ReferencePremultipliedRgba8Buffer::from_pixels(
@@ -31057,10 +31165,10 @@ fn c10_reference_straight_pixels_for_test(
         source_pixels
             .iter()
             .copied()
-            .map(c09_premultiplied_pixel_for_test)
+            .map(reference_premultiplied_pixel_for_test)
             .collect(),
     )
-    .expect("the C10 source pixels must form one premultiplied oracle buffer");
+    .expect("the color-filter source pixels must form one premultiplied oracle buffer");
     let filter = FilterList::try_ops(
         operations
             .iter()
@@ -31077,11 +31185,11 @@ fn c10_reference_straight_pixels_for_test(
             })
             .collect(),
     )
-    .expect("the C10 oracle operations must form one authored filter");
+    .expect("the color-filter oracle operations must form one authored filter");
     let pipeline = filter
         .color_filter_pipeline()
-        .expect("the C10 oracle fixture contains only color functions")
-        .expect("the C10 oracle fixture contains one nonempty color run");
+        .expect("the color-filter oracle fixture contains only color functions")
+        .expect("the color-filter oracle fixture contains one nonempty color run");
     match working_format {
         WorkingFormat::HighPrecision => {
             super::reference::apply_color_filter_pipeline_to_straight_rgba8(
@@ -31092,20 +31200,20 @@ fn c10_reference_straight_pixels_for_test(
         WorkingFormat::ReducedPrecision => {
             let filtered = premultiplied_source
                 .apply_color_filter_pipeline(&pipeline)
-                .expect("the C10 CPU oracle must evaluate every authored operation");
-            c09_reference_straight_bytes_for_test(&filtered)
+                .expect("the color-filter CPU oracle must evaluate every authored operation");
+            reference_straight_bytes_for_test(&filtered)
         }
     }
 }
 
-fn render_c10_fixture_for_test(
+fn render_color_filter_fixture_for_test(
     renderer: &mut Renderer,
     surface: &mut Surface,
     scene: &Scene,
     filters: Vec<FilterList>,
     parameters: Parameters,
     working_format: WorkingFormat,
-) -> C10ProductionFrameForTest {
+) -> ColorFilterProductionFrameForTest {
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -31113,7 +31221,7 @@ fn render_c10_fixture_for_test(
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let graph = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+    let graph = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         surface,
         scene,
         filters,
@@ -31121,7 +31229,7 @@ fn render_c10_fixture_for_test(
         working_format,
     ))
     .unwrap_or_else(|error| {
-        panic!("the C10 fixture must execute through the shared exact graph: {error}")
+        panic!("the color-filter fixture must execute through the shared exact graph: {error}")
     });
     let queue_submissions = submission.queue_submission_count_for_test();
     let graph_submissions = graph_submission.queue_submission_count_for_test();
@@ -31133,9 +31241,11 @@ fn render_c10_fixture_for_test(
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
     let output = pollster::block_on(renderer.read_headless(surface)).unwrap_or_else(|error| {
-        panic!("the already-published C10 RED fixture must be explicitly readable: {error}")
+        panic!(
+            "the already-published color-filter RED fixture must be explicitly readable: {error}"
+        )
     });
-    C10ProductionFrameForTest {
+    ColorFilterProductionFrameForTest {
         output,
         stats: graph.stats,
         working_format: graph.working_format,
@@ -31151,20 +31261,23 @@ fn render_c10_fixture_for_test(
     }
 }
 
-fn c10_frame_has_exact_extent_origin_and_submission_for_test(
-    rendered: &C10ProductionFrameForTest,
+fn color_filter_frame_has_exact_extent_origin_and_submission_for_test(
+    rendered: &ColorFilterProductionFrameForTest,
     visible_width: u32,
 ) -> bool {
     rendered.output.size() == PhysicalSize::new(visible_width, 1)
         && rendered.output_extent == PhysicalSize::new(visible_width, 1)
-        && rendered.source_origin == Some((C10_PIXEL_FIXTURE_SIGNED_X, 0))
+        && rendered.source_origin == Some((COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X, 0))
         && rendered.source_extent
             == Some(PhysicalSize::new(
-                visible_width + C10_PIXEL_FIXTURE_SIGNED_X.unsigned_abs(),
+                visible_width + COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X.unsigned_abs(),
                 1,
             ))
         && rendered.source_texel_origin
-            == Some(Point::new(f64::from(C10_PIXEL_FIXTURE_SIGNED_X), 0.0))
+            == Some(Point::new(
+                f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X),
+                0.0,
+            ))
         && rendered.source_raster_scale == Some(1.0)
         && rendered.queue_submissions == 1
         && rendered.graph_submissions == 1
@@ -31200,7 +31313,7 @@ fn terminal_straight_rgba8_rejects_rgb_leakage_at_zero_alpha() {
     );
 }
 
-fn c10_high_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
+fn high_precision_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
     (actual.len() == expected.len() && actual.len().is_multiple_of(4)).then(|| {
         actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
             0,
@@ -31222,7 +31335,7 @@ fn c10_high_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8
     })
 }
 
-fn c10_reduced_error_for_test(actual: &[u8], expected: &[u8]) -> Option<(u8, u8)> {
+fn reduced_precision_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<(u8, u8)> {
     (actual.len() == expected.len()).then(|| {
         actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
             (0, 0),
@@ -31230,8 +31343,9 @@ fn c10_reduced_error_for_test(actual: &[u8], expected: &[u8]) -> Option<(u8, u8)
                 let alpha = max_alpha.max(actual[3].abs_diff(expected[3]));
                 let premul = (0..3).fold(max_premul, |maximum, channel| {
                     maximum.max(
-                        c08_premul8_for_test(actual[channel], actual[3])
-                            .abs_diff(c08_premul8_for_test(expected[channel], expected[3])),
+                        premultiply_u8_channel_for_test(actual[channel], actual[3]).abs_diff(
+                            premultiply_u8_channel_for_test(expected[channel], expected[3]),
+                        ),
                     )
                 });
                 (alpha, premul)
@@ -31240,51 +31354,56 @@ fn c10_reduced_error_for_test(actual: &[u8], expected: &[u8]) -> Option<(u8, u8)
     })
 }
 
-fn c10_pixel_renderer_for_test(working_format: WorkingFormat, width: u32) -> (Renderer, Surface) {
+fn color_filter_pixel_renderer_for_test(
+    working_format: WorkingFormat,
+    width: u32,
+) -> (Renderer, Surface) {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("C10 pixel execution requires a real renderer: {error}"));
-    let supported = c08_supported_working_formats_for_test(&mut renderer);
+    .unwrap_or_else(|error| {
+        panic!("color-filter pixel execution requires a real renderer: {error}")
+    });
+    let supported = graph_supported_working_formats_for_test(&mut renderer);
     assert!(
         supported.contains(&working_format),
-        "C10 pixel execution requires the requested real working format"
+        "color-filter pixel execution requires the requested real working format"
     );
     let adapter = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("C10 pixel execution requires one ready real adapter")
+        .expect("color-filter pixel execution requires one ready real adapter")
         .adapter_for_test()
         .get_info();
     eprintln!(
-        "C10 real adapter name={} backend={:?} device_type={:?} driver={} driver_info={}",
+        "color-filter real adapter name={} backend={:?} device_type={:?} driver={} driver_info={}",
         adapter.name, adapter.backend, adapter.device_type, adapter.driver, adapter.driver_info
     );
     let surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap_or_else(|error| {
-                panic!("C10 pixel execution requires a headless surface: {error}")
+                panic!("color-filter pixel execution requires a headless surface: {error}")
             });
     (renderer, surface)
 }
 
 #[test]
 fn high_precision_color_functions_match_cpu_oracle_for_boundary_pixels() {
-    let source = c10_boundary_pixels_for_test();
+    let source = color_filter_boundary_pixels_for_test();
     let width =
         u32::try_from(source.len()).expect("the high-precision color matrix width must fit u32");
-    let scene = c10_signed_source_scene_for_test(&source);
+    let scene = color_filter_signed_source_scene_for_test(&source);
     let (mut renderer, mut surface) =
-        c10_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
+        color_filter_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
     let mut maximum_error = 0;
     let mut exact_execution = true;
 
-    for (name, operation) in c10_color_operation_matrix_for_test() {
-        let expected = c10_reference_straight_pixels_for_test(
+    for (name, operation) in color_filter_operation_matrix_for_test() {
+        let expected = color_filter_reference_straight_pixels_for_test(
             &source,
             &[operation],
             WorkingFormat::HighPrecision,
         );
-        let rendered = render_c10_fixture_for_test(
+        let rendered = render_color_filter_fixture_for_test(
             &mut renderer,
             &mut surface,
             &scene,
@@ -31293,14 +31412,14 @@ fn high_precision_color_functions_match_cpu_oracle_for_boundary_pixels() {
             WorkingFormat::HighPrecision,
         );
         let exact_grid =
-            c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width);
+            color_filter_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width);
         let terminal_canonical =
             terminal_straight_rgba8_is_canonical_for_test(rendered.output.rgba());
         exact_execution &= rendered.working_format == WorkingFormat::HighPrecision
             && exact_grid
             && terminal_canonical;
-        let error =
-            c10_high_terminal_error_for_test(rendered.output.rgba(), &expected).unwrap_or(u8::MAX);
+        let error = high_precision_terminal_error_for_test(rendered.output.rgba(), &expected)
+            .unwrap_or(u8::MAX);
         maximum_error = maximum_error.max(error);
         eprintln!(
             "high-precision color operation={name} max_terminal_straight_rgba8_error={error} exact_grid={exact_grid} terminal_canonical={terminal_canonical} output_extent={:?} source_origin={:?} source_extent={:?} source_texel_origin={:?} source_raster_scale={:?} submissions={}/{}/{} publication_count={}",
@@ -31324,23 +31443,23 @@ fn high_precision_color_functions_match_cpu_oracle_for_boundary_pixels() {
 
 #[test]
 fn reduced_precision_color_functions_match_cpu_oracle_with_declared_tolerance() {
-    let source = c10_boundary_pixels_for_test();
+    let source = color_filter_boundary_pixels_for_test();
     let width =
         u32::try_from(source.len()).expect("the reduced-precision color matrix width must fit u32");
-    let scene = c10_signed_source_scene_for_test(&source);
+    let scene = color_filter_signed_source_scene_for_test(&source);
     let (mut renderer, mut surface) =
-        c10_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, width);
+        color_filter_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, width);
     let mut maximum_alpha_error = 0;
     let mut maximum_premul_error = 0;
     let mut exact_execution = true;
 
-    for (name, operation) in c10_color_operation_matrix_for_test() {
-        let expected = c10_reference_straight_pixels_for_test(
+    for (name, operation) in color_filter_operation_matrix_for_test() {
+        let expected = color_filter_reference_straight_pixels_for_test(
             &source,
             &[operation],
             WorkingFormat::ReducedPrecision,
         );
-        let rendered = render_c10_fixture_for_test(
+        let rendered = render_color_filter_fixture_for_test(
             &mut renderer,
             &mut surface,
             &scene,
@@ -31351,10 +31470,10 @@ fn reduced_precision_color_functions_match_cpu_oracle_with_declared_tolerance() 
         let terminal_canonical =
             terminal_straight_rgba8_is_canonical_for_test(rendered.output.rgba());
         exact_execution &= rendered.working_format == WorkingFormat::ReducedPrecision
-            && c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
+            && color_filter_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
             && terminal_canonical;
         let (alpha_error, premul_error) =
-            c10_reduced_error_for_test(rendered.output.rgba(), &expected)
+            reduced_precision_terminal_error_for_test(rendered.output.rgba(), &expected)
                 .unwrap_or((u8::MAX, u8::MAX));
         maximum_alpha_error = maximum_alpha_error.max(alpha_error);
         maximum_premul_error = maximum_premul_error.max(premul_error);
@@ -31379,7 +31498,7 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
         [17, 231, 93, 255],
     ];
     let width = u32::try_from(source.len()).expect("the ordered color-filter width must fit u32");
-    let scene = c10_signed_source_scene_for_test(&source);
+    let scene = color_filter_signed_source_scene_for_test(&source);
     let chain_pairs = [
         (
             "noncommuting contrast/brightness",
@@ -31410,13 +31529,14 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let (mut renderer, mut surface) = c10_pixel_renderer_for_test(working_format, width);
+        let (mut renderer, mut surface) =
+            color_filter_pixel_renderer_for_test(working_format, width);
         for (name, first, second) in chain_pairs {
             let first_expected =
-                c10_reference_straight_pixels_for_test(&source, &first, working_format);
+                color_filter_reference_straight_pixels_for_test(&source, &first, working_format);
             let second_expected =
-                c10_reference_straight_pixels_for_test(&source, &second, working_format);
-            let first_rendered = render_c10_fixture_for_test(
+                color_filter_reference_straight_pixels_for_test(&source, &second, working_format);
+            let first_rendered = render_color_filter_fixture_for_test(
                 &mut renderer,
                 &mut surface,
                 &scene,
@@ -31424,7 +31544,7 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
                 Parameters::default(),
                 working_format,
             );
-            let second_rendered = render_c10_fixture_for_test(
+            let second_rendered = render_color_filter_fixture_for_test(
                 &mut renderer,
                 &mut surface,
                 &scene,
@@ -31437,17 +31557,18 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
             let second_terminal_canonical =
                 terminal_straight_rgba8_is_canonical_for_test(second_rendered.output.rgba());
             let exact_frames =
-                c10_frame_has_exact_extent_origin_and_submission_for_test(&first_rendered, width)
-                    && c10_frame_has_exact_extent_origin_and_submission_for_test(
-                        &second_rendered,
-                        width,
-                    )
-                    && first_terminal_canonical
+                color_filter_frame_has_exact_extent_origin_and_submission_for_test(
+                    &first_rendered,
+                    width,
+                ) && color_filter_frame_has_exact_extent_origin_and_submission_for_test(
+                    &second_rendered,
+                    width,
+                ) && first_terminal_canonical
                     && second_terminal_canonical;
             let first_matches =
-                c10_rendered_output_matches_for_test(&first_rendered, &first_expected);
+                color_filter_rendered_output_matches_for_test(&first_rendered, &first_expected);
             let second_matches =
-                c10_rendered_output_matches_for_test(&second_rendered, &second_expected);
+                color_filter_rendered_output_matches_for_test(&second_rendered, &second_expected);
             ordered_results_are_exact &= first_expected != second_expected
                 && first_rendered.output.rgba() != second_rendered.output.rgba()
                 && first_matches
@@ -31465,17 +31586,17 @@ fn filter_function_order_changes_output_and_matches_ordered_oracle() {
     );
 }
 
-fn c10_rendered_output_matches_for_test(
-    rendered: &C10ProductionFrameForTest,
+fn color_filter_rendered_output_matches_for_test(
+    rendered: &ColorFilterProductionFrameForTest,
     expected: &[u8],
 ) -> bool {
     match rendered.working_format {
         WorkingFormat::HighPrecision => {
-            c10_high_terminal_error_for_test(rendered.output.rgba(), expected)
+            high_precision_terminal_error_for_test(rendered.output.rgba(), expected)
                 .is_some_and(|error| error <= 2)
         }
         WorkingFormat::ReducedPrecision => {
-            c10_reduced_error_for_test(rendered.output.rgba(), expected)
+            reduced_precision_terminal_error_for_test(rendered.output.rgba(), expected)
                 .is_some_and(|(alpha, premul)| alpha <= 2 && premul <= 2)
         }
     }
@@ -31496,11 +31617,11 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
 {
     let source = vec![[17, 31, 47, 0], [224, 72, 16, 127], [192, 64, 46, 255]];
     let width = u32::try_from(source.len()).expect("the color-filter failure width must fit u32");
-    let scene = c10_signed_source_scene_for_test(&source);
+    let scene = color_filter_signed_source_scene_for_test(&source);
     let (mut renderer, mut surface) =
-        c10_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
+        color_filter_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
     assert!(
-        c08_supported_working_formats_for_test(&mut renderer)
+        graph_supported_working_formats_for_test(&mut renderer)
             .contains(&WorkingFormat::ReducedPrecision),
         "color-filter shader-failure coverage requires the real reduced working format"
     );
@@ -31508,7 +31629,7 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
         ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
         ColorFilterOp::Brightness(FilterAmount::try_new(0.7).unwrap()),
     ])];
-    let _baseline = render_c10_fixture_for_test(
+    let _baseline = render_color_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         &scene,
@@ -31540,7 +31661,7 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
     let direct_submission = direct_scope.observation_for_test();
     let shader_failure =
         super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization();
-    let failure = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+    let failure = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
         filters,
@@ -31598,7 +31719,7 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
 }
 
 fn is_injected_color_filter_shader_failure(
-    failure: Result<super::renderer::C10ColorFilterRenderResultForTest>,
+    failure: Result<super::renderer::ColorFilterRenderResultForTest>,
 ) -> bool {
     failure.is_err_and(|error| {
         error.code() == ErrorCode::RenderFailed
@@ -31625,7 +31746,7 @@ fn color_filter_shader_failure_preserves_prior_publication_and_cache() {
     );
 }
 
-fn c10_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
+fn color_filter_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
     let source = vec![
         [0, 0, 0, 255],
         [255, 255, 255, 255],
@@ -31638,7 +31759,7 @@ fn c10_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
         .flat_map(|pixel| [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], pixel[3]])
         .collect();
     (
-        c10_signed_source_scene_for_test(&source),
+        color_filter_signed_source_scene_for_test(&source),
         vec![color_filter_list([ColorFilterOp::Invert(
             UnitFilterAmount::try_new(1.0).unwrap(),
         )])],
@@ -31646,7 +31767,7 @@ fn c10_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
     )
 }
 
-fn c10_repeated_resource_observations_are_stable_for_test(
+fn color_filter_repeated_resource_observations_are_stable_for_test(
     observations: &[super::resource::ResourceManagerObservationForTest],
     warmed: &super::resource::ResourceManagerObservationForTest,
 ) -> bool {
@@ -31667,26 +31788,9 @@ fn c10_repeated_resource_observations_are_stable_for_test(
     })
 }
 
-fn warm_c10_retention_fixture_for_test(
-    renderer: &mut Renderer,
-    surface: &mut Surface,
-    scene: &Scene,
-    filters: &[FilterList],
-    working_format: WorkingFormat,
-) {
-    for _ in 0..2 {
-        pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
-            surface,
-            scene,
-            filters.to_vec(),
-            Parameters::default(),
-            working_format,
-        ))
-        .unwrap_or_else(|error| panic!("color-filter reuse warm-up frames must succeed: {error}"));
-    }
-}
-
-fn c10_prepared_resource_identities_are_stable_for_test(history: &[Vec<ResourceIdentity>]) -> bool {
+fn color_filter_prepared_resource_identities_are_stable_for_test(
+    history: &[Vec<ResourceIdentity>],
+) -> bool {
     history.len() == 3
         && history.first().is_some_and(|first| {
             !first.is_empty() && history.iter().all(|identities| identities == first)
@@ -31695,7 +31799,7 @@ fn c10_prepared_resource_identities_are_stable_for_test(history: &[Vec<ResourceI
 
 #[test]
 fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
-    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let (scene, filters, expected) = color_filter_retention_fixture_for_test();
     let width =
         u32::try_from(expected.len() / 4).expect("the color-filter retention width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
@@ -31706,20 +31810,23 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     .unwrap_or_else(|error| {
         panic!("repeated color-filter reuse coverage requires a renderer: {error}")
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap_or_else(|error| {
                 panic!("repeated color-filter reuse coverage requires a headless surface: {error}")
             });
 
-    warm_c10_retention_fixture_for_test(
-        &mut renderer,
-        &mut surface,
-        &scene,
-        &filters,
-        working_format,
-    );
+    for _ in 0..2 {
+        pollster::block_on(renderer.render_color_filter_fixture_for_test(
+            &mut surface,
+            &scene,
+            filters.clone(),
+            Parameters::default(),
+            working_format,
+        ))
+        .unwrap_or_else(|error| panic!("color-filter reuse warm-up frames must succeed: {error}"));
+    }
     let warmed_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
             panic!("the warmed color-filter publication must be readable: {error}")
@@ -31740,7 +31847,7 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let mut cache_observations = Vec::new();
     let mut stats = Vec::new();
     for _ in 0..3 {
-        let frame = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+        let frame = pollster::block_on(renderer.render_color_filter_fixture_for_test(
             &mut surface,
             &scene,
             filters.clone(),
@@ -31748,7 +31855,7 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
             working_format,
         ))
         .unwrap_or_else(|error| panic!("repeated color-filter frames must succeed: {error}"));
-        stats.push(C08PublicStatsForTest::from(frame.stats));
+        stats.push(GraphPublicStatsForTest::from(frame.stats));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
             .unwrap_or_else(|| panic!("repeated color-filter frames must retain the ready device"));
@@ -31757,12 +31864,12 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     }
     let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
     let retention_history = graph_submission.resource_retention_history_for_test();
-    let stable_resource_set = c10_repeated_resource_observations_are_stable_for_test(
+    let stable_resource_set = color_filter_repeated_resource_observations_are_stable_for_test(
         &resource_observations,
         &warmed_resources,
     );
     let stable_prepared_identities =
-        c10_prepared_resource_identities_are_stable_for_test(&prepared_history);
+        color_filter_prepared_resource_identities_are_stable_for_test(&prepared_history);
     let stable_retention =
         retention_history == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3];
     let stable_cache = warmed_cache.has_render_pipelines()
@@ -31804,7 +31911,7 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
 
 #[test]
 fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
-    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let (scene, filters, expected) = color_filter_retention_fixture_for_test();
     let width =
         u32::try_from(expected.len() / 4).expect("the color-filter zero-budget width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
@@ -31815,14 +31922,14 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
     .unwrap_or_else(|error| {
         panic!("zero-retention color-filter coverage requires a renderer: {error}")
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap_or_else(|error| {
                 panic!("zero-retention color-filter coverage requires a headless surface: {error}")
             });
 
-    let first = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+    let first = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
         filters.clone(),
@@ -31849,7 +31956,7 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let second = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+    let second = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
         filters,
@@ -31894,8 +32001,8 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         graph_submission.queue_submission_count_for_test(),
         direct_submission.queue_submission_count_for_test(),
         submission.readback_queue_submission_count_for_test(),
-        C08PublicStatsForTest::from(first.stats),
-        C08PublicStatsForTest::from(second.stats),
+        GraphPublicStatsForTest::from(first.stats),
+        GraphPublicStatsForTest::from(second.stats),
         first_output.rgba(),
         second_output.rgba(),
     );
@@ -31913,28 +32020,28 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
     );
 }
 
-fn c10_public_color_graph_diagnostic_for_test(
+fn color_filter_public_color_graph_diagnostic_for_test(
     scene: &Scene,
     filters: Vec<FilterList>,
     size: Size,
 ) -> Option<UnsupportedPrimitive> {
     let commands = scene
         .normalize(Capabilities::CURRENT)
-        .expect("the public C10 diagnostic fixture must normalize ordinary capture input");
+        .expect("the public color-filter diagnostic fixture must normalize ordinary capture input");
     let context =
         super::frame::FrameContext::try_new(size, 1.0, Antialiasing::Area, Color::TRANSPARENT)
-            .expect("the public C10 diagnostic fixture must form a frame context");
-    let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)
-        .expect("the public diagnostic fixture must form the same authored C10 graph");
+            .expect("the public color-filter diagnostic fixture must form a frame context");
+    let graph = super::frame::authored_filter_graph_for_test(filters, commands, context)
+        .expect("the public diagnostic fixture must form the same authored color-filter graph");
     super::renderer::future_graph_diagnostic_for_test(
         &graph,
         Format::Rgba8,
         &DeviceCapabilities::from_test_facts(true, true, 4_096),
     )
-    .expect("the retained public dispatch classifier must diagnose a C10 graph")
+    .expect("the retained public dispatch classifier must diagnose a color-filter graph")
 }
 
-fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
+fn retained_public_filter_diagnostics_are_exact_for_test() -> bool {
     let capabilities = Capabilities::CURRENT;
     let supported = [
         (
@@ -31980,7 +32087,8 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
             .ensure_supported(expected)
             .is_err_and(|error| error.unsupported_primitive() == Some(expected))
     });
-    let reference = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#c10-reference");
+    let reference =
+        UnresolvedResource::new(UnresolvedResourceKind::Filter, "#color_filter-reference");
     let reference_error = Error::unresolved_resource(reference.clone());
     supported_are_exact
         && unsupported_are_exact
@@ -32006,7 +32114,7 @@ fn c10_retained_public_filter_diagnostics_are_exact_for_test() -> bool {
         && reference_error.unresolved_resource_diagnostic() == Some(&reference)
 }
 
-fn c10_future_backdrop_scene_for_test() -> Scene {
+fn color_filter_future_backdrop_scene_for_test() -> Scene {
     let backdrop_filters = color_filter_list([ColorFilterOp::Invert(
         UnitFilterAmount::try_new(1.0).unwrap(),
     )]);
@@ -32036,21 +32144,21 @@ fn c10_future_backdrop_scene_for_test() -> Scene {
 
 #[test]
 fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
-    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let (scene, filters, expected) = color_filter_retention_fixture_for_test();
     let width =
         u32::try_from(expected.len() / 4).expect("the color-filter ingress width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .unwrap_or_else(|error| panic!("color-filter ingress coverage requires a renderer: {error}"));
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap_or_else(|error| {
                 panic!("color-filter ingress coverage requires a surface: {error}")
             });
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let rendered = render_c10_fixture_for_test(
+    let rendered = render_color_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
         &scene,
@@ -32066,7 +32174,7 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
     let publication_before_diagnostic = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let public_diagnostic = c10_public_color_graph_diagnostic_for_test(
+    let public_diagnostic = color_filter_public_color_graph_diagnostic_for_test(
         &scene,
         filters,
         Size::new(f64::from(width), 1.0),
@@ -32086,19 +32194,21 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
     );
 
     assert!(
-        c10_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
+        color_filter_frame_has_exact_extent_origin_and_submission_for_test(&rendered, width)
             && rendered.output.rgba() == expected
             && rendered.stats == renderer.stats()
             && public_diagnostic == Some(expected_diagnostic)
-            && c10_retained_public_filter_diagnostics_are_exact_for_test()
+            && retained_public_filter_diagnostics_are_exact_for_test()
             && no_public_gpu_work
             && resources_after_diagnostic == resources_before_diagnostic
             && cache_after_diagnostic == cache_before_diagnostic
             && surface.headless_publication_count_for_test() == publication_before_diagnostic
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.exact_c10_fixture_routes
-                == dispatch_before.exact_c10_fixture_routes.saturating_add(1),
+            && dispatch_after.exact_color_filter_fixture_routes
+                == dispatch_before
+                    .exact_color_filter_fixture_routes
+                    .saturating_add(1),
         "the color-filter fixture did not execute through retained private ingress while the public capability remained diagnostic"
     );
 }
@@ -32106,7 +32216,7 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
 #[cfg(feature = "render-window")]
 #[test]
 fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_graph() {
-    let (scene, filters, expected) = c10_retention_fixture_for_test();
+    let (scene, filters, expected) = color_filter_retention_fixture_for_test();
     let width =
         u32::try_from(expected.len() / 4).expect("the presented fixture width must fit u32");
     let parameters = Parameters::default();
@@ -32114,7 +32224,7 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .unwrap_or_else(|error| panic!("presented color-filter coverage requires a renderer: {error}"));
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = display_free_presented_surface_for_test(
         &mut renderer,
         SurfaceOptions {
@@ -32133,7 +32243,7 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let rendered = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
+    let rendered = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
         filters,
@@ -32167,11 +32277,14 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
     let exact_graph = rendered.as_ref().is_ok_and(|rendered| {
         rendered.working_format == working_format
             && rendered.output_extent == PhysicalSize::new(width, 1)
-            && rendered.source_origin == (C10_PIXEL_FIXTURE_SIGNED_X, 0)
+            && rendered.source_origin == (COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X, 0)
             && rendered.source_extent
-                == PhysicalSize::new(width + C10_PIXEL_FIXTURE_SIGNED_X.unsigned_abs(), 1)
+                == PhysicalSize::new(
+                    width + COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X.unsigned_abs(),
+                    1,
+                )
             && rendered.source_texel_origin
-                == Point::new(f64::from(C10_PIXEL_FIXTURE_SIGNED_X), 0.0)
+                == Point::new(f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X), 0.0)
             && rendered.source_raster_scale == 1.0
             && rendered.stats == renderer.stats()
     });
@@ -32187,51 +32300,59 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
             && presented.as_deref() == Some(expected.as_slice())
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.exact_c10_fixture_routes
-                == dispatch_before.exact_c10_fixture_routes.saturating_add(1),
+            && dispatch_after.exact_color_filter_fixture_routes
+                == dispatch_before
+                    .exact_color_filter_fixture_routes
+                    .saturating_add(1),
         "the presented color-filter fixture did not use the production graph transaction and host effects"
     );
 }
 
 #[test]
 fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdrop() {
-    let (c10_scene, c10_filters, c10_expected) = c10_retention_fixture_for_test();
-    let c10_width =
-        u32::try_from(c10_expected.len() / 4).expect("the color-filter width must fit u32");
+    let (color_filter_scene, color_filters, color_filter_expected) =
+        color_filter_retention_fixture_for_test();
+    let color_filter_width = u32::try_from(color_filter_expected.len() / 4)
+        .expect("the color-filter width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .unwrap_or_else(|error| {
         panic!("composition and color-filter dispatch coverage requires a renderer: {error}")
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let dispatch_before = renderer.dispatch_observation_for_test();
 
-    let mut c10_surface =
-        pollster::block_on(renderer.create_headless(Size::new(f64::from(c10_width), 1.0), 1.0))
-            .unwrap_or_else(|error| {
-                panic!("color-filter dispatch coverage requires a surface: {error}")
-            });
-    let c10 = render_c10_fixture_for_test(
+    let mut color_filter_surface = pollster::block_on(
+        renderer.create_headless(Size::new(f64::from(color_filter_width), 1.0), 1.0),
+    )
+    .unwrap_or_else(|error| panic!("color-filter dispatch coverage requires a surface: {error}"));
+    let color_filter = render_color_filter_fixture_for_test(
         &mut renderer,
-        &mut c10_surface,
-        &c10_scene,
-        c10_filters.clone(),
+        &mut color_filter_surface,
+        &color_filter_scene,
+        color_filters.clone(),
         Parameters::default(),
         working_format,
     );
 
-    let (c09_scene, c09_size, _, _) = c09_reuse_scene_and_oracle_for_test();
-    let mut c09_surface = pollster::block_on(renderer.create_headless(
-        Size::new(f64::from(c09_size.width()), f64::from(c09_size.height())),
+    let (composition_scene, composition_size, _, _) = composition_reuse_scene_and_oracle_for_test();
+    let mut composition_surface = pollster::block_on(renderer.create_headless(
+        Size::new(
+            f64::from(composition_size.width()),
+            f64::from(composition_size.height()),
+        ),
         1.0,
     ))
     .unwrap_or_else(|error| panic!("masked-composition coverage requires a surface: {error}"));
-    let c09 =
-        pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
+    let composition = pollster::block_on(renderer.render(
+        &mut composition_surface,
+        &composition_scene,
+        Parameters::default(),
+    ));
 
-    let future_scene = c10_future_backdrop_scene_for_test();
+    let future_scene = color_filter_future_backdrop_scene_for_test();
     let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .unwrap_or_else(|error| panic!("future boundary coverage requires a surface: {error}"));
     let ready = renderer
@@ -32246,10 +32367,10 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
         &future_scene,
         Parameters::default(),
     ));
-    let color_diagnostic = c10_public_color_graph_diagnostic_for_test(
-        &c10_scene,
-        c10_filters,
-        Size::new(f64::from(c10_width), 1.0),
+    let color_diagnostic = color_filter_public_color_graph_diagnostic_for_test(
+        &color_filter_scene,
+        color_filters,
+        Size::new(f64::from(color_filter_width), 1.0),
     );
     let no_rejected_work = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0;
@@ -32270,9 +32391,12 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
     );
 
     assert!(
-        c10.output.rgba() == c10_expected
-            && c10_frame_has_exact_extent_origin_and_submission_for_test(&c10, c10_width)
-            && c09.is_ok()
+        color_filter.output.rgba() == color_filter_expected
+            && color_filter_frame_has_exact_extent_origin_and_submission_for_test(
+                &color_filter,
+                color_filter_width
+            )
+            && composition.is_ok()
             && future
                 .as_ref()
                 .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
@@ -32285,8 +32409,10 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
                 == dispatch_before.boundary_invocations.saturating_add(2)
             && dispatch_after.exact_c09_graph_routes
                 == dispatch_before.exact_c09_graph_routes.saturating_add(1)
-            && dispatch_after.exact_c10_fixture_routes
-                == dispatch_before.exact_c10_fixture_routes.saturating_add(1)
+            && dispatch_after.exact_color_filter_fixture_routes
+                == dispatch_before
+                    .exact_color_filter_fixture_routes
+                    .saturating_add(1)
             && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
         "public dispatch misrouted masked composition, color filters, or broad backdrop"
     );
@@ -32296,15 +32422,15 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
 fn graph_render_submits_one_transaction_and_publishes_once() {
     let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let graph_submission = graph_submission_scope.observation_for_test();
-    let c08_submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let c08_submission = c08_submission_scope.observation_for_test();
+    let graph_transaction_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_transaction = graph_transaction_scope.observation_for_test();
     let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_submission_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .unwrap_or_panic_for_test("graph submission coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
         .unwrap_or_panic_for_test("graph submission coverage requires a headless surface");
     let publication_before = surface.headless_publication_count_for_test();
@@ -32321,14 +32447,14 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
     let production_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
         && graph_submission.transaction_generation_for_test()
             == graph_submission.active_generation_for_test()
-        && c08_submission.queue_submission_count_for_test() == 1
-        && c08_submission.transaction_generation_for_test()
-            == c08_submission.active_generation_for_test()
-        && c08_submission.capture_lease_count_for_test() == 1
-        && c08_submission.scopes_resolved_for_test()
-        && c08_submission.prepared_frame_committed_for_test()
-        && c08_submission.capture_resources_committed_for_test()
-        && c08_submission.headless_draft_released_for_test()
+        && graph_transaction.queue_submission_count_for_test() == 1
+        && graph_transaction.transaction_generation_for_test()
+            == graph_transaction.active_generation_for_test()
+        && graph_transaction.capture_lease_count_for_test() == 1
+        && graph_transaction.scopes_resolved_for_test()
+        && graph_transaction.prepared_frame_committed_for_test()
+        && graph_transaction.capture_resources_committed_for_test()
+        && graph_transaction.headless_draft_released_for_test()
         && direct_submission.queue_submission_count_for_test() == 0
         && surface
             .headless_publication_count_for_test()
@@ -32343,7 +32469,7 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
 }
 
 #[derive(Debug)]
-struct C09ProductionFrameForTest {
+struct CompositionProductionFrameForTest {
     output: ImageBuffer,
     stats: Stats,
     working_format: WorkingFormat,
@@ -32353,7 +32479,7 @@ struct C09ProductionFrameForTest {
     publication_count: usize,
 }
 
-fn c09_mask_image_from_alpha_for_test(
+fn composition_mask_image_from_alpha_for_test(
     size: PhysicalSize,
     alpha: &[u8],
     quality: ImageQuality,
@@ -32378,17 +32504,17 @@ fn c09_mask_image_from_alpha_for_test(
     .extend(extend)
 }
 
-fn c09_premultiplied_pixel_for_test(straight: [u8; 4]) -> PremultipliedRgba8 {
+fn reference_premultiplied_pixel_for_test(straight: [u8; 4]) -> PremultipliedRgba8 {
     PremultipliedRgba8::try_new(
-        c08_premul8_for_test(straight[0], straight[3]),
-        c08_premul8_for_test(straight[1], straight[3]),
-        c08_premul8_for_test(straight[2], straight[3]),
+        premultiply_u8_channel_for_test(straight[0], straight[3]),
+        premultiply_u8_channel_for_test(straight[1], straight[3]),
+        premultiply_u8_channel_for_test(straight[2], straight[3]),
         straight[3],
     )
     .unwrap()
 }
 
-fn c09_reference_solid_for_test(
+fn reference_solid_for_test(
     size: PhysicalSize,
     straight: [u8; 4],
 ) -> ReferencePremultipliedRgba8Buffer {
@@ -32398,18 +32524,18 @@ fn c09_reference_solid_for_test(
         .unwrap();
     ReferencePremultipliedRgba8Buffer::from_pixels(
         size,
-        vec![c09_premultiplied_pixel_for_test(straight); pixel_count],
+        vec![reference_premultiplied_pixel_for_test(straight); pixel_count],
     )
     .unwrap()
 }
 
-fn c09_reference_straight_bytes_for_test(buffer: &ReferencePremultipliedRgba8Buffer) -> Vec<u8> {
+fn reference_straight_bytes_for_test(buffer: &ReferencePremultipliedRgba8Buffer) -> Vec<u8> {
     reference::premultiplied_rgba8_reference_to_straight_rgba8_image_buffer(buffer)
         .unwrap()
         .into_rgba()
 }
 
-fn c09_color_for_test(straight: [u8; 4]) -> Color {
+fn color_from_straight_rgba8_for_test(straight: [u8; 4]) -> Color {
     Color::try_rgba(
         f32::from(straight[0]) / 255.0,
         f32::from(straight[1]) / 255.0,
@@ -32419,7 +32545,7 @@ fn c09_color_for_test(straight: [u8; 4]) -> Color {
     .unwrap()
 }
 
-fn c09_pixels_match_for_test(
+fn graph_pixels_match_for_test(
     actual: &[u8],
     expected: &[u8],
     working_format: WorkingFormat,
@@ -32438,30 +32564,30 @@ fn c09_pixels_match_for_test(
                 WorkingFormat::ReducedPrecision => {
                     actual[3].abs_diff(expected[3]) <= tolerance
                         && (0..3).all(|channel| {
-                            c08_premul8_for_test(actual[channel], actual[3])
-                                .abs_diff(c08_premul8_for_test(expected[channel], expected[3]))
-                                <= tolerance
+                            premultiply_u8_channel_for_test(actual[channel], actual[3]).abs_diff(
+                                premultiply_u8_channel_for_test(expected[channel], expected[3]),
+                            ) <= tolerance
                         })
                 }
             })
 }
 
-fn render_c09_headless_for_test(
+fn render_composition_headless_for_test(
     scene: &Scene,
     size: Size,
     parameters: Parameters,
     working_format: WorkingFormat,
-) -> C09ProductionFrameForTest {
+) -> CompositionProductionFrameForTest {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .unwrap_or_else(|error| {
-        panic!("C09 production execution requires a compatible renderer: {error}")
+        panic!("masked-composition production execution requires a compatible renderer: {error}")
     });
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface =
         pollster::block_on(renderer.create_headless(size, 1.0)).unwrap_or_else(|error| {
-            panic!("C09 production execution requires a headless surface: {error}")
+            panic!("masked-composition production execution requires a headless surface: {error}")
         });
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -32472,7 +32598,7 @@ fn render_c09_headless_for_test(
     let direct_submission = direct_scope.observation_for_test();
     let stats = pollster::block_on(renderer.render(&mut surface, scene, parameters))
         .unwrap_or_else(|error| {
-            panic!("the C09 fixture must reach its current production render route: {error}")
+            panic!("the masked-composition fixture must reach its current production render route: {error}")
         });
     let queue_submissions = submission.queue_submission_count_for_test();
     let graph_submissions = graph_submission.queue_submission_count_for_test();
@@ -32484,9 +32610,9 @@ fn render_c09_headless_for_test(
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
     let output = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-        panic!("the C09 fixture publication must be explicitly readable: {error}")
+        panic!("the masked-composition fixture publication must be explicitly readable: {error}")
     });
-    C09ProductionFrameForTest {
+    CompositionProductionFrameForTest {
         output,
         stats,
         working_format,
@@ -32497,8 +32623,8 @@ fn render_c09_headless_for_test(
     }
 }
 
-fn c09_frame_used_one_atomic_graph_submission_for_test(
-    rendered: &C09ProductionFrameForTest,
+fn composition_frame_used_one_atomic_graph_submission_for_test(
+    rendered: &CompositionProductionFrameForTest,
 ) -> bool {
     rendered.queue_submissions == 1
         && rendered.graph_submissions == 1
@@ -32507,58 +32633,72 @@ fn c09_frame_used_one_atomic_graph_submission_for_test(
         && rendered.stats.commands > 0
 }
 
-fn c09_supported_working_formats_for_test() -> Vec<WorkingFormat> {
+fn composition_supported_working_formats_for_test() -> Vec<WorkingFormat> {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("C09 format coverage requires a compatible renderer: {error}"));
-    c08_supported_working_formats_for_test(&mut renderer)
+    .unwrap_or_else(|error| {
+        panic!("masked-composition format coverage requires a compatible renderer: {error}")
+    });
+    graph_supported_working_formats_for_test(&mut renderer)
 }
 
-fn c09_reuse_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>, ResolvedMaskUploadKey) {
+fn composition_reuse_scene_and_oracle_for_test()
+-> (Scene, PhysicalSize, Vec<u8>, ResolvedMaskUploadKey) {
     let size = PhysicalSize::new(4, 4);
     let bounds = Rect::new(0.0, 0.0, 4.0, 4.0);
     let source = [224, 64, 32, 192];
     let destination = [48, 160, 208, 255];
-    let mask = c09_mask_image_from_alpha_for_test(
+    let mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(2, 2),
         &[160, 160, 160, 160],
         ImageQuality::High,
         Extend::Reflect,
     );
     let mask_key = ResolvedMaskUploadDescriptor::try_from_image(mask.clone())
-        .unwrap_or_else(|error| panic!("the C09 reuse mask must produce an upload key: {error}"))
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse mask must produce an upload key: {error}")
+        })
         .cache_key();
     let layer = Layer::new()
         .try_clip(Shape::rect(bounds))
-        .unwrap_or_else(|error| panic!("the C09 reuse clip must be valid: {error}"))
+        .unwrap_or_else(|error| panic!("the masked-composition reuse clip must be valid: {error}"))
         .try_opacity(0.75)
-        .unwrap_or_else(|error| panic!("the C09 reuse opacity must be valid: {error}"))
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse opacity must be valid: {error}")
+        })
         .blend(BlendMode::Multiply)
         .with_resolved_alpha_mask(
-            ResolvedLayerAlphaMask::try_new(mask.clone(), bounds)
-                .unwrap_or_else(|error| panic!("the C09 reuse mask bounds must be valid: {error}")),
+            ResolvedLayerAlphaMask::try_new(mask.clone(), bounds).unwrap_or_else(|error| {
+                panic!("the masked-composition reuse mask bounds must be valid: {error}")
+            }),
         );
     let mut scene = Scene::new();
     scene
-        .fill(bounds, c09_color_for_test(destination))
+        .fill(bounds, color_from_straight_rgba8_for_test(destination))
         .layer(layer, |scene| {
-            scene.fill(bounds, c09_color_for_test(source));
+            scene.fill(bounds, color_from_straight_rgba8_for_test(source));
         });
 
-    let source = c09_reference_solid_for_test(size, source)
+    let source = reference_solid_for_test(size, source)
         .apply_resolved_alpha_mask(bounds, &mask, bounds)
-        .unwrap_or_else(|error| panic!("the C09 reuse mask oracle must resolve: {error}"))
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse mask oracle must resolve: {error}")
+        })
         .apply_opacity(0.75)
-        .unwrap_or_else(|error| panic!("the C09 reuse opacity oracle must resolve: {error}"));
-    let destination = c09_reference_solid_for_test(size, destination);
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse opacity oracle must resolve: {error}")
+        });
+    let destination = reference_solid_for_test(size, destination);
     let expected = source
         .blend_over(&destination, BlendMode::Multiply)
-        .unwrap_or_else(|error| panic!("the C09 reuse blend oracle must resolve: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse blend oracle must resolve: {error}")
+        });
     (
         scene,
         size,
-        c09_reference_straight_bytes_for_test(&expected),
+        reference_straight_bytes_for_test(&expected),
         mask_key,
     )
 }
@@ -32567,13 +32707,13 @@ fn c09_reuse_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>, Resol
 fn resolved_alpha_mask_preserves_partial_alpha_and_nested_order() {
     let size = PhysicalSize::new(4, 2);
     let bounds = Rect::new(0.0, 0.0, 4.0, 2.0);
-    let inner_mask = c09_mask_image_from_alpha_for_test(
+    let inner_mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
         &[128],
         ImageQuality::Low,
         Extend::Pad,
     );
-    let outer_mask = c09_mask_image_from_alpha_for_test(
+    let outer_mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
         &[160],
         ImageQuality::Low,
@@ -32585,48 +32725,53 @@ fn resolved_alpha_mask_preserves_partial_alpha_and_nested_order() {
             ResolvedLayerAlphaMask::try_new(outer_mask.clone(), bounds).unwrap(),
         ),
         |scene| {
-            scene.fill(bounds, c09_color_for_test([32, 64, 224, 255]));
+            scene.fill(
+                bounds,
+                color_from_straight_rgba8_for_test([32, 64, 224, 255]),
+            );
             scene.layer(
                 Layer::new().with_resolved_alpha_mask(
                     ResolvedLayerAlphaMask::try_new(inner_mask.clone(), bounds).unwrap(),
                 ),
                 |scene| {
-                    scene.fill(bounds, c09_color_for_test([240, 48, 16, 255]));
+                    scene.fill(
+                        bounds,
+                        color_from_straight_rgba8_for_test([240, 48, 16, 255]),
+                    );
                 },
             );
         },
     );
 
-    let inner = c09_reference_solid_for_test(size, [240, 48, 16, 255])
+    let inner = reference_solid_for_test(size, [240, 48, 16, 255])
         .apply_resolved_alpha_mask(bounds, &inner_mask, bounds)
         .unwrap();
-    let parent = c09_reference_solid_for_test(size, [32, 64, 224, 255]);
+    let parent = reference_solid_for_test(size, [32, 64, 224, 255]);
     let expected = inner
         .source_over(&parent)
         .unwrap()
         .apply_resolved_alpha_mask(bounds, &outer_mask, bounds)
         .unwrap();
-    let expected = c09_reference_straight_bytes_for_test(&expected);
+    let expected = reference_straight_bytes_for_test(&expected);
 
-    let preserves_nested_order =
-        c09_supported_working_formats_for_test()
-            .into_iter()
-            .all(|working_format| {
-                let rendered = render_c09_headless_for_test(
-                    &scene,
-                    Size::new(4.0, 2.0),
-                    Parameters::default(),
-                    working_format,
-                );
-                rendered.output.size() == size
-                    && c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
-                    && c09_pixels_match_for_test(
-                        rendered.output.rgba(),
-                        &expected,
-                        rendered.working_format,
-                        2,
-                    )
-            });
+    let preserves_nested_order = composition_supported_working_formats_for_test()
+        .into_iter()
+        .all(|working_format| {
+            let rendered = render_composition_headless_for_test(
+                &scene,
+                Size::new(4.0, 2.0),
+                Parameters::default(),
+                working_format,
+            );
+            rendered.output.size() == size
+                && composition_frame_used_one_atomic_graph_submission_for_test(&rendered)
+                && graph_pixels_match_for_test(
+                    rendered.output.rgba(),
+                    &expected,
+                    rendered.working_format,
+                    2,
+                )
+        });
 
     assert!(
         preserves_nested_order,
@@ -32634,7 +32779,7 @@ fn resolved_alpha_mask_preserves_partial_alpha_and_nested_order() {
     );
 }
 
-fn c09_mask_quality_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
+fn composition_mask_quality_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
     let qualities = [ImageQuality::Low, ImageQuality::Medium, ImageQuality::High];
     let extends = [Extend::Pad, Extend::Repeat, Extend::Reflect];
     let tile_size = PhysicalSize::new(12, 8);
@@ -32643,7 +32788,7 @@ fn c09_mask_quality_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>
     let mut case_index = 0_u32;
     for quality in qualities {
         for extend in extends {
-            let mask = c09_mask_image_from_alpha_for_test(
+            let mask = composition_mask_image_from_alpha_for_test(
                 PhysicalSize::new(2, 2),
                 &[16, 96, 160, 240],
                 quality,
@@ -32668,13 +32813,16 @@ fn c09_mask_quality_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>
                         ResolvedLayerAlphaMask::try_new(mask.clone(), mask_bounds).unwrap(),
                     ),
                 |scene| {
-                    scene.fill(source_bounds, c09_color_for_test([255, 255, 255, 255]));
+                    scene.fill(
+                        source_bounds,
+                        color_from_straight_rgba8_for_test([255, 255, 255, 255]),
+                    );
                 },
             );
-            let reference = c09_reference_solid_for_test(tile_size, [255, 255, 255, 255])
+            let reference = reference_solid_for_test(tile_size, [255, 255, 255, 255])
                 .apply_resolved_alpha_mask(source_bounds, &mask, mask_bounds)
                 .unwrap();
-            expected.extend(c09_reference_straight_bytes_for_test(&reference));
+            expected.extend(reference_straight_bytes_for_test(&reference));
             case_index += 1;
         }
     }
@@ -32687,26 +32835,25 @@ fn c09_mask_quality_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>
 
 #[test]
 fn resolved_alpha_mask_low_medium_high_and_extend_modes_match_boundary_oracle() {
-    let (scene, size, expected) = c09_mask_quality_scene_and_oracle_for_test();
-    let matches_boundary_oracle =
-        c09_supported_working_formats_for_test()
-            .into_iter()
-            .all(|working_format| {
-                let rendered = render_c09_headless_for_test(
-                    &scene,
-                    Size::new(f64::from(size.width()), f64::from(size.height())),
-                    Parameters::default(),
-                    working_format,
-                );
-                rendered.output.size() == size
-                    && c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
-                    && c09_pixels_match_for_test(
-                        rendered.output.rgba(),
-                        &expected,
-                        rendered.working_format,
-                        2,
-                    )
-            });
+    let (scene, size, expected) = composition_mask_quality_scene_and_oracle_for_test();
+    let matches_boundary_oracle = composition_supported_working_formats_for_test()
+        .into_iter()
+        .all(|working_format| {
+            let rendered = render_composition_headless_for_test(
+                &scene,
+                Size::new(f64::from(size.width()), f64::from(size.height())),
+                Parameters::default(),
+                working_format,
+            );
+            rendered.output.size() == size
+                && composition_frame_used_one_atomic_graph_submission_for_test(&rendered)
+                && graph_pixels_match_for_test(
+                    rendered.output.rgba(),
+                    &expected,
+                    rendered.working_format,
+                    2,
+                )
+        });
 
     assert!(
         matches_boundary_oracle,
@@ -32714,7 +32861,7 @@ fn resolved_alpha_mask_low_medium_high_and_extend_modes_match_boundary_oracle() 
     );
 }
 
-fn c09_blend_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
+fn composition_blend_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
     let modes = [
         BlendMode::Normal,
         BlendMode::Multiply,
@@ -32740,9 +32887,9 @@ fn c09_blend_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
             let y = f64::from(u32::try_from(base_index).unwrap() * tile_height);
             let rect = Rect::new(x, y, f64::from(tile_width), f64::from(tile_height));
             if destination[3] != 0 {
-                scene.fill(rect, c09_color_for_test(destination));
+                scene.fill(rect, color_from_straight_rgba8_for_test(destination));
             }
-            let mask = c09_mask_image_from_alpha_for_test(
+            let mask = composition_mask_image_from_alpha_for_test(
                 PhysicalSize::new(1, 1),
                 &[255],
                 ImageQuality::Low,
@@ -32753,12 +32900,12 @@ fn c09_blend_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
                     .blend(mode)
                     .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
                 |scene| {
-                    scene.fill(rect, c09_color_for_test(source));
+                    scene.fill(rect, color_from_straight_rgba8_for_test(source));
                 },
             );
-            let expected_pixel = c09_premultiplied_pixel_for_test(source)
-                .blend_over(c09_premultiplied_pixel_for_test(destination), mode);
-            let expected_pixel = c09_reference_straight_bytes_for_test(
+            let expected_pixel = reference_premultiplied_pixel_for_test(source)
+                .blend_over(reference_premultiplied_pixel_for_test(destination), mode);
+            let expected_pixel = reference_straight_bytes_for_test(
                 &ReferencePremultipliedRgba8Buffer::from_pixels(
                     PhysicalSize::new(1, 1),
                     vec![expected_pixel],
@@ -32780,19 +32927,19 @@ fn c09_blend_scene_and_oracle_for_test() -> (Scene, PhysicalSize, Vec<u8>) {
 
 #[test]
 fn all_supported_blends_match_oracle_over_transparent_and_opaque_bases() {
-    let (scene, size, expected) = c09_blend_scene_and_oracle_for_test();
-    let blends_match = c09_supported_working_formats_for_test()
+    let (scene, size, expected) = composition_blend_scene_and_oracle_for_test();
+    let blends_match = composition_supported_working_formats_for_test()
         .into_iter()
         .all(|working_format| {
-            let rendered = render_c09_headless_for_test(
+            let rendered = render_composition_headless_for_test(
                 &scene,
                 Size::new(f64::from(size.width()), f64::from(size.height())),
                 Parameters::default(),
                 working_format,
             );
             rendered.output.size() == size
-                && c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
-                && c09_pixels_match_for_test(
+                && composition_frame_used_one_atomic_graph_submission_for_test(&rendered)
+                && graph_pixels_match_for_test(
                     rendered.output.rgba(),
                     &expected,
                     rendered.working_format,
@@ -32809,13 +32956,13 @@ fn plus_blend_clamps_high_precision_results() {
     let destination = [128, 255, 192, 204];
     let rect = Rect::new(0.0, 0.0, 4.0, 4.0);
     let mut scene = Scene::new();
-    scene.fill(rect, c09_color_for_test(destination));
+    scene.fill(rect, color_from_straight_rgba8_for_test(destination));
     scene.layer(
         Layer::new()
             .blend(BlendMode::Plus)
             .with_resolved_alpha_mask(
                 ResolvedLayerAlphaMask::try_new(
-                    c09_mask_image_from_alpha_for_test(
+                    composition_mask_image_from_alpha_for_test(
                         PhysicalSize::new(1, 1),
                         &[255],
                         ImageQuality::Low,
@@ -32826,21 +32973,21 @@ fn plus_blend_clamps_high_precision_results() {
                 .unwrap(),
             ),
         |scene| {
-            scene.fill(rect, c09_color_for_test(source));
+            scene.fill(rect, color_from_straight_rgba8_for_test(source));
         },
     );
-    let expected_pixel = c09_premultiplied_pixel_for_test(source).blend_over(
-        c09_premultiplied_pixel_for_test(destination),
+    let expected_pixel = reference_premultiplied_pixel_for_test(source).blend_over(
+        reference_premultiplied_pixel_for_test(destination),
         BlendMode::Plus,
     );
-    let expected = c09_reference_straight_bytes_for_test(
+    let expected = reference_straight_bytes_for_test(
         &ReferencePremultipliedRgba8Buffer::from_pixels(
             PhysicalSize::new(4, 4),
             vec![expected_pixel; 16],
         )
         .unwrap(),
     );
-    let rendered = render_c09_headless_for_test(
+    let rendered = render_composition_headless_for_test(
         &scene,
         Size::new(4.0, 4.0),
         Parameters::default(),
@@ -32848,8 +32995,8 @@ fn plus_blend_clamps_high_precision_results() {
     );
 
     assert!(
-        c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
-            && c09_pixels_match_for_test(
+        composition_frame_used_one_atomic_graph_submission_for_test(&rendered)
+            && graph_pixels_match_for_test(
                 rendered.output.rgba(),
                 &expected,
                 WorkingFormat::HighPrecision,
@@ -32864,7 +33011,7 @@ fn outer_clip_precedes_mask_and_opacity_on_unfiltered_sources() {
     let surface_size = PhysicalSize::new(4, 2);
     let source_bounds = Rect::new(0.0, 0.0, 4.0, 2.0);
     let clip_bounds = Rect::new(1.0, 0.0, 2.0, 2.0);
-    let mask = c09_mask_image_from_alpha_for_test(
+    let mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
         &[128],
         ImageQuality::Low,
@@ -32881,22 +33028,25 @@ fn outer_clip_precedes_mask_and_opacity_on_unfiltered_sources() {
                 ResolvedLayerAlphaMask::try_new(mask.clone(), source_bounds).unwrap(),
             ),
         |scene| {
-            scene.fill(source_bounds, c09_color_for_test([224, 48, 16, 255]));
+            scene.fill(
+                source_bounds,
+                color_from_straight_rgba8_for_test([224, 48, 16, 255]),
+            );
         },
     );
-    let masked = c09_reference_solid_for_test(surface_size, [224, 48, 16, 255])
+    let masked = reference_solid_for_test(surface_size, [224, 48, 16, 255])
         .apply_resolved_alpha_mask(source_bounds, &mask, source_bounds)
         .unwrap()
         .apply_opacity(0.5)
         .unwrap();
-    let mut expected = c09_reference_straight_bytes_for_test(&masked);
+    let mut expected = reference_straight_bytes_for_test(&masked);
     for y in 0..surface_size.height() {
         for x in [0_u32, 3] {
             let offset = usize::try_from((y * surface_size.width() + x) * 4).unwrap();
             expected[offset..offset + 4].fill(0);
         }
     }
-    let rendered = render_c09_headless_for_test(
+    let rendered = render_composition_headless_for_test(
         &scene,
         Size::new(4.0, 2.0),
         Parameters::default(),
@@ -32904,9 +33054,9 @@ fn outer_clip_precedes_mask_and_opacity_on_unfiltered_sources() {
     );
 
     assert!(
-        c09_frame_used_one_atomic_graph_submission_for_test(&rendered)
+        composition_frame_used_one_atomic_graph_submission_for_test(&rendered)
             && rendered.output.size() == surface_size
-            && c09_pixels_match_for_test(
+            && graph_pixels_match_for_test(
                 rendered.output.rgba(),
                 &expected,
                 WorkingFormat::HighPrecision,
@@ -32923,25 +33073,25 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
     let destination = [48, 160, 208, 255];
     let mask_alpha = 160_u8;
     let rect = Rect::new(0.0, 0.0, 4.0, 4.0);
-    let mask = c09_mask_image_from_alpha_for_test(
+    let mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
         &[mask_alpha],
         ImageQuality::Low,
         Extend::Pad,
     );
-    let scene = c09_presented_masked_blended_scene_for_test(rect);
-    let expected_source = c09_reference_solid_for_test(PhysicalSize::new(1, 1), source)
+    let scene = composition_presented_masked_blended_scene_for_test(rect);
+    let expected_source = reference_solid_for_test(PhysicalSize::new(1, 1), source)
         .apply_resolved_alpha_mask(rect, &mask, rect)
         .unwrap();
     let expected = expected_source
         .blend_over(
-            &c09_reference_solid_for_test(PhysicalSize::new(1, 1), destination),
+            &reference_solid_for_test(PhysicalSize::new(1, 1), destination),
             BlendMode::Multiply,
         )
         .unwrap();
-    let expected = c09_reference_straight_bytes_for_test(&expected);
+    let expected = reference_straight_bytes_for_test(&expected);
     let parameters = Parameters {
-        base_color: c09_color_for_test(destination),
+        base_color: color_from_straight_rgba8_for_test(destination),
         debug: false,
     };
 
@@ -32953,7 +33103,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
         .unwrap_or_else(|error| {
             panic!("presented masked-composition coverage requires a compatible renderer: {error}")
         });
-        let working_format = default_c08_working_format_for_test(&mut renderer);
+        let working_format = default_graph_working_format_for_test(&mut renderer);
         renderer.select_exact_graph_working_format_for_test(working_format);
         let mut surface = display_free_presented_surface_for_test(
             &mut renderer,
@@ -33013,7 +33163,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
             && renderer.stats() == stats.unwrap()
             && surface.last_parameters == Some(parameters)
             && pixel.is_some_and(|pixel| {
-                c09_pixels_match_for_test(&pixel, &expected, working_format, 3)
+                graph_pixels_match_for_test(&pixel, &expected, working_format, 3)
             })
     });
 
@@ -33027,7 +33177,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
 #[test]
 fn presented_masked_blended_present_scope_failure_attempts_present_without_publication() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
-    let scene = c09_presented_masked_blended_scene_for_test(rect);
+    let scene = composition_presented_masked_blended_scene_for_test(rect);
 
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -33039,11 +33189,11 @@ fn presented_masked_blended_present_scope_failure_attempts_present_without_publi
             "presented masked-composition failure coverage requires a compatible renderer: {error}"
         )
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let parameters = Parameters {
-        base_color: c09_color_for_test([48, 160, 208, 255]),
+        base_color: color_from_straight_rgba8_for_test([48, 160, 208, 255]),
         debug: true,
     };
     let stats_before = renderer.stats();
@@ -33128,7 +33278,7 @@ fn presented_masked_blended_present_scope_failure_attempts_present_without_publi
 #[test]
 fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
-    let scene = c09_presented_masked_blended_scene_for_test(rect);
+    let scene = composition_presented_masked_blended_scene_for_test(rect);
 
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -33138,11 +33288,11 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     .unwrap_or_else(|error| {
         panic!("presented terminal-signal coverage requires a compatible renderer: {error}")
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let parameters = Parameters {
-        base_color: c09_color_for_test([48, 160, 208, 255]),
+        base_color: color_from_straight_rgba8_for_test([48, 160, 208, 255]),
         debug: true,
     };
     let lifecycle_before = presented_lifecycle_for_test(&surface);
@@ -33229,8 +33379,8 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
 }
 
 #[cfg(feature = "render-window")]
-fn c09_presented_masked_blended_scene_for_test(rect: Rect) -> Scene {
-    let mask = c09_mask_image_from_alpha_for_test(
+fn composition_presented_masked_blended_scene_for_test(rect: Rect) -> Scene {
+    let mask = composition_mask_image_from_alpha_for_test(
         PhysicalSize::new(1, 1),
         &[160],
         ImageQuality::Low,
@@ -33242,13 +33392,13 @@ fn c09_presented_masked_blended_scene_for_test(rect: Rect) -> Scene {
             .blend(BlendMode::Multiply)
             .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(mask, rect).unwrap()),
         |scene| {
-            scene.fill(rect, c09_color_for_test([224, 64, 32, 192]));
+            scene.fill(rect, color_from_straight_rgba8_for_test([224, 64, 32, 192]));
         },
     );
     scene
 }
 
-fn c13_future_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
+fn future_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
     let filters = FilterList::try_ops(vec![FilterOp::brightness(
         FilterAmount::try_new(1.25).unwrap(),
     )])
@@ -33295,7 +33445,7 @@ fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication
     let mut baseline = Scene::new();
     baseline.fill(
         Rect::new(0.0, 0.0, 8.0, 6.0),
-        c09_color_for_test([32, 64, 96, 255]),
+        color_from_straight_rgba8_for_test([32, 64, 96, 255]),
     );
     pollster::block_on(renderer.render(&mut surface, &baseline, Parameters::default()))
         .unwrap_or_else(|error| {
@@ -33316,8 +33466,7 @@ fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication
         .unwrap()
         .internal_resource_manager_observation_for_test();
 
-    let future =
-        c13_future_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
+    let future = future_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -33393,8 +33542,7 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         "the real renderer must accept the scoped no-effect-format capability facts"
     );
 
-    let future =
-        c13_future_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
+    let future = future_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -33461,8 +33609,8 @@ fn capabilities_report_supported_gpu_operations_and_broad_mask_diagnostic() {
     let filters = capabilities.filters();
     let masks = capabilities.masks_clips();
     let offscreen = capabilities.offscreen_pipeline();
-    let supported = c09_supported_capability_rows(filters, masks, offscreen);
-    let rejected = c09_rejected_capability_rows(filters, masks, offscreen);
+    let supported = composition_supported_capability_rows(filters, masks, offscreen);
+    let rejected = composition_rejected_capability_rows(filters, masks, offscreen);
     let supported_are_exact = supported.into_iter().all(|(query, family, operation)| {
         query
             && capabilities
@@ -33494,7 +33642,7 @@ fn capabilities_report_supported_gpu_operations_and_broad_mask_diagnostic() {
 
 type CapabilityRowForTest = (bool, PrimitiveFamily, PrimitiveOperation);
 
-fn c09_supported_capability_rows(
+fn composition_supported_capability_rows(
     filters: FilterCapabilities,
     masks: MaskClipCapabilities,
     offscreen: OffscreenPipelineCapabilities,
@@ -33568,7 +33716,7 @@ fn c09_supported_capability_rows(
     ]
 }
 
-fn c09_rejected_capability_rows(
+fn composition_rejected_capability_rows(
     _filters: FilterCapabilities,
     masks: MaskClipCapabilities,
     offscreen: OffscreenPipelineCapabilities,
@@ -33624,7 +33772,7 @@ fn c09_rejected_capability_rows(
 
 #[test]
 fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback() {
-    let (scene, size, expected, mask_key) = c09_reuse_scene_and_oracle_for_test();
+    let (scene, size, expected, mask_key) = composition_reuse_scene_and_oracle_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -33633,7 +33781,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     .unwrap_or_else(|error| {
         panic!("repeated composition reuse coverage requires a renderer: {error}")
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
@@ -33674,7 +33822,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
                 .unwrap_or_else(|error| {
                     panic!("repeated composition frames must succeed: {error}")
                 });
-        stats.push(C08PublicStatsForTest::from(frame));
+        stats.push(GraphPublicStatsForTest::from(frame));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
             .unwrap_or_else(|| panic!("repeated composition frames must retain the ready device"));
@@ -33684,7 +33832,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
     let retention_history = graph_submission.resource_retention_history_for_test();
     let stable_resource_set =
-        c09_resource_observations_are_stable(&resource_observations, &warmed_resources);
+        composition_resource_observations_are_stable(&resource_observations, &warmed_resources);
     let exact_mask_key_is_retained = warmed_resources.resolved_mask_upload_keys_for_test()
         == [mask_key]
         && mask_key.physical_size() == PhysicalSize::new(2, 2)
@@ -33725,12 +33873,12 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
             && stable_stats
             && one_submission_without_readback
             && warmed_output.rgba() == actual.rgba()
-            && c09_pixels_match_for_test(actual.rgba(), &expected, working_format, 3),
+            && graph_pixels_match_for_test(actual.rgba(), &expected, working_format, 3),
         "composition resources grow or enter readback"
     );
 }
 
-fn c09_resource_observations_are_stable(
+fn composition_resource_observations_are_stable(
     observations: &[super::resource::ResourceManagerObservationForTest],
     warmed: &super::resource::ResourceManagerObservationForTest,
 ) -> bool {
@@ -33752,7 +33900,7 @@ fn c09_resource_observations_are_stable(
 
 #[test]
 fn budget_zero_releases_composition_resources_without_changing_pixels() {
-    let (scene, size, expected, _) = c09_reuse_scene_and_oracle_for_test();
+    let (scene, size, expected, _) = composition_reuse_scene_and_oracle_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -33761,7 +33909,7 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
     .unwrap_or_else(|error| {
         panic!("zero-retention composition coverage requires a renderer: {error}")
     });
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
@@ -33827,9 +33975,9 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
             && one_submission_without_readback
             && cache_before == cache_after
             && cache_after.has_render_pipelines()
-            && C08PublicStatsForTest::from(first) == C08PublicStatsForTest::from(second)
+            && GraphPublicStatsForTest::from(first) == GraphPublicStatsForTest::from(second)
             && first_output.rgba() == second_output.rgba()
-            && c09_pixels_match_for_test(second_output.rgba(), &expected, working_format, 3),
+            && graph_pixels_match_for_test(second_output.rgba(), &expected, working_format, 3),
         "zero retention changed composition pixels or kept idle resources"
     );
 }
@@ -33842,7 +33990,7 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .unwrap_or_else(|error| panic!("renderer dispatch coverage requires a renderer: {error}"));
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
 
     let mut direct_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
@@ -33855,26 +34003,29 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
         Parameters::default(),
     ));
 
-    let mut c08_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .unwrap_or_else(|error| {
-            panic!("forced-graph dispatch coverage requires a surface: {error}")
-        });
-    let c08 = pollster::block_on(renderer.render_forced_c08_graph_for_test(
-        &mut c08_surface,
+    let mut forced_graph_surface = pollster::block_on(
+        renderer.create_headless(Size::new(4.0, 4.0), 1.0),
+    )
+    .unwrap_or_else(|error| panic!("forced-graph dispatch coverage requires a surface: {error}"));
+    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut forced_graph_surface,
         &direct_scene,
         Parameters::default(),
         working_format,
     ));
 
-    let (c09_scene, _, _, _) = c09_reuse_scene_and_oracle_for_test();
-    let mut c09_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .unwrap_or_else(|error| {
-            panic!("masked-composition dispatch coverage requires a surface: {error}")
-        });
-    let c09 =
-        pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
+    let (composition_scene, _, _, _) = composition_reuse_scene_and_oracle_for_test();
+    let mut composition_surface =
+        pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap_or_else(
+            |error| panic!("masked-composition dispatch coverage requires a surface: {error}"),
+        );
+    let composition = pollster::block_on(renderer.render(
+        &mut composition_surface,
+        &composition_scene,
+        Parameters::default(),
+    ));
 
-    let (blur_scene, backdrop_scene) = c09_future_dispatch_scenes_for_test();
+    let (blur_scene, backdrop_scene) = composition_future_dispatch_scenes_for_test();
     let mut blur_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .unwrap_or_else(|error| panic!("future blur coverage requires a surface: {error}"));
     let mut backdrop_surface =
@@ -33925,8 +34076,8 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
 
     assert!(
         direct.is_ok()
-            && c08.is_ok()
-            && c09.is_ok()
+            && graph.is_ok()
+            && composition.is_ok()
             && graph_submission.queue_submission_count_for_test() == 2
             && dispatch.boundary_invocations == 3
             && dispatch.direct_vello_routes == 1
@@ -33944,7 +34095,7 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
     );
 }
 
-fn c09_future_dispatch_scenes_for_test() -> (Scene, Scene) {
+fn composition_future_dispatch_scenes_for_test() -> (Scene, Scene) {
     let blur = Filter::try_blur(1.0)
         .unwrap_or_else(|error| panic!("the future blur fixture must be valid: {error}"));
     let blur_layer = Layer::new()
@@ -33954,7 +34105,7 @@ fn c09_future_dispatch_scenes_for_test() -> (Scene, Scene) {
     blur_scene.layer(blur_layer, |scene| {
         scene.fill(
             Rect::new(0.0, 0.0, 4.0, 4.0),
-            c09_color_for_test([255, 255, 255, 255]),
+            color_from_straight_rgba8_for_test([255, 255, 255, 255]),
         );
     });
     let filters = FilterList::try_ops(vec![FilterOp::brightness(
@@ -33977,7 +34128,7 @@ fn c09_future_dispatch_scenes_for_test() -> (Scene, Scene) {
         .layer(layer, |scene| {
             scene.fill(
                 Rect::new(1.0, 1.0, 2.0, 2.0),
-                c09_color_for_test([255, 255, 255, 255]),
+                color_from_straight_rgba8_for_test([255, 255, 255, 255]),
             );
         });
     (blur_scene, backdrop_scene)
@@ -33991,12 +34142,12 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .unwrap_or_else(|error| panic!("repeated graph reuse coverage requires a renderer: {error}"));
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
         .unwrap_or_else(|error| {
             panic!("repeated graph reuse coverage requires a headless surface: {error}")
         });
-    let scene = repeated_c08_scene_for_test();
+    let scene = repeated_graph_scene_for_test();
 
     for _ in 0..2 {
         pollster::block_on(renderer.render_forced_c08_graph_for_test(
@@ -34035,7 +34186,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             working_format,
         ))
         .unwrap_or_else(|error| panic!("repeated graph frames must succeed: {error}"));
-        public_stats.push(C08PublicStatsForTest::from(result.stats));
+        public_stats.push(GraphPublicStatsForTest::from(result.stats));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
             .unwrap_or_else(|| panic!("repeated graph frames must retain the ready device"));
@@ -34044,12 +34195,12 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
     }
 
     let no_post_warmup_growth =
-        c08_resource_observations_are_stable(&resource_observations, &warmed_resources);
+        graph_resource_observations_are_stable(&resource_observations, &warmed_resources);
     let reusable_vello_resources_are_retained =
         warmed_resources.committed_transient_buffer_count_for_test() > 0
             && warmed_resources.committed_transient_image_count_for_test() > 0;
     let reusable_graph_frame_resources_are_retained =
-        c08_graph_frame_resources_are_retained(&warmed_resources);
+        graph_frame_resources_are_retained(&warmed_resources);
     let stable_cache_and_pipelines = warmed_cache.has_render_pipelines()
         && cache_observations
             .iter()
@@ -34083,7 +34234,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
     );
 }
 
-fn repeated_c08_scene_for_test() -> Scene {
+fn repeated_graph_scene_for_test() -> Scene {
     let mut scene = Scene::new();
     scene
         .fill(
@@ -34098,7 +34249,7 @@ fn repeated_c08_scene_for_test() -> Scene {
     scene
 }
 
-fn c08_graph_frame_resources_are_retained(
+fn graph_frame_resources_are_retained(
     resources: &super::resource::ResourceManagerObservationForTest,
 ) -> bool {
     resources.entry_count
@@ -34108,7 +34259,7 @@ fn c08_graph_frame_resources_are_retained(
             .saturating_add(resources.retained_atlas_count_for_test())
 }
 
-fn c08_resource_observations_are_stable(
+fn graph_resource_observations_are_stable(
     observations: &[super::resource::ResourceManagerObservationForTest],
     warmed: &super::resource::ResourceManagerObservationForTest,
 ) -> bool {
@@ -34133,7 +34284,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("zero-retention graph coverage requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
         .expect("zero-retention graph coverage requires a headless surface");
     let mut scene = Scene::new();
@@ -34195,8 +34346,8 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
             && no_hidden_submission_or_readback
             && cache_before == cache_after
             && cache_after.has_render_pipelines()
-            && C08PublicStatsForTest::from(first.stats)
-                == C08PublicStatsForTest::from(second.stats)
+            && GraphPublicStatsForTest::from(first.stats)
+                == GraphPublicStatsForTest::from(second.stats)
             && actual.rgba() == expected.rgba(),
         "zero retention changed graph pixels or retained idle resources"
     );
@@ -34210,7 +34361,7 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("renderer public-dispatch coverage requires a selected device");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let working_format = default_graph_working_format_for_test(&mut renderer);
 
     let mut direct_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .expect("direct public-dispatch coverage requires a headless surface");
@@ -34266,58 +34417,58 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08ParityFixtureForTest {
+enum GraphParityFixtureForTest {
     SolidShape,
     StableAhemGlyph,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08ParityConfigurationForTest {
+struct GraphParityConfigurationForTest {
     antialiasing: Antialiasing,
     scale: f64,
 }
 
-const C08_PARITY_CONFIGURATIONS_FOR_TEST: [C08ParityConfigurationForTest; 9] = [
-    C08ParityConfigurationForTest {
+const GRAPH_PARITY_CONFIGURATIONS_FOR_TEST: [GraphParityConfigurationForTest; 9] = [
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Area,
         scale: 1.0,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Area,
         scale: 1.25,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Area,
         scale: 2.0,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa8,
         scale: 1.0,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa8,
         scale: 1.25,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa8,
         scale: 2.0,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa16,
         scale: 1.0,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa16,
         scale: 1.25,
     },
-    C08ParityConfigurationForTest {
+    GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa16,
         scale: 2.0,
     },
 ];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08ParityScenarioForTest {
+enum GraphParityScenarioForTest {
     Matrix,
     CaptureTransform,
     ParentTransform,
@@ -34325,16 +34476,16 @@ enum C08ParityScenarioForTest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08ParityCaseForTest {
-    fixture: C08ParityFixtureForTest,
-    scenario: C08ParityScenarioForTest,
+struct GraphParityCaseForTest {
+    fixture: GraphParityFixtureForTest,
+    scenario: GraphParityScenarioForTest,
     antialiasing: Antialiasing,
     scale: f64,
     working_format: WorkingFormat,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08ParityFailureStageForTest {
+enum GraphParityFailureStageForTest {
     Setup,
     RequestedAntialiasing,
     OutputDimensions,
@@ -34350,16 +34501,16 @@ enum C08ParityFailureStageForTest {
 }
 
 #[derive(Debug)]
-struct C08ParityFailureForTest {
-    case: C08ParityCaseForTest,
-    stage: C08ParityFailureStageForTest,
+struct GraphParityFailureForTest {
+    case: GraphParityCaseForTest,
+    stage: GraphParityFailureStageForTest,
     detail: String,
 }
 
-impl C08ParityFailureForTest {
+impl GraphParityFailureForTest {
     fn new(
-        case: C08ParityCaseForTest,
-        stage: C08ParityFailureStageForTest,
+        case: GraphParityCaseForTest,
+        stage: GraphParityFailureStageForTest,
         detail: impl Into<String>,
     ) -> Self {
         Self {
@@ -34370,7 +34521,7 @@ impl C08ParityFailureForTest {
     }
 }
 
-impl std::fmt::Display for C08ParityFailureForTest {
+impl std::fmt::Display for GraphParityFailureForTest {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             formatter,
@@ -34381,30 +34532,30 @@ impl std::fmt::Display for C08ParityFailureForTest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08PixelMetricForTest {
+enum GraphPixelMetricForTest {
     HighPrecisionStraightRgba8,
     ReducedPrecisionAlphaAndPremul8,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08ParityToleranceForTest {
-    metric: C08PixelMetricForTest,
+struct GraphParityToleranceForTest {
+    metric: GraphPixelMetricForTest,
     interior_levels: u8,
     boundary_levels: u8,
     centroid_device_pixels: f64,
 }
 
-impl C08ParityToleranceForTest {
+impl GraphParityToleranceForTest {
     const fn for_working_format(working_format: WorkingFormat) -> Self {
         match working_format {
             WorkingFormat::HighPrecision => Self {
-                metric: C08PixelMetricForTest::HighPrecisionStraightRgba8,
+                metric: GraphPixelMetricForTest::HighPrecisionStraightRgba8,
                 interior_levels: 2,
                 boundary_levels: 4,
                 centroid_device_pixels: 0.25,
             },
             WorkingFormat::ReducedPrecision => Self {
-                metric: C08PixelMetricForTest::ReducedPrecisionAlphaAndPremul8,
+                metric: GraphPixelMetricForTest::ReducedPrecisionAlphaAndPremul8,
                 interior_levels: 2,
                 boundary_levels: 4,
                 centroid_device_pixels: 0.35,
@@ -34414,12 +34565,12 @@ impl C08ParityToleranceForTest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08CaptureMappingForTest {
+struct GraphCaptureMappingForTest {
     capture_transform: Transform,
     parent_to_surface: Transform,
 }
 
-impl C08CaptureMappingForTest {
+impl GraphCaptureMappingForTest {
     const fn identity() -> Self {
         Self {
             capture_transform: Transform::IDENTITY,
@@ -34430,7 +34581,7 @@ impl C08CaptureMappingForTest {
     fn combined(self) -> Transform {
         self.capture_transform
             .then(self.parent_to_surface)
-            .expect("source-readable C08 fixture transforms must compose")
+            .expect("source-readable graph fixture transforms must compose")
     }
 
     const fn as_frame_mapping(self) -> super::frame::ForcedC08CaptureMappingForTest {
@@ -34442,7 +34593,7 @@ impl C08CaptureMappingForTest {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08ExpectedCaptureGridForTest {
+struct GraphExpectedCaptureGridForTest {
     device_origin: (i32, i32),
     texel_origin: Point,
     extent: PhysicalSize,
@@ -34450,7 +34601,7 @@ struct C08ExpectedCaptureGridForTest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08PublicStatsForTest {
+struct GraphPublicStatsForTest {
     commands: usize,
     fills: usize,
     strokes: usize,
@@ -34463,7 +34614,7 @@ struct C08PublicStatsForTest {
     uploaded_bytes: u64,
 }
 
-impl From<Stats> for C08PublicStatsForTest {
+impl From<Stats> for GraphPublicStatsForTest {
     fn from(stats: Stats) -> Self {
         Self {
             commands: stats.commands,
@@ -34481,26 +34632,26 @@ impl From<Stats> for C08PublicStatsForTest {
 }
 
 #[derive(Debug)]
-struct C08DirectParityOutputForTest {
+struct GraphDirectParityOutputForTest {
     image: ImageBuffer,
-    stats: C08PublicStatsForTest,
+    stats: GraphPublicStatsForTest,
     planned_antialiasing: Antialiasing,
 }
 
 #[derive(Debug)]
-struct C08GraphParityOutputForTest {
+struct GraphParityOutputForTest {
     image: ImageBuffer,
     result: super::renderer::C08ForcedGraphRenderResultForTest,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08PixelComparisonProfileForTest {
+enum GraphPixelComparisonProfileForTest {
     FixtureInteriorAndBoundary,
     PlacementBoundary,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08DeviceRegionForTest {
+struct GraphDeviceRegionForTest {
     min_x: u32,
     min_y: u32,
     max_x_exclusive: u32,
@@ -34508,95 +34659,95 @@ struct C08DeviceRegionForTest {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08PixelCoordinateForTest {
+struct GraphPixelCoordinateForTest {
     x: u32,
     y: u32,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08PixelMismatchForTest {
-    coordinate: C08PixelCoordinateForTest,
+struct GraphPixelMismatchForTest {
+    coordinate: GraphPixelCoordinateForTest,
     direct: [u8; 4],
     graph: [u8; 4],
     metric_error: [u8; 4],
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08PixelMismatchSummaryForTest {
+struct GraphPixelMismatchSummaryForTest {
     mismatch_count: usize,
     maximum_metric_error: [u8; 4],
-    first: Option<C08PixelMismatchForTest>,
+    first: Option<GraphPixelMismatchForTest>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08TileTranslationMismatchForTest {
-    surface_coordinate: C08PixelCoordinateForTest,
-    capture_coordinate: C08PixelCoordinateForTest,
+struct GraphTileTranslationMismatchForTest {
+    surface_coordinate: GraphPixelCoordinateForTest,
+    capture_coordinate: GraphPixelCoordinateForTest,
     surface_pixel: [u8; 4],
     capture_pixel: [u8; 4],
     metric_error: [u8; 4],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08AlphaWeightedCentroidForTest {
+struct GraphAlphaWeightedCentroidForTest {
     x: f64,
     y: f64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08NonEmptyAlphaSupportForTest {
+struct GraphNonEmptyAlphaSupportForTest {
     min_x: u32,
     min_y: u32,
     max_x: u32,
     max_y: u32,
     alpha_sum: u64,
-    centroid: C08AlphaWeightedCentroidForTest,
+    centroid: GraphAlphaWeightedCentroidForTest,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum C08AlphaSupportForTest {
+enum GraphAlphaSupportForTest {
     Empty,
-    NonEmpty(C08NonEmptyAlphaSupportForTest),
+    NonEmpty(GraphNonEmptyAlphaSupportForTest),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08GraphCaptureRequestForTest {
+enum GraphCaptureRequestForTest {
     Identity,
     DistinctMapping,
 }
 
-fn c08_parity_surface_size_for_test() -> Size {
+fn graph_parity_surface_size_for_test() -> Size {
     Size::new(32.0, 24.0)
 }
 
-fn c08_transformed_parity_surface_size_for_test() -> Size {
+fn graph_transformed_parity_surface_size_for_test() -> Size {
     Size::new(20.0, 16.0)
 }
 
-fn c08_parity_ink_bounds_for_test(fixture: C08ParityFixtureForTest) -> Rect {
+fn graph_parity_ink_bounds_for_test(fixture: GraphParityFixtureForTest) -> Rect {
     match fixture {
-        C08ParityFixtureForTest::SolidShape => Rect::new(4.25, 3.5, 13.5, 11.25),
-        C08ParityFixtureForTest::StableAhemGlyph => Rect::new(8.25, 8.5, 10.0, 10.0),
+        GraphParityFixtureForTest::SolidShape => Rect::new(4.25, 3.5, 13.5, 11.25),
+        GraphParityFixtureForTest::StableAhemGlyph => Rect::new(8.25, 8.5, 10.0, 10.0),
     }
 }
 
-fn c08_parity_interior_bounds_for_test(fixture: C08ParityFixtureForTest) -> Rect {
+fn graph_parity_interior_bounds_for_test(fixture: GraphParityFixtureForTest) -> Rect {
     match fixture {
-        C08ParityFixtureForTest::SolidShape => Rect::new(7.0, 6.0, 7.0, 5.0),
-        C08ParityFixtureForTest::StableAhemGlyph => Rect::new(11.0, 11.0, 4.0, 4.0),
+        GraphParityFixtureForTest::SolidShape => Rect::new(7.0, 6.0, 7.0, 5.0),
+        GraphParityFixtureForTest::StableAhemGlyph => Rect::new(11.0, 11.0, 4.0, 4.0),
     }
 }
 
-fn c08_parity_scene_for_test(fixture: C08ParityFixtureForTest) -> Scene {
+fn graph_parity_scene_for_test(fixture: GraphParityFixtureForTest) -> Scene {
     let mut scene = Scene::new();
     match fixture {
-        C08ParityFixtureForTest::SolidShape => {
+        GraphParityFixtureForTest::SolidShape => {
             scene.fill(
                 Rect::new(4.25, 3.5, 13.5, 11.25),
                 Color::try_rgba(0.8, 0.2, 0.1, 0.75).unwrap(),
             );
         }
-        C08ParityFixtureForTest::StableAhemGlyph => {
+        GraphParityFixtureForTest::StableAhemGlyph => {
             assert_eq!(
                 AHEM_GLYPH_X, 58,
                 "the parity fixture must retain the proven Ahem X glyph id"
@@ -34618,7 +34769,7 @@ fn c08_parity_scene_for_test(fixture: C08ParityFixtureForTest) -> Scene {
     scene
 }
 
-fn c08_supported_working_formats_for_test(renderer: &mut Renderer) -> Vec<WorkingFormat> {
+fn graph_supported_working_formats_for_test(renderer: &mut Renderer) -> Vec<WorkingFormat> {
     let precision = renderer
         .default_device_capabilities_for_test()
         .effect_precisions();
@@ -34636,10 +34787,10 @@ fn c08_supported_working_formats_for_test(renderer: &mut Renderer) -> Vec<Workin
     formats
 }
 
-fn c08_frame_plan_antialiasing_for_test(
+fn graph_frame_plan_antialiasing_for_test(
     scene: &Scene,
     size: Size,
-    configuration: C08ParityConfigurationForTest,
+    configuration: GraphParityConfigurationForTest,
 ) -> Option<Antialiasing> {
     let commands = scene.normalize(Capabilities::CURRENT).ok()?;
     super::frame::frame_plan_result_observation_for_test(
@@ -34657,26 +34808,26 @@ fn c08_frame_plan_antialiasing_for_test(
     })
 }
 
-fn c08_render_direct_parity_for_test(
+fn graph_render_direct_parity_for_test(
     renderer: &mut Renderer,
     scene: &Scene,
     size: Size,
-    configuration: C08ParityConfigurationForTest,
-    case: C08ParityCaseForTest,
-) -> std::result::Result<C08DirectParityOutputForTest, C08ParityFailureForTest> {
-    let planned_antialiasing = c08_frame_plan_antialiasing_for_test(scene, size, configuration)
+    configuration: GraphParityConfigurationForTest,
+    case: GraphParityCaseForTest,
+) -> std::result::Result<GraphDirectParityOutputForTest, GraphParityFailureForTest> {
+    let planned_antialiasing = graph_frame_plan_antialiasing_for_test(scene, size, configuration)
         .ok_or_else(|| {
-            C08ParityFailureForTest::new(
-                case,
-                C08ParityFailureStageForTest::RequestedAntialiasing,
-                "the fixture did not produce one direct plan with an observable AA request",
-            )
-        })?;
+        GraphParityFailureForTest::new(
+            case,
+            GraphParityFailureStageForTest::RequestedAntialiasing,
+            "the fixture did not produce one direct plan with an observable AA request",
+        )
+    })?;
     let mut surface = pollster::block_on(renderer.create_headless(size, configuration.scale))
         .map_err(|error| {
-            C08ParityFailureForTest::new(
+            GraphParityFailureForTest::new(
                 case,
-                C08ParityFailureStageForTest::Setup,
+                GraphParityFailureStageForTest::Setup,
                 format!("direct headless surface creation failed: {error}"),
             )
         })?;
@@ -34692,9 +34843,9 @@ fn c08_render_direct_parity_for_test(
     let effect_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
         .map_err(|error| {
-            C08ParityFailureForTest::new(
+            GraphParityFailureForTest::new(
                 case,
-                C08ParityFailureStageForTest::DirectRoute,
+                GraphParityFailureStageForTest::DirectRoute,
                 format!("production direct rendering failed: {error}"),
             )
         })?;
@@ -34719,9 +34870,9 @@ fn c08_render_direct_parity_for_test(
     drop(graph_scope);
     drop(direct_scope);
     if !direct_route_is_exact {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::DirectRoute,
+            GraphParityFailureStageForTest::DirectRoute,
             format!(
                 "direct route changed: submissions={}, raster_passes={}, graph_submissions={}, effect_acquires={}, publication_count={}, cache_before={cache_before:?}, cache_after={cache_after:?}",
                 direct_submission.queue_submission_count_for_test(),
@@ -34733,33 +34884,33 @@ fn c08_render_direct_parity_for_test(
         ));
     }
     let image = pollster::block_on(renderer.read_headless(&surface)).map_err(|error| {
-        C08ParityFailureForTest::new(
+        GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::DirectRoute,
+            GraphParityFailureStageForTest::DirectRoute,
             format!("direct publication readback failed: {error}"),
         )
     })?;
-    Ok(C08DirectParityOutputForTest {
+    Ok(GraphDirectParityOutputForTest {
         image,
         stats: stats.into(),
         planned_antialiasing,
     })
 }
 
-fn c08_render_graph_parity_for_test(
+fn graph_render_graph_parity_for_test(
     renderer: &mut Renderer,
     scene: &Scene,
     size: Size,
-    configuration: C08ParityConfigurationForTest,
-    case: C08ParityCaseForTest,
-    mapping: C08CaptureMappingForTest,
-    request: C08GraphCaptureRequestForTest,
-) -> std::result::Result<C08GraphParityOutputForTest, C08ParityFailureForTest> {
+    configuration: GraphParityConfigurationForTest,
+    case: GraphParityCaseForTest,
+    mapping: GraphCaptureMappingForTest,
+    request: GraphCaptureRequestForTest,
+) -> std::result::Result<GraphParityOutputForTest, GraphParityFailureForTest> {
     let mut surface = pollster::block_on(renderer.create_headless(size, configuration.scale))
         .map_err(|error| {
-            C08ParityFailureForTest::new(
+            GraphParityFailureForTest::new(
                 case,
-                C08ParityFailureStageForTest::Setup,
+                GraphParityFailureStageForTest::Setup,
                 format!("graph headless surface creation failed: {error}"),
             )
         })?;
@@ -34769,7 +34920,7 @@ fn c08_render_graph_parity_for_test(
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let result = match request {
-        C08GraphCaptureRequestForTest::Identity => {
+        GraphCaptureRequestForTest::Identity => {
             pollster::block_on(renderer.render_forced_c08_graph_for_test(
                 &mut surface,
                 scene,
@@ -34777,7 +34928,7 @@ fn c08_render_graph_parity_for_test(
                 case.working_format,
             ))
         }
-        C08GraphCaptureRequestForTest::DistinctMapping => pollster::block_on(
+        GraphCaptureRequestForTest::DistinctMapping => pollster::block_on(
             renderer.render_forced_c08_graph_with_capture_mapping_for_test(
                 &mut surface,
                 scene,
@@ -34788,9 +34939,9 @@ fn c08_render_graph_parity_for_test(
         ),
     }
     .map_err(|error| {
-        C08ParityFailureForTest::new(
+        GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::GraphRoute,
+            GraphParityFailureStageForTest::GraphRoute,
             format!("production forced-graph rendering failed: {error}"),
         )
     })?;
@@ -34812,9 +34963,9 @@ fn c08_render_graph_parity_for_test(
     drop(direct_scope);
     drop(graph_scope);
     if !graph_route_is_exact {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::GraphRoute,
+            GraphParityFailureStageForTest::GraphRoute,
             format!(
                 "graph route changed: submissions={}, direct_submissions={}, capture_leases={}, scopes_resolved={}, frame_committed={}, captures_committed={}, draft_released={}, publication_count={}",
                 graph_submission.queue_submission_count_for_test(),
@@ -34829,16 +34980,16 @@ fn c08_render_graph_parity_for_test(
         ));
     }
     let image = pollster::block_on(renderer.read_headless(&surface)).map_err(|error| {
-        C08ParityFailureForTest::new(
+        GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::GraphRoute,
+            GraphParityFailureStageForTest::GraphRoute,
             format!("graph publication readback failed: {error}"),
         )
     })?;
-    Ok(C08GraphParityOutputForTest { image, result })
+    Ok(GraphParityOutputForTest { image, result })
 }
 
-fn c08_transform_point_for_test(transform: Transform, point: Point) -> Point {
+fn graph_transform_point_for_test(transform: Transform, point: Point) -> Point {
     let [a, b, c, d, e, f] = transform.as_array();
     Point::new(
         a * point.x() + c * point.y() + e,
@@ -34846,14 +34997,14 @@ fn c08_transform_point_for_test(transform: Transform, point: Point) -> Point {
     )
 }
 
-fn c08_transform_rect_for_test(rect: Rect, transform: Transform) -> Rect {
+fn graph_transform_rect_for_test(rect: Rect, transform: Transform) -> Rect {
     let corners = [
         Point::new(rect.x(), rect.y()),
         Point::new(rect.x() + rect.width(), rect.y()),
         Point::new(rect.x(), rect.y() + rect.height()),
         Point::new(rect.x() + rect.width(), rect.y() + rect.height()),
     ]
-    .map(|point| c08_transform_point_for_test(transform, point));
+    .map(|point| graph_transform_point_for_test(transform, point));
     let min_x = corners
         .iter()
         .map(|point| point.x())
@@ -34873,7 +35024,7 @@ fn c08_transform_rect_for_test(rect: Rect, transform: Transform) -> Rect {
     Rect::new(min_x, min_y, max_x - min_x, max_y - min_y)
 }
 
-fn c08_largest_singular_value_for_test(transform: Transform) -> f64 {
+fn graph_largest_singular_value_for_test(transform: Transform) -> f64 {
     let [a, b, c, d, _, _] = transform.as_array();
     let frobenius_squared = a * a + b * b + c * c + d * d;
     let determinant = a * d - b * c;
@@ -34882,19 +35033,19 @@ fn c08_largest_singular_value_for_test(transform: Transform) -> f64 {
     ((frobenius_squared + discriminant.sqrt()) * 0.5).sqrt()
 }
 
-fn c08_expected_capture_grid_for_test(
+fn graph_expected_capture_grid_for_test(
     local_bounds: Rect,
-    mapping: C08CaptureMappingForTest,
+    mapping: GraphCaptureMappingForTest,
     surface_scale: f64,
-) -> C08ExpectedCaptureGridForTest {
+) -> GraphExpectedCaptureGridForTest {
     let combined = mapping.combined();
-    let mapped_bounds = c08_transform_rect_for_test(local_bounds, combined);
-    let raster_scale = surface_scale * c08_largest_singular_value_for_test(combined);
+    let mapped_bounds = graph_transform_rect_for_test(local_bounds, combined);
+    let raster_scale = surface_scale * graph_largest_singular_value_for_test(combined);
     let device_min_x = (mapped_bounds.x() * raster_scale).floor() as i32;
     let device_min_y = (mapped_bounds.y() * raster_scale).floor() as i32;
     let device_max_x = ((mapped_bounds.x() + mapped_bounds.width()) * raster_scale).ceil() as i32;
     let device_max_y = ((mapped_bounds.y() + mapped_bounds.height()) * raster_scale).ceil() as i32;
-    C08ExpectedCaptureGridForTest {
+    GraphExpectedCaptureGridForTest {
         device_origin: (device_min_x, device_min_y),
         texel_origin: Point::new(
             f64::from(device_min_x) / raster_scale,
@@ -34910,12 +35061,12 @@ fn c08_expected_capture_grid_for_test(
     }
 }
 
-fn c08_device_region_for_test(
+fn graph_device_region_for_test(
     logical: Rect,
     scale: f64,
     output: PhysicalSize,
-) -> C08DeviceRegionForTest {
-    C08DeviceRegionForTest {
+) -> GraphDeviceRegionForTest {
+    GraphDeviceRegionForTest {
         min_x: ((logical.x() * scale).floor().max(0.0) as u32).min(output.width()),
         min_y: ((logical.y() * scale).floor().max(0.0) as u32).min(output.height()),
         max_x_exclusive: (((logical.x() + logical.width()) * scale).ceil().max(0.0) as u32)
@@ -34925,18 +35076,18 @@ fn c08_device_region_for_test(
     }
 }
 
-fn c08_metric_error_for_test(
+fn graph_metric_error_for_test(
     direct: [u8; 4],
     graph: [u8; 4],
-    metric: C08PixelMetricForTest,
+    metric: GraphPixelMetricForTest,
 ) -> [u8; 4] {
     match metric {
-        C08PixelMetricForTest::HighPrecisionStraightRgba8 => {
+        GraphPixelMetricForTest::HighPrecisionStraightRgba8 => {
             // Straight RGB has no defined color at zero alpha. Canonicalize that
             // one semantic value before comparing independently quantized RGBA8
             // outputs; nonzero alpha always retains the straight RGB oracle.
-            let direct = c08_canonical_pixel_for_test(direct);
-            let graph = c08_canonical_pixel_for_test(graph);
+            let direct = graph_canonical_pixel_for_test(direct);
+            let graph = graph_canonical_pixel_for_test(graph);
             [
                 direct[0].abs_diff(graph[0]),
                 direct[1].abs_diff(graph[1]),
@@ -34944,25 +35095,25 @@ fn c08_metric_error_for_test(
                 direct[3].abs_diff(graph[3]),
             ]
         }
-        C08PixelMetricForTest::ReducedPrecisionAlphaAndPremul8 => [
-            c08_premul8_for_test(direct[0], direct[3])
-                .abs_diff(c08_premul8_for_test(graph[0], graph[3])),
-            c08_premul8_for_test(direct[1], direct[3])
-                .abs_diff(c08_premul8_for_test(graph[1], graph[3])),
-            c08_premul8_for_test(direct[2], direct[3])
-                .abs_diff(c08_premul8_for_test(graph[2], graph[3])),
+        GraphPixelMetricForTest::ReducedPrecisionAlphaAndPremul8 => [
+            premultiply_u8_channel_for_test(direct[0], direct[3])
+                .abs_diff(premultiply_u8_channel_for_test(graph[0], graph[3])),
+            premultiply_u8_channel_for_test(direct[1], direct[3])
+                .abs_diff(premultiply_u8_channel_for_test(graph[1], graph[3])),
+            premultiply_u8_channel_for_test(direct[2], direct[3])
+                .abs_diff(premultiply_u8_channel_for_test(graph[2], graph[3])),
             direct[3].abs_diff(graph[3]),
         ],
     }
 }
 
-fn c08_compare_pixel_region_for_test(
+fn graph_compare_pixel_region_for_test(
     direct: &ImageBuffer,
     graph: &ImageBuffer,
-    region: C08DeviceRegionForTest,
-    metric: C08PixelMetricForTest,
+    region: GraphDeviceRegionForTest,
+    metric: GraphPixelMetricForTest,
     tolerance: u8,
-) -> Option<C08PixelMismatchSummaryForTest> {
+) -> Option<GraphPixelMismatchSummaryForTest> {
     let mut mismatch_count = 0_usize;
     let mut maximum_metric_error = [0_u8; 4];
     let mut first = None;
@@ -34970,7 +35121,7 @@ fn c08_compare_pixel_region_for_test(
         for x in region.min_x..region.max_x_exclusive {
             let direct_pixel = pixel_rgba(direct, x, y);
             let graph_pixel = pixel_rgba(graph, x, y);
-            let metric_error = c08_metric_error_for_test(direct_pixel, graph_pixel, metric);
+            let metric_error = graph_metric_error_for_test(direct_pixel, graph_pixel, metric);
             let mismatched = metric_error.iter().any(|error| *error > tolerance);
             if !mismatched {
                 continue;
@@ -34980,22 +35131,22 @@ fn c08_compare_pixel_region_for_test(
                 maximum_metric_error[channel] =
                     maximum_metric_error[channel].max(metric_error[channel]);
             }
-            first.get_or_insert(C08PixelMismatchForTest {
-                coordinate: C08PixelCoordinateForTest { x, y },
+            first.get_or_insert(GraphPixelMismatchForTest {
+                coordinate: GraphPixelCoordinateForTest { x, y },
                 direct: direct_pixel,
                 graph: graph_pixel,
                 metric_error,
             });
         }
     }
-    (mismatch_count > 0).then_some(C08PixelMismatchSummaryForTest {
+    (mismatch_count > 0).then_some(GraphPixelMismatchSummaryForTest {
         mismatch_count,
         maximum_metric_error,
         first,
     })
 }
 
-fn c08_alpha_support_for_test(image: &ImageBuffer) -> C08AlphaSupportForTest {
+fn graph_alpha_support_for_test(image: &ImageBuffer) -> GraphAlphaSupportForTest {
     let mut min_x = u32::MAX;
     let mut min_y = u32::MAX;
     let mut max_x = 0_u32;
@@ -35019,15 +35170,15 @@ fn c08_alpha_support_for_test(image: &ImageBuffer) -> C08AlphaSupportForTest {
         }
     }
     if alpha_sum == 0 {
-        C08AlphaSupportForTest::Empty
+        GraphAlphaSupportForTest::Empty
     } else {
-        C08AlphaSupportForTest::NonEmpty(C08NonEmptyAlphaSupportForTest {
+        GraphAlphaSupportForTest::NonEmpty(GraphNonEmptyAlphaSupportForTest {
             min_x,
             min_y,
             max_x,
             max_y,
             alpha_sum,
-            centroid: C08AlphaWeightedCentroidForTest {
+            centroid: GraphAlphaWeightedCentroidForTest {
                 x: weighted_x / alpha_sum as f64,
                 y: weighted_y / alpha_sum as f64,
             },
@@ -35035,7 +35186,7 @@ fn c08_alpha_support_for_test(image: &ImageBuffer) -> C08AlphaSupportForTest {
     }
 }
 
-fn c08_has_antialiased_boundary_for_test(image: &ImageBuffer) -> bool {
+fn graph_has_antialiased_boundary_for_test(image: &ImageBuffer) -> bool {
     let maximum_alpha = image
         .rgba()
         .chunks_exact(4)
@@ -35049,20 +35200,20 @@ fn c08_has_antialiased_boundary_for_test(image: &ImageBuffer) -> bool {
             .any(|pixel| pixel[3] > 0 && pixel[3] < maximum_alpha)
 }
 
-fn c08_compare_support_for_test(
-    case: C08ParityCaseForTest,
-    direct: C08AlphaSupportForTest,
-    graph: C08AlphaSupportForTest,
+fn graph_compare_support_for_test(
+    case: GraphParityCaseForTest,
+    direct: GraphAlphaSupportForTest,
+    graph: GraphAlphaSupportForTest,
     centroid_tolerance: f64,
-) -> std::result::Result<(), C08ParityFailureForTest> {
-    let (C08AlphaSupportForTest::NonEmpty(direct), C08AlphaSupportForTest::NonEmpty(graph)) =
+) -> std::result::Result<(), GraphParityFailureForTest> {
+    let (GraphAlphaSupportForTest::NonEmpty(direct), GraphAlphaSupportForTest::NonEmpty(graph)) =
         (direct, graph)
     else {
         return match (direct, graph) {
-            (C08AlphaSupportForTest::Empty, C08AlphaSupportForTest::Empty) => Ok(()),
-            _ => Err(C08ParityFailureForTest::new(
+            (GraphAlphaSupportForTest::Empty, GraphAlphaSupportForTest::Empty) => Ok(()),
+            _ => Err(GraphParityFailureForTest::new(
                 case,
-                C08ParityFailureStageForTest::InkSupport,
+                GraphParityFailureStageForTest::InkSupport,
                 format!("support emptiness differs: direct={direct:?}, graph={graph:?}"),
             )),
         };
@@ -35074,9 +35225,9 @@ fn c08_compare_support_for_test(
         ("max_y", direct.max_y, graph.max_y),
     ] {
         if direct_edge.abs_diff(graph_edge) > 1 {
-            return Err(C08ParityFailureForTest::new(
+            return Err(GraphParityFailureForTest::new(
                 case,
-                C08ParityFailureStageForTest::InkSupport,
+                GraphParityFailureStageForTest::InkSupport,
                 format!(
                     "nonzero support {axis} differs by more than one pixel: direct={direct:?}, graph={graph:?}"
                 ),
@@ -35086,9 +35237,9 @@ fn c08_compare_support_for_test(
     let centroid_delta_x = (direct.centroid.x - graph.centroid.x).abs();
     let centroid_delta_y = (direct.centroid.y - graph.centroid.y).abs();
     if centroid_delta_x > centroid_tolerance || centroid_delta_y > centroid_tolerance {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::AlphaWeightedCentroid,
+            GraphParityFailureStageForTest::AlphaWeightedCentroid,
             format!(
                 "centroid delta=({centroid_delta_x:.6},{centroid_delta_y:.6}) exceeds {centroid_tolerance:.2}; direct={direct:?}, graph={graph:?}"
             ),
@@ -35097,25 +35248,25 @@ fn c08_compare_support_for_test(
     Ok(())
 }
 
-fn c08_compare_parity_outputs_for_test(
-    case: C08ParityCaseForTest,
-    direct: C08DirectParityOutputForTest,
-    graph: C08GraphParityOutputForTest,
+fn graph_compare_parity_outputs_for_test(
+    case: GraphParityCaseForTest,
+    direct: GraphDirectParityOutputForTest,
+    graph: GraphParityOutputForTest,
     surface_size: Size,
-    expected_capture: C08ExpectedCaptureGridForTest,
-    expected_mapping: C08CaptureMappingForTest,
-    profile: C08PixelComparisonProfileForTest,
-) -> std::result::Result<(), C08ParityFailureForTest> {
-    let tolerance = C08ParityToleranceForTest::for_working_format(case.working_format);
+    expected_capture: GraphExpectedCaptureGridForTest,
+    expected_mapping: GraphCaptureMappingForTest,
+    profile: GraphPixelComparisonProfileForTest,
+) -> std::result::Result<(), GraphParityFailureForTest> {
+    let tolerance = GraphParityToleranceForTest::for_working_format(case.working_format);
     if direct.planned_antialiasing != case.antialiasing
         || !matches!(
             graph.result.captures.as_slice(),
             [capture] if capture.antialiasing == case.antialiasing
         )
     {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::RequestedAntialiasing,
+            GraphParityFailureStageForTest::RequestedAntialiasing,
             format!(
                 "requested={:?}, direct_plan={:?}, graph_captures={:?}",
                 case.antialiasing, direct.planned_antialiasing, graph.result.captures
@@ -35129,9 +35280,9 @@ fn c08_compare_parity_outputs_for_test(
         || graph.image.size() != expected_output
         || graph.result.output_extent != expected_output
     {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::OutputDimensions,
+            GraphParityFailureStageForTest::OutputDimensions,
             format!(
                 "expected={expected_output:?}, direct={:?}, graph={:?}, graph_root={:?}",
                 direct.image.size(),
@@ -35142,9 +35293,9 @@ fn c08_compare_parity_outputs_for_test(
     }
 
     let [capture] = graph.result.captures.as_slice() else {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::CaptureGrid,
+            GraphParityFailureStageForTest::CaptureGrid,
             format!(
                 "expected one capture grid, observed {}",
                 graph.result.captures.len()
@@ -35168,28 +35319,28 @@ fn c08_compare_parity_outputs_for_test(
         || capture.capture_transform != expected_mapping.capture_transform
         || capture.parent_to_surface != expected_mapping.parent_to_surface
     {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::CaptureGrid,
+            GraphParityFailureStageForTest::CaptureGrid,
             format!(
                 "expected_grid={expected_capture:?}, actual_capture={capture:?}, expected_mapping={expected_mapping:?}"
             ),
         ));
     }
 
-    let graph_stats = C08PublicStatsForTest::from(graph.result.stats);
+    let graph_stats = GraphPublicStatsForTest::from(graph.result.stats);
     let expected_direct_stats = match profile {
-        C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary => graph_stats,
-        C08PixelComparisonProfileForTest::PlacementBoundary => C08PublicStatsForTest {
+        GraphPixelComparisonProfileForTest::FixtureInteriorAndBoundary => graph_stats,
+        GraphPixelComparisonProfileForTest::PlacementBoundary => GraphPublicStatsForTest {
             commands: graph_stats.commands.saturating_add(1),
             layers: graph_stats.layers.saturating_add(1),
             ..graph_stats
         },
     };
     if direct.stats != expected_direct_stats {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::PublicStats,
+            GraphParityFailureStageForTest::PublicStats,
             format!(
                 "direct={:?}, graph={graph_stats:?}, expected_direct={expected_direct_stats:?}",
                 direct.stats
@@ -35197,7 +35348,7 @@ fn c08_compare_parity_outputs_for_test(
         ));
     }
 
-    c08_compare_parity_pixel_regions(
+    graph_compare_parity_pixel_regions(
         case,
         &direct.image,
         &graph.image,
@@ -35206,89 +35357,89 @@ fn c08_compare_parity_outputs_for_test(
         tolerance,
     )?;
 
-    c08_compare_parity_support(case, &direct.image, &graph.image, tolerance)
+    graph_compare_parity_support(case, &direct.image, &graph.image, tolerance)
 }
 
-fn c08_compare_parity_support(
-    case: C08ParityCaseForTest,
+fn graph_compare_parity_support(
+    case: GraphParityCaseForTest,
     direct: &ImageBuffer,
     graph: &ImageBuffer,
-    tolerance: C08ParityToleranceForTest,
-) -> std::result::Result<(), C08ParityFailureForTest> {
-    if !c08_has_antialiased_boundary_for_test(direct)
-        || !c08_has_antialiased_boundary_for_test(graph)
+    tolerance: GraphParityToleranceForTest,
+) -> std::result::Result<(), GraphParityFailureForTest> {
+    if !graph_has_antialiased_boundary_for_test(direct)
+        || !graph_has_antialiased_boundary_for_test(graph)
     {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::AntialiasedBoundaryPixels,
+            GraphParityFailureStageForTest::AntialiasedBoundaryPixels,
             "the fixture did not retain an observable partial-alpha AA boundary",
         ));
     }
-    c08_compare_support_for_test(
+    graph_compare_support_for_test(
         case,
-        c08_alpha_support_for_test(direct),
-        c08_alpha_support_for_test(graph),
+        graph_alpha_support_for_test(direct),
+        graph_alpha_support_for_test(graph),
         tolerance.centroid_device_pixels,
     )
 }
 
-fn c08_compare_parity_pixel_regions(
-    case: C08ParityCaseForTest,
+fn graph_compare_parity_pixel_regions(
+    case: GraphParityCaseForTest,
     direct: &ImageBuffer,
     graph: &ImageBuffer,
     output: PhysicalSize,
-    profile: C08PixelComparisonProfileForTest,
-    tolerance: C08ParityToleranceForTest,
-) -> std::result::Result<(), C08ParityFailureForTest> {
-    let full_output = C08DeviceRegionForTest {
+    profile: GraphPixelComparisonProfileForTest,
+    tolerance: GraphParityToleranceForTest,
+) -> std::result::Result<(), GraphParityFailureForTest> {
+    let full_output = GraphDeviceRegionForTest {
         min_x: 0,
         min_y: 0,
         max_x_exclusive: output.width(),
         max_y_exclusive: output.height(),
     };
-    if let Some(summary) = c08_compare_pixel_region_for_test(
+    if let Some(summary) = graph_compare_pixel_region_for_test(
         direct,
         graph,
         full_output,
         tolerance.metric,
         tolerance.boundary_levels,
     ) {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::AntialiasedBoundaryPixels,
+            GraphParityFailureStageForTest::AntialiasedBoundaryPixels,
             format!(
                 "metric={:?}, tolerance={}, summary={summary:?}",
                 tolerance.metric, tolerance.boundary_levels
             ),
         ));
     }
-    if profile != C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary {
+    if profile != GraphPixelComparisonProfileForTest::FixtureInteriorAndBoundary {
         return Ok(());
     }
-    let interior = c08_device_region_for_test(
-        c08_parity_interior_bounds_for_test(case.fixture),
+    let interior = graph_device_region_for_test(
+        graph_parity_interior_bounds_for_test(case.fixture),
         case.scale,
         output,
     );
     let contains_ink = (interior.min_y..interior.max_y_exclusive)
         .any(|y| (interior.min_x..interior.max_x_exclusive).any(|x| pixel_alpha(direct, x, y) > 0));
     if !contains_ink {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::InteriorPixels,
+            GraphParityFailureStageForTest::InteriorPixels,
             format!("fixture interior contains no direct ink: {interior:?}"),
         ));
     }
-    if let Some(summary) = c08_compare_pixel_region_for_test(
+    if let Some(summary) = graph_compare_pixel_region_for_test(
         direct,
         graph,
         interior,
         tolerance.metric,
         tolerance.interior_levels,
     ) {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::InteriorPixels,
+            GraphParityFailureStageForTest::InteriorPixels,
             format!(
                 "metric={:?}, tolerance={}, region={interior:?}, summary={summary:?}",
                 tolerance.metric, tolerance.interior_levels
@@ -35298,11 +35449,11 @@ fn c08_compare_parity_pixel_regions(
     Ok(())
 }
 
-fn c08_run_fixture_parity_matrix_for_test(
-    fixture: C08ParityFixtureForTest,
-) -> std::result::Result<Vec<C08ParityCaseForTest>, C08ParityFailureForTest> {
-    let scene = c08_parity_scene_for_test(fixture);
-    let mapping = C08CaptureMappingForTest::identity();
+fn run_graph_parity_matrix_for_test(
+    fixture: GraphParityFixtureForTest,
+) -> std::result::Result<Vec<GraphParityCaseForTest>, GraphParityFailureForTest> {
+    let scene = graph_parity_scene_for_test(fixture);
+    let mapping = GraphCaptureMappingForTest::identity();
     let mut completed = Vec::new();
     let mut configuration_index = 0_usize;
     for antialiasing in [
@@ -35316,63 +35467,63 @@ fn c08_run_fixture_parity_matrix_for_test(
                 .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
         ))
         .expect("the parity matrix requires a real selected WGPU device");
-        let working_formats = c08_supported_working_formats_for_test(&mut renderer);
+        let working_formats = graph_supported_working_formats_for_test(&mut renderer);
         for scale in [1.0, 1.25, 2.0] {
-            let configuration = C08ParityConfigurationForTest {
+            let configuration = GraphParityConfigurationForTest {
                 antialiasing,
                 scale,
             };
-            if C08_PARITY_CONFIGURATIONS_FOR_TEST[configuration_index] != configuration {
-                let case = C08ParityCaseForTest {
+            if GRAPH_PARITY_CONFIGURATIONS_FOR_TEST[configuration_index] != configuration {
+                let case = GraphParityCaseForTest {
                     fixture,
-                    scenario: C08ParityScenarioForTest::Matrix,
+                    scenario: GraphParityScenarioForTest::Matrix,
                     antialiasing,
                     scale,
                     working_format: working_formats[0],
                 };
-                return Err(C08ParityFailureForTest::new(
+                return Err(GraphParityFailureForTest::new(
                     case,
-                    C08ParityFailureStageForTest::MatrixCoverage,
+                    GraphParityFailureStageForTest::MatrixCoverage,
                     "the source-readable AA/scale registry no longer matches execution order",
                 ));
             }
             configuration_index += 1;
             for working_format in working_formats.iter().copied() {
-                let case = C08ParityCaseForTest {
+                let case = GraphParityCaseForTest {
                     fixture,
-                    scenario: C08ParityScenarioForTest::Matrix,
+                    scenario: GraphParityScenarioForTest::Matrix,
                     antialiasing,
                     scale,
                     working_format,
                 };
-                let direct = c08_render_direct_parity_for_test(
+                let direct = graph_render_direct_parity_for_test(
                     &mut renderer,
                     &scene,
-                    c08_parity_surface_size_for_test(),
+                    graph_parity_surface_size_for_test(),
                     configuration,
                     case,
                 )?;
-                let graph = c08_render_graph_parity_for_test(
+                let graph = graph_render_graph_parity_for_test(
                     &mut renderer,
                     &scene,
-                    c08_parity_surface_size_for_test(),
+                    graph_parity_surface_size_for_test(),
                     configuration,
                     case,
                     mapping,
-                    C08GraphCaptureRequestForTest::Identity,
+                    GraphCaptureRequestForTest::Identity,
                 )?;
-                c08_compare_parity_outputs_for_test(
+                graph_compare_parity_outputs_for_test(
                     case,
                     direct,
                     graph,
-                    c08_parity_surface_size_for_test(),
-                    c08_expected_capture_grid_for_test(
-                        c08_parity_ink_bounds_for_test(fixture),
+                    graph_parity_surface_size_for_test(),
+                    graph_expected_capture_grid_for_test(
+                        graph_parity_ink_bounds_for_test(fixture),
                         mapping,
                         scale,
                     ),
                     mapping,
-                    C08PixelComparisonProfileForTest::FixtureInteriorAndBoundary,
+                    GraphPixelComparisonProfileForTest::FixtureInteriorAndBoundary,
                 )?;
                 completed.push(case);
             }
@@ -35381,22 +35532,22 @@ fn c08_run_fixture_parity_matrix_for_test(
     Ok(completed)
 }
 
-fn c08_expected_matrix_cases_for_test() -> Vec<C08ParityCaseForTest> {
+fn graph_expected_matrix_cases_for_test() -> Vec<GraphParityCaseForTest> {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("parity-matrix completeness requires a real selected WGPU device");
-    let working_formats = c08_supported_working_formats_for_test(&mut renderer);
+    let working_formats = graph_supported_working_formats_for_test(&mut renderer);
     let mut expected = Vec::new();
     for fixture in [
-        C08ParityFixtureForTest::SolidShape,
-        C08ParityFixtureForTest::StableAhemGlyph,
+        GraphParityFixtureForTest::SolidShape,
+        GraphParityFixtureForTest::StableAhemGlyph,
     ] {
-        for configuration in C08_PARITY_CONFIGURATIONS_FOR_TEST {
+        for configuration in GRAPH_PARITY_CONFIGURATIONS_FOR_TEST {
             for working_format in working_formats.iter().copied() {
-                expected.push(C08ParityCaseForTest {
+                expected.push(GraphParityCaseForTest {
                     fixture,
-                    scenario: C08ParityScenarioForTest::Matrix,
+                    scenario: GraphParityScenarioForTest::Matrix,
                     antialiasing: configuration.antialiasing,
                     scale: configuration.scale,
                     working_format,
@@ -35408,32 +35559,32 @@ fn c08_expected_matrix_cases_for_test() -> Vec<C08ParityCaseForTest> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C08TransformedPlacementCaseForTest {
-    scenario: C08ParityScenarioForTest,
-    mapping: C08CaptureMappingForTest,
+struct GraphTransformedPlacementCaseForTest {
+    scenario: GraphParityScenarioForTest,
+    mapping: GraphCaptureMappingForTest,
 }
 
-fn c08_transformed_placement_cases_for_test() -> [C08TransformedPlacementCaseForTest; 3] {
+fn graph_transformed_placement_cases_for_test() -> [GraphTransformedPlacementCaseForTest; 3] {
     let capture = Transform::try_new([0.0, 1.0, -1.0, 0.0, 10.375, -6.125]).unwrap();
     let parent = Transform::try_new([0.0, -1.0, 1.0, 0.0, -6.25, 14.375]).unwrap();
     [
-        C08TransformedPlacementCaseForTest {
-            scenario: C08ParityScenarioForTest::CaptureTransform,
-            mapping: C08CaptureMappingForTest {
+        GraphTransformedPlacementCaseForTest {
+            scenario: GraphParityScenarioForTest::CaptureTransform,
+            mapping: GraphCaptureMappingForTest {
                 capture_transform: capture,
                 parent_to_surface: Transform::identity(),
             },
         },
-        C08TransformedPlacementCaseForTest {
-            scenario: C08ParityScenarioForTest::ParentTransform,
-            mapping: C08CaptureMappingForTest {
+        GraphTransformedPlacementCaseForTest {
+            scenario: GraphParityScenarioForTest::ParentTransform,
+            mapping: GraphCaptureMappingForTest {
                 capture_transform: Transform::identity(),
                 parent_to_surface: parent,
             },
         },
-        C08TransformedPlacementCaseForTest {
-            scenario: C08ParityScenarioForTest::OrderedCaptureThenParent,
-            mapping: C08CaptureMappingForTest {
+        GraphTransformedPlacementCaseForTest {
+            scenario: GraphParityScenarioForTest::OrderedCaptureThenParent,
+            mapping: GraphCaptureMappingForTest {
                 capture_transform: capture,
                 parent_to_surface: parent,
             },
@@ -35441,8 +35592,8 @@ fn c08_transformed_placement_cases_for_test() -> [C08TransformedPlacementCaseFor
     ]
 }
 
-fn c08_transformed_direct_solid_scene_for_test(mapping: C08CaptureMappingForTest) -> Scene {
-    let bounds = c08_parity_ink_bounds_for_test(C08ParityFixtureForTest::SolidShape);
+fn graph_transformed_direct_solid_scene_for_test(mapping: GraphCaptureMappingForTest) -> Scene {
+    let bounds = graph_parity_ink_bounds_for_test(GraphParityFixtureForTest::SolidShape);
     let transform = mapping.combined();
     let mut scene = Scene::new();
     scene.transform(transform, |scene| {
@@ -35451,66 +35602,66 @@ fn c08_transformed_direct_solid_scene_for_test(mapping: C08CaptureMappingForTest
     scene
 }
 
-fn c08_run_transformed_parity_for_test()
--> std::result::Result<Vec<C08ParityCaseForTest>, C08ParityFailureForTest> {
-    let configuration = C08ParityConfigurationForTest {
+fn graph_run_transformed_parity_for_test()
+-> std::result::Result<Vec<GraphParityCaseForTest>, GraphParityFailureForTest> {
+    let configuration = GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa16,
         scale: 1.25,
     };
-    let graph_scene = c08_parity_scene_for_test(C08ParityFixtureForTest::SolidShape);
+    let graph_scene = graph_parity_scene_for_test(GraphParityFixtureForTest::SolidShape);
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_antialiasing(configuration.antialiasing)
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("transformed direct-graph parity requires a real selected WGPU device");
-    let working_formats = c08_supported_working_formats_for_test(&mut renderer);
+    let working_formats = graph_supported_working_formats_for_test(&mut renderer);
     let mut completed = Vec::new();
-    for transformed in c08_transformed_placement_cases_for_test() {
-        let expected_grid = c08_expected_capture_grid_for_test(
-            c08_parity_ink_bounds_for_test(C08ParityFixtureForTest::SolidShape),
+    for transformed in graph_transformed_placement_cases_for_test() {
+        let expected_grid = graph_expected_capture_grid_for_test(
+            graph_parity_ink_bounds_for_test(GraphParityFixtureForTest::SolidShape),
             transformed.mapping,
             configuration.scale,
         );
-        c08_validate_transformed_grid(
+        graph_validate_transformed_grid(
             transformed,
             expected_grid,
             configuration,
             working_formats[0],
         )?;
-        let direct_scene = c08_transformed_direct_solid_scene_for_test(transformed.mapping);
+        let direct_scene = graph_transformed_direct_solid_scene_for_test(transformed.mapping);
         for working_format in working_formats.iter().copied() {
-            let case = C08ParityCaseForTest {
-                fixture: C08ParityFixtureForTest::SolidShape,
+            let case = GraphParityCaseForTest {
+                fixture: GraphParityFixtureForTest::SolidShape,
                 scenario: transformed.scenario,
                 antialiasing: configuration.antialiasing,
                 scale: configuration.scale,
                 working_format,
             };
-            let direct = c08_render_direct_parity_for_test(
+            let direct = graph_render_direct_parity_for_test(
                 &mut renderer,
                 &direct_scene,
-                c08_transformed_parity_surface_size_for_test(),
+                graph_transformed_parity_surface_size_for_test(),
                 configuration,
                 case,
             )?;
-            let graph = c08_render_graph_parity_for_test(
+            let graph = graph_render_graph_parity_for_test(
                 &mut renderer,
                 &graph_scene,
-                c08_transformed_parity_surface_size_for_test(),
+                graph_transformed_parity_surface_size_for_test(),
                 configuration,
                 case,
                 transformed.mapping,
-                C08GraphCaptureRequestForTest::DistinctMapping,
+                GraphCaptureRequestForTest::DistinctMapping,
             )?;
-            c08_compare_parity_outputs_for_test(
+            graph_compare_parity_outputs_for_test(
                 case,
                 direct,
                 graph,
-                c08_transformed_parity_surface_size_for_test(),
+                graph_transformed_parity_surface_size_for_test(),
                 expected_grid,
                 transformed.mapping,
-                C08PixelComparisonProfileForTest::PlacementBoundary,
+                GraphPixelComparisonProfileForTest::PlacementBoundary,
             )?;
             completed.push(case);
         }
@@ -35518,45 +35669,45 @@ fn c08_run_transformed_parity_for_test()
     Ok(completed)
 }
 
-fn c08_validate_transformed_grid(
-    transformed: C08TransformedPlacementCaseForTest,
-    grid: C08ExpectedCaptureGridForTest,
-    configuration: C08ParityConfigurationForTest,
+fn graph_validate_transformed_grid(
+    transformed: GraphTransformedPlacementCaseForTest,
+    grid: GraphExpectedCaptureGridForTest,
+    configuration: GraphParityConfigurationForTest,
     working_format: WorkingFormat,
-) -> std::result::Result<(), C08ParityFailureForTest> {
-    let case = C08ParityCaseForTest {
-        fixture: C08ParityFixtureForTest::SolidShape,
+) -> std::result::Result<(), GraphParityFailureForTest> {
+    let case = GraphParityCaseForTest {
+        fixture: GraphParityFixtureForTest::SolidShape,
         scenario: transformed.scenario,
         antialiasing: configuration.antialiasing,
         scale: configuration.scale,
         working_format,
     };
     if grid.device_origin.0 >= 0 && grid.device_origin.1 >= 0 {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::CaptureGrid,
+            GraphParityFailureStageForTest::CaptureGrid,
             format!("transformed fixture did not retain a signed origin: {grid:?}"),
         ));
     }
     let fractional = grid.texel_origin.x().fract().abs() > f64::EPSILON
         || grid.texel_origin.y().fract().abs() > f64::EPSILON;
     if !fractional {
-        return Err(C08ParityFailureForTest::new(
+        return Err(GraphParityFailureForTest::new(
             case,
-            C08ParityFailureStageForTest::CaptureGrid,
+            GraphParityFailureStageForTest::CaptureGrid,
             format!("transformed fixture did not retain a fractional texel origin: {grid:?}"),
         ));
     }
-    if transformed.scenario == C08ParityScenarioForTest::OrderedCaptureThenParent {
+    if transformed.scenario == GraphParityScenarioForTest::OrderedCaptureThenParent {
         let reverse = transformed
             .mapping
             .parent_to_surface
             .then(transformed.mapping.capture_transform)
             .expect("the reverse-order probe transforms must compose");
         if transformed.mapping.combined() == reverse {
-            return Err(C08ParityFailureForTest::new(
+            return Err(GraphParityFailureForTest::new(
                 case,
-                C08ParityFailureStageForTest::CaptureGrid,
+                GraphParityFailureStageForTest::CaptureGrid,
                 "the ordered transform probe accidentally commutes",
             ));
         }
@@ -35570,19 +35721,19 @@ fn direct_and_graph_routes_match_each_fixture_configuration_and_pixel_oracle() {
     for (label, fixture) in [
         (
             "solid-shape interior and antialiased edges",
-            C08ParityFixtureForTest::SolidShape,
+            GraphParityFixtureForTest::SolidShape,
         ),
         (
             "Ahem glyph ink extent and capture grid",
-            C08ParityFixtureForTest::StableAhemGlyph,
+            GraphParityFixtureForTest::StableAhemGlyph,
         ),
     ] {
         actual.extend(
-            c08_run_fixture_parity_matrix_for_test(fixture)
+            run_graph_parity_matrix_for_test(fixture)
                 .unwrap_or_else(|failure| panic!("{label} parity failed: {failure}")),
         );
     }
-    let expected = c08_expected_matrix_cases_for_test();
+    let expected = graph_expected_matrix_cases_for_test();
     assert_eq!(
         actual,
         expected,
@@ -35594,14 +35745,14 @@ fn direct_and_graph_routes_match_each_fixture_configuration_and_pixel_oracle() {
 
 #[test]
 fn negative_bounds_and_subpixel_transforms_do_not_shift_capture() {
-    let completed = c08_run_transformed_parity_for_test().unwrap_or_else(|failure| {
+    let completed = graph_run_transformed_parity_for_test().unwrap_or_else(|failure| {
         panic!("transformed signed capture placement exceeds S34 tolerance: {failure}")
     });
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("transformed parity coverage requires a real selected WGPU device");
-    let expected_count = c08_supported_working_formats_for_test(&mut renderer).len() * 3;
+    let expected_count = graph_supported_working_formats_for_test(&mut renderer).len() * 3;
     assert_eq!(
         completed.len(),
         expected_count,
@@ -35612,27 +35763,27 @@ fn negative_bounds_and_subpixel_transforms_do_not_shift_capture() {
 
 #[test]
 fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
-    let fixture = C08ParityFixtureForTest::SolidShape;
-    let configuration = C08ParityConfigurationForTest {
+    let fixture = GraphParityFixtureForTest::SolidShape;
+    let configuration = GraphParityConfigurationForTest {
         antialiasing: Antialiasing::Msaa8,
         scale: 1.25,
     };
-    let case = C08ParityCaseForTest {
+    let case = GraphParityCaseForTest {
         fixture,
-        scenario: C08ParityScenarioForTest::Matrix,
+        scenario: GraphParityScenarioForTest::Matrix,
         antialiasing: configuration.antialiasing,
         scale: configuration.scale,
         working_format: WorkingFormat::HighPrecision,
     };
-    let scene = c08_parity_scene_for_test(fixture);
+    let scene = graph_parity_scene_for_test(fixture);
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_antialiasing(configuration.antialiasing),
     ))
     .expect("the focused Vello tile-translation regression requires a real selected device");
-    let direct = c08_render_direct_parity_for_test(
+    let direct = graph_render_direct_parity_for_test(
         &mut renderer,
         &scene,
-        c08_parity_surface_size_for_test(),
+        graph_parity_surface_size_for_test(),
         configuration,
         case,
     )
@@ -35640,9 +35791,9 @@ fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
     let normalized = scene
         .normalize(renderer.capabilities())
         .expect("the focused solid fixture must normalize");
-    let grid = c08_expected_capture_grid_for_test(
-        c08_parity_ink_bounds_for_test(fixture),
-        C08CaptureMappingForTest::identity(),
+    let grid = graph_expected_capture_grid_for_test(
+        graph_parity_ink_bounds_for_test(fixture),
+        GraphCaptureMappingForTest::identity(),
         configuration.scale,
     );
     let initial_transform = Transform::translation(-grid.texel_origin.x(), -grid.texel_origin.y())
@@ -35686,7 +35837,7 @@ fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
     .expect("the focused bounded Vello capture must be readable after submission");
 
     let (mismatch_count, first) =
-        c08_tile_translation_mismatches(&direct.image, &local_image, grid);
+        graph_tile_translation_mismatches(&direct.image, &local_image, grid);
     local
         .release()
         .expect("the focused capture lease must release");
@@ -35696,11 +35847,11 @@ fn internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant() {
     );
 }
 
-fn c08_tile_translation_mismatches(
+fn graph_tile_translation_mismatches(
     direct: &ImageBuffer,
     local: &ImageBuffer,
-    grid: C08ExpectedCaptureGridForTest,
-) -> (usize, Option<C08TileTranslationMismatchForTest>) {
+    grid: GraphExpectedCaptureGridForTest,
+) -> (usize, Option<GraphTileTranslationMismatchForTest>) {
     let mut count = 0usize;
     let mut first = None;
     for local_y in 0..grid.extent.height() {
@@ -35711,19 +35862,19 @@ fn c08_tile_translation_mismatches(
                 .expect("the focused identity capture must remain on the positive surface");
             let direct_pixel = pixel_rgba(direct, surface_x, surface_y);
             let local_pixel = pixel_rgba(local, local_x, local_y);
-            let error = c08_metric_error_for_test(
+            let error = graph_metric_error_for_test(
                 direct_pixel,
                 local_pixel,
-                C08PixelMetricForTest::HighPrecisionStraightRgba8,
+                GraphPixelMetricForTest::HighPrecisionStraightRgba8,
             );
             if error.iter().any(|channel| *channel > 4) {
                 count = count.saturating_add(1);
-                first.get_or_insert(C08TileTranslationMismatchForTest {
-                    surface_coordinate: C08PixelCoordinateForTest {
+                first.get_or_insert(GraphTileTranslationMismatchForTest {
+                    surface_coordinate: GraphPixelCoordinateForTest {
                         x: surface_x,
                         y: surface_y,
                     },
-                    capture_coordinate: C08PixelCoordinateForTest {
+                    capture_coordinate: GraphPixelCoordinateForTest {
                         x: local_x,
                         y: local_y,
                     },
@@ -35839,7 +35990,7 @@ fn pinned_vello_characterization_scene() -> Scene {
     });
     scene.text_run(
         TextRun::try_new(
-            ahem_font("C03 pinned Vello characterization"),
+            ahem_font("pinned Vello characterization"),
             10.0,
             Transform::identity(),
             TextPaint::try_fill(Color::BLACK.into()).unwrap(),

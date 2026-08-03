@@ -370,12 +370,12 @@ pub(crate) fn forced_c08_graph_with_capture_mapping_for_test(
     )
 }
 
-/// Test-only authored-filter ingress for C10 graph closure. This starts with
+/// Test-only authored-filter ingress into the exact graph executor. This starts with
 /// authored [`FilterList`] values and ordinary normalized capture input, then
 /// uses the production planner's source capture, filter lowering, composition,
 /// scheduling, and validation owners. It does not execute or encode the graph.
 #[cfg(test)]
-pub(crate) fn authored_c10_color_graph_for_test(
+pub(crate) fn authored_filter_graph_for_test(
     filters: Vec<FilterList>,
     commands: RenderCommands,
     context: FrameContext,
@@ -3315,7 +3315,7 @@ impl SemanticFrameGraphPlanner {
     ) -> Result<GpuRenderGraph> {
         if filters.is_empty() {
             return Err(Error::invalid_value(
-                "C10 authored filter fixture",
+                "authored filter fixture",
                 0,
                 "must begin with at least one authored FilterList",
             ));
@@ -3324,7 +3324,7 @@ impl SemanticFrameGraphPlanner {
             FrameSpatialPlan::NonEmpty(spatial) => spatial,
             FrameSpatialPlan::Empty(_) => {
                 return Err(Error::invalid_value(
-                    "C10 authored filter fixture output bounds",
+                    "authored filter fixture output bounds",
                     "empty",
                     "must be non-empty before the private graph fixture is planned",
                 ));
@@ -3372,7 +3372,7 @@ impl SemanticFrameGraphPlanner {
             .plan_layer_source(commands.commands, Transform::identity())?
             .ok_or_else(|| {
                 Error::invalid_value(
-                    "C10 authored filter fixture capture",
+                    "authored filter fixture capture",
                     "empty",
                     "must contain ordinary capture input",
                 )

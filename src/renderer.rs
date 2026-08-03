@@ -86,10 +86,10 @@ pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) direct_vello_routes: usize,
     pub(crate) exact_c08_graph_routes: usize,
     pub(crate) exact_c09_graph_routes: usize,
-    pub(crate) exact_c10_fixture_routes: usize,
-    pub(crate) exact_c11_fixture_routes: usize,
+    pub(crate) exact_color_filter_fixture_routes: usize,
+    pub(crate) exact_spatial_filter_fixture_routes: usize,
     pub(crate) exact_c12_graph_routes: usize,
-    pub(crate) exact_c12_fixture_routes: usize,
+    pub(crate) exact_bounded_backdrop_fixture_routes: usize,
     pub(crate) future_pass_rejections: usize,
 }
 
@@ -255,7 +255,7 @@ fn preparation_failure_cleanup(
 
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct C10ColorFilterRenderResultForTest {
+pub(crate) struct ColorFilterRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
@@ -267,7 +267,7 @@ pub(crate) struct C10ColorFilterRenderResultForTest {
 
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct C11SpatialFilterRenderResultForTest {
+pub(crate) struct SpatialFilterRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
@@ -277,7 +277,7 @@ pub(crate) struct C11SpatialFilterRenderResultForTest {
 
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct C12BackdropRenderResultForTest {
+pub(crate) struct BoundedBackdropRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
@@ -286,7 +286,7 @@ pub(crate) struct C12BackdropRenderResultForTest {
 }
 
 #[cfg(test)]
-struct C10ColorFilterFixturePreparationForTest {
+struct ColorFilterFixturePreparationForTest {
     device_identity: DeviceSlotIdentity,
     frame_start: Instant,
     encode_start: Instant,
@@ -297,7 +297,7 @@ struct C10ColorFilterFixturePreparationForTest {
 }
 
 #[cfg(test)]
-struct C11SpatialFilterFixturePreparationForTest {
+struct SpatialFilterFixturePreparationForTest {
     device_identity: DeviceSlotIdentity,
     frame_start: Instant,
     encode_start: Instant,
@@ -309,7 +309,7 @@ struct C11SpatialFilterFixturePreparationForTest {
 }
 
 #[cfg(test)]
-struct C12BackdropFixturePreparationForTest {
+struct BoundedBackdropFixturePreparationForTest {
     device_identity: DeviceSlotIdentity,
     frame_start: Instant,
     encode_start: Instant,
@@ -951,7 +951,7 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn classify_c10_fixture_dispatch(
+    fn classify_color_filter_fixture_dispatch(
         &mut self,
         graph: &GpuRenderGraph,
         output_format: Format,
@@ -968,9 +968,9 @@ impl Renderer {
             working_format,
             capabilities,
         )?;
-        self.dispatch_observation.exact_c10_fixture_routes = self
+        self.dispatch_observation.exact_color_filter_fixture_routes = self
             .dispatch_observation
-            .exact_c10_fixture_routes
+            .exact_color_filter_fixture_routes
             .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
             ExactSurfaceGraph::C10(preparable),
@@ -978,7 +978,7 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn classify_c11_fixture_dispatch(
+    fn classify_spatial_filter_fixture_dispatch(
         &mut self,
         graph: &GpuRenderGraph,
         output_format: Format,
@@ -995,9 +995,10 @@ impl Renderer {
             working_format,
             capabilities,
         )?;
-        self.dispatch_observation.exact_c11_fixture_routes = self
+        self.dispatch_observation
+            .exact_spatial_filter_fixture_routes = self
             .dispatch_observation
-            .exact_c11_fixture_routes
+            .exact_spatial_filter_fixture_routes
             .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
             ExactSurfaceGraph::C11(preparable),
@@ -1005,7 +1006,7 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn classify_c12_fixture_dispatch(
+    fn classify_bounded_backdrop_fixture_dispatch(
         &mut self,
         graph: &GpuRenderGraph,
         output_format: Format,
@@ -1022,9 +1023,10 @@ impl Renderer {
             working_format,
             capabilities,
         )?;
-        self.dispatch_observation.exact_c12_fixture_routes = self
+        self.dispatch_observation
+            .exact_bounded_backdrop_fixture_routes = self
             .dispatch_observation
-            .exact_c12_fixture_routes
+            .exact_bounded_backdrop_fixture_routes
             .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
             ExactSurfaceGraph::C12(preparable),
@@ -1535,17 +1537,17 @@ impl Renderer {
         })
     }
 
-    /// Private C10 authored-filter ingress into the shared exact graph executor.
+    /// Private color-filter ingress into the shared exact graph executor.
     #[cfg(test)]
-    pub(crate) async fn render_c10_color_filter_fixture_for_test(
+    pub(crate) async fn render_color_filter_fixture_for_test(
         &mut self,
         surface: &mut Surface,
         scene: &Scene,
         filters: Vec<FilterList>,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C10ColorFilterRenderResultForTest> {
-        let prepared = self.prepare_c10_color_filter_fixture_for_test(
+    ) -> Result<ColorFilterRenderResultForTest> {
+        let prepared = self.prepare_color_filter_fixture_for_test(
             surface,
             scene,
             filters,
@@ -1570,10 +1572,9 @@ impl Renderer {
             stats.cache_hits = stats.cache_hits.saturating_add(self.stats.cache_hits);
         }
         let frame = {
-            let backend = self
-                .backend
-                .as_mut()
-                .expect("C10 fixture preflight confirmed the renderer backend is available");
+            let backend = self.backend.as_mut().expect(
+                "color-filter fixture preflight confirmed the renderer backend is available",
+            );
             #[cfg(any(
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
@@ -1621,7 +1622,7 @@ impl Renderer {
             },
             prepared.frame_start,
         )?;
-        Ok(C10ColorFilterRenderResultForTest {
+        Ok(ColorFilterRenderResultForTest {
             stats,
             working_format,
             output_extent: prepared.output_extent,
@@ -1633,14 +1634,14 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn prepare_c10_color_filter_fixture_for_test(
+    fn prepare_color_filter_fixture_for_test(
         &mut self,
         surface: &Surface,
         scene: &Scene,
         filters: Vec<FilterList>,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C10ColorFilterFixturePreparationForTest> {
+    ) -> Result<ColorFilterFixturePreparationForTest> {
         self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceRendering)?;
         self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceRendering)?;
@@ -1651,7 +1652,7 @@ impl Renderer {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "the private C10 fixture requires a device-backed surface",
+                "the private color-filter fixture requires a device-backed surface",
             )
         })?;
         let frame_start = Instant::now();
@@ -1664,7 +1665,7 @@ impl Renderer {
             parameters.base_color,
         )?;
         let graph =
-            super::frame::authored_c10_color_graph_for_test(filters, normalized.clone(), context)?;
+            super::frame::authored_filter_graph_for_test(filters, normalized.clone(), context)?;
         let capabilities = self
             .backend
             .as_mut()
@@ -1672,17 +1673,17 @@ impl Renderer {
                 Error::runtime_unavailable(
                     RuntimeOperation::SurfaceRendering,
                     RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                    "the private C10 fixture requires a renderer backend",
+                    "the private color-filter fixture requires a renderer backend",
                 )
             })?
             .device_capabilities(device_identity)
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C10 fixture lost immutable device capabilities",
+                    "the private color-filter fixture lost immutable device capabilities",
                 )
             })?;
-        let preparable = match self.classify_c10_fixture_dispatch(
+        let preparable = match self.classify_color_filter_fixture_dispatch(
             &graph,
             runtime_surface_format(surface),
             working_format,
@@ -1696,14 +1697,14 @@ impl Renderer {
                 | ExactSurfaceGraph::C12(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
-                        "the private C10 fixture left its exact renderer dispatch route",
+                        "the private color-filter fixture left its exact renderer dispatch route",
                     ));
                 }
             },
             RendererFrameDispatch::DirectVello(_) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C10 fixture left its exact renderer dispatch route",
+                    "the private color-filter fixture left its exact renderer dispatch route",
                 ));
             }
         };
@@ -1711,10 +1712,10 @@ impl Renderer {
         let source_spatial = preparable.first_color_spatial_for_test().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "the private C10 fixture lost its first exact color source",
+                "the private color-filter fixture lost its first exact color source",
             )
         })?;
-        Ok(C10ColorFilterFixturePreparationForTest {
+        Ok(ColorFilterFixturePreparationForTest {
             device_identity,
             frame_start,
             encode_start,
@@ -1725,17 +1726,17 @@ impl Renderer {
         })
     }
 
-    /// Private C11 authored-filter ingress into the shared exact graph executor.
+    /// Private spatial-filter ingress into the shared exact graph executor.
     #[cfg(test)]
-    pub(crate) async fn render_c11_spatial_filter_fixture_for_test(
+    pub(crate) async fn render_spatial_filter_fixture_for_test(
         &mut self,
         surface: &mut Surface,
         scene: &Scene,
         filters: Vec<FilterList>,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C11SpatialFilterRenderResultForTest> {
-        let prepared = self.prepare_c11_spatial_filter_fixture_for_test(
+    ) -> Result<SpatialFilterRenderResultForTest> {
+        let prepared = self.prepare_spatial_filter_fixture_for_test(
             surface,
             scene,
             filters,
@@ -1757,10 +1758,9 @@ impl Renderer {
             &mut uploaded_images,
         );
         let frame = {
-            let backend = self
-                .backend
-                .as_mut()
-                .expect("C11 fixture preflight confirmed the renderer backend is available");
+            let backend = self.backend.as_mut().expect(
+                "spatial-filter fixture preflight confirmed the renderer backend is available",
+            );
             #[cfg(any(
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
@@ -1797,7 +1797,7 @@ impl Renderer {
             },
             prepared.frame_start,
         )?;
-        Ok(C11SpatialFilterRenderResultForTest {
+        Ok(SpatialFilterRenderResultForTest {
             stats,
             working_format,
             output_extent: prepared.output_extent,
@@ -1807,14 +1807,14 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn prepare_c11_spatial_filter_fixture_for_test(
+    fn prepare_spatial_filter_fixture_for_test(
         &mut self,
         surface: &Surface,
         scene: &Scene,
         filters: Vec<FilterList>,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C11SpatialFilterFixturePreparationForTest> {
+    ) -> Result<SpatialFilterFixturePreparationForTest> {
         let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
         let frame_start = Instant::now();
         let encode_start = Instant::now();
@@ -1826,7 +1826,7 @@ impl Renderer {
             parameters.base_color,
         )?;
         let graph =
-            super::frame::authored_c10_color_graph_for_test(filters, normalized.clone(), context)?;
+            super::frame::authored_filter_graph_for_test(filters, normalized.clone(), context)?;
         let capabilities = self
             .backend
             .as_mut()
@@ -1834,10 +1834,10 @@ impl Renderer {
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C11 fixture lost immutable device capabilities",
+                    "the private spatial-filter fixture lost immutable device capabilities",
                 )
             })?;
-        let preparable = match self.classify_c11_fixture_dispatch(
+        let preparable = match self.classify_spatial_filter_fixture_dispatch(
             &graph,
             runtime_surface_format(surface),
             working_format,
@@ -1851,14 +1851,14 @@ impl Renderer {
                 | ExactSurfaceGraph::C12(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
-                        "the private C11 fixture left its exact renderer dispatch route",
+                        "the private spatial-filter fixture left its exact renderer dispatch route",
                     ));
                 }
             },
             RendererFrameDispatch::DirectVello(_) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C11 fixture left its exact renderer dispatch route",
+                    "the private spatial-filter fixture left its exact renderer dispatch route",
                 ));
             }
         };
@@ -1867,10 +1867,10 @@ impl Renderer {
             preparable.first_filter_spatial_for_test().ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C11 fixture lost its first spatial filter mapping",
+                    "the private spatial-filter fixture lost its first spatial mapping",
                 )
             })?;
-        Ok(C11SpatialFilterFixturePreparationForTest {
+        Ok(SpatialFilterFixturePreparationForTest {
             device_identity,
             frame_start,
             encode_start,
@@ -1882,17 +1882,21 @@ impl Renderer {
         })
     }
 
-    /// Private C12 bounded-backdrop ingress into the shared exact graph executor.
+    /// Private bounded-backdrop ingress into the shared exact graph executor.
     #[cfg(test)]
-    pub(crate) async fn render_c12_backdrop_fixture_for_test(
+    pub(crate) async fn render_bounded_backdrop_fixture_for_test(
         &mut self,
         surface: &mut Surface,
         scene: &Scene,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C12BackdropRenderResultForTest> {
-        let prepared =
-            self.prepare_c12_backdrop_fixture_for_test(surface, scene, parameters, working_format)?;
+    ) -> Result<BoundedBackdropRenderResultForTest> {
+        let prepared = self.prepare_bounded_backdrop_fixture_for_test(
+            surface,
+            scene,
+            parameters,
+            working_format,
+        )?;
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
             .await?;
         let mut stats = Stats {
@@ -1908,10 +1912,9 @@ impl Renderer {
             &mut uploaded_images,
         );
         let frame = {
-            let backend = self
-                .backend
-                .as_mut()
-                .expect("C12 fixture preflight confirmed the renderer backend is available");
+            let backend = self.backend.as_mut().expect(
+                "bounded-backdrop fixture preflight confirmed the renderer backend is available",
+            );
             render_exact_headless_graph_surface(backend, surface, prepared.graph).await
         };
         if frame.is_err()
@@ -1931,7 +1934,7 @@ impl Renderer {
             },
             prepared.frame_start,
         )?;
-        Ok(C12BackdropRenderResultForTest {
+        Ok(BoundedBackdropRenderResultForTest {
             stats,
             working_format,
             output_extent: prepared.output_extent,
@@ -1941,13 +1944,13 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn prepare_c12_backdrop_fixture_for_test(
+    fn prepare_bounded_backdrop_fixture_for_test(
         &mut self,
         surface: &Surface,
         scene: &Scene,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C12BackdropFixturePreparationForTest> {
+    ) -> Result<BoundedBackdropFixturePreparationForTest> {
         let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
         let frame_start = Instant::now();
         let encode_start = Instant::now();
@@ -1961,7 +1964,7 @@ impl Renderer {
         let FramePlan::GpuGraph(graph) = normalized.clone().plan_for(context)? else {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "the private C12 fixture did not produce a bounded backdrop graph",
+                "the private bounded-backdrop fixture did not produce a bounded backdrop graph",
             ));
         };
         let capabilities = self
@@ -1971,10 +1974,10 @@ impl Renderer {
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C12 fixture lost immutable device capabilities",
+                    "the private bounded-backdrop fixture lost immutable device capabilities",
                 )
             })?;
-        let preparable = match self.classify_c12_fixture_dispatch(
+        let preparable = match self.classify_bounded_backdrop_fixture_dispatch(
             &graph,
             runtime_surface_format(surface),
             working_format,
@@ -1985,14 +1988,14 @@ impl Renderer {
                 _ => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
-                        "the private C12 fixture left its exact renderer dispatch route",
+                        "the private bounded-backdrop fixture left its exact renderer dispatch route",
                     ));
                 }
             },
             RendererFrameDispatch::DirectVello(_) => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C12 fixture left its exact renderer dispatch route",
+                    "the private bounded-backdrop fixture left its exact renderer dispatch route",
                 ));
             }
         };
@@ -2001,10 +2004,10 @@ impl Renderer {
             preparable.backdrop_spatial_for_test().ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C12 fixture lost its exact backdrop mapping",
+                    "the private bounded-backdrop fixture lost its exact backdrop mapping",
                 )
             })?;
-        Ok(C12BackdropFixturePreparationForTest {
+        Ok(BoundedBackdropFixturePreparationForTest {
             device_identity,
             frame_start,
             encode_start,

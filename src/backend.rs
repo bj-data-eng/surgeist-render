@@ -3909,7 +3909,7 @@ impl Backend {
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let graph = super::frame::authored_filter_graph_for_test(filters, commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
@@ -4015,7 +4015,7 @@ impl Backend {
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let graph = super::frame::authored_filter_graph_for_test(filters, commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
@@ -4257,7 +4257,7 @@ impl Backend {
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let graph = super::frame::authored_filter_graph_for_test(filters, commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
@@ -4415,7 +4415,7 @@ impl Backend {
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::authored_c10_color_graph_for_test(filters, commands, context)?;
+        let graph = super::frame::authored_filter_graph_for_test(filters, commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
