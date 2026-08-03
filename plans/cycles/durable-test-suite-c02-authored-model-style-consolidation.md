@@ -44,6 +44,8 @@
   count assertion is added.
 - C03 owns runtime graph/pass/shader/backend/renderer/resource/transaction/
   Vello/surface/presentation/readback consolidation and `cNN` execution names.
+  All tests in `src/vello_engine/resources.rs`, including atlas-recovery
+  behavior, remain C03-owned and are read-only context in C02.
   C04 owns final cross-domain fixture and complete naming reconciliation.
 - `src/tests.rs` remains one file until P02-I02. Production algorithms, public
   APIs, manifests, dependencies, features, targets, docs, examples, fixtures,
@@ -69,7 +71,7 @@
 - Area: tests and solely owned private test support for capabilities, typed
   errors, geometry, transforms, paint, shapes, image buffers/resources, layers,
   scenes, text models, and their construction/conversion/validation behavior in
-  `src/tests.rs` and `src/vello_engine/resources.rs` where applicable.
+  `src/tests.rs`. Runtime/Vello resource tests are excluded.
 - Outcome: every in-scope test is retained, consolidated, renamed, or deleted
   according to specification S04-S05; names state the subject, triggering
   condition where needed, and observable result without planning provenance.
