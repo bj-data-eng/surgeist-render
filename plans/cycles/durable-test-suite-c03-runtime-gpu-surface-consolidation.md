@@ -4,7 +4,7 @@
 
 - Cycle: `P02/I01/S01/C03`.
 - Owning repository: `surgeist-render`.
-- Status: `reviewed`.
+- Status: `in_progress`.
 - Cycle base and published prerequisite:
   `d6e33a40196f334e8070739ad44473174eef8e6b` (`P02/I01/S01/C02`),
   verified on local `main`, `origin/main`, and observed authority-remote `main`
