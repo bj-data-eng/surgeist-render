@@ -295,17 +295,29 @@ models do not depend on preparation, encoding, backend, test-support, or higher
 phases. Production children never depend on `test_support`. Reference modules
 remain test-only.
 
-This mechanical initiative does not eliminate the following existing
-crate-level mutual coordination edges:
+This mechanical initiative does not eliminate the following complete set of
+existing bidirectional edges among the module directories in M05:
 
 - `backend::execute` consumes transactions and commit payloads owned by
   `gpu_transaction::{mod,graph,vello}`, while those transaction owners consume
   device signals owned by `backend::device`;
+- `backend::{mod,execute}` consumes lowered, prepared, and encoded graph
+  contracts owned by `pass::{model,lower,prepare,encode}`, while pass validation
+  and preparation consume capabilities owned by `backend::device`;
+- `backend::{mod,execute,offscreen}` consumes manager, cleanup, format, and
+  lease contracts owned by `resource::{mod,manager,lease}`, while resource
+  realization consumes capabilities owned by `backend::device`;
+- `backend::{mod,device,execute}` consumes public policy and cache-budget types
+  owned by `renderer::options`, while `renderer::{mod,dispatch,publication}`
+  consumes the backend front door and its execution results;
 - `pass::{model,parameters}` supplies runtime facts serialized or keyed by
   `shader::{parameters,key,validate}`, while `pass::prepare` consumes the
   realization/cache contracts owned by `shader::{pipeline,cache}`;
 - `frame::mod` consumes public `renderer::options::Antialiasing`, while
   `renderer::dispatch` consumes the frame-planning front door;
+- `pass::{model,prepare}` consumes public policy types owned by
+  `renderer::options`, while `renderer::{dispatch,test_support}` consumes the
+  pass lowering, preparation, and diagnostic front doors;
 - `resource::{manager,lease}` consumes public
   `renderer::options::ResourceCacheBudget`, while renderer/backend orchestration
   consumes the resource front door.
@@ -314,7 +326,7 @@ Those types remain with the exact owners above because relocating the public
 option types or transaction, pass, shader, device, and resource contracts would
 be an architectural change rather than a file move. Their imports must name the
 owning front door or child explicitly; no compatibility shim is added. These
-four baseline edges are allowed and are not evidence of an incomplete move.
+eight baseline edges are allowed and are not evidence of an incomplete move.
 The initiative may not introduce another crate-level mutual edge.
 
 If two proposed children within one module directory would require a cycle, the
