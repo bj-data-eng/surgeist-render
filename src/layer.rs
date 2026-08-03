@@ -53,16 +53,6 @@ impl Layer {
         self
     }
 
-    #[cfg(test)]
-    pub(crate) fn try_install_resolved_alpha_mask_contract_for_test(
-        self,
-        image: Image,
-        bounds: Rect,
-    ) -> Result<Self> {
-        let mask = ResolvedLayerAlphaMask::try_new(image, bounds)?;
-        Ok(self.with_resolved_alpha_mask(mask))
-    }
-
     pub fn try_filter(mut self, filter: Filter) -> Result<Self> {
         validate_filter(filter)?;
         self.filter = Some(filter);

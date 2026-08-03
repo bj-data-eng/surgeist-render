@@ -7091,18 +7091,12 @@ fn resolved_alpha_mask_requires_finite_positive_local_bounds() {
         Rect::new(0.0, 0.0, -1.0, 1.0),
         Rect::new(0.0, 0.0, 1.0, -1.0),
     ];
-    let rejects_invalid_bounds = invalid_bounds.into_iter().all(|bounds| {
-        Layer::new()
-            .try_install_resolved_alpha_mask_contract_for_test(image.clone(), bounds)
-            .is_err()
-    });
+    let rejects_invalid_bounds = invalid_bounds
+        .into_iter()
+        .all(|bounds| ResolvedLayerAlphaMask::try_new(image.clone(), bounds).is_err());
     let zero_sized_image = Image::from_rgba(Size::new(0.0, 0.0), Arc::<[u8]>::from([])).unwrap();
-    let accepts_zero_sized_image = Layer::new()
-        .try_install_resolved_alpha_mask_contract_for_test(
-            zero_sized_image,
-            Rect::new(2.0, 3.0, 4.0, 5.0),
-        )
-        .is_ok();
+    let accepts_zero_sized_image =
+        ResolvedLayerAlphaMask::try_new(zero_sized_image, Rect::new(2.0, 3.0, 4.0, 5.0)).is_ok();
 
     assert!(
         rejects_invalid_bounds && accepts_zero_sized_image,
@@ -7126,9 +7120,11 @@ fn resolved_mask_normalization_preserves_image_identity_sampling_and_local_bound
     let expected_bytes = image.bytes.clone();
     let mut scene = Scene::new();
     scene.layer(
-        Layer::new()
-            .try_install_resolved_alpha_mask_contract_for_test(image, bounds)
-            .unwrap_or_panic_for_test("the valid resolved-mask normalization fixture must install"),
+        Layer::new().with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(image, bounds).unwrap_or_panic_for_test(
+                "the valid resolved-mask normalization fixture must install",
+            ),
+        ),
         |scene| {
             scene.fill(bounds, Color::BLACK);
         },
@@ -7221,8 +7217,10 @@ fn transitional_resolved_mask_bridge_preserves_bounds_quality_extend_and_transfo
         Layer::new()
             .try_transform(transform)
             .unwrap()
-            .try_install_resolved_alpha_mask_contract_for_test(transformed_mask, mask_bounds)
-            .unwrap_or_panic_for_test("the transformed staged mask fixture must install"),
+            .with_resolved_alpha_mask(
+                ResolvedLayerAlphaMask::try_new(transformed_mask, mask_bounds)
+                    .unwrap_or_panic_for_test("the transformed staged mask fixture must install"),
+            ),
         |scene| {
             scene.fill(source_bounds, Color::BLACK);
         },
