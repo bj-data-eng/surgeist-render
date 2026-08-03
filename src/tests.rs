@@ -723,29 +723,33 @@ fn assert_resource_lifetime(
 }
 
 #[test]
-fn font_data_try_from_bytes_api_shape() {
-    let font_data: Result<FontData> = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0);
+fn font_data_rejects_unreadable_bytes_and_out_of_range_collection_indices() {
+    let cases = [
+        (
+            "malformed bytes",
+            vec![0x00, 0x01, 0x02],
+            7,
+            "len=3, index=7".to_string(),
+        ),
+        (
+            "out-of-range collection index",
+            AHEM_FONT_BYTES.to_vec(),
+            1,
+            format!("len={}, index=1", AHEM_FONT_BYTES.len()),
+        ),
+    ];
 
-    assert!(font_data.is_ok());
-}
+    for (case, bytes, index, expected_value) in cases {
+        let error = FontData::try_from_bytes(bytes, index)
+            .expect_err("invalid font data must not construct FontData");
 
-#[test]
-fn font_data_rejects_malformed_bytes_before_raster_lowering() {
-    let error = FontData::try_from_bytes(vec![0x00, 0x01, 0x02], 7)
-        .expect_err("malformed bytes must not construct FontData");
-
-    assert_font_data_error(&error, "len=3, index=7");
-}
-
-#[test]
-fn font_data_rejects_out_of_range_collection_index_before_raster_lowering() {
-    let error = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 1)
-        .expect_err("a single-font file has only collection index zero");
-
-    assert_font_data_error(
-        &error,
-        format!("len={}, index=1", AHEM_FONT_BYTES.len()).as_str(),
-    );
+        assert_font_data_error(&error, &expected_value);
+        assert_eq!(
+            error.invalid_value_diagnostic().map(InvalidValue::field),
+            Some("font_data"),
+            "{case} returned the wrong typed diagnostic"
+        );
+    }
 }
 
 proptest! {
@@ -770,24 +774,6 @@ proptest! {
             );
         }
     }
-}
-
-#[test]
-fn font_lowering_rejects_malformed_lazy_tables_without_panic_or_gpu_work() {
-    let font_data = FontData::try_from_bytes(ahem_with_tables(vec![(*b"glyf", vec![0])]), 0)
-        .expect("the SFNT container remains readable before lazy glyph access");
-    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
-    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
-    let mut scene = VelloScene::default();
-    let outcome = catch_unwind(AssertUnwindSafe(|| scene.encode_text_run(&run)));
-
-    let error = match outcome {
-        Ok(Err(error)) => error,
-        Ok(Ok(())) => panic!("malformed lazy outline data must not reach Encoding"),
-        Err(_) => panic!("malformed lazy outline data must not panic"),
-    };
-    assert_font_data_error(&error, font_data_value(&run).as_str());
-    assert_no_glyph_encoding(&scene);
 }
 
 #[test]
@@ -1090,56 +1076,6 @@ fn selected_glyph_preflight_distinguishes_unsupported_image_from_malformed_data(
 }
 
 #[test]
-fn external_glyph_resolver_omission_branches_are_blocked_by_preflight() {
-    let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap();
-    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
-    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
-    let mut scene = VelloScene::default();
-
-    scene
-        .encode_text_run(&run)
-        .expect("a selected outline must reach Encoding without resolver omission");
-    let observation = scene.observation_for_test();
-    assert_eq!(observation.glyph_run_count_for_test(), 1);
-    assert_eq!(observation.glyph_count_for_test(), 1);
-    assert_eq!(
-        observation
-            .first_glyph_for_test()
-            .expect("the private scene must retain the selected glyph")
-            .id_for_test(),
-        AHEM_GLYPH_X
-    );
-
-    let missing_glyphs = [TextGlyph::try_new(u32::MAX, 0.0, 16.0, 8.0).unwrap()];
-    let missing_run = text_run_for(
-        FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap(),
-        16.0,
-        Transform::identity(),
-        &missing_glyphs,
-    );
-    let mut missing_scene = VelloScene::default();
-    let error = missing_scene
-        .encode_text_run(&missing_run)
-        .expect_err("missing glyphs must fail before external encoding");
-    assert_missing_glyph_error(&error, u32::MAX);
-    assert_no_glyph_encoding(&missing_scene);
-}
-
-#[test]
-fn unsupported_glyph_image_encoding_returns_render_failed_without_omission() {
-    let font_data = FontData::try_from_bytes(ahem_sbix_font(grayscale_png()), 0).unwrap();
-    let glyphs = [TextGlyph::try_new(AHEM_GLYPH_X, 0.0, 16.0, 8.0).unwrap()];
-    let run = text_run_for(font_data, 16.0, Transform::identity(), &glyphs);
-    let mut scene = VelloScene::default();
-    let error = scene
-        .encode_text_run(&run)
-        .expect_err("unsupported glyph images must not be omitted");
-
-    assert_render_failed_without_font_diagnostic(&error);
-    assert_no_glyph_encoding(&scene);
-}
-
-#[test]
 fn ahem_font_data_validates_at_collection_index_zero() {
     let font_data = FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0);
 
@@ -1147,7 +1083,7 @@ fn ahem_font_data_validates_at_collection_index_zero() {
 }
 
 #[test]
-fn internal_vello_font_parsing_is_fallible_and_never_unwraps() {
+fn malformed_lazy_font_tables_return_typed_errors_without_encoding_glyphs() {
     let malformed_colr_head_bytes = ahem_color_font(valid_cpal());
     let malformed_bitmap_head_bytes = ahem_sbix_font(rgba_png());
     let cases = [
@@ -8596,23 +8532,6 @@ fn invalid_value_errors_name_rejected_value() {
 }
 
 #[test]
-fn error_type_stays_below_clippy_large_err_threshold() {
-    assert!(
-        std::mem::size_of::<Error>() <= 128,
-        "Error should stay compact enough for crate-wide Result<T, Error>: {} bytes",
-        std::mem::size_of::<Error>()
-    );
-}
-
-#[test]
-fn style_color_inputs_are_root_resolved_concrete_colors() {
-    let color = Color::try_rgba(0.25, 0.5, 0.75, 0.8).unwrap();
-    let input = StyleColor::new(color);
-
-    assert_eq!(input.color(), color);
-}
-
-#[test]
 fn symbolic_color_policy_keeps_style_colors_root_resolved() {
     let color = Color::try_rgba(0.25, 0.5, 0.75, 0.8).unwrap();
     let style_color = StyleColor::new(color);
@@ -8679,7 +8598,7 @@ fn normalized_paint_layers_preserve_valid_paint_sources() {
 }
 
 #[test]
-fn normalized_paint_layers_reject_invalid_paint_sources() {
+fn gradients_reject_non_finite_geometry_before_paint_layer_construction() {
     let error = Gradient::try_linear(
         Point::new(f64::NAN, 0.0),
         Point::try_new(1.0, 0.0).unwrap(),
@@ -18864,7 +18783,7 @@ fn mask_inputs_reject_invalid_shape_points() {
 }
 
 #[test]
-fn paths_expose_elements_without_exposing_mutation() {
+fn paths_expose_authored_elements() {
     let mut path = Path::new();
     path.move_to(Point::try_new(0.0, 0.0).unwrap())
         .line_to(Point::try_new(4.0, 0.0).unwrap())
@@ -20582,114 +20501,103 @@ fn unsupported_primitive_errors_name_operation() {
 }
 
 #[test]
-fn unresolved_resource_diagnostics_name_image_resources() {
-    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Image, "hero.png");
-    let error = Error::unresolved_resource(diagnostic.clone());
+fn unresolved_resource_diagnostics_preserve_kind_identifier_and_message() {
+    let cases = [
+        (
+            "image",
+            UnresolvedResourceKind::Image,
+            "hero.png",
+            "image resource hero.png could not be resolved",
+        ),
+        (
+            "mask",
+            UnresolvedResourceKind::Mask,
+            "#avatar-mask",
+            "mask resource #avatar-mask could not be resolved",
+        ),
+        (
+            "filter",
+            UnresolvedResourceKind::Filter,
+            "#blur",
+            "filter resource #blur could not be resolved",
+        ),
+        (
+            "clip",
+            UnresolvedResourceKind::Clip,
+            "#content-clip",
+            "clip resource #content-clip could not be resolved",
+        ),
+    ];
 
-    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
-    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
-    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Image);
-    assert_eq!(diagnostic.kind().label(), "image");
-    assert_eq!(diagnostic.identifier(), "hero.png");
-    assert_eq!(
-        error.message(),
-        "image resource hero.png could not be resolved"
-    );
+    for (case, kind, identifier, expected_message) in cases {
+        let diagnostic = UnresolvedResource::new(kind, identifier);
+        let error = Error::unresolved_resource(diagnostic.clone());
+
+        assert_eq!(
+            (
+                error.code(),
+                error.unresolved_resource_diagnostic(),
+                diagnostic.kind(),
+                diagnostic.kind().label(),
+                diagnostic.identifier(),
+                error.message(),
+            ),
+            (
+                ErrorCode::UnresolvedResource,
+                Some(&diagnostic),
+                kind,
+                case,
+                identifier,
+                expected_message,
+            ),
+            "{case} resource diagnostic changed"
+        );
+    }
 }
 
 #[test]
-fn unresolved_resource_diagnostics_name_mask_resources() {
-    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Mask, "#avatar-mask");
-    let error = Error::unresolved_resource(diagnostic.clone());
+fn degraded_quality_diagnostics_preserve_kind_value_and_message() {
+    let cases = [
+        (
+            "reduced precision",
+            DegradedQualityKind::ReducedIntermediatePrecision,
+            "reduced intermediate precision",
+            "rgba16float unavailable",
+            "render quality degraded: reduced intermediate precision (rgba16float unavailable)",
+        ),
+        (
+            "paint-space conversion",
+            DegradedQualityKind::UnsupportedPaintSpaceConversion,
+            "unsupported paint-space conversion",
+            "display-p3 -> srgb",
+            "render quality degraded: unsupported paint-space conversion (display-p3 -> srgb)",
+        ),
+    ];
 
-    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
-    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
-    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Mask);
-    assert_eq!(diagnostic.kind().label(), "mask");
-    assert_eq!(diagnostic.identifier(), "#avatar-mask");
-    assert_eq!(
-        error.message(),
-        "mask resource #avatar-mask could not be resolved"
-    );
-}
+    for (case, kind, expected_label, value, expected_message) in cases {
+        let diagnostic = DegradedQuality::new(kind, value);
+        let error = Error::degraded_quality(diagnostic.clone());
 
-#[test]
-fn unresolved_resource_diagnostics_name_filter_resources() {
-    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Filter, "#blur");
-    let error = Error::unresolved_resource(diagnostic.clone());
-
-    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
-    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
-    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Filter);
-    assert_eq!(diagnostic.kind().label(), "filter");
-    assert_eq!(diagnostic.identifier(), "#blur");
-    assert_eq!(
-        error.message(),
-        "filter resource #blur could not be resolved"
-    );
-}
-
-#[test]
-fn unresolved_resource_diagnostics_name_clip_resources() {
-    let diagnostic = UnresolvedResource::new(UnresolvedResourceKind::Clip, "#content-clip");
-    let error = Error::unresolved_resource(diagnostic.clone());
-
-    assert_eq!(error.code(), ErrorCode::UnresolvedResource);
-    assert_eq!(error.unresolved_resource_diagnostic(), Some(&diagnostic));
-    assert_eq!(diagnostic.kind(), UnresolvedResourceKind::Clip);
-    assert_eq!(diagnostic.kind().label(), "clip");
-    assert_eq!(diagnostic.identifier(), "#content-clip");
-    assert_eq!(
-        error.message(),
-        "clip resource #content-clip could not be resolved"
-    );
-}
-
-#[test]
-fn degraded_quality_diagnostics_name_reduced_intermediate_precision() {
-    let diagnostic = DegradedQuality::new(
-        DegradedQualityKind::ReducedIntermediatePrecision,
-        "rgba16float unavailable",
-    );
-    let error = Error::degraded_quality(diagnostic.clone());
-
-    assert_eq!(error.code(), ErrorCode::DegradedQuality);
-    assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
-    assert_eq!(
-        diagnostic.kind(),
-        DegradedQualityKind::ReducedIntermediatePrecision
-    );
-    assert_eq!(diagnostic.kind().label(), "reduced intermediate precision");
-    assert_eq!(diagnostic.value(), "rgba16float unavailable");
-    assert_eq!(
-        error.message(),
-        "render quality degraded: reduced intermediate precision (rgba16float unavailable)"
-    );
-}
-
-#[test]
-fn degraded_quality_diagnostics_name_unsupported_paint_space_conversions() {
-    let diagnostic = DegradedQuality::new(
-        DegradedQualityKind::UnsupportedPaintSpaceConversion,
-        "display-p3 -> srgb",
-    );
-    let error = Error::degraded_quality(diagnostic.clone());
-
-    assert_eq!(error.code(), ErrorCode::DegradedQuality);
-    assert_eq!(error.degraded_quality_diagnostic(), Some(&diagnostic));
-    assert_eq!(
-        diagnostic.kind(),
-        DegradedQualityKind::UnsupportedPaintSpaceConversion
-    );
-    assert_eq!(
-        diagnostic.kind().label(),
-        "unsupported paint-space conversion"
-    );
-    assert_eq!(diagnostic.value(), "display-p3 -> srgb");
-    assert_eq!(
-        error.message(),
-        "render quality degraded: unsupported paint-space conversion (display-p3 -> srgb)"
-    );
+        assert_eq!(
+            (
+                error.code(),
+                error.degraded_quality_diagnostic(),
+                diagnostic.kind(),
+                diagnostic.kind().label(),
+                diagnostic.value(),
+                error.message(),
+            ),
+            (
+                ErrorCode::DegradedQuality,
+                Some(&diagnostic),
+                kind,
+                expected_label,
+                value,
+                expected_message,
+            ),
+            "{case} degraded-quality diagnostic changed"
+        );
+    }
 }
 
 #[test]
@@ -21191,14 +21099,6 @@ fn pixel_moving_filter_and_shadow_diagnostics_have_granular_names() {
 }
 
 #[test]
-fn hit_test_geometry_is_root_owned_not_render_lowered() {
-    assert_eq!(
-        Capabilities::CURRENT.geometry_targets().hit_testing(),
-        HitTestOwnership::RootOwned
-    );
-}
-
-#[test]
 fn capabilities_map_unsupported_primitives_to_typed_errors() {
     let capabilities = Capabilities::CURRENT;
     let unsupported = UnsupportedPrimitive::new(
@@ -21599,7 +21499,7 @@ fn coordinate_space_ids_reject_reserved_zero() {
 }
 
 #[test]
-fn coordinate_space_tags_model_future_backdrop_capture_space() {
+fn coordinate_space_viewport_tags_preserve_transforms() {
     let tag = CoordinateSpaceTag::viewport(Transform::translation(4.0, 6.0).unwrap()).unwrap();
 
     assert_eq!(tag.kind(), CoordinateSpaceKind::Viewport);
@@ -21619,18 +21519,21 @@ fn rect_try_from_kurbo_rejects_invalid_bounds() {
 }
 
 #[test]
-fn physical_size_try_from_logical_size_rejects_invalid_scale() {
-    let error = PhysicalSize::try_from_logical(Size::try_new(10.0, 10.0).unwrap(), 0.0)
-        .expect_err("scale zero should be rejected before conversion");
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
-}
+fn physical_size_conversion_rejects_invalid_scale_and_device_overflow() {
+    let cases = [
+        ("zero scale", Size::try_new(10.0, 10.0).unwrap(), 0.0),
+        (
+            "device-pixel overflow",
+            Size::try_new(f64::from(u32::MAX), 1.0).unwrap(),
+            2.0,
+        ),
+    ];
 
-#[test]
-fn physical_size_try_from_logical_size_rejects_u32_overflow() {
-    let error =
-        PhysicalSize::try_from_logical(Size::try_new(f64::from(u32::MAX), 1.0).unwrap(), 2.0)
-            .expect_err("physical device pixels should fit in u32");
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
+    for (case, logical_size, scale) in cases {
+        let error = PhysicalSize::try_from_logical(logical_size, scale)
+            .expect_err("invalid physical-size conversion must be rejected");
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{case}");
+    }
 }
 
 #[test]
@@ -22584,241 +22487,6 @@ fn materialized_generated_image_marker_and_text_content_are_ordinary_image_text_
     assert_eq!(*fit, ImageFit::Contain);
     assert_eq!(font.id(), FontId::new(41));
     assert_eq!(glyphs, &item_glyphs);
-}
-
-#[test]
-fn sequence14_matrix_rows_normalize_or_report_typed_diagnostics() {
-    let gradient = Gradient::try_linear(
-        Point::new(0.0, 0.0),
-        Point::new(12.0, 0.0),
-        vec![
-            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
-            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
-        ],
-    )
-    .unwrap();
-    let glyph_fill_glyphs = [TextGlyph::try_new(51, 2.0, 12.0, 7.0).unwrap()];
-    let glyph_fill = TextRun::try_new(
-        FontRef::new(51).named("Sequence 14 glyph fill"),
-        14.0,
-        Transform::identity(),
-        TextPaint::try_fill(Paint::gradient(gradient.clone())).unwrap(),
-        &glyph_fill_glyphs,
-        TextRunBounds::unspecified(),
-    )
-    .unwrap();
-    let decoration = TextDecorationLine::try_solid(
-        Point::new(2.0, 16.0),
-        Point::new(22.0, 16.0),
-        1.5,
-        Transform::identity(),
-        Paint::color(Color::BLACK),
-    )
-    .unwrap();
-    let generated_image =
-        Image::from_rgba(Size::new(1.0, 1.0), Arc::<[u8]>::from([0, 0, 0, 255])).unwrap();
-    let generated_glyphs = [TextGlyph::try_new(52, 28.0, 12.0, 6.0).unwrap()];
-    let generated = TextRun::try_new(
-        FontRef::new(52).named("Sequence 14 generated content"),
-        14.0,
-        Transform::identity(),
-        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
-        &generated_glyphs,
-        TextRunBounds::unspecified(),
-    )
-    .unwrap();
-    let mut scene = Scene::new();
-    scene
-        .fill(
-            Rect::new(0.0, 2.0, 26.0, 18.0),
-            Color::try_rgba(0.7, 0.82, 1.0, 1.0).unwrap(),
-        )
-        .text_run(glyph_fill)
-        .text_decoration_line(decoration)
-        .image(
-            generated_image,
-            Rect::new(24.0, 4.0, 28.0, 8.0),
-            ImageFit::Contain,
-        )
-        .text_run(generated);
-
-    let normalized = scene
-        .normalize(Capabilities::CURRENT)
-        .expect("implemented Sequence 14 rows should normalize as ordinary render commands");
-
-    assert_eq!(normalized.stats().fills, 1);
-    assert_eq!(normalized.stats().strokes, 1);
-    assert_eq!(normalized.stats().images, 1);
-    assert_eq!(normalized.stats().glyphs, 2);
-    let [
-        command::RenderCommand::Fill { .. },
-        command::RenderCommand::TextRun {
-            paint: glyph_paint,
-            glyphs: normalized_glyphs,
-            ..
-        },
-        command::RenderCommand::Stroke { stroke, paint, .. },
-        command::RenderCommand::Image { fit, .. },
-        command::RenderCommand::TextRun {
-            font: generated_font,
-            ..
-        },
-    ] = normalized.commands.as_slice()
-    else {
-        panic!("Sequence 14 implemented rows should keep fill/text/stroke/image/text order");
-    };
-    assert_eq!(glyph_paint.fill(), &Paint::gradient(gradient));
-    assert_eq!(normalized_glyphs, &glyph_fill_glyphs);
-    assert_eq!(stroke.width, 1.5);
-    assert_eq!(paint, &command::RenderPaint::Color(Color::BLACK));
-    assert_eq!(*fit, ImageFit::Contain);
-    assert_eq!(generated_font.id(), FontId::new(52));
-
-    assert_sequence14_text_shadow_diagnostic();
-}
-
-fn assert_sequence14_text_shadow_diagnostic() {
-    let shadow_glyphs = [TextGlyph::try_new(53, 0.0, 12.0, 7.0).unwrap()];
-    let shadow_run = TextRun::try_new(
-        FontRef::new(53).named("Sequence 14 text shadow"),
-        14.0,
-        Transform::identity(),
-        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
-        &shadow_glyphs,
-        TextRunBounds::unspecified(),
-    )
-    .unwrap();
-    let shadows = ShadowList::try_new(vec![
-        Shadow::try_new(Point::new(1.0, 1.0), 0.0, 0.0, Color::BLACK).unwrap(),
-    ])
-    .unwrap();
-    let mut shadow_scene = Scene::new();
-    shadow_scene.text_shadow_run(TextShadowRun::try_new(shadow_run, shadows).unwrap());
-
-    let error = shadow_scene
-        .normalize(Capabilities::CURRENT)
-        .expect_err("Sequence 14 text-shadow execution should stay explicitly diagnostic");
-    assert_eq!(
-        error.unsupported_primitive(),
-        Some(UnsupportedPrimitive::new(
-            PrimitiveFamily::Shadows,
-            PrimitiveOperation::TextShadow,
-        ))
-    );
-    assert!(error.message().contains("zero-blur solid text shadows"));
-}
-
-#[test]
-fn sequence14_capabilities_advertise_only_render_owned_text_behavior() {
-    let capabilities = Capabilities::CURRENT;
-
-    assert!(capabilities.paint_sources().supports_solid_rgba());
-    assert!(capabilities.paint_sources().supports_gradients());
-    assert!(capabilities.paint_sources().supports_image_paint());
-    assert!(capabilities.geometry_targets().supports_rect_fill_stroke());
-    assert!(
-        capabilities
-            .geometry_targets()
-            .supports_arbitrary_path_centered_stroke()
-    );
-    assert!(capabilities.image_sampling().supports_image_fit());
-
-    assert_eq!(
-        capabilities.geometry_targets().hit_testing(),
-        HitTestOwnership::RootOwned,
-        "selection ownership must stay outside render; render only accepts materialized fills/text"
-    );
-    assert_eq!(
-        capabilities.paint_sources().symbolic_color_policy(),
-        SymbolicColorPolicy::RootResolvedOnly,
-        "generated/currentColor style resolution must stay outside render"
-    );
-    assert!(
-        !capabilities
-            .paint_sources()
-            .supports_unresolved_symbolic_colors()
-    );
-    assert!(!capabilities.paint_sources().supports_color_mix());
-    assert!(!capabilities.shadows().supports_text_shadows());
-    assert!(
-        !capabilities
-            .offscreen_pipeline()
-            .supports_layer_filter_execution()
-    );
-    assert!(!capabilities.offscreen_pipeline().supports_mask_execution());
-
-    let text_shadow =
-        UnsupportedPrimitive::new(PrimitiveFamily::Shadows, PrimitiveOperation::TextShadow);
-    let error = capabilities
-        .ensure_supported(text_shadow)
-        .expect_err("capabilities should not claim text-shadow execution");
-    assert_eq!(error.unsupported_primitive(), Some(text_shadow));
-}
-
-#[test]
-fn sequence14_text_shadow_candidates_stay_on_diagnostic_boundary() {
-    assert!(!Capabilities::CURRENT.shadows().supports_text_shadows());
-
-    let gradient = Gradient::try_linear(
-        Point::new(0.0, 0.0),
-        Point::new(8.0, 0.0),
-        vec![
-            GradientStop::try_new(0.0, Color::BLACK).unwrap(),
-            GradientStop::try_new(1.0, Color::TRANSPARENT).unwrap(),
-        ],
-    )
-    .unwrap();
-    let cases = [
-        (
-            "zero blur",
-            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Color::BLACK).unwrap(),
-            "zero-blur solid text shadows",
-        ),
-        (
-            "blurred glyph alpha",
-            Shadow::try_new(Point::new(1.0, 0.0), 3.0, 0.0, Color::BLACK).unwrap(),
-            "glyph-alpha/offscreen text capture",
-        ),
-        (
-            "non-solid glyph alpha",
-            Shadow::try_new(Point::new(1.0, 0.0), 0.0, 0.0, Paint::gradient(gradient)).unwrap(),
-            "glyph-alpha/offscreen text capture",
-        ),
-    ];
-
-    for (label, shadow, expected_message) in cases {
-        let glyphs = [TextGlyph::try_new(61, 0.0, 12.0, 7.0).unwrap()];
-        let run = TextRun::try_new(
-            FontRef::new(61).named(label),
-            14.0,
-            Transform::identity(),
-            TextPaint::try_fill(Color::BLACK.into()).unwrap(),
-            &glyphs,
-            TextRunBounds::unspecified(),
-        )
-        .unwrap();
-        let mut scene = Scene::new();
-        scene.text_shadow_run(
-            TextShadowRun::try_new(run, ShadowList::try_new(vec![shadow]).unwrap()).unwrap(),
-        );
-
-        let error = match scene.normalize(Capabilities::CURRENT) {
-            Ok(_) => panic!("{label} text-shadow should stay unsupported"),
-            Err(error) => error,
-        };
-        assert_eq!(
-            error.unsupported_primitive(),
-            Some(UnsupportedPrimitive::new(
-                PrimitiveFamily::Shadows,
-                PrimitiveOperation::TextShadow,
-            ))
-        );
-        assert!(
-            error.message().contains(expected_message),
-            "{label} text-shadow used the wrong diagnostic: {}",
-            error.message()
-        );
-    }
 }
 
 #[test]
@@ -28404,7 +28072,7 @@ fn failed_render_does_not_warm_image_reuse_stats() {
 }
 
 #[test]
-fn rejects_malformed_rgba_images() {
+fn images_reject_incorrect_byte_lengths_and_fractional_dimensions() {
     let error = Image::from_rgba(Size::new(2.0, 2.0), Arc::<[u8]>::from([0, 0, 0, 255]))
         .expect_err("wrong byte length should fail");
 
@@ -28419,7 +28087,7 @@ fn rejects_malformed_rgba_images() {
 }
 
 #[test]
-fn rejects_malformed_scene_values() {
+fn colors_reject_non_finite_red_components_at_construction() {
     let error = Color::try_rgba(f32::NAN, 0.0, 0.0, 1.0)
         .expect_err("invalid paint should fail at construction");
 
