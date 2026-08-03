@@ -50,7 +50,7 @@
 ### C02 Authored Model And Style Test Consolidation
 
 - Owning repository: `surgeist-render`.
-- Specification sections: S01, S04-S05, S07-S12.
+- Specification sections: S01-S02, S04-S05, S07-S12.
 - Prerequisites: published C01 candidate and its complete handoff.
 - Entry state: authored and normalized geometry, scene, paint, image, layer,
   text, style, capability, and validation tests use behavioral evidence but
@@ -67,7 +67,7 @@
 ### C03 Runtime GPU Surface And Lifecycle Test Consolidation
 
 - Owning repository: `surgeist-render`.
-- Specification sections: S01, S04-S05, S07-S12.
+- Specification sections: S01-S02, S04-S05, S07-S12.
 - Prerequisites: published C02 candidate and its complete handoff.
 - Entry state: frame, graph, pass, shader, backend, renderer, resource,
   transaction, Vello, surface, presentation, and readback tests remain
