@@ -78,8 +78,44 @@
   cross-child coordination in `style/mod.rs`.
 - Use explicit sibling imports and the narrowest visibility; do not copy an
   item or add forwarding-only functions.
-- Required focused evidence: the same pre/post tests selected for every moved
-  responsibility, plus default and combined-feature check/test/Clippy and fmt.
+- Required focused pre/post commands, each of which must select at least one
+  test and pass before and after the move:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render style_reference_identifiers
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render image_placement
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render image_repeat_plan
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render background_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render box_decoration_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render border_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render outlines_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render filter_lists_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render filtered_image_paint_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render backdrop_filter_input_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render clip_input
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render mask_input
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render mask_layer_stack
+  ```
+
+- Task acceptance commands after the focused repetition:
+
+  ```sh
+  test ! -e src/style.rs
+  for required in src/style/mod.rs src/style/image.rs src/style/filter.rs \
+    src/style/clip.rs src/style/mask.rs src/style/decoration.rs \
+    src/style/background.rs; do test -f "$required"; done
+  test -z "$(rg -n 'include!|#\s*\[\s*path\s*=' src/style || true)"
+  test -z "$(git diff d5ac5c23b3c66d3fa451bed6b751f1c82275b5d1 -- src/lib.rs Cargo.toml)"
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render --features render-window,render-web
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
+  git diff --check
+  ```
+
 - Commit only the T01 range and return a complete move/visibility inventory for
   task review.
 
@@ -100,9 +136,45 @@
   crate-level test-only compilation boundary and every oracle byte/result.
 - Reconcile C01 module declarations/reexports/imports without reopening T01
   behavior or changing public source.
-- Required focused evidence: identical pre/post reference operations/oracles,
-  default and combined-feature check/test/Clippy, fmt, and the complete C01
-  matrix on the exact task head.
+- Required focused pre/post commands, each of which must select at least one
+  test and pass before and after the move:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_buffer_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_premultiplied_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_source_over_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_pixels_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_blends_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_alpha_masks_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_blur_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render reference_color_filter_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render compiled_color_filter_pipeline_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render image_straight_rgba8_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render materialized_drop_shadow_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render materialized_image_filter_reference_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render resolved_alpha_masks_match_reference_
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render direct_vello_blend_modes_match_reference_
+  ```
+
+- Task acceptance commands after the focused repetition:
+
+  ```sh
+  test ! -e src/reference.rs
+  for required in src/reference/mod.rs src/reference/color.rs \
+    src/reference/filter.rs src/reference/mask.rs; do test -f "$required"; done
+  test -z "$(rg -n 'include!|#\s*\[\s*path\s*=' src/reference || true)"
+  test -z "$(git diff d5ac5c23b3c66d3fa451bed6b751f1c82275b5d1 -- src/lib.rs Cargo.toml)"
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render --features render-window,render-web
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
+  git diff --check
+  ```
+
+- Run the complete C01 matrix on the exact T02 head.
 - Commit only the T02 range and return the complete move/visibility inventory
   for task review.
 
