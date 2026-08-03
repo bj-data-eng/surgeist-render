@@ -4,7 +4,7 @@
 
 - Cycle: `P02/I02/S01/C01`.
 - Owning repository: `surgeist-render`.
-- Status: `in_progress`.
+- Status: `complete`.
 - Cycle base: `d5ac5c23b3c66d3fa451bed6b751f1c82275b5d1`, the local reviewed
   P02-I02 planning head.
 - Published prerequisite: `4f7fcb8b81d96f16b426f045b336aaba345c4cfa`
