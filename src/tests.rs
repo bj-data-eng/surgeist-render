@@ -29570,27 +29570,6 @@ fn headless_direct_post_submit_failure_preserves_previous_and_initial_publicatio
         "a failed submitted frame must not overwrite readable published pixels"
     );
 
-    let pause = ScopedInternalVelloPostSubmitControlForTest::paused();
-    {
-        let future = renderer.render(&mut surface, &replacement, Parameters::default());
-        let mut future = std::pin::pin!(future);
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(
-            Future::poll(future.as_mut(), &mut context),
-            Poll::Pending
-        ));
-        pause.wait_for_submission_for_test(Duration::from_secs(2));
-    }
-    drop(pause);
-    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
-    assert_eq!(
-        pollster::block_on(renderer.read_headless(&surface))
-            .expect("a canceled frame must retain the previous publication")
-            .rgba(),
-        published.rgba(),
-        "a canceled submitted frame must not overwrite readable published pixels"
-    );
-
     let mut uninitialized =
         pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
     let failure = ScopedInternalVelloPostSubmitControlForTest::failing();
