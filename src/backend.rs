@@ -4231,7 +4231,7 @@ impl Backend {
         Ok(C12FailurePreservationObservationForTest {
             encode_failure_is_reported: encode_error
                 .message()
-                .contains("injected C10 color-filter shader failure"),
+                .contains("injected color-filter shader failure"),
             resources_are_unchanged: c11_resources_preserved(&resources_before, &resources_after),
             cache_is_unchanged: cache_after == cache_before,
             publication_is_unchanged: published_surface.headless_publication_count_for_test()
@@ -4312,7 +4312,7 @@ impl Backend {
         Ok(C11FailurePreservationObservationForTest {
             encode_failure_is_reported: encode_error
                 .message()
-                .contains("injected C10 color-filter shader failure"),
+                .contains("injected color-filter shader failure"),
             scope_failure_is_reported: scope_error.message()
                 == "checked internal Vello resource or command encoding failed",
             resources_are_unchanged: c11_resources_preserved(&resources_before, &resources_after),
@@ -4377,7 +4377,7 @@ impl Backend {
             label: Some("Surgeist C11 injected-failure graph encoder"),
         });
         let _encode_failure = matches!(failure, C11InjectedFailureForTest::Encode)
-            .then(super::pass::ScopedC10ColorFilterShaderFailureForTest::after_checked_realization);
+            .then(super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization);
         let result = prepared
             .encode_c08_custom_spine(
                 &mut encoder,

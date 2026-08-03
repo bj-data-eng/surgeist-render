@@ -5852,7 +5852,7 @@ fn resource_byte_accounting_overflow_is_typed() {
 }
 
 #[test]
-fn c08_discard_accounting_mismatch_faults_resource_manager_without_clamping() {
+fn discard_accounting_mismatch_faults_resource_manager_without_clamping() {
     let manager = ResourceManager::default();
     let mut unrelated_frame = manager.begin_frame().unwrap();
     let unrelated_lease = unrelated_frame
@@ -5868,7 +5868,7 @@ fn c08_discard_accounting_mismatch_faults_resource_manager_without_clamping() {
     manager.inject_retained_byte_mismatch_before_discard_for_test();
 
     let drop_result = catch_unwind(AssertUnwindSafe(|| drop(discarded_frame)));
-    assert!(drop_result.is_ok(), "C08 discard-on-drop must not panic");
+    assert!(drop_result.is_ok(), "discard-on-drop must not panic");
 
     let after_discard = manager.observation_for_test();
     assert_eq!(after_discard.retained_bytes, 7);
@@ -5893,11 +5893,11 @@ fn c08_discard_accounting_mismatch_faults_resource_manager_without_clamping() {
         !after_discard
             .entry_identities_for_test()
             .contains(&discarded_identity),
-        "discarded C08 resource remained registered for reuse"
+        "the discarded resource remained registered for reuse"
     );
 
     let begin_error = match manager.begin_frame() {
-        Ok(_) => panic!("C08 discard accepted a retained-byte mismatch by saturation/clamping"),
+        Ok(_) => panic!("discard accepted a retained-byte mismatch by saturation/clamping"),
         Err(error) => error,
     };
     let preflight_error = manager
@@ -5970,7 +5970,7 @@ fn resource_manager_observation_reports_checked_entry_total_overflow() {
 }
 
 #[test]
-fn c08_discard_records_underflow_and_surviving_total_overflow_without_panicking() {
+fn discard_records_underflow_and_surviving_total_overflow_without_panicking() {
     let underflow_manager = ResourceManager::default();
     let mut underflow_frame = underflow_manager.begin_frame().unwrap();
     let underflow_lease = underflow_frame
@@ -7461,7 +7461,7 @@ fn texture_cache_rejects_stale_handle_after_reuse() {
 }
 
 #[test]
-fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
+fn texture_cache_rejects_foreign_release_for_matching_descriptor() {
     let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(5, 5));
     let first_manager = ResourceManager::default();
     let second_manager = ResourceManager::default();
@@ -7473,27 +7473,6 @@ fn texture_cache_rejects_same_descriptor_handle_from_another_cache() {
     let error = second_frame
         .release(foreign)
         .expect_err("foreign handles must not release matching local entries");
-
-    assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(second_manager.live_count(), 1);
-    assert_eq!(second_manager.stats().releases, 0);
-    second_frame.release(local).unwrap();
-    assert_eq!(second_manager.stats().releases, 1);
-}
-
-#[test]
-fn texture_cache_default_construction_rejects_same_descriptor_foreign_release() {
-    let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(7, 7));
-    let first_manager = ResourceManager::default();
-    let second_manager = ResourceManager::default();
-    let mut first_frame = first_manager.begin_frame().unwrap();
-    let mut second_frame = second_manager.begin_frame().unwrap();
-
-    let foreign = first_frame.acquire(key, byte_len).unwrap();
-    let local = second_frame.acquire(key, byte_len).unwrap();
-    let error = second_frame
-        .release(foreign)
-        .expect_err("default-constructed caches must still have unique identities");
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
     assert_eq!(second_manager.live_count(), 1);
@@ -11474,7 +11453,7 @@ fn later_sibling_dependency_follows_completed_backdrop_group() {
 }
 
 #[test]
-fn c12_backdrop_encode_failure_preserves_resources_cache_and_publication() {
+fn backdrop_encode_failure_preserves_resources_cache_and_publication() {
     let (mut backend, identity) = c10_selected_backend_for_encoding_test();
     let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(backend.c12_failure_preservation_observation_for_test(
@@ -11482,7 +11461,7 @@ fn c12_backdrop_encode_failure_preserves_resources_cache_and_publication() {
         c12_bounded_graph_commands_for_test(),
         c10_authored_color_graph_context_for_test(),
     ))
-    .unwrap_or_panic_for_test("the C12 failure fixture must reach its atomic abort path");
+    .unwrap_or_panic_for_test("the backdrop failure fixture must reach its atomic abort path");
     let submission = submission_scope.observation_for_test();
 
     assert!(
@@ -11492,7 +11471,7 @@ fn c12_backdrop_encode_failure_preserves_resources_cache_and_publication() {
             && observed.publication_is_unchanged
             && observed.performs_no_submission_or_retry
             && submission.queue_submission_count_for_test() == 0,
-        "the C12 encode abort changed provisional or published state"
+        "the backdrop encode abort changed provisional or published state"
     );
 }
 
@@ -11768,7 +11747,7 @@ fn drop_shadow_reads_source_twice_and_releases_after_merge() {
 }
 
 #[test]
-fn c11_encode_failure_preserves_resources_cache_and_publication() {
+fn spatial_filter_encode_and_scope_failures_preserve_resources_cache_and_publication() {
     let (mut backend, identity) = c10_selected_backend_for_encoding_test();
     let observed = pollster::block_on(backend.c11_failure_preservation_observation_for_test(
         identity,
@@ -11776,7 +11755,7 @@ fn c11_encode_failure_preserves_resources_cache_and_publication() {
         c10_authored_color_graph_commands_for_test(),
         c10_authored_color_graph_context_for_test(),
     ))
-    .unwrap_or_panic_for_test("the C11 failure fixture must exercise both abort paths");
+    .unwrap_or_panic_for_test("the spatial-filter failure fixture must exercise both abort paths");
 
     assert!(
         observed.encode_failure_is_reported
@@ -11785,7 +11764,7 @@ fn c11_encode_failure_preserves_resources_cache_and_publication() {
             && observed.cache_is_unchanged
             && observed.publication_is_unchanged
             && observed.performs_no_submission_or_retry,
-        "failed C11 encoding changed provisional or published state"
+        "failed spatial-filter encoding changed provisional or published state"
     );
 }
 
@@ -12778,7 +12757,9 @@ fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
             c09_composition_frame_context_for_test(),
         ),
     )
-    .unwrap_or_panic_for_test("the C10 transaction fixture must reach one shared graph executor");
+    .unwrap_or_panic_for_test(
+        "the ordered color-filter transaction must reach one shared graph executor",
+    );
     let submission = submission_scope.observation_for_test();
 
     assert!(
@@ -12792,7 +12773,7 @@ fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
             && submission.scopes_resolved_for_test()
             && submission.prepared_frame_committed_for_test()
             && submission.capture_resources_committed_for_test(),
-        "C10 split the frame transaction"
+        "ordered color filtering split the frame transaction"
     );
 }
 
@@ -12808,7 +12789,9 @@ fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
             c10_authored_color_graph_context_for_test(),
         ),
     )
-    .unwrap_or_panic_for_test("the C10 limit fixture must reject through immutable preparation");
+    .unwrap_or_panic_for_test(
+        "the oversized color-filter fixture must reject through immutable preparation",
+    );
     let submission = submission_scope.observation_for_test();
 
     assert!(
@@ -12817,7 +12800,7 @@ fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
             && observed.cache_is_unchanged
             && observed.publication_is_unchanged
             && submission.queue_submission_count_for_test() == 0,
-        "C10 limit rejection changed GPU or published state"
+        "the color-filter limit rejection changed GPU or published state"
     );
 }
 
@@ -14124,7 +14107,7 @@ fn resource_preparation_is_private_allocation_safe_and_submission_free() {
             && submission.readback_queue_submission_count_for_test() == 0
             && public_state_unchanged
             && bounded_after_cleanup,
-        "C09 has no complete private resource and pass preparation handoff: observed={observed:?}, resources_before={resources_before:?}, resources_after={resources_after:?}, public_state_unchanged={public_state_unchanged}, bounded_after_cleanup={bounded_after_cleanup}"
+        "the graph has no complete private resource and pass preparation handoff: observed={observed:?}, resources_before={resources_before:?}, resources_after={resources_after:?}, public_state_unchanged={public_state_unchanged}, bounded_after_cleanup={bounded_after_cleanup}"
     );
 }
 
@@ -15307,8 +15290,8 @@ fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
     let vello_submission = vello_submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .unwrap_or_panic_for_test("multiple C08 captures require backend selection")
-        .unwrap_or_panic_for_test("multiple C08 captures require a host adapter");
+        .unwrap_or_panic_for_test("multiple Vello captures require backend selection")
+        .unwrap_or_panic_for_test("multiple Vello captures require a host adapter");
     let observed = pollster::block_on(
         backend.c08_multiple_vello_capture_encoding_observation_for_test(
             identity,
@@ -15343,8 +15326,8 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
     let vello_submission = vello_submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .unwrap_or_panic_for_test("later C08 capture failure requires backend selection")
-        .unwrap_or_panic_for_test("later C08 capture failure requires a host adapter");
+        .unwrap_or_panic_for_test("later Vello capture failure requires backend selection")
+        .unwrap_or_panic_for_test("later Vello capture failure requires a host adapter");
     let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
@@ -15352,7 +15335,7 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
         c08_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::LaterCaptureEncoding,
     ))
-    .unwrap_or_panic_for_test("later C08 capture failure must reach its private observation");
+    .unwrap_or_panic_for_test("later Vello capture failure must reach its private observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -15380,8 +15363,8 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
     let vello_submission = vello_submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .unwrap_or_panic_for_test("shared C08 scope failure requires backend selection")
-        .unwrap_or_panic_for_test("shared C08 scope failure requires a host adapter");
+        .unwrap_or_panic_for_test("shared Vello scope failure requires backend selection")
+        .unwrap_or_panic_for_test("shared Vello scope failure requires a host adapter");
     let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
@@ -15389,7 +15372,7 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
         c08_shader_frame_context_for_test(),
         C08TwoCaptureFailureForTest::SharedScopeResolution,
     ))
-    .unwrap_or_panic_for_test("shared C08 scope failure must reach its private observation");
+    .unwrap_or_panic_for_test("shared Vello scope failure must reach its private observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
         && vello_submission.queue_submission_count_for_test() == 0;
@@ -15457,15 +15440,15 @@ fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
 fn capture_failure_aborts_and_rejects_retry_on_new_encoder() {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
-        .unwrap_or_panic_for_test("C08 capture-failure coverage requires backend selection")
-        .unwrap_or_panic_for_test("C08 capture-failure coverage requires a host adapter");
+        .unwrap_or_panic_for_test("capture-failure coverage requires backend selection")
+        .unwrap_or_panic_for_test("capture-failure coverage requires a host adapter");
     let observed = pollster::block_on(backend.c08_capture_failure_observation_for_test(
         identity,
         c08_shader_commands_for_test(),
         c08_shader_frame_context_for_test(),
         Format::Rgba8,
     ))
-    .unwrap_or_panic_for_test("C08 capture-failure coverage must reach its private observation");
+    .unwrap_or_panic_for_test("capture-failure coverage must reach its private observation");
     assert!(
         observed.capture_failure_is_reported
             && observed.complete_pass_is_rejected
@@ -26590,10 +26573,10 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
         Parameters::default(),
         working_format,
     ))
-    .expect("device-loss coverage must first retain one C10 graph frame");
+    .expect("device-loss coverage must first retain one color-filter graph frame");
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("the warmed C10 device must remain ready before loss");
+        .expect("the warmed color-filter device must remain ready before loss");
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache = ready.device_pass_cache_counts_for_test();
     assert!(
@@ -26601,7 +26584,7 @@ fn device_loss_is_terminal_idempotent_and_releases_device_resources() {
             && resources.entry_count > 0
             && resources.effect_texture_count_for_test() > 0
             && cache.has_render_pipelines(),
-        "device-loss coverage did not first retain exact C10 resources"
+        "device-loss coverage did not first retain exact color-filter resources"
     );
 
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
@@ -29440,8 +29423,7 @@ fn unsupported_path_shadows_report_typed_error() {
     assert!(error.message().contains("ellipse/path shadow shape"));
 }
 
-#[test]
-fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames() {
+fn headless_direct_publication_fixture_for_test() -> (Renderer, Surface, Scene, ImageBuffer) {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
@@ -29457,6 +29439,14 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         Rect::new(0.0, 0.0, 2.0, 2.0),
         Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
     );
+
+    (renderer, surface, replacement, published)
+}
+
+#[test]
+fn headless_direct_post_submit_failure_preserves_previous_and_initial_publication() {
+    let (mut renderer, mut surface, replacement, published) =
+        headless_direct_publication_fixture_for_test();
     let failure = ScopedInternalVelloPostSubmitControlForTest::failing();
     let error =
         pollster::block_on(renderer.render(&mut surface, &replacement, Parameters::default()))
@@ -29514,149 +29504,15 @@ fn headless_draft_publication_preserves_pixels_across_failed_and_canceled_frames
         RuntimeOperation::SurfaceReadback,
         RenderSurfaceAvailability::Uninitialized,
     );
-
-    let mut graph_fixture = c08_graph_publication_fixture_for_test(&first);
-
-    assert_failed_c08_graph_publication(&mut graph_fixture, &replacement);
-
-    assert_canceled_c08_graph_publication(&mut graph_fixture, &replacement);
-
-    assert_failed_first_c08_graph_publication(&mut graph_fixture, &replacement);
 }
 
-struct C08GraphPublicationFixtureForTest {
-    renderer: Renderer,
-    surface: Surface,
-    working_format: WorkingFormat,
-    published: ImageBuffer,
-    stats: Stats,
-    parameters: Option<Parameters>,
-    uploaded_images: std::collections::HashSet<ImageId>,
-    publication_count: usize,
-    cache_before: super::shader::DevicePassCacheCountsForTest,
-    resources_before: super::resource::ResourceManagerObservationForTest,
-}
-
-fn c08_graph_publication_fixture_for_test(first: &Scene) -> C08GraphPublicationFixtureForTest {
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
-    ))
-    .expect("graph publication atomicity requires a renderer");
-    let working_format = default_c08_working_format_for_test(&mut renderer);
-    let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-        .expect("graph publication atomicity requires a headless surface");
-    pollster::block_on(renderer.render(&mut surface, first, Parameters::default()))
-        .expect("the direct route must establish the graph failure publication baseline");
-    let published = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the graph failure baseline must be readable");
-    let stats = renderer.stats();
-    let parameters = surface.last_parameters;
-    let uploaded_images = renderer.uploaded_images_for_test();
-    let publication_count = surface.headless_publication_count_for_test();
-    let cache_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the graph failure baseline must retain a ready device")
-        .device_pass_cache_counts_for_test();
-    let resources_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the graph failure baseline must retain one resource manager")
-        .internal_resource_manager_observation_for_test();
-    C08GraphPublicationFixtureForTest {
-        renderer,
-        surface,
-        working_format,
-        published,
-        stats,
-        parameters,
-        uploaded_images,
-        publication_count,
-        cache_before,
-        resources_before,
-    }
-}
-
-fn assert_failed_c08_graph_publication(
-    fixture: &mut C08GraphPublicationFixtureForTest,
-    replacement: &Scene,
-) {
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    let error = pollster::block_on(fixture.renderer.render_forced_c08_graph_for_test(
-        &mut fixture.surface,
-        replacement,
-        c08_replacement_parameters_for_test(),
-        fixture.working_format,
-    ))
-    .expect_err("the scoped C08 graph validation failure must abort publication");
-    assert_eq!(error.code(), ErrorCode::RenderFailed);
-    assert!(
-        failure.scope_resolution_observed_for_test(),
-        "the C08 graph failure must resolve transaction scopes before returning"
-    );
-    drop(failure);
-    assert_eq!(submission.queue_submission_count_for_test(), 1);
-    assert!(submission.scopes_resolved_for_test());
-    assert!(!submission.prepared_frame_committed_for_test());
-    assert!(!submission.capture_resources_committed_for_test());
-    assert!(!submission.headless_draft_released_for_test());
-    drop(submission_scope);
-    assert_eq!(fixture.renderer.stats(), fixture.stats);
-    assert_eq!(fixture.surface.last_parameters, fixture.parameters);
-    assert_eq!(
-        fixture.renderer.uploaded_images_for_test(),
-        fixture.uploaded_images
-    );
-    assert_eq!(
-        fixture.surface.headless_publication_count_for_test(),
-        fixture.publication_count
-    );
-    assert_eq!(
-        pollster::block_on(fixture.renderer.read_headless(&fixture.surface))
-            .expect("a failed C08 graph must retain the prior publication")
-            .rgba(),
-        fixture.published.rgba()
-    );
-    assert_eq!(
-        fixture
-            .renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the failed C08 graph must retain its ready device")
-            .device_pass_cache_counts_for_test(),
-        fixture.cache_before
-    );
-    let resources_after_failure = fixture
-        .renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the failed C08 graph must return its resource leases")
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after_failure.leased_count, 0);
-    assert_eq!(
-        resources_after_failure.retained_count_for_test(),
-        fixture.resources_before.retained_count_for_test()
-    );
-    assert_eq!(
-        resources_after_failure.retained_atlas_byte_len_for_test(),
-        fixture.resources_before.retained_atlas_byte_len_for_test()
-    );
-}
-
-fn assert_canceled_c08_graph_publication(
-    fixture: &mut C08GraphPublicationFixtureForTest,
-    replacement: &Scene,
-) {
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+#[test]
+fn headless_direct_cancellation_after_submit_preserves_previous_publication() {
+    let (mut renderer, mut surface, replacement, published) =
+        headless_direct_publication_fixture_for_test();
+    let pause = ScopedInternalVelloPostSubmitControlForTest::paused();
     {
-        let future = fixture.renderer.render_forced_c08_graph_for_test(
-            &mut fixture.surface,
-            replacement,
-            c08_replacement_parameters_for_test(),
-            fixture.working_format,
-        );
+        let future = renderer.render(&mut surface, &replacement, Parameters::default());
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
         assert!(matches!(
@@ -29666,75 +29522,52 @@ fn assert_canceled_c08_graph_publication(
         pause.wait_for_submission_for_test(Duration::from_secs(2));
     }
     drop(pause);
+    assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
+    assert_eq!(
+        pollster::block_on(renderer.read_headless(&surface))
+            .expect("a canceled frame must retain the previous publication")
+            .rgba(),
+        published.rgba(),
+        "a canceled submitted frame must not overwrite readable published pixels"
+    );
+}
+
+#[test]
+fn headless_graph_post_submit_failure_leaves_first_frame_unpublished() {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .expect("first-frame graph failure coverage requires a renderer");
+    let working_format = default_c08_working_format_for_test(&mut renderer);
+    let mut uninitialized = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
+        .expect("first-frame graph failure coverage requires a headless surface");
+    let replacement = graph_white_replacement_scene_for_test();
+    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission = submission_scope.observation_for_test();
+    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        &mut uninitialized,
+        &replacement,
+        Parameters::default(),
+        working_format,
+    ))
+    .expect_err("a failed first graph frame must not create a publication");
+    assert_eq!(error.code(), ErrorCode::RenderFailed);
+    assert!(failure.scope_resolution_observed_for_test());
+    drop(failure);
     assert_eq!(submission.queue_submission_count_for_test(), 1);
-    assert!(!submission.scopes_resolved_for_test());
+    assert!(submission.scopes_resolved_for_test());
     assert!(!submission.prepared_frame_committed_for_test());
     assert!(!submission.capture_resources_committed_for_test());
     assert!(!submission.headless_draft_released_for_test());
     drop(submission_scope);
-    assert_eq!(fixture.renderer.stats(), fixture.stats);
-    assert_eq!(fixture.surface.last_parameters, fixture.parameters);
-    assert_eq!(
-        fixture.renderer.uploaded_images_for_test(),
-        fixture.uploaded_images
-    );
-    assert_eq!(
-        fixture.surface.headless_publication_count_for_test(),
-        fixture.publication_count
-    );
-    assert_eq!(
-        pollster::block_on(fixture.renderer.read_headless(&fixture.surface))
-            .expect("a canceled C08 graph must retain the prior publication")
-            .rgba(),
-        fixture.published.rgba()
-    );
-    assert_eq!(
-        fixture
-            .renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the canceled C08 graph must retain its ready device")
-            .device_pass_cache_counts_for_test(),
-        fixture.cache_before
-    );
-    let resources_after_cancellation = fixture
-        .renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the canceled C08 graph must return its resource leases")
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after_cancellation.leased_count, 0);
-    assert_eq!(
-        resources_after_cancellation.retained_count_for_test(),
-        fixture.resources_before.retained_count_for_test()
-    );
-    assert_eq!(
-        resources_after_cancellation.retained_atlas_byte_len_for_test(),
-        fixture.resources_before.retained_atlas_byte_len_for_test()
-    );
-}
-
-fn assert_failed_first_c08_graph_publication(
-    fixture: &mut C08GraphPublicationFixtureForTest,
-    replacement: &Scene,
-) {
-    let mut uninitialized =
-        pollster::block_on(fixture.renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-            .expect("first-frame graph failure coverage requires another headless surface");
-    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    pollster::block_on(fixture.renderer.render_forced_c08_graph_for_test(
-        &mut uninitialized,
-        replacement,
-        Parameters::default(),
-        fixture.working_format,
-    ))
-    .expect_err("a failed first C08 graph frame must not create a publication");
-    drop(failure);
     assert_eq!(
         uninitialized.resource_state(),
         SurfaceResourceState::PendingAllocation
     );
     assert_eq!(uninitialized.headless_publication_count_for_test(), 0);
-    let error = pollster::block_on(fixture.renderer.read_headless(&uninitialized))
-        .expect_err("a failed first C08 graph frame must remain unreadable");
+    let error = pollster::block_on(renderer.read_headless(&uninitialized))
+        .expect_err("a failed first graph frame must remain unreadable");
     assert_surface_unavailable(
         error,
         RuntimeOperation::SurfaceReadback,
@@ -29743,16 +29576,16 @@ fn assert_failed_first_c08_graph_publication(
 }
 
 #[test]
-fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits() {
+fn headless_accounting_fault_after_submit_suppresses_publication_and_commits() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .expect("headless C08 accounting coverage requires a renderer");
+    .expect("headless accounting coverage requires a renderer");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
-        .expect("headless C08 accounting coverage requires a real surface");
+        .expect("headless accounting coverage requires a real surface");
     let mut baseline_scene = Scene::new();
     baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
     pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
@@ -29768,8 +29601,8 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
         .expect("the baseline must retain a ready device")
         .device_pass_cache_counts_for_test();
 
-    let replacement = c08_white_replacement_scene_for_test();
-    let replacement_parameters = c08_replacement_parameters_for_test();
+    let replacement = graph_white_replacement_scene_for_test();
+    let replacement_parameters = graph_replacement_parameters_for_test();
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
@@ -29782,7 +29615,7 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
         replacement_parameters,
         working_format,
     ))
-    .expect_err("accounting poison after submit must abort the headless C08 publication");
+    .expect_err("accounting poison after submit must abort the headless graph publication");
 
     assert_eq!(error.code(), ErrorCode::RenderFailed);
     assert_eq!(
@@ -29826,7 +29659,7 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
     assert_headless_accounting_fault(&after_fault, &prepared_identities);
     assert_eq!(
         pollster::block_on(renderer.read_headless(&surface))
-            .expect("the failed C08 graph must preserve the baseline publication")
+            .expect("the failed graph must preserve the baseline publication")
             .rgba(),
         baseline_pixels.rgba()
     );
@@ -29837,7 +29670,7 @@ fn headless_c08_accounting_fault_after_submit_suppresses_publication_and_commits
         replacement_parameters,
         working_format,
     ))
-    .expect_err("the poisoned resource manager must block a later C08 acquisition");
+    .expect_err("the poisoned resource manager must block a later graph acquisition");
     assert_eq!(retry.code(), ErrorCode::RenderFailed);
     assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
     assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
@@ -29869,7 +29702,7 @@ fn assert_headless_accounting_fault(
     );
 }
 
-fn c08_white_replacement_scene_for_test() -> Scene {
+fn graph_white_replacement_scene_for_test() -> Scene {
     let mut replacement = Scene::new();
     replacement.fill(
         Rect::new(0.0, 0.0, 8.0, 8.0),
@@ -29878,14 +29711,14 @@ fn c08_white_replacement_scene_for_test() -> Scene {
     replacement
 }
 
-fn c08_replacement_parameters_for_test() -> Parameters {
+fn graph_replacement_parameters_for_test() -> Parameters {
     Parameters {
         base_color: Color::TRANSPARENT,
         debug: true,
     }
 }
 
-struct C08AbortFixtureForTest {
+struct GraphAbortFixtureForTest {
     renderer: Renderer,
     surface: Surface,
     replacement: Scene,
@@ -29900,14 +29733,14 @@ struct C08AbortFixtureForTest {
     resources_before: super::resource::ResourceManagerObservationForTest,
 }
 
-fn c08_abort_fixture_for_test(
+fn graph_abort_fixture_for_test(
     renderer_expectation: &'static str,
     surface_expectation: &'static str,
     baseline_render_expectation: &'static str,
     baseline_read_expectation: &'static str,
     ready_device_expectation: &'static str,
     resource_manager_expectation: &'static str,
-) -> C08AbortFixtureForTest {
+) -> GraphAbortFixtureForTest {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -29935,11 +29768,11 @@ fn c08_abort_fixture_for_test(
         .default_ready_device_state_borrow_for_test()
         .expect(resource_manager_expectation)
         .internal_resource_manager_observation_for_test();
-    C08AbortFixtureForTest {
+    GraphAbortFixtureForTest {
         renderer,
         surface,
-        replacement: c08_white_replacement_scene_for_test(),
-        replacement_parameters: c08_replacement_parameters_for_test(),
+        replacement: graph_white_replacement_scene_for_test(),
+        replacement_parameters: graph_replacement_parameters_for_test(),
         working_format,
         baseline_pixels,
         baseline_stats,
@@ -29952,8 +29785,8 @@ fn c08_abort_fixture_for_test(
 }
 
 #[test]
-fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget() {
-    let C08AbortFixtureForTest {
+fn post_submit_scope_failure_discards_prepared_resources_with_nonzero_budget() {
+    let GraphAbortFixtureForTest {
         mut renderer,
         mut surface,
         replacement,
@@ -29966,10 +29799,10 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
         baseline_publication_count,
         baseline_cache,
         resources_before,
-    } = c08_abort_fixture_for_test(
-        "post-submit C08 abort coverage requires a renderer",
-        "post-submit C08 abort coverage requires a headless surface",
-        "the direct baseline frame must publish before C08 abort coverage",
+    } = graph_abort_fixture_for_test(
+        "post-submit graph abort coverage requires a renderer",
+        "post-submit graph abort coverage requires a headless surface",
+        "the direct baseline frame must publish before graph abort coverage",
         "the direct baseline publication must be readable",
         "the direct baseline must retain a ready device",
         "the direct baseline must retain one resource manager",
@@ -29985,7 +29818,7 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
         replacement_parameters,
         working_format,
     ))
-    .expect_err("the injected post-submit scope failure must abort the C08 frame");
+    .expect_err("the injected post-submit scope failure must abort the graph frame");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
     assert!(failure.scope_resolution_observed_for_test());
     drop(failure);
@@ -29994,10 +29827,10 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
         graph_submission.prepared_frame_resource_identities_for_test();
     assert!(
         !aborted_prepared_identities.is_empty(),
-        "the real C08 submission must identify every prepared-frame resource"
+        "the real graph submission must identify every prepared-frame resource"
     );
-    assert_c08_aborted_state(
-        C08AbortedStateContextForTest {
+    assert_graph_aborted_state(
+        GraphAbortedStateContextForTest {
             renderer: &mut renderer,
             surface: &surface,
             generic_submission: &generic_submission,
@@ -30010,12 +29843,12 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
             baseline_cache,
             resources_before: &resources_before,
         },
-        C08AbortedStateExpectationsForTest {
+        GraphAbortedStateExpectationsForTest {
             scopes_resolved: true,
             ready_device: "the scoped failure must retain the ready device",
             resource_manager: "the scoped failure must retain one resource manager",
             accounting: "post-submit failure resource accounting must have an exact total",
-            retained_resources: "submitted-but-uncertain C08 prepared resources remained reusable after post-submit scope failure",
+            retained_resources: "submitted-but-uncertain prepared resources remained reusable after post-submit scope failure",
             eviction: "prepared-frame abort must record every discarded resource as an eviction",
         },
     );
@@ -30028,8 +29861,8 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
         baseline_pixels.rgba()
     );
 
-    assert_c08_retry_after_abort(
-        C08RetryContextForTest {
+    assert_graph_retry_after_abort(
+        GraphRetryContextForTest {
             renderer: &mut renderer,
             surface: &mut surface,
             replacement: &replacement,
@@ -30040,17 +29873,17 @@ fn post_submit_scope_failure_discards_c08_prepared_resources_with_nonzero_budget
             baseline_publication_count,
             baseline_pixels: &baseline_pixels,
         },
-        C08RetryExpectationsForTest {
-            success: "a clean C08 retry must succeed after prepared-frame abort",
+        GraphRetryExpectationsForTest {
+            success: "a clean graph retry must succeed after prepared-frame abort",
             fresh_identities: "a clean retry must allocate fresh prepared-frame identities after uncertainty",
-            readable: "the clean C08 retry publication must be readable",
+            readable: "the clean graph retry publication must be readable",
         },
     );
 }
 
 #[test]
-fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_fresh() {
-    let C08AbortFixtureForTest {
+fn canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fresh() {
+    let GraphAbortFixtureForTest {
         mut renderer,
         mut surface,
         replacement,
@@ -30063,9 +29896,9 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
         baseline_publication_count,
         baseline_cache,
         resources_before,
-    } = c08_abort_fixture_for_test(
-        "submitted C08 cancellation coverage requires a renderer",
-        "submitted C08 cancellation coverage requires a headless surface",
+    } = graph_abort_fixture_for_test(
+        "submitted graph cancellation coverage requires a renderer",
+        "submitted graph cancellation coverage requires a headless surface",
         "the direct baseline frame must publish before cancellation coverage",
         "the cancellation baseline publication must be readable",
         "the cancellation baseline must retain a ready device",
@@ -30099,10 +29932,10 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
         graph_submission.prepared_frame_resource_identities_for_test();
     assert!(
         !canceled_prepared_identities.is_empty(),
-        "the real submitted C08 frame must identify every prepared-frame resource"
+        "the real submitted graph frame must identify every prepared-frame resource"
     );
-    assert_c08_aborted_state(
-        C08AbortedStateContextForTest {
+    assert_graph_aborted_state(
+        GraphAbortedStateContextForTest {
             renderer: &mut renderer,
             surface: &surface,
             generic_submission: &generic_submission,
@@ -30115,12 +29948,12 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
             baseline_cache,
             resources_before: &resources_before,
         },
-        C08AbortedStateExpectationsForTest {
+        GraphAbortedStateExpectationsForTest {
             scopes_resolved: false,
             ready_device: "the canceled frame must retain the ready device",
             resource_manager: "the canceled frame must retain one resource manager",
             accounting: "canceled frame resource accounting must have an exact total",
-            retained_resources: "canceled submitted C08 prepared resources remained reusable",
+            retained_resources: "canceled submitted graph resources remained reusable",
             eviction: "cancellation abort must record every discarded resource as an eviction",
         },
     );
@@ -30133,8 +29966,8 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
         baseline_pixels.rgba()
     );
 
-    assert_c08_retry_after_abort(
-        C08RetryContextForTest {
+    assert_graph_retry_after_abort(
+        GraphRetryContextForTest {
             renderer: &mut renderer,
             surface: &mut surface,
             replacement: &replacement,
@@ -30145,15 +29978,15 @@ fn canceled_c08_graph_after_real_submit_discards_prepared_resources_and_retries_
             baseline_publication_count,
             baseline_pixels: &baseline_pixels,
         },
-        C08RetryExpectationsForTest {
-            success: "a clean C08 retry must succeed after submitted cancellation",
+        GraphRetryExpectationsForTest {
+            success: "a clean graph retry must succeed after submitted cancellation",
             fresh_identities: "the frame after submitted cancellation must receive fresh prepared-resource identities",
             readable: "the clean retry publication must be readable",
         },
     );
 }
 
-struct C08AbortedStateContextForTest<'a> {
+struct GraphAbortedStateContextForTest<'a> {
     renderer: &'a mut Renderer,
     surface: &'a Surface,
     generic_submission: &'a super::gpu_transaction::GpuOperationSubmissionObservationForTest,
@@ -30167,7 +30000,7 @@ struct C08AbortedStateContextForTest<'a> {
     resources_before: &'a super::resource::ResourceManagerObservationForTest,
 }
 
-struct C08AbortedStateExpectationsForTest {
+struct GraphAbortedStateExpectationsForTest {
     scopes_resolved: bool,
     ready_device: &'static str,
     resource_manager: &'static str,
@@ -30176,9 +30009,9 @@ struct C08AbortedStateExpectationsForTest {
     eviction: &'static str,
 }
 
-fn assert_c08_aborted_state(
-    context: C08AbortedStateContextForTest<'_>,
-    expectations: C08AbortedStateExpectationsForTest,
+fn assert_graph_aborted_state(
+    context: GraphAbortedStateContextForTest<'_>,
+    expectations: GraphAbortedStateExpectationsForTest,
 ) {
     assert_eq!(
         context.generic_submission.queue_submission_count_for_test(),
@@ -30278,7 +30111,7 @@ fn assert_c08_aborted_state(
     );
 }
 
-struct C08RetryContextForTest<'a> {
+struct GraphRetryContextForTest<'a> {
     renderer: &'a mut Renderer,
     surface: &'a mut Surface,
     replacement: &'a Scene,
@@ -30290,15 +30123,15 @@ struct C08RetryContextForTest<'a> {
     baseline_pixels: &'a ImageBuffer,
 }
 
-struct C08RetryExpectationsForTest {
+struct GraphRetryExpectationsForTest {
     success: &'static str,
     fresh_identities: &'static str,
     readable: &'static str,
 }
 
-fn assert_c08_retry_after_abort(
-    context: C08RetryContextForTest<'_>,
-    expectations: C08RetryExpectationsForTest,
+fn assert_graph_retry_after_abort(
+    context: GraphRetryContextForTest<'_>,
+    expectations: GraphRetryExpectationsForTest,
 ) {
     let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let retry_generic_submission = retry_generic_scope.observation_for_test();
@@ -31650,7 +31483,7 @@ fn c10_rendered_output_matches_for_test(
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct C10ShaderFailureObservationForTest {
+struct ColorFilterShaderFailureObservationForTest {
     failure_is_reported: bool,
     prior_pixels_are_preserved: bool,
     prior_publication_is_preserved: bool,
@@ -31660,16 +31493,17 @@ struct C10ShaderFailureObservationForTest {
     performs_no_submission_or_cpu_retry: bool,
 }
 
-fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTest {
+fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailureObservationForTest
+{
     let source = vec![[17, 31, 47, 0], [224, 72, 16, 127], [192, 64, 46, 255]];
-    let width = u32::try_from(source.len()).expect("the C10 failure width must fit u32");
+    let width = u32::try_from(source.len()).expect("the color-filter failure width must fit u32");
     let scene = c10_signed_source_scene_for_test(&source);
     let (mut renderer, mut surface) =
         c10_pixel_renderer_for_test(WorkingFormat::HighPrecision, width);
     assert!(
         c08_supported_working_formats_for_test(&mut renderer)
             .contains(&WorkingFormat::ReducedPrecision),
-        "C10 shader-failure coverage requires the real reduced working format"
+        "color-filter shader-failure coverage requires the real reduced working format"
     );
     let filters = vec![color_filter_list([
         ColorFilterOp::Contrast(FilterAmount::try_new(1.8).unwrap()),
@@ -31684,7 +31518,7 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
         WorkingFormat::HighPrecision,
     );
     let published = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the C10 failure baseline must be readable");
+        .expect("the color-filter failure baseline must be readable");
     let stats_before = renderer.stats();
     let parameters_before = surface.last_parameters;
     let uploaded_images_before = renderer.uploaded_images_for_test();
@@ -31692,7 +31526,7 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
     let (cache_before, resources_before) = {
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("the C10 failure baseline must retain a ready device");
+            .expect("the color-filter failure baseline must retain a ready device");
         (
             ready.device_pass_cache_counts_for_test(),
             ready.internal_resource_manager_observation_for_test(),
@@ -31706,7 +31540,7 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let shader_failure =
-        super::pass::ScopedC10ColorFilterShaderFailureForTest::after_checked_realization();
+        super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization();
     let failure = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
         &mut surface,
         &scene,
@@ -31726,18 +31560,18 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
     drop(submission_scope);
 
     let current = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the failed C10 attempt must leave the prior publication readable");
+        .expect("the failed color-filter attempt must leave the prior publication readable");
     let (cache_after, resources_after) = {
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("the failed C10 attempt must retain its ready device");
+            .expect("the failed color-filter attempt must retain its ready device");
         (
             ready.device_pass_cache_counts_for_test(),
             ready.internal_resource_manager_observation_for_test(),
         )
     };
-    let failure_is_reported = is_injected_c10_shader_failure(failure);
-    C10ShaderFailureObservationForTest {
+    let failure_is_reported = is_injected_color_filter_shader_failure(failure);
+    ColorFilterShaderFailureObservationForTest {
         failure_is_reported,
         prior_pixels_are_preserved: current.rgba() == published.rgba(),
         prior_publication_is_preserved: surface.headless_publication_count_for_test()
@@ -31764,21 +31598,21 @@ fn c10_shader_failure_observation_for_test() -> C10ShaderFailureObservationForTe
     }
 }
 
-fn is_injected_c10_shader_failure(
+fn is_injected_color_filter_shader_failure(
     failure: Result<super::renderer::C10ColorFilterRenderResultForTest>,
 ) -> bool {
     failure.is_err_and(|error| {
         error.code() == ErrorCode::RenderFailed
             && error
                 .message()
-                .contains("injected C10 color-filter shader failure")
+                .contains("injected color-filter shader failure")
     })
 }
 
 #[test]
 fn color_filter_shader_failure_preserves_prior_publication_and_cache() {
-    let observed = c10_shader_failure_observation_for_test();
-    eprintln!("C10 shader failure observation={observed:?}");
+    let observed = color_filter_shader_failure_observation_for_test();
+    eprintln!("color-filter shader failure observation={observed:?}");
 
     assert!(
         observed.failure_is_reported
@@ -31788,7 +31622,7 @@ fn color_filter_shader_failure_preserves_prior_publication_and_cache() {
             && observed.pass_cache_is_preserved
             && observed.draft_resources_are_aborted
             && observed.performs_no_submission_or_cpu_retry,
-        "failed C10 execution published draft state"
+        "failed color-filter execution published draft state"
     );
 }
 
@@ -31849,7 +31683,7 @@ fn warm_c10_retention_fixture_for_test(
             Parameters::default(),
             working_format,
         ))
-        .unwrap_or_else(|error| panic!("C10 reuse warm-up frames must succeed: {error}"));
+        .unwrap_or_else(|error| panic!("color-filter reuse warm-up frames must succeed: {error}"));
     }
 }
 
@@ -31863,18 +31697,21 @@ fn c10_prepared_resource_identities_are_stable_for_test(history: &[Vec<ResourceI
 #[test]
 fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let (scene, filters, expected) = c10_retention_fixture_for_test();
-    let width = u32::try_from(expected.len() / 4).expect("the C10 retention width must fit u32");
+    let width =
+        u32::try_from(expected.len() / 4).expect("the color-filter retention width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .unwrap_or_else(|error| panic!("repeated C10 reuse coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("repeated color-filter reuse coverage requires a renderer: {error}")
+    });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap_or_else(|error| {
-                panic!("repeated C10 reuse coverage requires a headless surface: {error}")
+                panic!("repeated color-filter reuse coverage requires a headless surface: {error}")
             });
 
     warm_c10_retention_fixture_for_test(
@@ -31884,11 +31721,13 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
         &filters,
         working_format,
     );
-    let warmed_output = pollster::block_on(renderer.read_headless(&surface))
-        .unwrap_or_else(|error| panic!("the warmed C10 publication must be readable: {error}"));
+    let warmed_output =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the warmed color-filter publication must be readable: {error}")
+        });
     let warmed = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the warmed C10 device must remain ready"));
+        .unwrap_or_else(|| panic!("the warmed color-filter device must remain ready"));
     let warmed_resources = warmed.internal_resource_manager_observation_for_test();
     let warmed_cache = warmed.device_pass_cache_counts_for_test();
 
@@ -31909,11 +31748,11 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
             Parameters::default(),
             working_format,
         ))
-        .unwrap_or_else(|error| panic!("repeated exact C10 frames must succeed: {error}"));
+        .unwrap_or_else(|error| panic!("repeated color-filter frames must succeed: {error}"));
         stats.push(C08PublicStatsForTest::from(frame.stats));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| panic!("repeated C10 frames must retain the ready device"));
+            .unwrap_or_else(|| panic!("repeated color-filter frames must retain the ready device"));
         resource_observations.push(ready.internal_resource_manager_observation_for_test());
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
@@ -31942,10 +31781,10 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     drop(graph_scope);
     drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-        panic!("the repeated C10 publication must remain readable: {error}")
+        panic!("the repeated color-filter publication must remain readable: {error}")
     });
     eprintln!(
-        "C10 retained cache={warmed_cache:?} resources={warmed_resources:?} prepared_identities={prepared_history:?}"
+        "color-filter retained cache={warmed_cache:?} resources={warmed_resources:?} prepared_identities={prepared_history:?}"
     );
 
     assert!(
@@ -31960,25 +31799,28 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
             && one_submission_without_readback
             && warmed_output.rgba() == actual.rgba()
             && actual.rgba() == expected,
-        "repeated C10 frames grew passes or resources or entered readback"
+        "repeated color-filter frames grew passes or resources or entered readback"
     );
 }
 
 #[test]
 fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
     let (scene, filters, expected) = c10_retention_fixture_for_test();
-    let width = u32::try_from(expected.len() / 4).expect("the C10 zero-budget width must fit u32");
+    let width =
+        u32::try_from(expected.len() / 4).expect("the color-filter zero-budget width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .unwrap_or_else(|error| panic!("zero-retention C10 coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("zero-retention color-filter coverage requires a renderer: {error}")
+    });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
             .unwrap_or_else(|error| {
-                panic!("zero-retention C10 coverage requires a headless surface: {error}")
+                panic!("zero-retention color-filter coverage requires a headless surface: {error}")
             });
 
     let first = pollster::block_on(renderer.render_c10_color_filter_fixture_for_test(
@@ -31988,14 +31830,18 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         Parameters::default(),
         working_format,
     ))
-    .unwrap_or_else(|error| panic!("the first zero-retention C10 frame must succeed: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("the first zero-retention color-filter frame must succeed: {error}")
+    });
     let first_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-            panic!("the first zero-retention C10 publication must be readable: {error}")
+            panic!("the first zero-retention color-filter publication must be readable: {error}")
         });
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the first zero-retention C10 frame must retain its device"))
+        .unwrap_or_else(|| {
+            panic!("the first zero-retention color-filter frame must retain its device")
+        })
         .device_pass_cache_counts_for_test();
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -32011,10 +31857,14 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         Parameters::default(),
         working_format,
     ))
-    .unwrap_or_else(|error| panic!("the repeated zero-retention C10 frame must succeed: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("the repeated zero-retention color-filter frame must succeed: {error}")
+    });
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the repeated zero-retention C10 device must remain ready"));
+        .unwrap_or_else(|| {
+            panic!("the repeated zero-retention color-filter device must remain ready")
+        });
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
     let retention_history = graph_submission.resource_retention_history_for_test();
@@ -32037,10 +31887,10 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
     drop(submission_scope);
     let second_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-            panic!("the repeated zero-retention C10 publication must be readable: {error}")
+            panic!("the repeated zero-retention color-filter publication must be readable: {error}")
         });
     eprintln!(
-        "C10 zero-budget cache_before={cache_before:?} cache_after={cache_after:?} resources={resources:?} retention={retention_history:?} submissions={}/{}/{} readback={} first_stats={:?} second_stats={:?} first={:?} second={:?} expected={expected:?}",
+        "color-filter zero-budget cache_before={cache_before:?} cache_after={cache_after:?} resources={resources:?} retention={retention_history:?} submissions={}/{}/{} readback={} first_stats={:?} second_stats={:?} first={:?} second={:?} expected={expected:?}",
         submission.queue_submission_count_for_test(),
         graph_submission.queue_submission_count_for_test(),
         direct_submission.queue_submission_count_for_test(),
@@ -32060,7 +31910,7 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
             && first.stats.images == second.stats.images
             && first_output.rgba() == second_output.rgba()
             && second_output.rgba() == expected,
-        "zero retention changed C10 pixels or kept idle frame resources"
+        "zero retention changed color-filter pixels or kept idle frame resources"
     );
 }
 
@@ -32449,10 +32299,10 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_panic_for_test("C08 graph submission coverage requires a renderer");
+    .unwrap_or_panic_for_test("graph submission coverage requires a renderer");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-        .unwrap_or_panic_for_test("C08 graph submission coverage requires a headless surface");
+        .unwrap_or_panic_for_test("graph submission coverage requires a headless surface");
     let publication_before = surface.headless_publication_count_for_test();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
@@ -32462,9 +32312,7 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
         Parameters::default(),
         working_format,
     ))
-    .unwrap_or_panic_for_test(
-        "the private forced route must invoke the production C08 graph executor",
-    );
+    .unwrap_or_panic_for_test("the private forced route must invoke the production graph executor");
 
     let production_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
         && graph_submission.transaction_generation_for_test()
@@ -32486,7 +32334,7 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
         && graph.stats == renderer.stats();
     assert!(
         production_graph_transaction,
-        "production C08 graph did not commit one transaction and publication"
+        "the production graph did not commit one transaction and publication"
     );
 }
 
@@ -33770,7 +33618,9 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(512 * 1024 * 1024)),
     ))
-    .unwrap_or_else(|error| panic!("repeated C09 reuse coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("repeated composition reuse coverage requires a renderer: {error}")
+    });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = pollster::block_on(renderer.create_headless(
@@ -33778,18 +33628,22 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
         1.0,
     ))
     .unwrap_or_else(|error| {
-        panic!("repeated C09 reuse coverage requires a headless surface: {error}")
+        panic!("repeated composition reuse coverage requires a headless surface: {error}")
     });
 
     for _ in 0..2 {
         pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-            .unwrap_or_else(|error| panic!("C09 reuse warm-up frames must succeed: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("composition reuse warm-up frames must succeed: {error}")
+            });
     }
-    let warmed_output = pollster::block_on(renderer.read_headless(&surface))
-        .unwrap_or_else(|error| panic!("the warmed C09 publication must be readable: {error}"));
+    let warmed_output =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the warmed composition publication must be readable: {error}")
+        });
     let warmed = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the warmed C09 device must remain ready"));
+        .unwrap_or_else(|| panic!("the warmed composition device must remain ready"));
     let warmed_resources = warmed.internal_resource_manager_observation_for_test();
     let warmed_cache = warmed.device_pass_cache_counts_for_test();
 
@@ -33805,11 +33659,13 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     for _ in 0..3 {
         let frame =
             pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-                .unwrap_or_else(|error| panic!("repeated exact C09 frames must succeed: {error}"));
+                .unwrap_or_else(|error| {
+                    panic!("repeated composition frames must succeed: {error}")
+                });
         stats.push(C08PublicStatsForTest::from(frame));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| panic!("repeated C09 frames must retain the ready device"));
+            .unwrap_or_else(|| panic!("repeated composition frames must retain the ready device"));
         resource_observations.push(ready.internal_resource_manager_observation_for_test());
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
@@ -33844,7 +33700,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     drop(graph_scope);
     drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-        panic!("the repeated C09 publication must remain readable: {error}")
+        panic!("the repeated composition publication must remain readable: {error}")
     });
 
     assert!(
@@ -33858,7 +33714,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
             && one_submission_without_readback
             && warmed_output.rgba() == actual.rgba()
             && c09_pixels_match_for_test(actual.rgba(), &expected, working_format, 3),
-        "C09 resources grow or enter readback"
+        "composition resources grow or enter readback"
     );
 }
 
@@ -33890,7 +33746,9 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .unwrap_or_else(|error| panic!("zero-retention C09 coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("zero-retention composition coverage requires a renderer: {error}")
+    });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = pollster::block_on(renderer.create_headless(
@@ -33898,17 +33756,19 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
         1.0,
     ))
     .unwrap_or_else(|error| {
-        panic!("zero-retention C09 coverage requires a headless surface: {error}")
+        panic!("zero-retention composition coverage requires a headless surface: {error}")
     });
     let first = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .unwrap_or_else(|error| panic!("the first zero-retention C09 frame must succeed: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("the first zero-retention composition frame must succeed: {error}")
+        });
     let first_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-            panic!("the first zero-retention C09 publication must be readable: {error}")
+            panic!("the first zero-retention composition publication must be readable: {error}")
         });
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the zero-retention C09 device must remain ready"))
+        .unwrap_or_else(|| panic!("the zero-retention composition device must remain ready"))
         .device_pass_cache_counts_for_test();
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -33919,11 +33779,13 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
     let direct_submission = direct_scope.observation_for_test();
     let second = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .unwrap_or_else(|error| {
-            panic!("the repeated zero-retention C09 frame must succeed: {error}")
+            panic!("the repeated zero-retention composition frame must succeed: {error}")
         });
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the repeated zero-retention C09 device must remain ready"));
+        .unwrap_or_else(|| {
+            panic!("the repeated zero-retention composition device must remain ready")
+        });
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
     let retention_history = graph_submission.resource_retention_history_for_test();
@@ -33945,7 +33807,7 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
     drop(submission_scope);
     let second_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-            panic!("the repeated zero-retention C09 publication must be readable: {error}")
+            panic!("the repeated zero-retention composition publication must be readable: {error}")
         });
 
     assert!(
@@ -34112,11 +33974,11 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .unwrap_or_else(|error| panic!("repeated C08 reuse coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| panic!("repeated graph reuse coverage requires a renderer: {error}"));
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
         .unwrap_or_else(|error| {
-            panic!("repeated C08 reuse coverage requires a headless surface: {error}")
+            panic!("repeated graph reuse coverage requires a headless surface: {error}")
         });
     let scene = repeated_c08_scene_for_test();
 
@@ -34127,17 +33989,17 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             Parameters::default(),
             working_format,
         ))
-        .unwrap_or_else(|error| panic!("C08 reuse warm-up frames must succeed: {error}"));
+        .unwrap_or_else(|error| panic!("graph reuse warm-up frames must succeed: {error}"));
     }
     let expected = pollster::block_on(renderer.read_headless(&surface))
-        .unwrap_or_else(|error| panic!("the warmed C08 publication must be readable: {error}"));
+        .unwrap_or_else(|error| panic!("the warmed graph publication must be readable: {error}"));
     let warmed_resources = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the warmed C08 device must remain ready"))
+        .unwrap_or_else(|| panic!("the warmed graph device must remain ready"))
         .internal_resource_manager_observation_for_test();
     let warmed_cache = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the warmed C08 device must retain its pass cache"))
+        .unwrap_or_else(|| panic!("the warmed graph device must retain its pass cache"))
         .device_pass_cache_counts_for_test();
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -34156,11 +34018,11 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             Parameters::default(),
             working_format,
         ))
-        .unwrap_or_else(|error| panic!("repeated exact C08 frames must succeed: {error}"));
+        .unwrap_or_else(|error| panic!("repeated graph frames must succeed: {error}"));
         public_stats.push(C08PublicStatsForTest::from(result.stats));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| panic!("repeated exact C08 frames must retain the ready device"));
+            .unwrap_or_else(|| panic!("repeated graph frames must retain the ready device"));
         resource_observations.push(ready.internal_resource_manager_observation_for_test());
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
@@ -34190,7 +34052,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
     drop(graph_scope);
     drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the repeated C08 publication must remain readable");
+        .expect("the repeated graph publication must remain readable");
 
     assert!(
         no_post_warmup_growth
@@ -34201,7 +34063,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             && production_frames_have_one_submission_and_no_readback
             && explicit_retention
             && actual.rgba() == expected.rgba(),
-        "repeated C08 frames grew resources or entered readback"
+        "repeated graph frames grew resources or entered readback"
     );
 }
 
@@ -34254,10 +34116,10 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("zero-retention C08 coverage requires a renderer");
+    .expect("zero-retention graph coverage requires a renderer");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
-        .expect("zero-retention C08 coverage requires a headless surface");
+        .expect("zero-retention graph coverage requires a headless surface");
     let mut scene = Scene::new();
     scene.fill(
         Rect::new(0.0, 0.0, 6.0, 4.0),
@@ -34270,9 +34132,9 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
         Parameters::default(),
         working_format,
     ))
-    .expect("the first zero-retention C08 frame must succeed");
+    .expect("the first zero-retention graph frame must succeed");
     let expected = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the first zero-retention C08 publication must be readable");
+        .expect("the first zero-retention graph publication must be readable");
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the first zero-retention frame must retain the ready device")
@@ -34290,7 +34152,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
         Parameters::default(),
         working_format,
     ))
-    .expect("the repeated zero-retention C08 frame must succeed");
+    .expect("the repeated zero-retention graph frame must succeed");
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the repeated zero-retention frame must retain the ready device");
@@ -34310,7 +34172,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
     drop(graph_scope);
     drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the repeated zero-retention C08 publication must be readable");
+        .expect("the repeated zero-retention graph publication must be readable");
 
     assert!(
         released_all_idle
@@ -34320,7 +34182,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
             && C08PublicStatsForTest::from(first.stats)
                 == C08PublicStatsForTest::from(second.stats)
             && actual.rgba() == expected.rgba(),
-        "zero retention changed C08 pixels or retained idle resources"
+        "zero retention changed graph pixels or retained idle resources"
     );
 }
 

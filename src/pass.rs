@@ -72,36 +72,36 @@ use super::vello_engine::{
 
 #[cfg(test)]
 thread_local! {
-    static ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+    static ACTIVE_COLOR_FILTER_SHADER_FAILURE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Private deterministic failure at the checked color-filter shader boundary.
 #[cfg(test)]
-pub(crate) struct ScopedC10ColorFilterShaderFailureForTest {
+pub(crate) struct ScopedColorFilterShaderFailureForTest {
     previous: bool,
 }
 
 #[cfg(test)]
-impl ScopedC10ColorFilterShaderFailureForTest {
+impl ScopedColorFilterShaderFailureForTest {
     pub(crate) fn after_checked_realization() -> Self {
         let previous =
-            ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.replace(true));
+            ACTIVE_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.replace(true));
         Self { previous }
     }
 }
 
 #[cfg(test)]
-impl Drop for ScopedC10ColorFilterShaderFailureForTest {
+impl Drop for ScopedColorFilterShaderFailureForTest {
     fn drop(&mut self) {
-        ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.set(self.previous));
+        ACTIVE_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.set(self.previous));
     }
 }
 
 #[cfg(test)]
-fn inject_c10_color_filter_shader_failure_for_test() -> Result<()> {
-    if ACTIVE_C10_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(Cell::get) {
+fn inject_color_filter_shader_failure_for_test() -> Result<()> {
+    if ACTIVE_COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(Cell::get) {
         return Err(preparation_error(
-            "injected C10 color-filter shader failure after checked realization",
+            "injected color-filter shader failure after checked realization",
         ));
     }
     Ok(())
@@ -14057,7 +14057,7 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<C10ColorFilterEncodingFacts> {
         let prepared = self.prepare_c10_color_filter_encoding(request)?;
         #[cfg(test)]
-        inject_c10_color_filter_shader_failure_for_test()?;
+        inject_color_filter_shader_failure_for_test()?;
         let spatial_buffer = self.create_c08_spatial_uniform_buffer(prepared.spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Surgeist C10 exact color-filter bindings"),
