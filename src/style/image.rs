@@ -1,0 +1,1129 @@
+use super::super::{
+    Capabilities, CoordinateSpaceKind, CoordinateSpaceTag, Error, Image, ImageColorProfilePolicy,
+    ImageId, ImageOrientationPolicy, Paint, PrimitiveFamily, PrimitiveOperation, Rect, Result,
+    Shape, Size, UnresolvedResource, UnresolvedResourceKind, UnsupportedPrimitive,
+    validation::{validate_finite_f64, validate_paint, validate_shape, validate_size},
+};
+
+const MAX_IMAGE_REPEAT_TILES: usize = 1_000_000;
+const MAX_IMAGE_REPEAT_TILES_RULE: &str = "must not exceed 1000000";
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StyleResourceRef {
+    identifier: String,
+}
+
+impl StyleResourceRef {
+    pub fn try_new(identifier: impl Into<String>) -> Result<Self> {
+        let identifier = identifier.into();
+        if identifier.trim().is_empty() {
+            return Err(Error::invalid_value(
+                "style resource reference",
+                identifier,
+                "must not be empty",
+            ));
+        }
+        Ok(Self { identifier })
+    }
+
+    #[must_use]
+    pub fn identifier(&self) -> &str {
+        &self.identifier
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedImageResource {
+    id: ImageId,
+    intrinsic_size: Size,
+    density: Option<ImageResourceDensity>,
+}
+
+impl ResolvedImageResource {
+    pub fn try_new(id: ImageId, intrinsic_size: Size) -> Result<Self> {
+        validate_size(intrinsic_size, "resolved image intrinsic size")?;
+        Ok(Self {
+            id,
+            intrinsic_size,
+            density: None,
+        })
+    }
+
+    #[must_use]
+    pub const fn id(&self) -> ImageId {
+        self.id
+    }
+
+    #[must_use]
+    pub const fn intrinsic_size(&self) -> Size {
+        self.intrinsic_size
+    }
+
+    #[must_use]
+    pub const fn with_density(mut self, density: ImageResourceDensity) -> Self {
+        self.density = Some(density);
+        self
+    }
+
+    #[must_use]
+    pub const fn density(&self) -> Option<ImageResourceDensity> {
+        self.density
+    }
+
+    #[must_use]
+    pub const fn orientation_policy(&self) -> ImageOrientationPolicy {
+        ImageOrientationPolicy::RootResolvedOnly
+    }
+
+    #[must_use]
+    pub const fn color_profile_policy(&self) -> ImageColorProfilePolicy {
+        ImageColorProfilePolicy::RootResolvedOnly
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageResourceDensity {
+    value: f64,
+}
+
+impl ImageResourceDensity {
+    pub fn try_new(value: f64) -> Result<Self> {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(Error::invalid_value(
+                "image resource density",
+                value,
+                "must be finite and positive",
+            ));
+        }
+        Ok(Self { value })
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.value
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StyleImageSource {
+    kind: StyleImageSourceKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum StyleImageSourceKind {
+    Image(Image),
+    Resolved(ResolvedImageResource),
+    Paint(Paint),
+    Unresolved(StyleResourceRef),
+}
+
+impl StyleImageSource {
+    pub fn image(image: Image) -> Result<Self> {
+        validate_size(image.size(), "image size")?;
+        Ok(Self {
+            kind: StyleImageSourceKind::Image(image),
+        })
+    }
+
+    pub fn paint(paint: Paint) -> Result<Self> {
+        validate_paint(&paint)?;
+        Ok(Self {
+            kind: StyleImageSourceKind::Paint(paint),
+        })
+    }
+
+    #[must_use]
+    pub const fn resolved(resource: ResolvedImageResource) -> Self {
+        Self {
+            kind: StyleImageSourceKind::Resolved(resource),
+        }
+    }
+
+    #[must_use]
+    pub fn unresolved(reference: StyleResourceRef) -> Self {
+        Self {
+            kind: StyleImageSourceKind::Unresolved(reference),
+        }
+    }
+
+    pub fn require_resolved(&self) -> Result<()> {
+        if let StyleImageSourceKind::Unresolved(reference) = &self.kind {
+            return Err(Error::unresolved_resource(UnresolvedResource::new(
+                UnresolvedResourceKind::Image,
+                reference.identifier(),
+            )));
+        }
+        Ok(())
+    }
+
+    #[must_use]
+    pub const fn kind(&self) -> &StyleImageSourceKind {
+        &self.kind
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct StyleImageLayer {
+    source: StyleImageSource,
+    position: BackgroundPosition,
+    size: BackgroundSize,
+    repeat: BackgroundRepeat,
+    origin: BackgroundBox,
+    clip: BackgroundBox,
+    attachment: BackgroundAttachment,
+    coordinate_space: Option<CoordinateSpaceTag>,
+}
+
+impl StyleImageLayer {
+    pub fn try_new(source: StyleImageSource) -> Result<Self> {
+        Ok(Self {
+            source,
+            position: BackgroundPosition::default(),
+            size: BackgroundSize::auto(),
+            repeat: BackgroundRepeat::repeat(),
+            origin: BackgroundBox::Padding,
+            clip: BackgroundBox::Border,
+            attachment: BackgroundAttachment::Scroll,
+            coordinate_space: None,
+        })
+    }
+
+    #[must_use]
+    pub fn with_position(mut self, position: BackgroundPosition) -> Self {
+        self.position = position;
+        self
+    }
+
+    #[must_use]
+    pub fn with_size(mut self, size: BackgroundSize) -> Self {
+        self.size = size;
+        self
+    }
+
+    #[must_use]
+    pub fn with_repeat(mut self, repeat: BackgroundRepeat) -> Self {
+        self.repeat = repeat;
+        self
+    }
+
+    #[must_use]
+    pub fn with_origin(mut self, origin: BackgroundBox) -> Self {
+        self.origin = origin;
+        self
+    }
+
+    #[must_use]
+    pub fn with_clip(mut self, clip: BackgroundBox) -> Self {
+        self.clip = clip;
+        self
+    }
+
+    #[must_use]
+    pub fn with_attachment(mut self, attachment: BackgroundAttachment) -> Self {
+        self.attachment = attachment;
+        self
+    }
+
+    #[must_use]
+    pub fn with_coordinate_space(mut self, coordinate_space: CoordinateSpaceTag) -> Self {
+        self.coordinate_space = Some(coordinate_space);
+        self
+    }
+
+    #[must_use]
+    pub const fn source(&self) -> &StyleImageSource {
+        &self.source
+    }
+
+    #[must_use]
+    pub const fn position(&self) -> BackgroundPosition {
+        self.position
+    }
+
+    #[must_use]
+    pub const fn size(&self) -> BackgroundSize {
+        self.size
+    }
+
+    #[must_use]
+    pub const fn repeat(&self) -> BackgroundRepeat {
+        self.repeat
+    }
+
+    #[must_use]
+    pub const fn origin(&self) -> BackgroundBox {
+        self.origin
+    }
+
+    #[must_use]
+    pub const fn clip(&self) -> BackgroundBox {
+        self.clip
+    }
+
+    #[must_use]
+    pub const fn attachment(&self) -> BackgroundAttachment {
+        self.attachment
+    }
+
+    #[must_use]
+    pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundPosition {
+    x: PositionComponent,
+    y: PositionComponent,
+}
+
+impl BackgroundPosition {
+    pub fn percent(x: f64, y: f64) -> Result<Self> {
+        Ok(Self {
+            x: PositionComponent::try_percent_for(x, "background position x percent")?,
+            y: PositionComponent::try_percent_for(y, "background position y percent")?,
+        })
+    }
+
+    pub fn length(x: f64, y: f64) -> Result<Self> {
+        Ok(Self {
+            x: PositionComponent::try_length_for(x, "background position x length")?,
+            y: PositionComponent::try_length_for(y, "background position y length")?,
+        })
+    }
+
+    pub fn components(x: PositionComponent, y: PositionComponent) -> Self {
+        Self { x, y }
+    }
+
+    #[must_use]
+    pub const fn edge_offsets(x: PositionEdgeOffset, y: PositionEdgeOffset) -> Self {
+        Self {
+            x: PositionComponent::edge_offset(x),
+            y: PositionComponent::edge_offset(y),
+        }
+    }
+
+    #[must_use]
+    pub const fn x(self) -> PositionComponent {
+        self.x
+    }
+
+    #[must_use]
+    pub const fn y(self) -> PositionComponent {
+        self.y
+    }
+}
+
+impl Default for BackgroundPosition {
+    fn default() -> Self {
+        Self {
+            x: PositionComponent::percent_unchecked(0.0),
+            y: PositionComponent::percent_unchecked(0.0),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionComponent {
+    kind: PositionComponentKind,
+    value: f64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PositionComponentKind {
+    Length,
+    Percent,
+    EdgeOffset(PositionEdge),
+}
+
+impl PositionComponent {
+    pub fn try_percent(value: f64) -> Result<Self> {
+        Self::try_percent_for(value, "background position percent")
+    }
+
+    pub fn try_length(value: f64) -> Result<Self> {
+        Self::try_length_for(value, "background position length")
+    }
+
+    fn try_percent_for(value: f64, field: &str) -> Result<Self> {
+        if !value.is_finite() {
+            return Err(Error::invalid_value(field, value, "must be finite"));
+        }
+        Ok(Self::percent_unchecked(value))
+    }
+
+    fn try_length_for(value: f64, field: &str) -> Result<Self> {
+        if !value.is_finite() {
+            return Err(Error::invalid_value(field, value, "must be finite"));
+        }
+        Ok(Self {
+            kind: PositionComponentKind::Length,
+            value,
+        })
+    }
+
+    const fn percent_unchecked(value: f64) -> Self {
+        Self {
+            kind: PositionComponentKind::Percent,
+            value,
+        }
+    }
+
+    #[must_use]
+    pub const fn edge_offset(offset: PositionEdgeOffset) -> Self {
+        Self {
+            kind: PositionComponentKind::EdgeOffset(offset.edge()),
+            value: offset.offset(),
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> PositionComponentKind {
+        self.kind
+    }
+
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        self.value
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PositionEdge {
+    Start,
+    End,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PositionEdgeOffset {
+    edge: PositionEdge,
+    offset: f64,
+}
+
+impl PositionEdgeOffset {
+    pub fn start(offset: f64) -> Result<Self> {
+        Self::try_new(PositionEdge::Start, offset)
+    }
+
+    pub fn end(offset: f64) -> Result<Self> {
+        Self::try_new(PositionEdge::End, offset)
+    }
+
+    fn try_new(edge: PositionEdge, offset: f64) -> Result<Self> {
+        if !offset.is_finite() {
+            return Err(Error::invalid_value(
+                "background position edge offset",
+                offset,
+                "must be finite",
+            ));
+        }
+        Ok(Self { edge, offset })
+    }
+
+    #[must_use]
+    pub const fn edge(self) -> PositionEdge {
+        self.edge
+    }
+
+    #[must_use]
+    pub const fn offset(self) -> f64 {
+        self.offset
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundSize {
+    kind: BackgroundSizeKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackgroundSizeKind {
+    Auto,
+    Cover,
+    Contain,
+    Explicit {
+        width: SizeComponent,
+        height: SizeComponent,
+    },
+}
+
+impl BackgroundSize {
+    #[must_use]
+    pub const fn auto() -> Self {
+        Self {
+            kind: BackgroundSizeKind::Auto,
+        }
+    }
+
+    #[must_use]
+    pub const fn cover() -> Self {
+        Self {
+            kind: BackgroundSizeKind::Cover,
+        }
+    }
+
+    #[must_use]
+    pub const fn contain() -> Self {
+        Self {
+            kind: BackgroundSizeKind::Contain,
+        }
+    }
+
+    #[must_use]
+    pub const fn explicit(width: SizeComponent, height: SizeComponent) -> Self {
+        Self {
+            kind: BackgroundSizeKind::Explicit { width, height },
+        }
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> BackgroundSizeKind {
+        self.kind
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SizeComponent {
+    kind: SizeComponentKind,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SizeComponentKind {
+    Auto,
+    Length(f64),
+    Percent(f64),
+}
+
+impl SizeComponent {
+    #[must_use]
+    pub const fn auto() -> Self {
+        Self {
+            kind: SizeComponentKind::Auto,
+        }
+    }
+
+    pub fn try_length(value: f64) -> Result<Self> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::invalid_value(
+                "background size length",
+                value,
+                "must be finite and non-negative",
+            ));
+        }
+        Ok(Self {
+            kind: SizeComponentKind::Length(value),
+        })
+    }
+
+    pub fn try_percent(value: f64) -> Result<Self> {
+        if !value.is_finite() || value < 0.0 {
+            return Err(Error::invalid_value(
+                "background size percent",
+                value,
+                "must be finite and non-negative",
+            ));
+        }
+        Ok(Self {
+            kind: SizeComponentKind::Percent(value),
+        })
+    }
+
+    #[must_use]
+    pub const fn kind(self) -> SizeComponentKind {
+        self.kind
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImagePlacementInput {
+    paint_rect: Rect,
+    intrinsic_size: Size,
+    position: BackgroundPosition,
+    size: BackgroundSize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ResolvedImagePlacement {
+    paint_rect: Rect,
+    tile_rect: Rect,
+}
+
+impl ImagePlacementInput {
+    pub fn try_new(
+        paint_rect: Rect,
+        intrinsic_size: Size,
+        position: BackgroundPosition,
+        size: BackgroundSize,
+    ) -> Result<Self> {
+        validate_placement_rect(paint_rect, "image placement paint rect")?;
+        validate_positive_size(intrinsic_size, "image placement intrinsic size")?;
+        Ok(Self {
+            paint_rect,
+            intrinsic_size,
+            position,
+            size,
+        })
+    }
+
+    #[must_use]
+    pub const fn paint_rect(self) -> Rect {
+        self.paint_rect
+    }
+
+    #[must_use]
+    pub const fn intrinsic_size(self) -> Size {
+        self.intrinsic_size
+    }
+
+    #[must_use]
+    pub const fn position(self) -> BackgroundPosition {
+        self.position
+    }
+
+    #[must_use]
+    pub const fn size(self) -> BackgroundSize {
+        self.size
+    }
+
+    pub fn resolve(self) -> Result<ResolvedImagePlacement> {
+        let tile_size = resolve_background_size(self.paint_rect, self.intrinsic_size, self.size);
+        let tile_rect = Rect::new(
+            resolve_position_component(
+                self.paint_rect.x(),
+                self.paint_rect.width(),
+                tile_size.width(),
+                self.position.x(),
+            ),
+            resolve_position_component(
+                self.paint_rect.y(),
+                self.paint_rect.height(),
+                tile_size.height(),
+                self.position.y(),
+            ),
+            tile_size.width(),
+            tile_size.height(),
+        );
+        ResolvedImagePlacement::from_parts(self.paint_rect, tile_rect)
+    }
+}
+
+impl ResolvedImagePlacement {
+    pub fn from_parts(paint_rect: Rect, tile_rect: Rect) -> Result<Self> {
+        validate_placement_rect(paint_rect, "image placement paint rect")?;
+        validate_placement_rect(tile_rect, "image placement tile rect")?;
+        Ok(Self {
+            paint_rect,
+            tile_rect,
+        })
+    }
+
+    #[must_use]
+    pub const fn paint_rect(self) -> Rect {
+        self.paint_rect
+    }
+
+    #[must_use]
+    pub const fn tile_rect(self) -> Rect {
+        self.tile_rect
+    }
+}
+
+fn validate_placement_rect(rect: Rect, field: &str) -> Result<()> {
+    validate_finite_f64(rect.x(), &format!("{field} x"))?;
+    validate_finite_f64(rect.y(), &format!("{field} y"))?;
+    if rect.width() <= 0.0 || rect.height() <= 0.0 {
+        return Err(Error::invalid_value(
+            field,
+            format!("{rect:?}"),
+            "must have finite positive width and height",
+        ));
+    }
+    validate_positive_size(rect.size(), field)
+}
+
+fn validate_positive_size(size: Size, field: &str) -> Result<()> {
+    if !size.width().is_finite()
+        || !size.height().is_finite()
+        || size.width() <= 0.0
+        || size.height() <= 0.0
+    {
+        return Err(Error::invalid_value(
+            field,
+            format!("{size:?}"),
+            "must have finite positive width and height",
+        ));
+    }
+    Ok(())
+}
+
+fn resolve_background_size(paint_rect: Rect, intrinsic_size: Size, size: BackgroundSize) -> Size {
+    let intrinsic_width = intrinsic_size.width();
+    let intrinsic_height = intrinsic_size.height();
+    let scale_x = paint_rect.width() / intrinsic_width;
+    let scale_y = paint_rect.height() / intrinsic_height;
+
+    match size.kind() {
+        BackgroundSizeKind::Auto => intrinsic_size,
+        BackgroundSizeKind::Cover => {
+            let scale = scale_x.max(scale_y);
+            Size::new(intrinsic_width * scale, intrinsic_height * scale)
+        }
+        BackgroundSizeKind::Contain => {
+            let scale = scale_x.min(scale_y);
+            Size::new(intrinsic_width * scale, intrinsic_height * scale)
+        }
+        BackgroundSizeKind::Explicit { width, height } => {
+            let width = resolve_size_component(width, paint_rect.width());
+            let height = resolve_size_component(height, paint_rect.height());
+            match (width, height) {
+                (Some(width), Some(height)) => Size::new(width, height),
+                (Some(width), None) => Size::new(width, width * intrinsic_height / intrinsic_width),
+                (None, Some(height)) => {
+                    Size::new(height * intrinsic_width / intrinsic_height, height)
+                }
+                (None, None) => intrinsic_size,
+            }
+        }
+    }
+}
+
+fn resolve_size_component(component: SizeComponent, axis: f64) -> Option<f64> {
+    match component.kind() {
+        SizeComponentKind::Auto => None,
+        SizeComponentKind::Length(value) => Some(value),
+        SizeComponentKind::Percent(value) => Some(axis * value),
+    }
+}
+
+fn resolve_position_component(
+    origin: f64,
+    axis: f64,
+    tile_axis: f64,
+    component: PositionComponent,
+) -> f64 {
+    match component.kind() {
+        PositionComponentKind::Length => origin + component.value(),
+        PositionComponentKind::Percent => origin + (axis - tile_axis) * component.value(),
+        PositionComponentKind::EdgeOffset(PositionEdge::Start) => origin + component.value(),
+        PositionComponentKind::EdgeOffset(PositionEdge::End) => {
+            origin + axis - tile_axis - component.value()
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BackgroundRepeat {
+    x: RepeatMode,
+    y: RepeatMode,
+}
+
+impl BackgroundRepeat {
+    #[must_use]
+    pub const fn new(x: RepeatMode, y: RepeatMode) -> Self {
+        Self { x, y }
+    }
+
+    #[must_use]
+    pub const fn repeat() -> Self {
+        Self::new(RepeatMode::Repeat, RepeatMode::Repeat)
+    }
+
+    #[must_use]
+    pub const fn repeat_x() -> Self {
+        Self::new(RepeatMode::Repeat, RepeatMode::NoRepeat)
+    }
+
+    #[must_use]
+    pub const fn repeat_y() -> Self {
+        Self::new(RepeatMode::NoRepeat, RepeatMode::Repeat)
+    }
+
+    #[must_use]
+    pub const fn no_repeat() -> Self {
+        Self::new(RepeatMode::NoRepeat, RepeatMode::NoRepeat)
+    }
+
+    #[must_use]
+    pub const fn x(self) -> RepeatMode {
+        self.x
+    }
+
+    #[must_use]
+    pub const fn y(self) -> RepeatMode {
+        self.y
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepeatMode {
+    Repeat,
+    NoRepeat,
+    Round,
+    Space,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ImageRepeatMode {
+    NoRepeat,
+    RepeatX,
+    RepeatY,
+    RepeatBoth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct ImageRepeatPlan {
+    repeat: BackgroundRepeat,
+    mode: ImageRepeatMode,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ResolvedImageRepeat {
+    clip_rect: Rect,
+    tile_rects: Vec<Rect>,
+}
+
+impl ImageRepeatPlan {
+    pub fn try_new(repeat: BackgroundRepeat, capabilities: Capabilities) -> Result<Self> {
+        if matches!(repeat.x(), RepeatMode::Round) || matches!(repeat.y(), RepeatMode::Round) {
+            let unsupported = UnsupportedPrimitive::new(
+                PrimitiveFamily::ImageSampling,
+                PrimitiveOperation::BackgroundRepeatRound,
+            );
+            capabilities.ensure_supported(unsupported)?;
+            return Err(Error::unsupported_render_primitive(unsupported));
+        }
+        if matches!(repeat.x(), RepeatMode::Space) || matches!(repeat.y(), RepeatMode::Space) {
+            let unsupported = UnsupportedPrimitive::new(
+                PrimitiveFamily::ImageSampling,
+                PrimitiveOperation::BackgroundRepeatSpace,
+            );
+            capabilities.ensure_supported(unsupported)?;
+            return Err(Error::unsupported_render_primitive(unsupported));
+        }
+
+        let mode = match (repeat.x(), repeat.y()) {
+            (RepeatMode::NoRepeat, RepeatMode::NoRepeat) => ImageRepeatMode::NoRepeat,
+            (RepeatMode::Repeat, RepeatMode::NoRepeat) => ImageRepeatMode::RepeatX,
+            (RepeatMode::NoRepeat, RepeatMode::Repeat) => ImageRepeatMode::RepeatY,
+            (RepeatMode::Repeat, RepeatMode::Repeat) => ImageRepeatMode::RepeatBoth,
+            _ => unreachable!("round and space are rejected before repeat mode mapping"),
+        };
+        Ok(Self { repeat, mode })
+    }
+
+    #[must_use]
+    pub const fn repeat(self) -> BackgroundRepeat {
+        self.repeat
+    }
+
+    #[must_use]
+    pub const fn mode(self) -> ImageRepeatMode {
+        self.mode
+    }
+
+    pub fn resolve(self, placement: ResolvedImagePlacement) -> Result<ResolvedImageRepeat> {
+        let repeats_x = matches!(
+            self.mode,
+            ImageRepeatMode::RepeatX | ImageRepeatMode::RepeatBoth
+        );
+        let repeats_y = matches!(
+            self.mode,
+            ImageRepeatMode::RepeatY | ImageRepeatMode::RepeatBoth
+        );
+        let x_positions = repeat_positions(
+            placement.paint_rect().x(),
+            placement.paint_rect().width(),
+            placement.tile_rect().x(),
+            placement.tile_rect().width(),
+            repeats_x,
+        )?;
+        let y_positions = repeat_positions(
+            placement.paint_rect().y(),
+            placement.paint_rect().height(),
+            placement.tile_rect().y(),
+            placement.tile_rect().height(),
+            repeats_y,
+        )?;
+        let tile_count = x_positions
+            .len()
+            .checked_mul(y_positions.len())
+            .ok_or_else(|| image_repeat_tile_count_error("overflow"))?;
+        validate_image_repeat_tile_count(tile_count)?;
+
+        let mut tile_rects = Vec::with_capacity(tile_count);
+        for y in y_positions {
+            for x in &x_positions {
+                tile_rects.push(Rect::new(
+                    *x,
+                    y,
+                    placement.tile_rect().width(),
+                    placement.tile_rect().height(),
+                ));
+            }
+        }
+
+        Ok(ResolvedImageRepeat {
+            clip_rect: placement.paint_rect(),
+            tile_rects,
+        })
+    }
+}
+
+impl ResolvedImageRepeat {
+    #[must_use]
+    pub const fn clip_rect(&self) -> Rect {
+        self.clip_rect
+    }
+
+    #[must_use]
+    pub fn tile_rects(&self) -> &[Rect] {
+        &self.tile_rects
+    }
+}
+
+fn repeat_positions(
+    clip_origin: f64,
+    clip_axis: f64,
+    tile_origin: f64,
+    tile_axis: f64,
+    repeats: bool,
+) -> Result<Vec<f64>> {
+    if tile_axis <= 0.0 || !tile_axis.is_finite() {
+        return Err(Error::invalid_value(
+            "image repeat tile size",
+            tile_axis,
+            "must be finite and positive",
+        ));
+    }
+
+    let clip_end = clip_origin + clip_axis;
+    if !clip_end.is_finite() {
+        return Err(Error::invalid_value(
+            "image repeat geometry",
+            format!("origin {clip_origin}, axis {clip_axis}"),
+            "resolved clip extent must be finite",
+        ));
+    }
+    if !repeats {
+        return Ok(
+            if tile_origin < clip_end && tile_origin + tile_axis > clip_origin {
+                vec![tile_origin]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+
+    let origin = first_repeated_tile_origin(clip_origin, tile_origin, tile_axis);
+    let count = repeat_position_count(origin, clip_end, tile_axis)?;
+    validate_image_repeat_tile_count(count)?;
+
+    let mut positions = Vec::with_capacity(count);
+    for index in 0..count {
+        positions.push(origin + tile_axis * index as f64);
+    }
+    Ok(positions)
+}
+
+fn first_repeated_tile_origin(clip_origin: f64, tile_origin: f64, tile_axis: f64) -> f64 {
+    let offset = ((clip_origin - tile_origin) / tile_axis).floor();
+    let mut origin = tile_origin + offset * tile_axis;
+    if origin + tile_axis <= clip_origin {
+        origin += tile_axis;
+    }
+    origin
+}
+
+fn repeat_position_count(origin: f64, clip_end: f64, tile_axis: f64) -> Result<usize> {
+    if origin >= clip_end {
+        return Ok(0);
+    }
+    let count = ((clip_end - origin) / tile_axis).ceil();
+    if !count.is_finite() || count < 0.0 || count > usize::MAX as f64 {
+        return Err(image_repeat_tile_count_error(count));
+    }
+    Ok(count as usize)
+}
+
+fn validate_image_repeat_tile_count(tile_count: usize) -> Result<()> {
+    if tile_count > MAX_IMAGE_REPEAT_TILES {
+        return Err(image_repeat_tile_count_error(tile_count));
+    }
+    Ok(())
+}
+
+fn image_repeat_tile_count_error(value: impl std::fmt::Display) -> Error {
+    Error::invalid_value(
+        "image repeat tile count",
+        value,
+        MAX_IMAGE_REPEAT_TILES_RULE,
+    )
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundBox {
+    Border,
+    Padding,
+    Content,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BackgroundAreas {
+    border_box: Rect,
+    padding_box: Rect,
+    content_box: Rect,
+}
+
+impl BackgroundAreas {
+    pub fn try_new(border_box: Rect, padding_box: Rect, content_box: Rect) -> Result<Self> {
+        validate_background_rect(border_box, "background border box")?;
+        validate_background_rect(padding_box, "background padding box")?;
+        validate_background_rect(content_box, "background content box")?;
+        Ok(Self {
+            border_box,
+            padding_box,
+            content_box,
+        })
+    }
+
+    #[must_use]
+    pub const fn border_box(self) -> Rect {
+        self.border_box
+    }
+
+    #[must_use]
+    pub const fn padding_box(self) -> Rect {
+        self.padding_box
+    }
+
+    #[must_use]
+    pub const fn content_box(self) -> Rect {
+        self.content_box
+    }
+
+    #[must_use]
+    pub const fn rect_for(self, box_kind: BackgroundBox) -> Rect {
+        match box_kind {
+            BackgroundBox::Border => self.border_box,
+            BackgroundBox::Padding => self.padding_box,
+            BackgroundBox::Content => self.content_box,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct BackgroundClipGeometry {
+    kind: BackgroundClipGeometryKind,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum BackgroundClipGeometryKind {
+    Rect(Rect),
+    Shape(Shape),
+}
+
+impl BackgroundClipGeometry {
+    pub fn try_rect(rect: Rect) -> Result<Self> {
+        validate_background_rect(rect, "background clip rect")?;
+        Ok(Self {
+            kind: BackgroundClipGeometryKind::Rect(rect),
+        })
+    }
+
+    pub fn try_shape(shape: Shape) -> Result<Self> {
+        validate_shape(&shape)?;
+        Ok(Self {
+            kind: BackgroundClipGeometryKind::Shape(shape),
+        })
+    }
+
+    #[must_use]
+    pub fn kind(&self) -> &BackgroundClipGeometryKind {
+        &self.kind
+    }
+
+    #[must_use]
+    pub fn rect(&self) -> Option<Rect> {
+        match &self.kind {
+            BackgroundClipGeometryKind::Rect(rect) => Some(*rect),
+            BackgroundClipGeometryKind::Shape(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn shape(&self) -> Option<&Shape> {
+        match &self.kind {
+            BackgroundClipGeometryKind::Rect(_) => None,
+            BackgroundClipGeometryKind::Shape(shape) => Some(shape),
+        }
+    }
+}
+
+pub(super) fn validate_background_rect(rect: Rect, field: &str) -> Result<()> {
+    validate_finite_f64(rect.x(), &format!("{field} x"))?;
+    validate_finite_f64(rect.y(), &format!("{field} y"))?;
+    if !rect.width().is_finite()
+        || !rect.height().is_finite()
+        || rect.width() <= 0.0
+        || rect.height() <= 0.0
+    {
+        return Err(Error::invalid_value(
+            field,
+            format!("{rect:?}"),
+            "must have finite positive width and height",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BackgroundAttachment {
+    Scroll,
+    Fixed,
+    Local,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ImageAttachmentPlan {
+    attachment: BackgroundAttachment,
+    coordinate_space: Option<CoordinateSpaceTag>,
+}
+
+impl ImageAttachmentPlan {
+    pub fn try_new(
+        attachment: BackgroundAttachment,
+        coordinate_space: Option<CoordinateSpaceTag>,
+    ) -> Result<Self> {
+        if matches!(attachment, BackgroundAttachment::Fixed) {
+            let Some(tag) = coordinate_space else {
+                return Err(Error::invalid_value(
+                    "background attachment coordinate space",
+                    "none",
+                    "fixed backgrounds require a viewport coordinate tag",
+                ));
+            };
+            if tag.kind() != CoordinateSpaceKind::Viewport {
+                return Err(Error::invalid_value(
+                    "background attachment coordinate space",
+                    format!("{:?}", tag.kind()),
+                    "fixed backgrounds require a viewport coordinate tag",
+                ));
+            }
+        }
+        Ok(Self {
+            attachment,
+            coordinate_space,
+        })
+    }
+
+    #[must_use]
+    pub const fn attachment(self) -> BackgroundAttachment {
+        self.attachment
+    }
+
+    #[must_use]
+    pub const fn coordinate_space(self) -> Option<CoordinateSpaceTag> {
+        self.coordinate_space
+    }
+}
