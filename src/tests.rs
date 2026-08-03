@@ -20928,7 +20928,7 @@ fn mask_clip_capabilities_name_sequence12_boundaries_with_narrow_alpha_execution
 }
 
 #[test]
-fn c13_semantic_capabilities_match_final_gpu_only_contract() {
+fn current_capabilities_report_supported_gpu_filters_and_diagnostic_only_effects() {
     let capabilities = Capabilities::CURRENT;
     let filters = capabilities.filters();
     assert_eq!(
