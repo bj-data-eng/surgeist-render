@@ -49,7 +49,10 @@
   C04 owns final cross-domain fixture and complete naming reconciliation.
 - `src/tests.rs` remains one file until P02-I02. Production algorithms, public
   APIs, manifests, dependencies, features, targets, docs, examples, fixtures,
-  shaders, root artifacts, and rendering behavior are unchanged.
+  shaders, root artifacts, and rendering behavior are unchanged. Here,
+  `fixtures` means production or binary behavior inputs; C02 may remove or
+  consolidate private Rust test-only fixture/support code exactly as bounded by
+  T01-T03.
 - Commands use already installed artifacts with `CARGO_NET_OFFLINE=true`. No
   acquisition, installation, update, or bootstrap is authorized.
 
@@ -178,12 +181,23 @@ CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets
 CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets --features render-window,render-web
 CARGO_NET_OFFLINE=true RUSTDOCFLAGS="-D warnings" cargo doc -p surgeist-render --no-deps --features render-window,render-web
 test -z "$(git ls-files -- Cargo.lock)"
+owned_rust_files=("${(@f)$(
+  {
+    git ls-files -- '*.rs'
+    git ls-files --others --exclude-standard -- '*.rs'
+  } | sort -u
+)}")
+test "${#owned_rust_files[@]}" -gt 0
+if rg -n --pcre2 '#\s*\[\s*(?:unsafe\s*\(|no_mangle\b|export_name\b)|\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|\bstatic\s+mut\b|\bextern\s*(?:"[^"]*")?\s*\{' "${owned_rust_files[@]}"; then
+  exit 1
+else
+  test "$?" -eq 1
+fi
 ```
 
-Final safety evidence builds the explicit owned-Rust manifest, runs the
-canonical executable-unsafe scan, and classifies every match. Completion also
-requires a status-only `complete` plan commit, a distinct holistic `CLEAN`
-review over the exact cycle range, post-review repetition of the complete
-matrix, authority-remote publication/readback, and a C03 handoff. Missing
-installed tooling, graphical-host capability, credentials, or stable remote
-history uses the canonical blocker contract.
+Every unsafe-scan textual match is classified; an executable match blocks
+completion. Completion also requires a status-only `complete` plan commit, a
+distinct holistic `CLEAN` review over the exact cycle range, post-review
+repetition of the complete matrix, authority-remote publication/readback, and a
+C03 handoff. Missing installed tooling, graphical-host capability, credentials,
+or stable remote history uses the canonical blocker contract.
