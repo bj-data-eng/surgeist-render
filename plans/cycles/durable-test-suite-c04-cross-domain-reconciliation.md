@@ -61,7 +61,7 @@
   and unsafe-enabling allowances.
 - Baseline evidence at the cycle base: 680 tracked source-level `#[test]`
   functions remain across the two owned files; direct plan-identifier and
-  numbered-sequence test-name predicates are already empty; nine
+  numbered-sequence test-name predicates are already empty;
   `source-readable` references and several ambiguous historical words still
   require semantic adjudication. These facts guide review and are not numerical
   acceptance gates.
