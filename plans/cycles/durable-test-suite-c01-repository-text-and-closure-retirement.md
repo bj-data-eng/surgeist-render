@@ -4,7 +4,7 @@
 
 - Cycle: `P02/I01/S01/C01`.
 - Owning repository: `surgeist-render`.
-- Status: `reviewed`.
+- Status: `in_progress`.
 - Cycle base: `8bff3a6af323cf724175bb2e3fd09c801b401804`.
 - Specification: `plans/specs/durable-test-suite.md` at
   `79f68da934322a13f286a64d6d7df48213ca5046`, normalized SHA-256
