@@ -11083,7 +11083,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .expect("presented C12 coverage requires a renderer");
+    .expect("presented bounded-backdrop coverage requires a renderer");
     renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = display_free_presented_surface_for_test(
         &mut renderer,
@@ -11094,7 +11094,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
         },
     );
     pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .expect("presented C12 coverage must configure");
+        .expect("presented bounded-backdrop coverage must configure");
     let presentation = presented_observation_handle_for_test(&surface);
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -11129,7 +11129,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
             && presented.as_deref().is_some_and(|actual| {
                 c09_pixels_match_for_test(actual, &expected, WorkingFormat::ReducedPrecision, 4)
             }),
-        "presented C12 bounded backdrop did not execute atomically"
+        "the presented bounded backdrop did not execute atomically"
     );
 }
 
@@ -11139,13 +11139,13 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .expect("public C12 dispatch coverage requires a renderer");
+    .expect("public bounded-backdrop dispatch coverage requires a renderer");
     renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
-    .expect("public C12 dispatch coverage requires a surface");
+    .expect("public bounded-backdrop dispatch coverage requires a surface");
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
@@ -11162,7 +11162,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
     drop(graph_scope);
     drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the public C12 publication must be readable");
+        .expect("the public bounded-backdrop publication must be readable");
     let expected = c09_reference_straight_bytes_for_test(&expected);
     let dispatch_after = renderer.dispatch_observation_for_test();
 
@@ -11180,7 +11180,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(1)
             && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
-        "public dispatch did not enable only the exact bounded C12 graph"
+        "public dispatch did not enable only the exact bounded-backdrop graph"
     );
 }
 
@@ -12575,7 +12575,9 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("presented C11 coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("presented spatial-filter coverage requires a renderer: {error}")
+    });
     let mut surface = display_free_presented_surface_for_test(
         &mut renderer,
         SurfaceOptions {
@@ -12584,8 +12586,9 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
             ..SurfaceOptions::default()
         },
     );
-    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .unwrap_or_else(|error| panic!("presented C11 coverage must configure: {error}"));
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface)).unwrap_or_else(
+        |error| panic!("presented spatial-filter coverage must configure: {error}"),
+    );
     let presentation = presented_observation_handle_for_test(&surface);
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -12633,12 +12636,12 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
             && pixels_match
             && dispatch_after.exact_c11_fixture_routes
                 == dispatch_before.exact_c11_fixture_routes.saturating_add(1),
-        "presented C11 fixture did not execute Gaussian blur and drop shadow atomically"
+        "the presented fixture did not execute Gaussian blur and drop shadow atomically"
     );
 }
 
 #[test]
-fn public_dispatch_retains_c09_boundary_while_c11_fixture_uses_shared_executor() {
+fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_backdrop() {
     let (scene, filters, size, expected) = c11_mixed_filter_fixture_for_test();
     let (mut renderer, mut c11_surface) =
         c11_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
@@ -12656,12 +12659,12 @@ fn public_dispatch_retains_c09_boundary_while_c11_fixture_uses_shared_executor()
         Size::new(f64::from(c09_size.width()), f64::from(c09_size.height())),
         1.0,
     ))
-    .expect("C09 boundary coverage requires a surface");
+    .expect("masked-composition dispatch coverage requires a surface");
     let c09 =
         pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
     let future_scene = c10_future_backdrop_scene_for_test();
     let mut future_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .expect("future C12 boundary coverage requires a surface");
+        .expect("broad-backdrop rejection coverage requires a surface");
     let future = pollster::block_on(renderer.render(
         &mut future_surface,
         &future_scene,
@@ -12687,7 +12690,7 @@ fn public_dispatch_retains_c09_boundary_while_c11_fixture_uses_shared_executor()
             && dispatch_after.exact_c11_fixture_routes
                 == dispatch_before.exact_c11_fixture_routes.saturating_add(1)
             && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
-        "public dispatch crossed the C09 boundary or the C11 fixture bypassed the shared executor"
+        "public dispatch misrouted masked composition, spatial filters, or broad backdrop"
     );
 }
 
@@ -24464,7 +24467,7 @@ fn render_window_smoke_executes_direct_and_graph_presented_frames() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .expect("presented C08 smoke coverage requires a compatible device");
+    .expect("presented direct-and-graph smoke coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let observation = presented_observation_handle_for_test(&surface);
@@ -24501,7 +24504,7 @@ fn render_window_smoke_executes_direct_and_graph_presented_frames() {
 
     assert!(
         direct_presented && graph_presented,
-        "presented C08 graph did not acquire submit and present through one transaction"
+        "the presented graph did not acquire, submit, and present through one transaction"
     );
 }
 
@@ -24516,7 +24519,7 @@ fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
             Options::default()
                 .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
         ))
-        .expect("presented C08 format coverage requires a compatible device");
+        .expect("presented format coverage requires a compatible device");
         let working_format = default_c08_working_format_for_test(&mut renderer);
         let mut surface = display_free_presented_surface_for_test(
             &mut renderer,
@@ -24527,7 +24530,7 @@ fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
             },
         );
         pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-            .expect("presented C08 format coverage requires a configured output");
+            .expect("presented format coverage requires a configured output");
         let advertised_format_is_exact = matches!(
             &surface.backend,
             SurfaceBackend::Presented { surface, .. }
@@ -24588,7 +24591,7 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("presented C08 acquire-failure coverage requires a compatible device");
+    .expect("presented acquire-failure coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
@@ -24610,7 +24613,7 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
         Parameters::default(),
         working_format,
     ))
-    .expect_err("the injected acquire timeout must abort the prepared C08 graph");
+    .expect_err("the injected acquire timeout must abort the prepared graph");
 
     assert_eq!(error.code(), ErrorCode::SurfaceTimeout);
     let presented = presented_observation_for_test(&surface);
@@ -24658,7 +24661,7 @@ fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("presented C08 scope-failure coverage requires a compatible device");
+    .expect("presented scope-failure coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
@@ -24697,7 +24700,7 @@ fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
 
 #[cfg(feature = "render-window")]
 #[test]
-fn presented_c08_accounting_fault_before_authorization_suppresses_present_and_commits() {
+fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_commits() {
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let _poison = ScopedC08GraphPostSubmitControlForTest::accounting_fault();
@@ -24706,7 +24709,7 @@ fn presented_c08_accounting_fault_before_authorization_suppresses_present_and_co
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
-    .expect("presented C08 accounting coverage requires a compatible device");
+    .expect("presented accounting-fault coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
@@ -24797,7 +24800,7 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("presented C08 present-failure coverage requires a compatible device");
+    .expect("presented present-failure coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
@@ -24806,11 +24809,11 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     let resource_before = presented_resource_id_for_test(&surface);
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured C08 surface must retain a ready device"))
+        .unwrap_or_else(|| panic!("the configured surface must retain a ready device"))
         .device_pass_cache_counts_for_test();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured C08 surface must retain a resource manager"))
+        .unwrap_or_else(|| panic!("the configured surface must retain a resource manager"))
         .internal_resource_manager_observation_for_test();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
@@ -24845,17 +24848,13 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     assert_eq!(
         renderer
             .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| {
-                panic!("the C08 present-scope failure must retain the ready device")
-            })
+            .unwrap_or_else(|| { panic!("the present-scope failure must retain the ready device") })
             .device_pass_cache_counts_for_test(),
         cache_before
     );
     let resources_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| {
-            panic!("the C08 present-scope failure must return provisional resources")
-        })
+        .unwrap_or_else(|| panic!("the present-scope failure must return provisional resources"))
         .internal_resource_manager_observation_for_test();
     assert_eq!(resources_after.leased_count, 0);
     assert_eq!(resources_after.active_frame_count, 0);
@@ -24881,7 +24880,7 @@ fn presented_graph_cancellation_after_submit_discards_without_presentation() {
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
-    .expect("presented C08 cancellation coverage requires a compatible device");
+    .expect("presented cancellation coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let stats_before = renderer.stats();
@@ -24937,7 +24936,7 @@ fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device(
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .expect("presented C08 terminal-loss coverage requires a compatible device");
+    .expect("presented terminal-loss coverage requires a compatible device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let mut scene = Scene::new();
@@ -26756,7 +26755,7 @@ fn surgeist_device_state_owns_selected_wgpu_handles() {
 
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("T5 ownership coverage requires a real selected WGPU device");
+        .expect("ready-device ownership coverage requires a real selected WGPU device");
 
     assert_ready_device_state_exposes_owned_wgpu_handles(&ready);
     assert!(
@@ -26779,7 +26778,7 @@ fn terminal_device_cleanup_drops_internal_engine_resources() {
     let drop_witness = {
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("T5 terminal cleanup coverage requires a real selected WGPU device");
+            .expect("terminal device cleanup coverage requires a real selected WGPU device");
 
         assert_ready_device_state_exposes_owned_wgpu_handles(&ready);
         assert!(
@@ -27235,7 +27234,7 @@ fn repeated_direct_renders_keep_internal_vello_retention_bounded() {
 #[test]
 fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("T6 cancellation coverage requires a real selected WGPU device");
+        .expect("Vello cancellation coverage requires a real selected WGPU device");
     let target_extent = PhysicalSize::new(64, 48);
     let prepared = VelloScene::prepare_raster_scenario_for_test(
         VelloRasterScenario::Base,
@@ -27246,7 +27245,7 @@ fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
 
     let initial = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("T6 cancellation coverage requires the owned per-device Vello state")
+        .expect("Vello cancellation coverage requires the owned per-device state")
         .internal_resource_manager_observation_for_test();
     assert_eq!(initial.retained_count_for_test(), 0);
     assert_eq!(initial.recovery_outcome_for_test(), None);
@@ -27306,7 +27305,7 @@ fn canceled_vello_pass_drops_uncertain_resources_and_marks_atlas_dirty() {
 #[test]
 fn canceled_vello_atlas_recovery_survives_preallocation_failure() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("T6 recovery coverage requires a real selected WGPU device");
+        .expect("Vello atlas recovery coverage requires a real selected WGPU device");
     let target_extent = PhysicalSize::new(64, 48);
     let prepared = VelloScene::prepare_raster_scenario_for_test(
         VelloRasterScenario::Base,
@@ -32108,12 +32107,13 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
 #[test]
 fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_graph() {
     let (scene, filters, expected) = c10_retention_fixture_for_test();
-    let width = u32::try_from(expected.len() / 4).expect("the presented C10 width must fit u32");
+    let width =
+        u32::try_from(expected.len() / 4).expect("the presented fixture width must fit u32");
     let parameters = Parameters::default();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("presented C10 coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| panic!("presented color-filter coverage requires a renderer: {error}"));
     let working_format = default_c08_working_format_for_test(&mut renderer);
     let mut surface = display_free_presented_surface_for_test(
         &mut renderer,
@@ -32124,7 +32124,7 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
         },
     );
     pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .unwrap_or_else(|error| panic!("presented C10 coverage must configure: {error}"));
+        .unwrap_or_else(|error| panic!("presented color-filter coverage must configure: {error}"));
     let presentation = presented_observation_handle_for_test(&surface);
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -32189,26 +32189,30 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
                 == dispatch_before.boundary_invocations.saturating_add(1)
             && dispatch_after.exact_c10_fixture_routes
                 == dispatch_before.exact_c10_fixture_routes.saturating_add(1),
-        "presented C10 fixture did not use the production graph transaction and host effects"
+        "the presented color-filter fixture did not use the production graph transaction and host effects"
     );
 }
 
 #[test]
-fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor() {
+fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdrop() {
     let (c10_scene, c10_filters, c10_expected) = c10_retention_fixture_for_test();
     let c10_width =
-        u32::try_from(c10_expected.len() / 4).expect("the C10 boundary width must fit u32");
+        u32::try_from(c10_expected.len() / 4).expect("the color-filter width must fit u32");
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("C09/C10 boundary coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| {
+        panic!("composition and color-filter dispatch coverage requires a renderer: {error}")
+    });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
     let dispatch_before = renderer.dispatch_observation_for_test();
 
     let mut c10_surface =
         pollster::block_on(renderer.create_headless(Size::new(f64::from(c10_width), 1.0), 1.0))
-            .unwrap_or_else(|error| panic!("C10 boundary coverage requires a surface: {error}"));
+            .unwrap_or_else(|error| {
+                panic!("color-filter dispatch coverage requires a surface: {error}")
+            });
     let c10 = render_c10_fixture_for_test(
         &mut renderer,
         &mut c10_surface,
@@ -32223,7 +32227,7 @@ fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor()
         Size::new(f64::from(c09_size.width()), f64::from(c09_size.height())),
         1.0,
     ))
-    .unwrap_or_else(|error| panic!("C09 boundary coverage requires a surface: {error}"));
+    .unwrap_or_else(|error| panic!("masked-composition coverage requires a surface: {error}"));
     let c09 =
         pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
 
@@ -32232,7 +32236,7 @@ fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor()
         .unwrap_or_else(|error| panic!("future boundary coverage requires a surface: {error}"));
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
-        .expect("C09/C10 boundary coverage must retain its ready device");
+        .expect("dispatch coverage must retain its ready device");
     let resources_before = ready.internal_resource_manager_observation_for_test();
     let cache_before = ready.device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -32284,7 +32288,7 @@ fn public_dispatch_retains_c09_boundary_while_c10_fixture_uses_shared_executor()
             && dispatch_after.exact_c10_fixture_routes
                 == dispatch_before.exact_c10_fixture_routes.saturating_add(1)
             && dispatch_after.future_pass_rejections == dispatch_before.future_pass_rejections,
-        "public dispatch crossed the C09 boundary or the C10 fixture bypassed the shared executor"
+        "public dispatch misrouted masked composition, color filters, or broad backdrop"
     );
 }
 
@@ -32947,7 +32951,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
                 .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
         ))
         .unwrap_or_else(|error| {
-            panic!("presented C09 coverage requires a compatible renderer: {error}")
+            panic!("presented masked-composition coverage requires a compatible renderer: {error}")
         });
         let working_format = default_c08_working_format_for_test(&mut renderer);
         renderer.select_exact_graph_working_format_for_test(working_format);
@@ -32961,7 +32965,9 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
         );
         pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
             .unwrap_or_else(|error| {
-                panic!("presented C09 coverage requires a configured output: {error}")
+                panic!(
+                    "presented masked-composition coverage requires a configured output: {error}"
+                )
             });
         let observation = presented_observation_handle_for_test(&surface);
         let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -33013,13 +33019,13 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
 
     assert!(
         presented_atomically,
-        "presented C09 composition did not commit atomically"
+        "the presented masked composition did not commit atomically"
     );
 }
 
 #[cfg(feature = "render-window")]
 #[test]
-fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_publication() {
+fn presented_masked_blended_present_scope_failure_attempts_present_without_publication() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
     let scene = c09_presented_masked_blended_scene_for_test(rect);
 
@@ -33029,7 +33035,9 @@ fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_p
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .unwrap_or_else(|error| {
-        panic!("presented C09 failure coverage requires a compatible renderer: {error}")
+        panic!(
+            "presented masked-composition failure coverage requires a compatible renderer: {error}"
+        )
     });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
@@ -33048,11 +33056,11 @@ fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_p
     let resource_before = presented_resource_id_for_test(&surface);
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured C09 surface must retain a ready device"))
+        .unwrap_or_else(|| panic!("the configured surface must retain a ready device"))
         .device_pass_cache_counts_for_test();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured C09 surface must retain a resource manager"))
+        .unwrap_or_else(|| panic!("the configured surface must retain a resource manager"))
         .internal_resource_manager_observation_for_test();
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
@@ -33063,7 +33071,7 @@ fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_p
     let direct_submission = direct_scope.observation_for_test();
     let failure = ScopedC08GraphPostSubmitControlForTest::present_failing();
     let error = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
-        .expect_err("the injected C09 present-scope failure must abort public publication");
+        .expect_err("the injected present-scope failure must abort public publication");
 
     assert_eq!(error.code(), ErrorCode::PresentFailed);
     assert!(failure.scope_resolution_observed_for_test());
@@ -33093,13 +33101,15 @@ fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_p
     assert_eq!(
         renderer
             .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| panic!("the C09 failure must retain the ready device"))
+            .unwrap_or_else(|| panic!("the presentation failure must retain the ready device"))
             .device_pass_cache_counts_for_test(),
         cache_before
     );
     let resources_after = renderer
         .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the C09 failure must return every provisional resource"))
+        .unwrap_or_else(|| {
+            panic!("the presentation failure must return every provisional resource")
+        })
         .internal_resource_manager_observation_for_test();
     assert_eq!(resources_after.leased_count, 0);
     assert_eq!(resources_after.active_frame_count, 0);
@@ -33116,7 +33126,7 @@ fn presented_c09_masked_blended_present_scope_failure_attempts_present_without_p
 
 #[cfg(feature = "render-window")]
 #[test]
-fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
+fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
     let scene = c09_presented_masked_blended_scene_for_test(rect);
 
@@ -33126,7 +33136,7 @@ fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fail
             .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
     ))
     .unwrap_or_else(|error| {
-        panic!("presented C09 terminal coverage requires a compatible renderer: {error}")
+        panic!("presented terminal-signal coverage requires a compatible renderer: {error}")
     });
     let working_format = default_c08_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
@@ -33148,7 +33158,7 @@ fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fail
     let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
     let stats = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
         .unwrap_or_else(|error| {
-            panic!("a terminal signal after clean finish rewrote the completed C09 frame: {error}")
+            panic!("a terminal signal after clean finish rewrote the completed frame: {error}")
         });
     drop(loss);
 
@@ -33194,7 +33204,7 @@ fn presented_c09_post_transaction_terminal_signal_commits_current_frame_and_fail
     let next_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let next_graph_submission = next_graph_scope.observation_for_test();
     let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
-        .expect_err("the operation after an idle C09 terminal signal must fail deterministically");
+        .expect_err("the operation after an idle terminal signal must fail deterministically");
     assert_runtime_device_lost(
         error,
         RuntimeOperation::SurfaceRendering,
@@ -33269,18 +33279,18 @@ fn c13_future_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
 }
 
 #[test]
-fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publication() {
+fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
             .with_resource_cache_budget(ResourceCacheBudget::new(64 * 1024 * 1024)),
     ))
     .unwrap_or_else(|error| {
-        panic!("C10 diagnostic coverage requires a compatible renderer: {error}")
+        panic!("broad-backdrop diagnostic coverage requires a compatible renderer: {error}")
     });
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
         .unwrap_or_else(|error| {
-            panic!("C10 diagnostic coverage requires a headless surface: {error}")
+            panic!("broad-backdrop diagnostic coverage requires a headless surface: {error}")
         });
     let mut baseline = Scene::new();
     baseline.fill(
@@ -33289,10 +33299,12 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
     );
     pollster::block_on(renderer.render(&mut surface, &baseline, Parameters::default()))
         .unwrap_or_else(|error| {
-            panic!("C10 diagnostic coverage requires a published baseline: {error}")
+            panic!("broad-backdrop diagnostic coverage requires a published baseline: {error}")
         });
-    let pixels_before = pollster::block_on(renderer.read_headless(&surface))
-        .unwrap_or_else(|error| panic!("the C10 diagnostic baseline must be readable: {error}"));
+    let pixels_before =
+        pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the broad-backdrop diagnostic baseline must be readable: {error}")
+        });
     let stats_before = renderer.stats();
     let publication_before = surface.headless_publication_count_for_test();
     let cache_before = renderer
@@ -33321,7 +33333,7 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
     drop(submission_scope);
     let pixels_after =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
-            panic!("a rejected C10 graph must retain its prior publication: {error}")
+            panic!("a rejected broad-backdrop graph must retain its prior publication: {error}")
         });
     let diagnostic_is_exact = result.as_ref().err().is_some_and(|error| {
         error.code() == ErrorCode::UnsupportedPrimitive
@@ -33352,7 +33364,7 @@ fn c10_plus_graph_inputs_return_exact_gpu_unavailable_diagnostic_without_publica
 }
 
 #[test]
-fn c13_plus_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
+fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("future diagnostic ordering requires a real selected WGPU device");
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
@@ -33391,7 +33403,7 @@ fn c13_plus_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     let direct_submission = direct_scope.observation_for_test();
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let error = pollster::block_on(renderer.render(&mut surface, &future, Parameters::default()))
-        .expect_err("a C10+ graph must retain its typed unavailable-pass diagnostic");
+        .expect_err("a broad-backdrop graph must retain its typed unsupported-pass diagnostic");
     let expected = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BroadBackdropExecution,
@@ -33399,7 +33411,7 @@ fn c13_plus_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     assert_eq!(
         error.unsupported_primitive(),
         Some(expected),
-        "the C10+ graph diagnostic must precede effect-format resolution: {error:?}"
+        "the broad-backdrop diagnostic must precede effect-format resolution: {error:?}"
     );
     assert_eq!(
         error.runtime_capability_unavailable_diagnostic(),
@@ -33416,7 +33428,7 @@ fn c13_plus_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     drop(graph_scope);
     drop(submission_scope);
     let pixels_after = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the rejected C10+ graph must retain its prior publication");
+        .expect("the rejected broad-backdrop graph must retain its prior publication");
     let cache_after = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the future rejection must retain its ready cache")
@@ -33829,7 +33841,7 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .unwrap_or_else(|error| panic!("C09 dispatch coverage requires a renderer: {error}"));
+    .unwrap_or_else(|error| panic!("renderer dispatch coverage requires a renderer: {error}"));
     let working_format = default_c08_working_format_for_test(&mut renderer);
     renderer.select_exact_graph_working_format_for_test(working_format);
 
@@ -33844,7 +33856,9 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
     ));
 
     let mut c08_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .unwrap_or_else(|error| panic!("C08 dispatch coverage requires a surface: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("forced-graph dispatch coverage requires a surface: {error}")
+        });
     let c08 = pollster::block_on(renderer.render_forced_c08_graph_for_test(
         &mut c08_surface,
         &direct_scene,
@@ -33854,7 +33868,9 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
 
     let (c09_scene, _, _, _) = c09_reuse_scene_and_oracle_for_test();
     let mut c09_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .unwrap_or_else(|error| panic!("C09 dispatch coverage requires a surface: {error}"));
+        .unwrap_or_else(|error| {
+            panic!("masked-composition dispatch coverage requires a surface: {error}")
+        });
     let c09 =
         pollster::block_on(renderer.render(&mut c09_surface, &c09_scene, Parameters::default()));
 
@@ -33924,7 +33940,7 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
             && cache_after == cache_before
             && blur_surface.headless_publication_count_for_test() == 0
             && backdrop_surface.headless_publication_count_for_test() == 0,
-        "dispatch has no exact C09 boundary"
+        "dispatch misrouted supported graphs or admitted unsupported effects"
     );
 }
 
@@ -34187,17 +34203,17 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
 }
 
 #[test]
-fn renderer_dispatch_routes_closed_c08_and_c09_graph_subsets_to_gpu_executor() {
+fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
     let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
-    .expect("renderer dispatch coverage requires a selected device");
+    .expect("renderer public-dispatch coverage requires a selected device");
     let working_format = default_c08_working_format_for_test(&mut renderer);
 
     let mut direct_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .expect("direct dispatch coverage requires a headless surface");
+        .expect("direct public-dispatch coverage requires a headless surface");
     let mut direct_scene = Scene::new();
     direct_scene.fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK);
     let direct = pollster::block_on(renderer.render(
@@ -34207,7 +34223,7 @@ fn renderer_dispatch_routes_closed_c08_and_c09_graph_subsets_to_gpu_executor() {
     ));
 
     let mut exact_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .expect("exact C08 dispatch coverage requires a headless surface");
+        .expect("forced-graph dispatch coverage requires a headless surface");
     let exact = pollster::block_on(renderer.render_forced_c08_graph_for_test(
         &mut exact_surface,
         &direct_scene,
@@ -34216,7 +34232,7 @@ fn renderer_dispatch_routes_closed_c08_and_c09_graph_subsets_to_gpu_executor() {
     ));
 
     let mut later_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
-        .expect("later-cycle dispatch coverage requires a headless surface");
+        .expect("masked-composition dispatch coverage requires a headless surface");
     let masked =
         Layer::new().with_resolved_alpha_mask(opaque_planning_mask(PhysicalSize::new(4, 4)));
     let mut later_scene = Scene::new();
@@ -34245,7 +34261,7 @@ fn renderer_dispatch_routes_closed_c08_and_c09_graph_subsets_to_gpu_executor() {
             && dispatch.future_pass_rejections == 0
             && graph_submission.queue_submission_count_for_test() == 2
             && frame_gate.validated_plan_count == 1,
-        "renderer has no closed C08/C09 graph dispatch boundary"
+        "public dispatch did not validate and route direct, forced-graph, and masked-composition frames"
     );
 }
 
