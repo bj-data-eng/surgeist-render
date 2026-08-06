@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use super::lower::{
+    runtime_pass_cache_keys, runtime_resource_format, shader_binding_role, shader_sampling_edge,
+};
 use super::model::{
     LoweredGraphPlan, RuntimeBlur, RuntimeBlurAxis, RuntimeBlurInput, RuntimeClipCoverageElement,
     RuntimeColorClampBoundary, RuntimeColorFilter, RuntimeColorOperation,
@@ -12,9 +15,6 @@ use super::model::{
     RuntimeResultBinding, RuntimeSamplingEdge, RuntimeSamplingFilter, RuntimeSpatialDescriptor,
     RuntimeVelloCapture, RuntimeVelloSpan, RuntimeVelloSpanScope,
     runtime_affine_is_finite_and_non_singular,
-};
-use super::{
-    runtime_pass_cache_keys, runtime_resource_format, shader_binding_role, shader_sampling_edge,
 };
 use crate::{
     BackendErrorCode, BlendMode, Color, Error, Format, PhysicalSize, Point, Result, Transform,
