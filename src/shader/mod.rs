@@ -1,11 +1,36 @@
-use std::{borrow::Cow, collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
-use super::{Error, Result};
+use super::Result;
 
 mod key;
 mod parameters;
+mod pipeline;
+mod validate;
 
-use key::SampledTextureLayoutKey;
+#[cfg(test)]
+use pipeline::{BLUR_WGSL, span_source_over_blend};
+use pipeline::{
+    create_blur_bind_group_layout, create_blur_render_pipeline, create_blur_shader_module,
+    create_c08_bind_group_layout, create_c08_render_pipeline, create_c08_shader_module,
+    create_color_filter_bind_group_layout, create_color_filter_render_pipeline,
+    create_color_filter_shader_module, create_composite_bind_group_layout,
+    create_composite_render_pipeline, create_composite_shader_module,
+    create_copy_backdrop_bind_group_layout, create_copy_backdrop_pipeline,
+    create_copy_backdrop_shader_module, create_drop_shadow_colorize_bind_group_layout,
+    create_drop_shadow_colorize_render_pipeline, create_drop_shadow_colorize_shader_module,
+    create_sampler,
+};
+#[cfg(test)]
+use validate::{BlurAxis, BlurInput, is_blur_program};
+use validate::{
+    BlurPassDescription, BlurPassKeyRefs, C08PassKeyRefs, C08Program, ColorFilterPassDescription,
+    ColorFilterPassKeyRefs, CompositePassDescription, CompositePassKeyRefs,
+    CopyBackdropPassDescription, CopyBackdropPassKeyRefs, DropShadowColorizePassDescription,
+    DropShadowColorizePassKeyRefs, blur_cache_error, c08_cache_error, color_filter_cache_error,
+    copy_backdrop_cache_error, drop_shadow_cache_error, validate_blur_pass_keys,
+    validate_c08_pass_keys, validate_color_filter_pass_keys, validate_composite_pass_keys,
+    validate_copy_backdrop_pass_keys, validate_drop_shadow_colorize_pass_keys,
+};
 
 pub(crate) use key::{
     BindGroupLayoutKey, RenderPipelineKey, SamplerKey, ShaderBindingRoleKey, ShaderCompositeKey,
@@ -25,125 +50,6 @@ pub(crate) use parameters::{
 pub(crate) use parameters::{
     color_filter_operation_byte_len_for_test, drop_shadow_parameter_bytes_for_test,
 };
-
-const CANONICALIZE_CAPTURE_WGSL: &str = include_str!("../shaders/canonicalize_capture.wgsl");
-const SPAN_SOURCE_OVER_WGSL: &str = include_str!("../shaders/span_source_over.wgsl");
-const PRESENT_WGSL: &str = include_str!("../shaders/present.wgsl");
-const LAYER_COMPOSITE_WGSL: &str = include_str!("../shaders/layer_composite.wgsl");
-const COLOR_FILTER_WGSL: &str = include_str!("../shaders/color_filter.wgsl");
-const BLUR_WGSL: &str = include_str!("../shaders/blur.wgsl");
-const DROP_SHADOW_WGSL: &str = include_str!("../shaders/drop_shadow.wgsl");
-const COPY_BACKDROP_WGSL: &str = include_str!("../shaders/copy_backdrop.wgsl");
-
-const C08_EXCLUDED_C09_PARAMETER_BINDINGS: [ShaderDataBindingKey; 2] = [
-    ShaderDataBindingKey::CompositeParameters,
-    ShaderDataBindingKey::PresentParameters,
-];
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08Program {
-    CanonicalizeCapture,
-    SpanSourceOver,
-    DropShadowMerge,
-    Present,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct C08PassDescription {
-    program: C08Program,
-    target_format: ShaderTextureFormatKey,
-}
-
-#[derive(Clone, Copy)]
-struct C08PassKeyRefs<'a> {
-    samplers: &'a [SamplerKey],
-    layout: &'a BindGroupLayoutKey,
-    shader: &'a ShaderModuleKey,
-    pipeline: &'a RenderPipelineKey,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CompositePassDescription {
-    path: ShaderCompositePathKey,
-    has_clip_coverage: bool,
-    has_alpha_mask: bool,
-    target_format: ShaderTextureFormatKey,
-}
-
-#[derive(Clone, Copy)]
-struct CompositePassKeyRefs<'a> {
-    samplers: &'a [SamplerKey],
-    layout: &'a BindGroupLayoutKey,
-    shader: &'a ShaderModuleKey,
-    pipeline: &'a RenderPipelineKey,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct ColorFilterPassDescription {
-    working_format: ShaderTextureFormatKey,
-}
-
-#[derive(Clone, Copy)]
-struct ColorFilterPassKeyRefs<'a> {
-    samplers: &'a [SamplerKey],
-    layout: &'a BindGroupLayoutKey,
-    shader: &'a ShaderModuleKey,
-    pipeline: &'a RenderPipelineKey,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct CopyBackdropPassDescription {
-    working_format: ShaderTextureFormatKey,
-}
-
-#[derive(Clone, Copy)]
-struct CopyBackdropPassKeyRefs<'a> {
-    samplers: &'a [SamplerKey],
-    layout: &'a BindGroupLayoutKey,
-    shader: &'a ShaderModuleKey,
-    pipeline: &'a RenderPipelineKey,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BlurAxis {
-    Horizontal,
-    Vertical,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum BlurInput {
-    Rgba,
-    SourceAlpha,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct BlurPassDescription {
-    axis: BlurAxis,
-    input: BlurInput,
-    edge: ShaderSamplingEdgeKey,
-    working_format: ShaderTextureFormatKey,
-}
-
-#[derive(Clone, Copy)]
-struct BlurPassKeyRefs<'a> {
-    samplers: &'a [SamplerKey],
-    layout: &'a BindGroupLayoutKey,
-    shader: &'a ShaderModuleKey,
-    pipeline: &'a RenderPipelineKey,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct DropShadowColorizePassDescription {
-    working_format: ShaderTextureFormatKey,
-}
-
-#[derive(Clone, Copy)]
-struct DropShadowColorizePassKeyRefs<'a> {
-    samplers: &'a [SamplerKey],
-    layout: &'a BindGroupLayoutKey,
-    shader: &'a ShaderModuleKey,
-    pipeline: &'a RenderPipelineKey,
-}
 
 /// Non-clone handles created inside one checked GPU-operation scope. New entries
 /// remain private to this phase until the caller explicitly commits after the
@@ -627,27 +533,20 @@ impl ProvisionalDevicePassCacheUpdate {
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
             {
-                self.samplers.insert(
-                    *sampler_key,
-                    device.create_sampler(&sampler_descriptor(*sampler_key)),
-                );
+                self.samplers
+                    .insert(*sampler_key, create_sampler(device, *sampler_key));
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
             self.layouts.insert(
                 keys.layout.clone(),
-                create_c08_bind_group_layout(device, description.program),
+                create_c08_bind_group_layout(device, description),
             );
         }
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
             self.shaders.insert(
                 keys.shader.clone(),
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(c08_shader_label(description.program)),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(c08_shader_source(
-                        description.program,
-                    ))),
-                }),
+                create_c08_shader_module(device, description),
             );
         }
         if !cache.pipelines.contains_key(keys.pipeline)
@@ -663,45 +562,13 @@ impl ProvisionalDevicePassCacheUpdate {
                 .get(keys.shader)
                 .or_else(|| cache.shaders.get(keys.shader))
                 .ok_or_else(|| c08_cache_error("C08 shader-module realization was lost"))?;
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some(c08_pipeline_layout_label(description.program)),
-                bind_group_layouts: &[Some(layout_handle)],
-                immediate_size: 0,
-            });
-            let blend = matches!(
-                description.program,
-                C08Program::SpanSourceOver | C08Program::DropShadowMerge
-            )
-            .then_some(span_source_over_blend());
-            let target = wgpu::ColorTargetState {
-                format: texture_format(description.target_format)?,
-                blend,
-                write_mask: wgpu::ColorWrites::ALL,
-            };
-            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some(c08_pipeline_label(description.program)),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader_handle,
-                    entry_point: Some("vertex_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: shader_handle,
-                    entry_point: Some(fragment_entry),
-                    targets: &[Some(target)],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let created = create_c08_render_pipeline(
+                device,
+                description,
+                layout_handle,
+                shader_handle,
+                fragment_entry,
+            )?;
             self.pipelines.insert(keys.pipeline.clone(), created);
         }
 
@@ -790,10 +657,8 @@ impl ProvisionalDevicePassCacheUpdate {
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
             {
-                self.samplers.insert(
-                    *sampler_key,
-                    device.create_sampler(&sampler_descriptor(*sampler_key)),
-                );
+                self.samplers
+                    .insert(*sampler_key, create_sampler(device, *sampler_key));
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
@@ -805,10 +670,7 @@ impl ProvisionalDevicePassCacheUpdate {
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
             self.shaders.insert(
                 keys.shader.clone(),
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Surgeist C12 backdrop-copy shader"),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COPY_BACKDROP_WGSL)),
-                }),
+                create_copy_backdrop_shader_module(device),
             );
         }
         if !cache.pipelines.contains_key(keys.pipeline)
@@ -910,10 +772,8 @@ impl ProvisionalDevicePassCacheUpdate {
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
             {
-                self.samplers.insert(
-                    *sampler_key,
-                    device.create_sampler(&sampler_descriptor(*sampler_key)),
-                );
+                self.samplers
+                    .insert(*sampler_key, create_sampler(device, *sampler_key));
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
@@ -925,10 +785,7 @@ impl ProvisionalDevicePassCacheUpdate {
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
             self.shaders.insert(
                 keys.shader.clone(),
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Surgeist C10 color-filter shader"),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COLOR_FILTER_WGSL)),
-                }),
+                create_color_filter_shader_module(device),
             );
         }
         if !cache.pipelines.contains_key(keys.pipeline)
@@ -948,40 +805,12 @@ impl ProvisionalDevicePassCacheUpdate {
                 .ok_or_else(|| {
                     color_filter_cache_error("color-filter shader-module realization was lost")
                 })?;
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Surgeist C10 color-filter pipeline layout"),
-                bind_group_layouts: &[Some(layout_handle)],
-                immediate_size: 0,
-            });
-            let target = wgpu::ColorTargetState {
-                format: texture_format(description.working_format)?,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            };
-            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Surgeist C10 color-filter pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader_handle,
-                    entry_point: Some("vertex_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: shader_handle,
-                    entry_point: Some("fragment_main"),
-                    targets: &[Some(target)],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let created = create_color_filter_render_pipeline(
+                device,
+                description,
+                layout_handle,
+                shader_handle,
+            )?;
             self.pipelines.insert(keys.pipeline.clone(), created);
         }
         self.color_filter_pass_objects(cache, keys)
@@ -1030,26 +859,19 @@ impl ProvisionalDevicePassCacheUpdate {
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
             {
-                self.samplers.insert(
-                    *sampler_key,
-                    device.create_sampler(&sampler_descriptor(*sampler_key)),
-                );
+                self.samplers
+                    .insert(*sampler_key, create_sampler(device, *sampler_key));
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
             self.layouts.insert(
                 keys.layout.clone(),
-                create_blur_bind_group_layout(device, description.edge),
+                create_blur_bind_group_layout(device, description),
             );
         }
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
-            self.shaders.insert(
-                keys.shader.clone(),
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Surgeist checked Gaussian blur shader"),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(BLUR_WGSL)),
-                }),
-            );
+            self.shaders
+                .insert(keys.shader.clone(), create_blur_shader_module(device));
         }
         if !cache.pipelines.contains_key(keys.pipeline)
             && !self.pipelines.contains_key(keys.pipeline)
@@ -1064,40 +886,8 @@ impl ProvisionalDevicePassCacheUpdate {
                 .get(keys.shader)
                 .or_else(|| cache.shaders.get(keys.shader))
                 .ok_or_else(|| blur_cache_error("blur shader-module realization was lost"))?;
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Surgeist checked Gaussian blur pipeline layout"),
-                bind_group_layouts: &[Some(layout_handle)],
-                immediate_size: 0,
-            });
-            let target = wgpu::ColorTargetState {
-                format: texture_format(description.working_format)?,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            };
-            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Surgeist checked Gaussian blur pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader_handle,
-                    entry_point: Some("vertex_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: shader_handle,
-                    entry_point: Some(blur_fragment_entry(description)),
-                    targets: &[Some(target)],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let created =
+                create_blur_render_pipeline(device, description, layout_handle, shader_handle)?;
             self.pipelines.insert(keys.pipeline.clone(), created);
         }
         self.blur_pass_objects(cache, keys)
@@ -1127,10 +917,8 @@ impl ProvisionalDevicePassCacheUpdate {
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
             {
-                self.samplers.insert(
-                    *sampler_key,
-                    device.create_sampler(&sampler_descriptor(*sampler_key)),
-                );
+                self.samplers
+                    .insert(*sampler_key, create_sampler(device, *sampler_key));
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
@@ -1142,10 +930,7 @@ impl ProvisionalDevicePassCacheUpdate {
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
             self.shaders.insert(
                 keys.shader.clone(),
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Surgeist C11 drop-shadow colorize shader"),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DROP_SHADOW_WGSL)),
-                }),
+                create_drop_shadow_colorize_shader_module(device),
             );
         }
         if !cache.pipelines.contains_key(keys.pipeline)
@@ -1169,40 +954,12 @@ impl ProvisionalDevicePassCacheUpdate {
                         "drop-shadow colorize shader-module realization was lost",
                     )
                 })?;
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Surgeist C11 drop-shadow colorize pipeline layout"),
-                bind_group_layouts: &[Some(layout_handle)],
-                immediate_size: 0,
-            });
-            let target = wgpu::ColorTargetState {
-                format: texture_format(description.working_format)?,
-                blend: None,
-                write_mask: wgpu::ColorWrites::ALL,
-            };
-            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Surgeist C11 drop-shadow colorize pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader_handle,
-                    entry_point: Some("vertex_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: shader_handle,
-                    entry_point: Some("fragment_main"),
-                    targets: &[Some(target)],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let created = create_drop_shadow_colorize_render_pipeline(
+                device,
+                description,
+                layout_handle,
+                shader_handle,
+            )?;
             self.pipelines.insert(keys.pipeline.clone(), created);
         }
         self.drop_shadow_colorize_pass_objects(cache, keys)
@@ -1400,10 +1157,8 @@ impl ProvisionalDevicePassCacheUpdate {
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
             {
-                self.samplers.insert(
-                    *sampler_key,
-                    device.create_sampler(&sampler_descriptor(*sampler_key)),
-                );
+                self.samplers
+                    .insert(*sampler_key, create_sampler(device, *sampler_key));
             }
         }
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
@@ -1413,13 +1168,8 @@ impl ProvisionalDevicePassCacheUpdate {
             );
         }
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
-            self.shaders.insert(
-                keys.shader.clone(),
-                device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("Surgeist C09 layer-composite shader"),
-                    source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(LAYER_COMPOSITE_WGSL)),
-                }),
-            );
+            self.shaders
+                .insert(keys.shader.clone(), create_composite_shader_module(device));
         }
         if !cache.pipelines.contains_key(keys.pipeline)
             && !self.pipelines.contains_key(keys.pipeline)
@@ -1436,45 +1186,13 @@ impl ProvisionalDevicePassCacheUpdate {
                 .get(keys.shader)
                 .or_else(|| cache.shaders.get(keys.shader))
                 .ok_or_else(|| c08_cache_error("composite shader-module realization was lost"))?;
-            let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("Surgeist C09 layer-composite pipeline layout"),
-                bind_group_layouts: &[Some(layout_handle)],
-                immediate_size: 0,
-            });
-            let target = wgpu::ColorTargetState {
-                format: texture_format(description.target_format)?,
-                blend: match description.path {
-                    ShaderCompositePathKey::Normal => Some(span_source_over_blend()),
-                    ShaderCompositePathKey::DestinationSampling => None,
-                },
-                write_mask: wgpu::ColorWrites::ALL,
-            };
-            let fragment_entry =
-                fragment_entry_override.unwrap_or_else(|| composite_fragment_entry(description));
-            let created = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("Surgeist C09 layer-composite pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: shader_handle,
-                    entry_point: Some("vertex_main"),
-                    buffers: &[],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                },
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::TriangleList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                fragment: Some(wgpu::FragmentState {
-                    module: shader_handle,
-                    entry_point: Some(fragment_entry),
-                    targets: &[Some(target)],
-                    compilation_options: wgpu::PipelineCompilationOptions::default(),
-                }),
-                multiview_mask: None,
-                cache: None,
-            });
+            let created = create_composite_render_pipeline(
+                device,
+                description,
+                layout_handle,
+                shader_handle,
+                fragment_entry_override,
+            )?;
             self.pipelines.insert(keys.pipeline.clone(), created);
         }
         self.composite_pass_objects(cache, keys)
@@ -1815,1001 +1533,6 @@ impl ProvisionalDropShadowColorizePassObjects<'_> {
     pub(crate) const fn render_pipeline(&self) -> &wgpu::RenderPipeline {
         self.pipeline
     }
-}
-
-fn validate_c08_pass_keys(keys: C08PassKeyRefs<'_>) -> Result<C08PassDescription> {
-    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
-        return Err(c08_cache_error(
-            "a C08 pass layout must bind exactly one sampled texture",
-        ));
-    };
-    let [sampler] = keys.samplers else {
-        return Err(c08_cache_error(
-            "a C08 pass must bind exactly one exact sampler",
-        ));
-    };
-    validate_c08_key_consistency(keys, sampled_texture, sampler)?;
-    let (program, expected_role, expected_filter, expected_edge) =
-        c08_program_sampling(keys.layout.program)?;
-    if sampled_texture.binding_role != expected_role
-        || sampler.filter != expected_filter
-        || sampler.edge != expected_edge
-    {
-        return Err(c08_cache_error(
-            "C08 sampled texture and sampler semantics are not exact",
-        ));
-    }
-
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(c08_cache_error(
-            "C08 shader key has no selected working format",
-        ));
-    };
-    if !is_working_format(working_format) {
-        return Err(c08_cache_error(
-            "C08 shader key selected a non-working intermediate format",
-        ));
-    }
-    let target_format = c08_target_format(keys, sampled_texture, program, working_format)?;
-    Ok(C08PassDescription {
-        program,
-        target_format,
-    })
-}
-
-fn validate_c08_key_consistency(
-    keys: C08PassKeyRefs<'_>,
-    sampled_texture: &SampledTextureLayoutKey,
-    sampler: &SamplerKey,
-) -> Result<()> {
-    if keys.layout.data_bindings.as_slice() != [ShaderDataBindingKey::SpatialUniform]
-        || keys
-            .layout
-            .data_bindings
-            .iter()
-            .any(|binding| C08_EXCLUDED_C09_PARAMETER_BINDINGS.contains(binding))
-        || keys.shader.program != keys.layout.program
-        || &keys.shader.layout != keys.layout
-        || keys.shader.samplers.as_slice() != keys.samplers
-        || &keys.pipeline.shader != keys.shader
-        || &keys.pipeline.layout != keys.layout
-        || keys.pipeline.samplers.as_slice() != keys.samplers
-        || sampler.binding_role != sampled_texture.binding_role
-        || sampler.source_format != sampled_texture.source_format
-        || sampler.resolved_mask_sampling.is_some()
-    {
-        return Err(c08_cache_error(
-            "C08 pass keys disagree across sampler, layout, shader, or pipeline phases",
-        ));
-    }
-    Ok(())
-}
-
-fn c08_program_sampling(
-    program: ShaderProgramKey,
-) -> Result<(
-    C08Program,
-    ShaderBindingRoleKey,
-    ShaderSamplingFilterKey,
-    ShaderSamplingEdgeKey,
-)> {
-    let sampling = match program {
-        ShaderProgramKey::CanonicalizeCapture => (
-            C08Program::CanonicalizeCapture,
-            ShaderBindingRoleKey::CaptureSource,
-            ShaderSamplingFilterKey::Linear,
-            ShaderSamplingEdgeKey::ClampToExtent,
-        ),
-        ShaderProgramKey::Composite(ShaderCompositeKey::SpanSourceOver) => (
-            C08Program::SpanSourceOver,
-            ShaderBindingRoleKey::CompositeSource,
-            ShaderSamplingFilterKey::Linear,
-            ShaderSamplingEdgeKey::TransparentBlack,
-        ),
-        ShaderProgramKey::Composite(ShaderCompositeKey::DropShadow) => (
-            C08Program::DropShadowMerge,
-            ShaderBindingRoleKey::CompositeSource,
-            ShaderSamplingFilterKey::Linear,
-            ShaderSamplingEdgeKey::TransparentBlack,
-        ),
-        ShaderProgramKey::Present => (
-            C08Program::Present,
-            ShaderBindingRoleKey::FinalWorkingImage,
-            ShaderSamplingFilterKey::Linear,
-            ShaderSamplingEdgeKey::ClampToExtent,
-        ),
-        ShaderProgramKey::CopyBackdrop
-        | ShaderProgramKey::ColorFilter
-        | ShaderProgramKey::BlurHorizontal { .. }
-        | ShaderProgramKey::BlurVertical { .. }
-        | ShaderProgramKey::DropShadowColorize
-        | ShaderProgramKey::Composite(ShaderCompositeKey::Layer { .. }) => {
-            return Err(c08_cache_error(
-                "a later-cycle shader program reached C08 pass realization",
-            ));
-        }
-    };
-    Ok(sampling)
-}
-
-fn c08_target_format(
-    keys: C08PassKeyRefs<'_>,
-    sampled_texture: &SampledTextureLayoutKey,
-    program: C08Program,
-    working_format: ShaderTextureFormatKey,
-) -> Result<ShaderTextureFormatKey> {
-    let target_format = match program {
-        C08Program::CanonicalizeCapture => {
-            if sampled_texture.source_format != ShaderTextureFormatKey::VelloCaptureRgba8Unorm
-                || keys.shader.output_format.is_some()
-                || keys.pipeline.target_format != working_format
-            {
-                return Err(c08_cache_error(
-                    "canonicalization keys changed capture or working formats",
-                ));
-            }
-            working_format
-        }
-        C08Program::SpanSourceOver | C08Program::DropShadowMerge => {
-            if sampled_texture.source_format != working_format
-                || keys.shader.output_format.is_some()
-                || keys.pipeline.target_format != working_format
-            {
-                return Err(c08_cache_error(
-                    "source-over keys changed source or working target formats",
-                ));
-            }
-            working_format
-        }
-        C08Program::Present => {
-            let Some(output_format) = keys.shader.output_format else {
-                return Err(c08_cache_error("present key has no exact output format"));
-            };
-            if sampled_texture.source_format != working_format
-                || !is_output_format(output_format)
-                || keys.pipeline.target_format != output_format
-            {
-                return Err(c08_cache_error(
-                    "present keys changed working source or output specialization",
-                ));
-            }
-            output_format
-        }
-    };
-    Ok(target_format)
-}
-
-fn validate_color_filter_pass_keys(
-    keys: ColorFilterPassKeyRefs<'_>,
-) -> Result<ColorFilterPassDescription> {
-    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
-        return Err(color_filter_cache_error(
-            "a color-filter layout must bind exactly one sampled texture",
-        ));
-    };
-    let [sampler] = keys.samplers else {
-        return Err(color_filter_cache_error(
-            "a color-filter pass must bind exactly one source sampler",
-        ));
-    };
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(color_filter_cache_error(
-            "a color-filter shader key has no selected working format",
-        ));
-    };
-    if keys.layout.program != ShaderProgramKey::ColorFilter
-        || keys.layout.data_bindings.as_slice()
-            != [
-                ShaderDataBindingKey::SpatialUniform,
-                ShaderDataBindingKey::ColorFilterOperations,
-            ]
-        || keys.shader.program != ShaderProgramKey::ColorFilter
-        || &keys.shader.layout != keys.layout
-        || keys.shader.samplers.as_slice() != keys.samplers
-        || keys.shader.output_format.is_some()
-        || &keys.pipeline.shader != keys.shader
-        || &keys.pipeline.layout != keys.layout
-        || keys.pipeline.samplers.as_slice() != keys.samplers
-        || !is_working_format(working_format)
-        || keys.pipeline.target_format != working_format
-        || sampled_texture.binding_role != ShaderBindingRoleKey::FilterSource
-        || sampled_texture.source_format != working_format
-        || sampler.binding_role != ShaderBindingRoleKey::FilterSource
-        || sampler.source_format != working_format
-        || sampler.filter != ShaderSamplingFilterKey::Nearest
-        || sampler.edge != ShaderSamplingEdgeKey::ClampToExtent
-        || sampler.resolved_mask_sampling.is_some()
-    {
-        return Err(color_filter_cache_error(
-            "color-filter keys disagree across source, layout, shader, or working target",
-        ));
-    }
-    Ok(ColorFilterPassDescription { working_format })
-}
-
-fn validate_copy_backdrop_pass_keys(
-    keys: CopyBackdropPassKeyRefs<'_>,
-) -> Result<CopyBackdropPassDescription> {
-    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
-        return Err(copy_backdrop_cache_error(
-            "a backdrop-copy layout must bind exactly one sampled texture",
-        ));
-    };
-    let [sampler] = keys.samplers else {
-        return Err(copy_backdrop_cache_error(
-            "a backdrop-copy pass must bind exactly one parent sampler",
-        ));
-    };
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(copy_backdrop_cache_error(
-            "a backdrop-copy shader key has no selected working format",
-        ));
-    };
-    if keys.layout.program != ShaderProgramKey::CopyBackdrop
-        || keys.layout.data_bindings.as_slice() != [ShaderDataBindingKey::SpatialUniform]
-        || keys.shader.program != ShaderProgramKey::CopyBackdrop
-        || &keys.shader.layout != keys.layout
-        || keys.shader.samplers.as_slice() != keys.samplers
-        || keys.shader.output_format.is_some()
-        || &keys.pipeline.shader != keys.shader
-        || &keys.pipeline.layout != keys.layout
-        || keys.pipeline.samplers.as_slice() != keys.samplers
-        || !is_working_format(working_format)
-        || keys.pipeline.target_format != working_format
-        || sampled_texture.binding_role != ShaderBindingRoleKey::CompletedParent
-        || sampled_texture.source_format != working_format
-        || sampler.binding_role != ShaderBindingRoleKey::CompletedParent
-        || sampler.source_format != working_format
-        || sampler.filter != ShaderSamplingFilterKey::Nearest
-        || sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
-        || sampler.resolved_mask_sampling.is_some()
-    {
-        return Err(copy_backdrop_cache_error(
-            "backdrop-copy keys disagree across parent, layout, shader, or working target",
-        ));
-    }
-    Ok(CopyBackdropPassDescription { working_format })
-}
-
-fn validate_blur_pass_keys(keys: BlurPassKeyRefs<'_>) -> Result<BlurPassDescription> {
-    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
-        return Err(blur_cache_error(
-            "a blur layout must bind exactly one sampled texture",
-        ));
-    };
-    let [sampler] = keys.samplers else {
-        return Err(blur_cache_error(
-            "a blur pass must bind exactly one source sampler",
-        ));
-    };
-    let (axis, input, edge) = blur_program_facts(keys.layout.program)
-        .ok_or_else(|| blur_cache_error("a non-blur program reached C11 blur realization"))?;
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(blur_cache_error(
-            "a blur shader key has no selected working format",
-        ));
-    };
-    let expected_data_bindings = match edge {
-        ShaderSamplingEdgeKey::TransparentBlack => vec![
-            ShaderDataBindingKey::SpatialUniform,
-            ShaderDataBindingKey::GaussianKernel,
-        ],
-        ShaderSamplingEdgeKey::SemanticBorderMirror => vec![
-            ShaderDataBindingKey::SpatialUniform,
-            ShaderDataBindingKey::GaussianKernel,
-            ShaderDataBindingKey::BlurEdgeParameters,
-        ],
-        ShaderSamplingEdgeKey::ClampToExtent => {
-            return Err(blur_cache_error(
-                "a Gaussian blur program has no clamp-to-extent edge policy",
-            ));
-        }
-    };
-    if keys.layout.data_bindings != expected_data_bindings
-        || keys.shader.program != keys.layout.program
-        || &keys.shader.layout != keys.layout
-        || keys.shader.samplers.as_slice() != keys.samplers
-        || keys.shader.output_format.is_some()
-        || &keys.pipeline.shader != keys.shader
-        || &keys.pipeline.layout != keys.layout
-        || keys.pipeline.samplers.as_slice() != keys.samplers
-        || !is_working_format(working_format)
-        || keys.pipeline.target_format != working_format
-        || sampled_texture.binding_role != ShaderBindingRoleKey::FilterSource
-        || sampled_texture.source_format != working_format
-        || sampler.binding_role != ShaderBindingRoleKey::FilterSource
-        || sampler.source_format != working_format
-        || sampler.filter != ShaderSamplingFilterKey::Linear
-        || sampler.edge != edge
-        || sampler.resolved_mask_sampling.is_some()
-    {
-        return Err(blur_cache_error(
-            "blur keys disagree across source, layout, shader, or working target",
-        ));
-    }
-    Ok(BlurPassDescription {
-        axis,
-        input,
-        edge,
-        working_format,
-    })
-}
-
-fn validate_drop_shadow_colorize_pass_keys(
-    keys: DropShadowColorizePassKeyRefs<'_>,
-) -> Result<DropShadowColorizePassDescription> {
-    let [sampled_texture] = keys.layout.sampled_textures.as_slice() else {
-        return Err(drop_shadow_cache_error(
-            "a drop-shadow colorize layout must bind exactly one sampled texture",
-        ));
-    };
-    let [sampler] = keys.samplers else {
-        return Err(drop_shadow_cache_error(
-            "a drop-shadow colorize pass must bind exactly one source sampler",
-        ));
-    };
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(drop_shadow_cache_error(
-            "a drop-shadow colorize shader key has no selected working format",
-        ));
-    };
-    if keys.layout.program != ShaderProgramKey::DropShadowColorize
-        || keys.layout.data_bindings.as_slice()
-            != [
-                ShaderDataBindingKey::SpatialUniform,
-                ShaderDataBindingKey::DropShadowParameters,
-            ]
-        || keys.shader.program != ShaderProgramKey::DropShadowColorize
-        || &keys.shader.layout != keys.layout
-        || keys.shader.samplers.as_slice() != keys.samplers
-        || keys.shader.output_format.is_some()
-        || &keys.pipeline.shader != keys.shader
-        || &keys.pipeline.layout != keys.layout
-        || keys.pipeline.samplers.as_slice() != keys.samplers
-        || !is_working_format(working_format)
-        || keys.pipeline.target_format != working_format
-        || sampled_texture.binding_role != ShaderBindingRoleKey::BlurredSourceAlpha
-        || sampled_texture.source_format != working_format
-        || sampler.binding_role != ShaderBindingRoleKey::BlurredSourceAlpha
-        || sampler.source_format != working_format
-        || sampler.filter != ShaderSamplingFilterKey::Linear
-        || sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
-        || sampler.resolved_mask_sampling.is_some()
-    {
-        return Err(drop_shadow_cache_error(
-            "drop-shadow colorize keys disagree across source, layout, shader, or target",
-        ));
-    }
-    Ok(DropShadowColorizePassDescription { working_format })
-}
-
-const fn blur_program_facts(
-    program: ShaderProgramKey,
-) -> Option<(BlurAxis, BlurInput, ShaderSamplingEdgeKey)> {
-    match program {
-        ShaderProgramKey::BlurHorizontal { source_alpha, edge } => Some((
-            BlurAxis::Horizontal,
-            if source_alpha {
-                BlurInput::SourceAlpha
-            } else {
-                BlurInput::Rgba
-            },
-            edge,
-        )),
-        ShaderProgramKey::BlurVertical { source_alpha, edge } => Some((
-            BlurAxis::Vertical,
-            if source_alpha {
-                BlurInput::SourceAlpha
-            } else {
-                BlurInput::Rgba
-            },
-            edge,
-        )),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-const fn is_blur_program(program: ShaderProgramKey) -> bool {
-    blur_program_facts(program).is_some()
-}
-
-fn validate_composite_pass_keys(
-    keys: CompositePassKeyRefs<'_>,
-) -> Result<CompositePassDescription> {
-    let ShaderProgramKey::Composite(ShaderCompositeKey::Layer {
-        path,
-        has_clip_coverage,
-        has_alpha_mask,
-    }) = keys.layout.program
-    else {
-        return Err(c08_cache_error(
-            "a non-layer program reached C09 composite realization",
-        ));
-    };
-    let Some(working_format) = keys.shader.working_format else {
-        return Err(c08_cache_error(
-            "C09 composite shader key has no selected working format",
-        ));
-    };
-    if !is_working_format(working_format)
-        || keys.layout.data_bindings.as_slice()
-            != [
-                ShaderDataBindingKey::SpatialUniform,
-                ShaderDataBindingKey::CompositeParameters,
-            ]
-        || keys.shader.program != keys.layout.program
-        || &keys.shader.layout != keys.layout
-        || keys.shader.samplers.as_slice() != keys.samplers
-        || keys.shader.output_format.is_some()
-        || &keys.pipeline.shader != keys.shader
-        || &keys.pipeline.layout != keys.layout
-        || keys.pipeline.samplers.as_slice() != keys.samplers
-        || keys.pipeline.target_format != working_format
-    {
-        return Err(c08_cache_error(
-            "C09 composite keys disagree across layout, shader, format, or pipeline phases",
-        ));
-    }
-
-    let [source_sampler] = keys.samplers else {
-        return Err(c08_cache_error(
-            "C09 composite pass must bind exactly one source sampler",
-        ));
-    };
-    if source_sampler.binding_role != ShaderBindingRoleKey::CompositeSource
-        || source_sampler.source_format != working_format
-        || source_sampler.filter != ShaderSamplingFilterKey::Linear
-        || source_sampler.edge != ShaderSamplingEdgeKey::TransparentBlack
-        || source_sampler.resolved_mask_sampling.is_some()
-    {
-        return Err(c08_cache_error(
-            "C09 composite source sampler semantics are not exact",
-        ));
-    }
-
-    let mut expected_textures = Vec::with_capacity(4);
-    if path == ShaderCompositePathKey::DestinationSampling {
-        expected_textures.push(SampledTextureLayoutKey {
-            binding_role: ShaderBindingRoleKey::CompositeParent,
-            source_format: working_format,
-        });
-    }
-    expected_textures.push(SampledTextureLayoutKey {
-        binding_role: ShaderBindingRoleKey::CompositeSource,
-        source_format: working_format,
-    });
-    if has_clip_coverage {
-        expected_textures.push(SampledTextureLayoutKey {
-            binding_role: ShaderBindingRoleKey::ClipCoverage,
-            source_format: ShaderTextureFormatKey::ClipCoverageRgba8Unorm,
-        });
-    }
-    if has_alpha_mask {
-        expected_textures.push(SampledTextureLayoutKey {
-            binding_role: ShaderBindingRoleKey::AlphaMask,
-            source_format: ShaderTextureFormatKey::ResolvedMaskRgba8Unorm,
-        });
-    }
-    if keys.layout.sampled_textures != expected_textures {
-        return Err(c08_cache_error(
-            "C09 composite layout contains an absent or missing semantic texture",
-        ));
-    }
-
-    Ok(CompositePassDescription {
-        path,
-        has_clip_coverage,
-        has_alpha_mask,
-        target_format: working_format,
-    })
-}
-
-const fn is_working_format(format: ShaderTextureFormatKey) -> bool {
-    matches!(
-        format,
-        ShaderTextureFormatKey::WorkingHighPrecisionRgba16Float
-            | ShaderTextureFormatKey::WorkingReducedPrecisionRgba8Unorm
-    )
-}
-
-const fn is_output_format(format: ShaderTextureFormatKey) -> bool {
-    matches!(
-        format,
-        ShaderTextureFormatKey::OutputRgba8Unorm | ShaderTextureFormatKey::OutputBgra8Unorm
-    )
-}
-
-fn sampler_descriptor(key: SamplerKey) -> wgpu::SamplerDescriptor<'static> {
-    let filter = match key.filter {
-        ShaderSamplingFilterKey::Nearest => wgpu::FilterMode::Nearest,
-        ShaderSamplingFilterKey::Linear => wgpu::FilterMode::Linear,
-    };
-    let address_mode = match key
-        .resolved_mask_sampling
-        .map(ShaderMaskSamplingKey::extend)
-    {
-        None | Some(ShaderMaskExtendKey::Pad) => wgpu::AddressMode::ClampToEdge,
-        Some(ShaderMaskExtendKey::Repeat) => wgpu::AddressMode::Repeat,
-        Some(ShaderMaskExtendKey::Reflect) => wgpu::AddressMode::MirrorRepeat,
-    };
-    wgpu::SamplerDescriptor {
-        label: Some("Surgeist sampled-image sampler"),
-        address_mode_u: address_mode,
-        address_mode_v: address_mode,
-        address_mode_w: address_mode,
-        mag_filter: filter,
-        min_filter: filter,
-        mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-        ..Default::default()
-    }
-}
-
-fn create_c08_bind_group_layout(
-    device: &wgpu::Device,
-    program: C08Program,
-) -> wgpu::BindGroupLayout {
-    let entries = [
-        wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(48),
-            },
-            count: None,
-        },
-    ];
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some(c08_bind_group_layout_label(program)),
-        entries: &entries,
-    })
-}
-
-fn create_composite_bind_group_layout(
-    device: &wgpu::Device,
-    description: CompositePassDescription,
-) -> wgpu::BindGroupLayout {
-    let texture_entry = |binding, filterable| wgpu::BindGroupLayoutEntry {
-        binding,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Texture {
-            sample_type: wgpu::TextureSampleType::Float { filterable },
-            view_dimension: wgpu::TextureViewDimension::D2,
-            multisampled: false,
-        },
-        count: None,
-    };
-    let mut entries = Vec::with_capacity(7);
-    entries.push(texture_entry(0, true));
-    entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 1,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-        count: None,
-    });
-    if description.path == ShaderCompositePathKey::DestinationSampling {
-        entries.push(texture_entry(2, false));
-    }
-    if description.has_clip_coverage {
-        entries.push(texture_entry(3, false));
-    }
-    if description.has_alpha_mask {
-        entries.push(texture_entry(4, false));
-    }
-    entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 5,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: wgpu::BufferSize::new(48),
-        },
-        count: None,
-    });
-    entries.push(wgpu::BindGroupLayoutEntry {
-        binding: 6,
-        visibility: wgpu::ShaderStages::FRAGMENT,
-        ty: wgpu::BindingType::Buffer {
-            ty: wgpu::BufferBindingType::Uniform,
-            has_dynamic_offset: false,
-            min_binding_size: wgpu::BufferSize::new(112),
-        },
-        count: None,
-    });
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C09 layer-composite bindings"),
-        entries: &entries,
-    })
-}
-
-fn create_copy_backdrop_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let entries = [
-        wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(48),
-            },
-            count: None,
-        },
-    ];
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C12 backdrop-copy bindings"),
-        entries: &entries,
-    })
-}
-
-fn create_copy_backdrop_pipeline(
-    device: &wgpu::Device,
-    description: CopyBackdropPassDescription,
-    layout: &wgpu::BindGroupLayout,
-    shader: &wgpu::ShaderModule,
-) -> Result<wgpu::RenderPipeline> {
-    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Surgeist C12 backdrop-copy pipeline layout"),
-        bind_group_layouts: &[Some(layout)],
-        immediate_size: 0,
-    });
-    let target = wgpu::ColorTargetState {
-        format: texture_format(description.working_format)?,
-        blend: None,
-        write_mask: wgpu::ColorWrites::ALL,
-    };
-    Ok(
-        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Surgeist C12 backdrop-copy pipeline"),
-            layout: Some(&pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: shader,
-                entry_point: Some("vertex_main"),
-                buffers: &[],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                ..Default::default()
-            },
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: shader,
-                entry_point: Some("fragment_main"),
-                targets: &[Some(target)],
-                compilation_options: wgpu::PipelineCompilationOptions::default(),
-            }),
-            multiview_mask: None,
-            cache: None,
-        }),
-    )
-}
-
-fn create_color_filter_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let entries = [
-        wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(48),
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(48),
-            },
-            count: None,
-        },
-    ];
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C10 color-filter bindings"),
-        entries: &entries,
-    })
-}
-
-fn create_blur_bind_group_layout(
-    device: &wgpu::Device,
-    edge: ShaderSamplingEdgeKey,
-) -> wgpu::BindGroupLayout {
-    let mut entries = vec![
-        wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(48),
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Storage { read_only: true },
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(8),
-            },
-            count: None,
-        },
-    ];
-    if edge == ShaderSamplingEdgeKey::SemanticBorderMirror {
-        entries.push(wgpu::BindGroupLayoutEntry {
-            binding: 4,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(16),
-            },
-            count: None,
-        });
-    }
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist checked Gaussian blur bindings"),
-        entries: &entries,
-    })
-}
-
-fn create_drop_shadow_colorize_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    let entries = [
-        wgpu::BindGroupLayoutEntry {
-            binding: 0,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Texture {
-                sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                view_dimension: wgpu::TextureViewDimension::D2,
-                multisampled: false,
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 1,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 2,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(48),
-            },
-            count: None,
-        },
-        wgpu::BindGroupLayoutEntry {
-            binding: 3,
-            visibility: wgpu::ShaderStages::FRAGMENT,
-            ty: wgpu::BindingType::Buffer {
-                ty: wgpu::BufferBindingType::Uniform,
-                has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(32),
-            },
-            count: None,
-        },
-    ];
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C11 drop-shadow colorize bindings"),
-        entries: &entries,
-    })
-}
-
-const fn blur_fragment_entry(description: BlurPassDescription) -> &'static str {
-    match (description.axis, description.input, description.edge) {
-        (BlurAxis::Horizontal, BlurInput::Rgba, ShaderSamplingEdgeKey::TransparentBlack) => {
-            "fragment_horizontal_rgba"
-        }
-        (BlurAxis::Vertical, BlurInput::Rgba, ShaderSamplingEdgeKey::TransparentBlack) => {
-            "fragment_vertical_rgba"
-        }
-        (BlurAxis::Horizontal, BlurInput::SourceAlpha, ShaderSamplingEdgeKey::TransparentBlack) => {
-            "fragment_horizontal_source_alpha"
-        }
-        (BlurAxis::Vertical, BlurInput::SourceAlpha, ShaderSamplingEdgeKey::TransparentBlack) => {
-            "fragment_vertical_source_alpha"
-        }
-        (BlurAxis::Horizontal, BlurInput::Rgba, ShaderSamplingEdgeKey::SemanticBorderMirror) => {
-            "fragment_horizontal_rgba_mirror"
-        }
-        (BlurAxis::Vertical, BlurInput::Rgba, ShaderSamplingEdgeKey::SemanticBorderMirror) => {
-            "fragment_vertical_rgba_mirror"
-        }
-        (
-            BlurAxis::Horizontal,
-            BlurInput::SourceAlpha,
-            ShaderSamplingEdgeKey::SemanticBorderMirror,
-        ) => "fragment_horizontal_source_alpha_mirror",
-        (
-            BlurAxis::Vertical,
-            BlurInput::SourceAlpha,
-            ShaderSamplingEdgeKey::SemanticBorderMirror,
-        ) => "fragment_vertical_source_alpha_mirror",
-        (_, _, ShaderSamplingEdgeKey::ClampToExtent) => "invalid_blur_edge_policy",
-    }
-}
-
-const fn composite_fragment_entry(description: CompositePassDescription) -> &'static str {
-    match (
-        description.path,
-        description.has_clip_coverage,
-        description.has_alpha_mask,
-    ) {
-        (ShaderCompositePathKey::Normal, false, false) => "fragment_normal",
-        (ShaderCompositePathKey::Normal, true, false) => "fragment_normal_clip",
-        (ShaderCompositePathKey::Normal, false, true) => "fragment_normal_mask",
-        (ShaderCompositePathKey::Normal, true, true) => "fragment_normal_clip_mask",
-        (ShaderCompositePathKey::DestinationSampling, false, false) => "fragment_destination",
-        (ShaderCompositePathKey::DestinationSampling, true, false) => "fragment_destination_clip",
-        (ShaderCompositePathKey::DestinationSampling, false, true) => "fragment_destination_mask",
-        (ShaderCompositePathKey::DestinationSampling, true, true) => {
-            "fragment_destination_clip_mask"
-        }
-    }
-}
-
-const fn c08_shader_source(program: C08Program) -> &'static str {
-    match program {
-        C08Program::CanonicalizeCapture => CANONICALIZE_CAPTURE_WGSL,
-        C08Program::SpanSourceOver | C08Program::DropShadowMerge => SPAN_SOURCE_OVER_WGSL,
-        C08Program::Present => PRESENT_WGSL,
-    }
-}
-
-const fn c08_shader_label(program: C08Program) -> &'static str {
-    match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture shader",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over shader",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge shader",
-        C08Program::Present => "Surgeist C08 present shader",
-    }
-}
-
-const fn c08_bind_group_layout_label(program: C08Program) -> &'static str {
-    match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture bindings",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over bindings",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge bindings",
-        C08Program::Present => "Surgeist C08 present bindings",
-    }
-}
-
-const fn c08_pipeline_layout_label(program: C08Program) -> &'static str {
-    match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture pipeline layout",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over pipeline layout",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge pipeline layout",
-        C08Program::Present => "Surgeist C08 present pipeline layout",
-    }
-}
-
-const fn c08_pipeline_label(program: C08Program) -> &'static str {
-    match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture pipeline",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over pipeline",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge pipeline",
-        C08Program::Present => "Surgeist C08 present pipeline",
-    }
-}
-
-const fn span_source_over_blend() -> wgpu::BlendState {
-    let component = wgpu::BlendComponent {
-        src_factor: wgpu::BlendFactor::One,
-        dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
-        operation: wgpu::BlendOperation::Add,
-    };
-    wgpu::BlendState {
-        color: component,
-        alpha: component,
-    }
-}
-
-const fn texture_format(format: ShaderTextureFormatKey) -> Result<wgpu::TextureFormat> {
-    match format {
-        ShaderTextureFormatKey::VelloCaptureRgba8Unorm
-        | ShaderTextureFormatKey::ClipCoverageRgba8Unorm
-        | ShaderTextureFormatKey::WorkingReducedPrecisionRgba8Unorm
-        | ShaderTextureFormatKey::ResolvedMaskRgba8Unorm
-        | ShaderTextureFormatKey::OutputRgba8Unorm => Ok(wgpu::TextureFormat::Rgba8Unorm),
-        ShaderTextureFormatKey::WorkingHighPrecisionRgba16Float => {
-            Ok(wgpu::TextureFormat::Rgba16Float)
-        }
-        ShaderTextureFormatKey::OutputBgra8Unorm => Ok(wgpu::TextureFormat::Bgra8Unorm),
-    }
-}
-
-fn c08_cache_error(message: &'static str) -> Error {
-    Error::new(super::BackendErrorCode::RenderFailed, message)
-}
-
-fn color_filter_cache_error(message: &'static str) -> Error {
-    Error::new(super::BackendErrorCode::RenderFailed, message)
-}
-
-fn copy_backdrop_cache_error(message: &'static str) -> Error {
-    Error::new(super::BackendErrorCode::RenderFailed, message)
-}
-
-fn blur_cache_error(message: &'static str) -> Error {
-    Error::new(super::BackendErrorCode::RenderFailed, message)
-}
-
-fn drop_shadow_cache_error(message: &'static str) -> Error {
-    Error::new(super::BackendErrorCode::RenderFailed, message)
 }
 
 #[cfg(test)]
