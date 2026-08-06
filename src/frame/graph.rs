@@ -10,7 +10,7 @@ use super::bounds::{
 use super::filter::{
     FilterSourceRole, ResolvedFilterOperationIntent, ResolvedFilterStep, ResolvedFrameFilterPlan,
 };
-use super::{FrameContext, GraphSelectionRequirement, validate::validate_semantic_frame_graph};
+use super::{FrameContext, GraphSelectionRequirement};
 use crate::command::{
     LayerIsolation, NormalizedLayer, RenderClip, RenderCommand, RenderCommands, RenderLayerMask,
 };
@@ -1269,7 +1269,6 @@ impl SemanticFrameGraphPlanner {
         graph.filter_steps = planner.filter_steps;
         graph.backdrop_reads = planner.backdrop_reads;
         graph.imports = planner.imports;
-        graph_build(validate_semantic_frame_graph(&graph))?;
         Ok(graph)
     }
 
@@ -1403,7 +1402,6 @@ impl SemanticFrameGraphPlanner {
         graph.filter_steps = planner.filter_steps;
         graph.backdrop_reads = planner.backdrop_reads;
         graph.imports = planner.imports;
-        graph_build(validate_semantic_frame_graph(&graph))?;
         Ok(graph)
     }
 

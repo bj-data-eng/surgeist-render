@@ -10,7 +10,7 @@ use super::{
         SemanticFrameGraphPlanner, SemanticGraphBuilder, SemanticImportKind, SemanticPassId,
         SemanticPassIntent, SemanticPassResult, SemanticResourceDescriptor, SemanticResourceId,
         SemanticResourceProducer, SemanticResourceRole, SemanticVelloSpanScope,
-        WorkingImageInitialization,
+        WorkingImageInitialization, graph_build,
     },
     validate::validate_semantic_frame_graph,
 };
@@ -76,7 +76,7 @@ pub(crate) fn forced_c08_graph_with_capture_mapping_for_test(
             ));
         }
     };
-    SemanticFrameGraphPlanner::build_with_capture_mapping(
+    let graph = SemanticFrameGraphPlanner::build_with_capture_mapping(
         commands,
         context,
         output_spatial,
@@ -84,7 +84,9 @@ pub(crate) fn forced_c08_graph_with_capture_mapping_for_test(
         mapping.capture_transform,
         mapping.parent_to_surface,
         CaptureBoundsCoordinateSpace::ForcedMappedForTest,
-    )
+    )?;
+    graph_build(validate_semantic_frame_graph(&graph))?;
+    Ok(graph)
 }
 
 /// Test-only authored-filter ingress into the exact graph executor. This starts with
@@ -97,7 +99,10 @@ pub(crate) fn authored_filter_graph_for_test(
     commands: RenderCommands,
     context: FrameContext,
 ) -> Result<GpuRenderGraph> {
-    SemanticFrameGraphPlanner::build_authored_filter_fixture(filters, commands, context)
+    let graph =
+        SemanticFrameGraphPlanner::build_authored_filter_fixture(filters, commands, context)?;
+    graph_build(validate_semantic_frame_graph(&graph))?;
+    Ok(graph)
 }
 
 #[cfg(test)]

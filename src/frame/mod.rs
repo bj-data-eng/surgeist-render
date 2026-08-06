@@ -62,7 +62,8 @@ pub(crate) use test_support::{
 pub(crate) use bounds::LogicalBounds;
 use bounds::{FrameSpatialPlan, SemanticContributionDomain, SemanticSourceContribution};
 pub(crate) use graph::GpuRenderGraph;
-use graph::SemanticFrameGraphPlanner;
+use graph::{SemanticFrameGraphPlanner, graph_build};
+use validate::validate_semantic_frame_graph;
 
 use super::{
     command::{RenderCommand, RenderCommands},
@@ -168,8 +169,14 @@ impl FramePlan {
                 ));
             }
         };
-        SemanticFrameGraphPlanner::build(commands, context, output_spatial, selection_requirements)
-            .map(Self::GpuGraph)
+        let graph = SemanticFrameGraphPlanner::build(
+            commands,
+            context,
+            output_spatial,
+            selection_requirements,
+        )?;
+        graph_build(validate_semantic_frame_graph(&graph))?;
+        Ok(Self::GpuGraph(graph))
     }
 }
 

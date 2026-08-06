@@ -1,11 +1,8 @@
-use super::{
-    graph::{
-        GpuRenderGraph, GraphBuildResult, GraphValidationError, PassIndex, ResourceIndex,
-        SemanticCompositeKind, SemanticPassId, SemanticPassIntent, SemanticPassResult,
-        SemanticResourceId, SemanticResourceProducer, SemanticResourceRole,
-        WorkingImageInitialization,
-    },
-    lower::{graph_lowering_pass_kind, graph_lowering_read_bindings},
+use super::graph::{
+    GpuRenderGraph, GraphBuildResult, GraphValidationError, PassIndex, ResourceIndex,
+    SemanticCompositeKind, SemanticGraphPass, SemanticPassId, SemanticPassIntent,
+    SemanticPassResult, SemanticResourceId, SemanticResourceProducer, SemanticResourceRole,
+    WorkingImageInitialization,
 };
 
 pub(super) fn validate_semantic_frame_graph(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
@@ -138,22 +135,115 @@ fn validate_import_metadata(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
     Ok(())
 }
 
-pub(super) fn validate_graph_for_lowering(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
-    validate_semantic_frame_graph(graph)?;
-    if graph.resources.is_empty() {
-        return Err(GraphValidationError::MissingRootWorkingImage);
-    }
-    if graph.passes.is_empty() {
-        return Err(GraphValidationError::MissingFinalPresent);
+pub(super) struct LoweringValidationState<'graph> {
+    graph: &'graph GpuRenderGraph,
+    actual_reads: Vec<u32>,
+    last_reads: Vec<Option<SemanticPassId>>,
+    next_pass_index: usize,
+}
+
+impl<'graph> LoweringValidationState<'graph> {
+    pub(super) fn begin(graph: &'graph GpuRenderGraph) -> GraphBuildResult<Self> {
+        validate_semantic_frame_graph(graph)?;
+        if graph.resources.is_empty() {
+            return Err(GraphValidationError::MissingRootWorkingImage);
+        }
+        if graph.passes.is_empty() {
+            return Err(GraphValidationError::MissingFinalPresent);
+        }
+
+        let actual_reads = vec![0_u32; graph.resources.len()];
+        let last_reads = vec![None; graph.resources.len()];
+        validate_lowering_resources(graph)?;
+        validate_lowering_imports(graph)?;
+        Ok(Self {
+            graph,
+            actual_reads,
+            last_reads,
+            next_pass_index: 0,
+        })
     }
 
-    let mut actual_reads = vec![0_u32; graph.resources.len()];
-    let mut last_reads = vec![None; graph.resources.len()];
-    validate_lowering_resources(graph)?;
-    validate_lowering_imports(graph)?;
-    validate_lowering_passes(graph, &mut actual_reads, &mut last_reads)?;
-    validate_lowering_lifetimes(graph, &actual_reads, &last_reads)?;
-    validate_lowering_anchors(graph)
+    pub(super) fn validate_pass(&mut self, pass: &SemanticGraphPass) -> GraphBuildResult<()> {
+        let index = self.next_pass_index;
+        let graph = self.graph;
+        let expected_id = SemanticPassId::new(graph.generation, PassIndex::try_from_len(index)?);
+        if pass.id != expected_id {
+            return if pass.id.generation != graph.generation {
+                Err(GraphValidationError::WrongPassGeneration {
+                    expected: graph.generation,
+                    actual: pass.id.generation,
+                })
+            } else {
+                Err(GraphValidationError::UnknownPass(pass.id))
+            };
+        }
+        if !pass.scheduled {
+            return Err(GraphValidationError::UnscheduledPass(pass.id));
+        }
+
+        let mut seen_dependencies = Vec::with_capacity(pass.dependencies.len());
+        for dependency in &pass.dependencies {
+            if seen_dependencies.contains(dependency) {
+                return Err(GraphValidationError::DuplicateDependency(*dependency));
+            }
+            let dependency_index = validate_graph_pass_id(graph, *dependency)?;
+            if dependency_index >= index {
+                return Err(GraphValidationError::ForwardDependency(*dependency));
+            }
+            seen_dependencies.push(*dependency);
+        }
+
+        let mut seen_reads = Vec::with_capacity(pass.reads.len());
+        for read in &pass.reads {
+            if seen_reads.contains(read) {
+                return Err(GraphValidationError::DuplicateRead(*read));
+            }
+            let resource_index = validate_graph_resource_id(graph, *read)?;
+            let resource = graph
+                .resources
+                .get(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(*read))?;
+            if pass.result == SemanticPassResult::Resource(*read) {
+                return Err(GraphValidationError::ReadWriteAlias(*read));
+            }
+            if let Some(SemanticResourceProducer::Pass(producer)) = resource.producer {
+                let producer_index = validate_graph_pass_id(graph, producer)?;
+                if producer_index >= index {
+                    return Err(GraphValidationError::ForwardRead(*read));
+                }
+                if !pass.dependencies.contains(&producer) {
+                    return Err(GraphValidationError::MissingProducerDependency {
+                        resource: *read,
+                        producer,
+                    });
+                }
+            }
+            self.actual_reads[resource_index] = self.actual_reads[resource_index]
+                .checked_add(1)
+                .ok_or(GraphValidationError::ReadCountOverflow(*read))?;
+            self.last_reads[resource_index] = Some(pass.id);
+            seen_reads.push(*read);
+        }
+        if let SemanticPassResult::Resource(result) = pass.result {
+            let resource_index = validate_graph_resource_id(graph, result)?;
+            let resource = graph
+                .resources
+                .get(resource_index)
+                .ok_or(GraphValidationError::UnknownResource(result))?;
+            if resource.producer != Some(SemanticResourceProducer::Pass(pass.id)) {
+                return Err(GraphValidationError::DuplicateProducer(result));
+            }
+        }
+
+        self.next_pass_index += 1;
+        Ok(())
+    }
+
+    pub(super) fn finish(self) -> GraphBuildResult<()> {
+        validate_lowering_lifetimes(self.graph, &self.actual_reads, &self.last_reads)?;
+        validate_lowering_anchors(self.graph)
+    }
 }
 
 fn validate_lowering_resources(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
@@ -225,87 +315,6 @@ fn validate_lowering_imports(graph: &GpuRenderGraph) -> GraphBuildResult<()> {
         {
             return Err(GraphValidationError::InvalidImportedResourceRole);
         }
-    }
-    Ok(())
-}
-
-fn validate_lowering_passes(
-    graph: &GpuRenderGraph,
-    actual_reads: &mut [u32],
-    last_reads: &mut [Option<SemanticPassId>],
-) -> GraphBuildResult<()> {
-    for (index, pass) in graph.passes.iter().enumerate() {
-        let expected_id = SemanticPassId::new(graph.generation, PassIndex::try_from_len(index)?);
-        if pass.id != expected_id {
-            return if pass.id.generation != graph.generation {
-                Err(GraphValidationError::WrongPassGeneration {
-                    expected: graph.generation,
-                    actual: pass.id.generation,
-                })
-            } else {
-                Err(GraphValidationError::UnknownPass(pass.id))
-            };
-        }
-        if !pass.scheduled {
-            return Err(GraphValidationError::UnscheduledPass(pass.id));
-        }
-
-        let mut seen_dependencies = Vec::with_capacity(pass.dependencies.len());
-        for dependency in &pass.dependencies {
-            if seen_dependencies.contains(dependency) {
-                return Err(GraphValidationError::DuplicateDependency(*dependency));
-            }
-            let dependency_index = validate_graph_pass_id(graph, *dependency)?;
-            if dependency_index >= index {
-                return Err(GraphValidationError::ForwardDependency(*dependency));
-            }
-            seen_dependencies.push(*dependency);
-        }
-
-        let mut seen_reads = Vec::with_capacity(pass.reads.len());
-        for read in &pass.reads {
-            if seen_reads.contains(read) {
-                return Err(GraphValidationError::DuplicateRead(*read));
-            }
-            let resource_index = validate_graph_resource_id(graph, *read)?;
-            let resource = graph
-                .resources
-                .get(resource_index)
-                .ok_or(GraphValidationError::UnknownResource(*read))?;
-            if pass.result == SemanticPassResult::Resource(*read) {
-                return Err(GraphValidationError::ReadWriteAlias(*read));
-            }
-            if let Some(SemanticResourceProducer::Pass(producer)) = resource.producer {
-                let producer_index = validate_graph_pass_id(graph, producer)?;
-                if producer_index >= index {
-                    return Err(GraphValidationError::ForwardRead(*read));
-                }
-                if !pass.dependencies.contains(&producer) {
-                    return Err(GraphValidationError::MissingProducerDependency {
-                        resource: *read,
-                        producer,
-                    });
-                }
-            }
-            actual_reads[resource_index] = actual_reads[resource_index]
-                .checked_add(1)
-                .ok_or(GraphValidationError::ReadCountOverflow(*read))?;
-            last_reads[resource_index] = Some(pass.id);
-            seen_reads.push(*read);
-        }
-        if let SemanticPassResult::Resource(result) = pass.result {
-            let resource_index = validate_graph_resource_id(graph, result)?;
-            let resource = graph
-                .resources
-                .get(resource_index)
-                .ok_or(GraphValidationError::UnknownResource(result))?;
-            if resource.producer != Some(SemanticResourceProducer::Pass(pass.id)) {
-                return Err(GraphValidationError::DuplicateProducer(result));
-            }
-        }
-
-        graph_lowering_pass_kind(graph, pass)?;
-        graph_lowering_read_bindings(graph, pass)?;
     }
     Ok(())
 }

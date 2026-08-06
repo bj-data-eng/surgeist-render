@@ -12,6 +12,7 @@ use super::{
         SemanticResourceId, SemanticResourceProducer, SemanticResourceRole, SemanticVelloSpan,
         SemanticVelloSpanScope, WorkingImageInitialization, graph_build,
     },
+    validate::LoweringValidationState,
 };
 use crate::{
     command::{RenderClip, RenderCommands},
@@ -51,7 +52,13 @@ impl GraphLoweringResourceId {
 
 impl GpuRenderGraph {
     pub(crate) fn lowering_view(&self) -> Result<GraphLoweringView<'_>> {
-        graph_build(super::validate::validate_graph_for_lowering(self))?;
+        let mut validation = graph_build(LoweringValidationState::begin(self))?;
+        for pass in &self.passes {
+            graph_build(validation.validate_pass(pass))?;
+            graph_build(graph_lowering_pass_kind(self, pass))?;
+            graph_build(graph_lowering_read_bindings(self, pass))?;
+        }
+        graph_build(validation.finish())?;
         Ok(GraphLoweringView { graph: self })
     }
 }
