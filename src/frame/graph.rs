@@ -10,7 +10,7 @@ use super::bounds::{
 use super::filter::{
     FilterSourceRole, ResolvedFilterOperationIntent, ResolvedFilterStep, ResolvedFrameFilterPlan,
 };
-use super::{FrameContext, GraphSelectionRequirement, validate_semantic_frame_graph};
+use super::{FrameContext, GraphSelectionRequirement, validate::validate_semantic_frame_graph};
 use crate::command::{
     LayerIsolation, NormalizedLayer, RenderClip, RenderCommand, RenderCommands, RenderLayerMask,
 };

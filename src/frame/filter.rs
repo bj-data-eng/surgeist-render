@@ -317,3 +317,197 @@ impl InclusiveFilterKernelSupport {
         })
     }
 }
+
+#[cfg(test)]
+use crate::{filter::ColorClampBoundary, geometry::Rect, style::ColorFilterOp};
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum OrderedFilterEdgeObservation {
+    NoSampling,
+    TransparentBlack,
+    SemanticBorderMirror([f64; 4]),
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) enum OrderedFilterIntentObservation {
+    ColorRun {
+        operations: Vec<ColorFilterOp>,
+        clamp_boundaries_after_operation: Vec<usize>,
+    },
+    Blur {
+        standard_deviation: f64,
+        inclusive_support_taps: u32,
+    },
+    DropShadow {
+        offset: (f64, f64),
+        standard_deviation: f64,
+        inclusive_support_taps: u32,
+        uses_source_alpha: bool,
+        retains_unchanged_source: bool,
+        continuous_offset: bool,
+    },
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OrderedFilterStepObservation {
+    pub(crate) source_bounds: [f64; 4],
+    pub(crate) result_bounds: Option<[f64; 4]>,
+    pub(crate) source_device_origin: Option<(i32, i32)>,
+    pub(crate) source_device_extent: Option<(u32, u32)>,
+    pub(crate) result_device_origin: Option<(i32, i32)>,
+    pub(crate) result_device_extent: Option<(u32, u32)>,
+    pub(crate) edge: OrderedFilterEdgeObservation,
+    pub(crate) intent: OrderedFilterIntentObservation,
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OrderedFilterPlanObservation {
+    pub(crate) initial_bounds: [f64; 4],
+    pub(crate) final_bounds: [f64; 4],
+    pub(crate) authored_operation_count: usize,
+    pub(crate) is_empty: bool,
+    pub(crate) has_spatial_mapping: bool,
+    pub(crate) steps: Vec<OrderedFilterStepObservation>,
+}
+
+#[cfg(test)]
+pub(crate) fn ordered_filter_plan_for_test(
+    filters: &FilterList,
+    source_rect: Rect,
+    transform: Transform,
+    surface_scale: f64,
+    backdrop: bool,
+) -> Result<OrderedFilterPlanObservation> {
+    let source_bounds = LogicalBounds::try_from_rect(source_rect, "filter plan source bounds")?;
+    let source_role = if backdrop {
+        FilterSourceRole::Backdrop
+    } else {
+        FilterSourceRole::Ordinary
+    };
+    let plan = FrameContext::try_for_spatial_test(surface_scale)?.plan_filter_list(
+        source_bounds,
+        transform,
+        filters,
+        source_role,
+    )?;
+
+    match plan {
+        ResolvedFrameFilterPlan::Empty(plan) => {
+            let bounds = logical_rect_values(plan.source_bounds.rect());
+            Ok(OrderedFilterPlanObservation {
+                initial_bounds: bounds,
+                final_bounds: bounds,
+                authored_operation_count: plan.authored_operation_count,
+                is_empty: true,
+                has_spatial_mapping: false,
+                steps: Vec::new(),
+            })
+        }
+        ResolvedFrameFilterPlan::NonEmpty(plan) => {
+            let steps = plan
+                .steps
+                .into_iter()
+                .map(observe_resolved_filter_step)
+                .collect();
+            Ok(OrderedFilterPlanObservation {
+                initial_bounds: logical_rect_values(plan.initial_bounds.rect()),
+                final_bounds: logical_rect_values(plan.final_bounds.rect()),
+                authored_operation_count: plan.authored_operation_count,
+                is_empty: false,
+                has_spatial_mapping: true,
+                steps,
+            })
+        }
+    }
+}
+
+#[cfg(test)]
+fn observe_resolved_filter_step(step: ResolvedFilterStep) -> OrderedFilterStepObservation {
+    let source_device_origin = Some((
+        step.spatial_mapping.source.device_origin.x,
+        step.spatial_mapping.source.device_origin.y,
+    ));
+    let source_device_extent = Some((
+        step.spatial_mapping.source.device_extent.width,
+        step.spatial_mapping.source.device_extent.height,
+    ));
+    let result_device_origin = Some((
+        step.spatial_mapping.result.device_origin.x,
+        step.spatial_mapping.result.device_origin.y,
+    ));
+    let result_device_extent = Some((
+        step.spatial_mapping.result.device_extent.width,
+        step.spatial_mapping.result.device_extent.height,
+    ));
+    let edge = match step.edge_policy {
+        FilterEdgePolicy::NoSampling => OrderedFilterEdgeObservation::NoSampling,
+        FilterEdgePolicy::TransparentBlack => OrderedFilterEdgeObservation::TransparentBlack,
+        FilterEdgePolicy::SemanticBorderMirror { semantic_border } => {
+            OrderedFilterEdgeObservation::SemanticBorderMirror(logical_rect_values(
+                semantic_border.rect(),
+            ))
+        }
+    };
+    let intent = match step.operation_intent {
+        ResolvedFilterOperationIntent::ColorRun(run) => {
+            let operations = run
+                .operations()
+                .iter()
+                .copied()
+                .map(|operation| operation.operation())
+                .collect();
+            let clamp_boundaries_after_operation = run
+                .operations()
+                .iter()
+                .copied()
+                .enumerate()
+                .filter_map(|(index, operation)| {
+                    (operation.clamp_boundary()
+                        == ColorClampBoundary::ClampStraightRgbaToUnitThenPremultiply)
+                        .then_some(index)
+                })
+                .collect();
+            OrderedFilterIntentObservation::ColorRun {
+                operations,
+                clamp_boundaries_after_operation,
+            }
+        }
+        ResolvedFilterOperationIntent::Blur(intent) => OrderedFilterIntentObservation::Blur {
+            standard_deviation: intent.authored_blur.radius(),
+            inclusive_support_taps: intent.support.device_radius,
+        },
+        ResolvedFilterOperationIntent::DropShadow(intent) => {
+            let offset = intent.authored_shadow.offset();
+            OrderedFilterIntentObservation::DropShadow {
+                offset: (offset.x(), offset.y()),
+                standard_deviation: intent.authored_shadow.blur().radius(),
+                inclusive_support_taps: intent.support.device_radius,
+                uses_source_alpha: intent.alpha_source == DropShadowAlphaSource::SourceAlpha,
+                retains_unchanged_source: intent.source_composition
+                    == DropShadowSourceComposition::RetainUnchangedForSourceOver,
+                continuous_offset: intent.offset_sampling
+                    == DropShadowOffsetSampling::ContinuousLinear,
+            }
+        }
+    };
+
+    OrderedFilterStepObservation {
+        source_bounds: logical_rect_values(step.source_bounds.rect()),
+        result_bounds: Some(logical_rect_values(step.result_bounds.rect())),
+        source_device_origin,
+        source_device_extent,
+        result_device_origin,
+        result_device_extent,
+        edge,
+        intent,
+    }
+}
+
+#[cfg(test)]
+fn logical_rect_values(rect: Rect) -> [f64; 4] {
+    [rect.x(), rect.y(), rect.width(), rect.height()]
+}

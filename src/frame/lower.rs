@@ -49,6 +49,13 @@ impl GraphLoweringResourceId {
     }
 }
 
+impl GpuRenderGraph {
+    pub(crate) fn lowering_view(&self) -> Result<GraphLoweringView<'_>> {
+        graph_build(super::validate::validate_graph_for_lowering(self))?;
+        Ok(GraphLoweringView { graph: self })
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub(crate) struct GraphLoweringPassId {
     generation: GraphLoweringGeneration,

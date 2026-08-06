@@ -1012,3 +1012,77 @@ fn checked_finite_result(
     }
     Ok(result)
 }
+
+#[cfg(test)]
+pub(crate) struct SpatialPrimitivesForTest {
+    pub(crate) logical_and_device_phases_are_distinct: bool,
+    pub(crate) logical_bounds: Option<[f64; 4]>,
+    pub(crate) device_origin: Option<(i32, i32)>,
+    pub(crate) device_extent: Option<(u32, u32)>,
+    pub(crate) raster_scale: f64,
+    pub(crate) texel_center: Option<(f64, f64)>,
+    pub(crate) is_empty: bool,
+}
+
+#[cfg(test)]
+pub(crate) fn transformed_logical_bounds_for_test(
+    rect: Rect,
+    transform: Transform,
+) -> Result<[f64; 4]> {
+    let transformed = LogicalBounds::try_from_rect(rect, "frame logical bounds")?
+        .try_transform(transform, "frame transformed logical bounds")?
+        .rect();
+    Ok([
+        transformed.x(),
+        transformed.y(),
+        transformed.width(),
+        transformed.height(),
+    ])
+}
+
+#[cfg(test)]
+pub(crate) fn spatial_primitives_for_test(
+    rect: Rect,
+    transform: Transform,
+    surface_scale: f64,
+    texel: (u32, u32),
+) -> Result<SpatialPrimitivesForTest> {
+    let logical_bounds = LogicalBounds::try_from_rect(rect, "frame logical bounds")?;
+    let plan = FrameContext::try_for_spatial_test(surface_scale)?
+        .plan_local_bounds(logical_bounds, transform)?;
+    let logical_rect = logical_bounds.rect();
+    let logical_bounds = Some([
+        logical_rect.x(),
+        logical_rect.y(),
+        logical_rect.width(),
+        logical_rect.height(),
+    ]);
+
+    match plan {
+        FrameSpatialPlan::Empty(plan) => {
+            let _logical_bounds = plan.logical_bounds;
+            Ok(SpatialPrimitivesForTest {
+                logical_and_device_phases_are_distinct: true,
+                logical_bounds,
+                device_origin: None,
+                device_extent: None,
+                raster_scale: 0.0,
+                texel_center: None,
+                is_empty: true,
+            })
+        }
+        FrameSpatialPlan::NonEmpty(plan) => {
+            let _logical_bounds = plan.logical_bounds;
+            let texel_center = plan.texel_center_mapping.point_for(texel.0, texel.1)?;
+            Ok(SpatialPrimitivesForTest {
+                logical_and_device_phases_are_distinct: true,
+                logical_bounds,
+                device_origin: Some((plan.device_origin.x, plan.device_origin.y)),
+                device_extent: Some((plan.device_extent.width, plan.device_extent.height)),
+                raster_scale: plan.raster_scale.get(),
+                texel_center: Some((texel_center.x(), texel_center.y())),
+                is_empty: false,
+            })
+        }
+    }
+}
