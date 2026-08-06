@@ -31,13 +31,12 @@ pub(crate) use model::{
 };
 use parameters::c12_blur_edge_uniform_bytes;
 pub(crate) use prepare::{
-    ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest,
-    PreparedGaussianKernelBinding, PreparedGraph, PreparedPassView, PreparedTextureBinding,
-    VELLO_CAPTURE_TEXTURE_USAGES,
+    ExecutableGraphDispatchEligibility, PreparedGaussianKernelBinding, PreparedGraph,
+    PreparedPassView, PreparedTextureBinding, VELLO_CAPTURE_TEXTURE_USAGES,
 };
-use prepare::{PreparedC11PassObjects, RuntimePassPreparationRequest};
 #[cfg(test)]
-use prepare::{RuntimeAllocationRequest, RuntimeGraphPreparationPlan};
+use prepare::{GraphPreparationSource, RuntimeAllocationRequest, RuntimeGraphPreparationPlan};
+use prepare::{PreparedC11PassObjects, RuntimePassPreparationRequest};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -49,10 +48,13 @@ use std::cell::Cell;
 
 use super::{
     Color, Format, PhysicalSize, Result, Transform,
+    backend::DeviceCapabilities,
     encode::{encode_vello_clip_coverage_scene, encode_vello_scene_with_initial_transform},
     layer::BlendMode,
-    renderer::Antialiasing,
-    resource::{FrameCleanup, FrameResourceScope, GaussianKernelKey, ResourceManager},
+    renderer::{Antialiasing, EffectQualityPolicy},
+    resource::{
+        FrameCleanup, FrameResourceScope, GaussianKernelKey, ResourceManager, WorkingFormat,
+    },
     shader::{
         BlurEdgeParameterBytes, ColorFilterOperationBufferLimits, ColorFilterOperationBytes,
         CompositeParameterBytes, DevicePassCache, DropShadowParameterBytes,
@@ -69,16 +71,51 @@ use super::{
 #[cfg(test)]
 use super::{
     BackendErrorCode, Error,
-    backend::DeviceCapabilities,
     filter::RuntimeFilterAmount,
     frame::{GpuRenderGraph, GraphLoweringImportView},
-    renderer::EffectQualityPolicy,
-    resource::{ResourceIdentity, WorkingFormat},
+    resource::ResourceIdentity,
     shader::{
         SamplerKey, ShaderBindingRoleKey, ShaderDataBindingKey, ShaderMaskSamplingKey,
         ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
 };
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExecutableGraphWorkingFormatRequest {
+    ConfiguredPolicy(EffectQualityPolicy),
+    #[cfg(test)]
+    Exact(WorkingFormat),
+}
+
+impl ExecutableGraphWorkingFormatRequest {
+    fn resolve(self, capabilities: &DeviceCapabilities) -> Result<WorkingFormat> {
+        match self {
+            Self::ConfiguredPolicy(policy) => capabilities.resolve_effect_working_format(policy),
+            #[cfg(test)]
+            Self::Exact(working_format) => {
+                capabilities.validate_supported_working_format(working_format)?;
+                Ok(working_format)
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct PreparedGraphTestSupport {
+    fail_capture_encoding_after: Option<usize>,
+    fail_scope_resolution: bool,
+    acquired_capture_lease_count: usize,
+}
+
+#[cfg(test)]
+impl PreparedGraphTestSupport {
+    const NONE: Self = Self {
+        fail_capture_encoding_after: None,
+        fail_scope_resolution: false,
+        acquired_capture_lease_count: 0,
+    };
+}
 
 #[cfg(test)]
 use super::texture::EffectTextureRole;
@@ -100,6 +137,8 @@ use super::vello_engine::scene::VelloPathDrawObservationForTest;
 #[cfg(test)]
 thread_local! {
     static ACTIVE_COLOR_FILTER_SHADER_FAILURE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+    static PREPARED_GRAPH_TEST_SUPPORT: Cell<PreparedGraphTestSupport> =
+        const { Cell::new(PreparedGraphTestSupport::NONE) };
 }
 
 /// Test-only deterministic failure at the checked color-filter shader boundary.
@@ -7159,6 +7198,102 @@ fn c08_vello_capture_scene(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> Resu
     }
 }
 
+#[cfg(test)]
+impl<'device> PreparedGraph<'device> {
+    pub(crate) fn try_prepare_c10(
+        preparable: C10PreparableGraph,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_phase: (&'device DevicePassCache, bool),
+    ) -> Result<Self> {
+        let selected_working_format = preparable.working_format();
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C10 {
+                preparable,
+                operation_limits: None,
+            },
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache_phase,
+        )?;
+        if prepared.c10_execution.is_none() {
+            return Err(preparation_error(
+                "C10 preparation lost its validated closed execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) fn try_prepare_c11(
+        preparable: C11PreparableGraph,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_phase: (&'device DevicePassCache, bool),
+    ) -> Result<Self> {
+        let selected_working_format = preparable.working_format();
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C11(preparable),
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            pass_cache_phase,
+        )?;
+        if prepared.c11_execution.is_none() {
+            return Err(preparation_error(
+                "C11 preparation lost its validated closed execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+
+    pub(crate) fn try_prepare_c10_with_operation_limits_for_test(
+        lowered: LoweredGraphPlan,
+        policy: EffectQualityPolicy,
+        capabilities: &DeviceCapabilities,
+        device: &'device wgpu::Device,
+        queue: &'device wgpu::Queue,
+        resources: &'device ResourceManager,
+        pass_cache_and_limits: (&'device DevicePassCache, ColorFilterOperationBufferLimits),
+    ) -> Result<Self> {
+        let (pass_cache, operation_limits) = pass_cache_and_limits;
+        let PrePreparationGraphClassification::ExactC10(preparable) =
+            PrePreparationGraphClassification::classify(lowered)
+        else {
+            return Err(preparation_error(
+                "the C10 limit fixture requires one exact closed color graph",
+            ));
+        };
+        let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
+        let prepared = Self::try_prepare_inner(
+            GraphPreparationSource::C10 {
+                preparable,
+                operation_limits: Some(operation_limits),
+            },
+            selected_working_format,
+            capabilities,
+            device,
+            queue,
+            resources,
+            (pass_cache, true),
+        )?;
+        if prepared.c10_execution.is_none() {
+            return Err(preparation_error(
+                "C10 limit preparation lost its validated closed execution facts",
+            ));
+        }
+        Ok(prepared)
+    }
+}
+
 impl<'device> PreparedGraph<'device> {
     pub(crate) fn with_vello_engine(mut self, engine: &'device VelloEngineState) -> Self {
         self.vello_engine = Some(engine);
@@ -7167,22 +7302,32 @@ impl<'device> PreparedGraph<'device> {
 
     #[cfg(test)]
     pub(crate) fn fail_capture_encoding_for_test(&mut self) {
-        self.fail_capture_encoding_after_for_test = Some(0);
+        self.fail_capture_encoding_after_for_test(0);
     }
 
     #[cfg(test)]
     pub(crate) fn fail_capture_encoding_after_for_test(&mut self, successful_capture_count: usize) {
-        self.fail_capture_encoding_after_for_test = Some(successful_capture_count);
+        PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
+            support.set(PreparedGraphTestSupport {
+                fail_capture_encoding_after: Some(successful_capture_count),
+                ..PreparedGraphTestSupport::NONE
+            });
+        });
     }
 
     #[cfg(test)]
     pub(crate) fn fail_scope_resolution_for_test(&mut self) {
-        self.fail_scope_resolution_for_test = true;
+        PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
+            support.set(PreparedGraphTestSupport {
+                fail_scope_resolution: true,
+                ..PreparedGraphTestSupport::NONE
+            });
+        });
     }
 
     #[cfg(test)]
-    pub(crate) const fn acquired_capture_lease_count_for_test(&self) -> usize {
-        self.acquired_capture_lease_count_for_test
+    pub(crate) fn acquired_capture_lease_count_for_test(&self) -> usize {
+        PREPARED_GRAPH_TEST_SUPPORT.with(|support| support.get().acquired_capture_lease_count)
     }
 
     pub(crate) async fn encode_c08_custom_spine(
@@ -7230,7 +7375,13 @@ impl<'device> PreparedGraph<'device> {
             }
         };
         #[cfg(test)]
-        if self.fail_scope_resolution_for_test {
+        if PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
+            let mut state = support.get();
+            let inject = state.fail_scope_resolution;
+            state.fail_scope_resolution = false;
+            support.set(state);
+            inject
+        }) {
             scope.inject_validation_error_for_test();
         }
         let leases = match scope.finish_with_leases(leases).await {
@@ -7439,7 +7590,15 @@ impl<'device> PreparedGraph<'device> {
         progress: &mut C08CustomSpineEncodingProgress,
     ) -> Result<()> {
         #[cfg(test)]
-        if self.fail_capture_encoding_after_for_test == Some(progress.capture_count) {
+        if PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
+            let mut state = support.get();
+            let inject = state.fail_capture_encoding_after == Some(progress.capture_count);
+            if inject {
+                state.fail_capture_encoding_after = None;
+                support.set(state);
+            }
+            inject
+        }) {
             return Err(preparation_error(
                 "injected C08 Vello capture encoding failure",
             ));
@@ -7452,10 +7611,12 @@ impl<'device> PreparedGraph<'device> {
         progress.capture_observations.push(encoded.observation);
         self.complete_c08_capture(request.id, target, session, encoded.receipt)?;
         #[cfg(test)]
-        {
-            self.acquired_capture_lease_count_for_test =
-                self.acquired_capture_lease_count_for_test.saturating_add(1);
-        }
+        PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
+            let mut state = support.get();
+            state.acquired_capture_lease_count =
+                state.acquired_capture_lease_count.saturating_add(1);
+            support.set(state);
+        });
         progress.record_capture_completion();
         Ok(())
     }

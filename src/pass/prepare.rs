@@ -27,11 +27,12 @@ use super::super::{
 };
 use super::{
     C08CustomSpineEncodingState, C08ExecutionFacts, C08PreparableGraph, C09PreparableGraph,
-    C10PreparableGraph, C11PreparableGraph, C12PreparableGraph, LoweredGraphPlan, RuntimeBlur,
-    RuntimeComposite, RuntimeCompositeKind, RuntimeGraphGeneration, RuntimePass,
-    RuntimePassCacheKeys, RuntimePassId, RuntimePassKind, RuntimeReadBinding,
-    RuntimeResourceFormat, RuntimeResourceId, RuntimeResourceImport, RuntimeResourceProducer,
-    RuntimeResourceRequest, RuntimeResourceRole, RuntimeResultBinding,
+    C10PreparableGraph, C11PreparableGraph, C12PreparableGraph,
+    ExecutableGraphWorkingFormatRequest, LoweredGraphPlan, RuntimeBlur, RuntimeComposite,
+    RuntimeCompositeKind, RuntimeGraphGeneration, RuntimePass, RuntimePassCacheKeys, RuntimePassId,
+    RuntimePassKind, RuntimeReadBinding, RuntimeResourceFormat, RuntimeResourceId,
+    RuntimeResourceImport, RuntimeResourceProducer, RuntimeResourceRequest, RuntimeResourceRole,
+    RuntimeResultBinding,
     close::{
         ClosedExecutableGraph, ClosedExecutableGraphFacts, PrePreparationGraphClassification,
         preparation_error,
@@ -698,26 +699,6 @@ struct PreparedPassRealization {
     c11_objects: BTreeMap<RuntimePassId, PreparedC11PassObjects>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ExecutableGraphWorkingFormatRequest {
-    ConfiguredPolicy(EffectQualityPolicy),
-    #[cfg(test)]
-    Exact(WorkingFormat),
-}
-
-impl ExecutableGraphWorkingFormatRequest {
-    fn resolve(self, capabilities: &DeviceCapabilities) -> Result<WorkingFormat> {
-        match self {
-            Self::ConfiguredPolicy(policy) => capabilities.resolve_effect_working_format(policy),
-            #[cfg(test)]
-            Self::Exact(working_format) => {
-                capabilities.validate_supported_working_format(working_format)?;
-                Ok(working_format)
-            }
-        }
-    }
-}
-
 #[must_use = "the closed graph dispatch result must select exactly one renderer route"]
 pub(crate) enum ExecutableGraphDispatchEligibility {
     ExactC08(C08PreparableGraph),
@@ -859,7 +840,7 @@ impl ExecutableGraphDispatchEligibility {
     }
 }
 
-enum GraphPreparationSource {
+pub(super) enum GraphPreparationSource {
     C08(C08PreparableGraph),
     C09(ClosedExecutableGraph),
     C10 {
@@ -929,12 +910,6 @@ pub(crate) struct PreparedGraph<'device> {
     pub(super) next_pass: usize,
     pub(super) c08_encoding_state: Option<C08CustomSpineEncodingState>,
     pub(super) c08_completed_session: Option<Arc<()>>,
-    #[cfg(test)]
-    pub(super) fail_capture_encoding_after_for_test: Option<usize>,
-    #[cfg(test)]
-    pub(super) fail_scope_resolution_for_test: bool,
-    #[cfg(test)]
-    pub(super) acquired_capture_lease_count_for_test: usize,
     pub(super) device: &'device wgpu::Device,
     pub(super) queue: &'device wgpu::Queue,
     pub(super) vello_engine: Option<&'device VelloEngineState>,
@@ -1272,63 +1247,6 @@ impl<'device> PreparedGraph<'device> {
         Ok(prepared)
     }
 
-    #[cfg(test)]
-    pub(crate) fn try_prepare_c10(
-        preparable: C10PreparableGraph,
-        capabilities: &DeviceCapabilities,
-        device: &'device wgpu::Device,
-        queue: &'device wgpu::Queue,
-        resources: &'device ResourceManager,
-        pass_cache_phase: (&'device DevicePassCache, bool),
-    ) -> Result<Self> {
-        let selected_working_format = preparable.working_format();
-        let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C10 {
-                preparable,
-                operation_limits: None,
-            },
-            selected_working_format,
-            capabilities,
-            device,
-            queue,
-            resources,
-            pass_cache_phase,
-        )?;
-        if prepared.c10_execution.is_none() {
-            return Err(preparation_error(
-                "C10 preparation lost its validated closed execution facts",
-            ));
-        }
-        Ok(prepared)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn try_prepare_c11(
-        preparable: C11PreparableGraph,
-        capabilities: &DeviceCapabilities,
-        device: &'device wgpu::Device,
-        queue: &'device wgpu::Queue,
-        resources: &'device ResourceManager,
-        pass_cache_phase: (&'device DevicePassCache, bool),
-    ) -> Result<Self> {
-        let selected_working_format = preparable.working_format();
-        let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C11(preparable),
-            selected_working_format,
-            capabilities,
-            device,
-            queue,
-            resources,
-            pass_cache_phase,
-        )?;
-        if prepared.c11_execution.is_none() {
-            return Err(preparation_error(
-                "C11 preparation lost its validated closed execution facts",
-            ));
-        }
-        Ok(prepared)
-    }
-
     pub(crate) fn try_prepare_c12(
         preparable: C12PreparableGraph,
         selected_working_format: WorkingFormat,
@@ -1464,46 +1382,7 @@ impl<'device> PreparedGraph<'device> {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn try_prepare_c10_with_operation_limits_for_test(
-        lowered: LoweredGraphPlan,
-        policy: EffectQualityPolicy,
-        capabilities: &DeviceCapabilities,
-        device: &'device wgpu::Device,
-        queue: &'device wgpu::Queue,
-        resources: &'device ResourceManager,
-        pass_cache_and_limits: (&'device DevicePassCache, ColorFilterOperationBufferLimits),
-    ) -> Result<Self> {
-        let (pass_cache, operation_limits) = pass_cache_and_limits;
-        let PrePreparationGraphClassification::ExactC10(preparable) =
-            PrePreparationGraphClassification::classify(lowered)
-        else {
-            return Err(preparation_error(
-                "the C10 limit fixture requires one exact closed color graph",
-            ));
-        };
-        let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
-        let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C10 {
-                preparable,
-                operation_limits: Some(operation_limits),
-            },
-            selected_working_format,
-            capabilities,
-            device,
-            queue,
-            resources,
-            (pass_cache, true),
-        )?;
-        if prepared.c10_execution.is_none() {
-            return Err(preparation_error(
-                "C10 limit preparation lost its validated closed execution facts",
-            ));
-        }
-        Ok(prepared)
-    }
-
-    fn try_prepare_inner(
+    pub(super) fn try_prepare_inner(
         source: GraphPreparationSource,
         selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
@@ -1572,12 +1451,6 @@ impl<'device> PreparedGraph<'device> {
             next_pass: 0,
             c08_encoding_state,
             c08_completed_session: None,
-            #[cfg(test)]
-            fail_capture_encoding_after_for_test: None,
-            #[cfg(test)]
-            fail_scope_resolution_for_test: false,
-            #[cfg(test)]
-            acquired_capture_lease_count_for_test: 0,
             device,
             queue,
             vello_engine: None,
