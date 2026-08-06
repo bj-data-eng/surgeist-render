@@ -1,8 +1,6 @@
-use super::{
-    BackendErrorCode, Error, ResourceCacheBudget, Result,
-    gaussian::{GaussianKernelKey, GaussianKernelPlan},
-};
+use super::gaussian::{GaussianKernelKey, GaussianKernelPlan};
 use crate::{
+    BackendErrorCode, Error, ResourceCacheBudget, Result,
     image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
     texture::{EffectTextureDescriptor, EffectTextureKey},
     vello_engine::{VelloAtlasOutcome, VelloBufferKey, VelloImageKey},
