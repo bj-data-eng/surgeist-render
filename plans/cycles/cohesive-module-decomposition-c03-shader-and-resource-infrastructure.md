@@ -277,6 +277,13 @@ unsafe-scan match is classified; any executable match blocks completion. The
 publication head is immutable after holistic review. Root integration remains
 excluded.
 
+User-authorized deferred-gate note (2026-08-06): retain both native smoke
+commands above, but ignore their current noncompletion for C03 progression. The
+user reports that the remotely accessed Mac aggressively attempts to sleep and
+its power settings cannot be changed until they are physically present; rerun
+these two gates later. This deferral is not a Rust-test failure and changes no
+implementation or test contract.
+
 The C03-to-C04 leaf handoff reports the immutable published C03 candidate and
 authority-remote readback SHA, the exact reviewed planning revision, clean task
 and holistic verdicts, and the stable shader/cache and resource-management front
