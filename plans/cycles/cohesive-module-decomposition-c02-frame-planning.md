@@ -4,7 +4,7 @@
 
 - Cycle: `P02/I02/S01/C02`.
 - Owning repository: `surgeist-render`.
-- Status: `in_progress`.
+- Status: `draft`.
 - Cycle base: `92b664bdb91f927bf38a4732c42ea89a5b822618`, the published
   P02-I02 C01 candidate verified on local and authority-remote `main`.
 - Specification: `plans/specs/cohesive-module-decomposition.md` at
@@ -184,6 +184,50 @@
   below passes.
 - Intended commit: one frame-front-door reconciliation point with the complete
   test-support move and final visibility inventory.
+
+### 4.5 T05 Remove The Frame Child Dependency Cycle
+
+- Start from `561ad11c9c69767a824bc7082c852b739938e5c3`, the status-only reopening
+  commit after the first holistic review rejected
+  `1740d1ce85bb440762bed1373068631998a702af`. That review found the prohibited
+  `graph -> validate -> lower -> validate` child dependency cycle at
+  `src/frame/{graph,validate,lower}.rs`; its full verdict is retained in the
+  coordinator task transcript for this cycle.
+- Remove the `graph -> validate` edge by returning graph construction to the
+  coordination in `frame/mod.rs` and test-only fixture coordination in
+  `test_support.rs`. `graph.rs` remains the sole owner of graph construction;
+  `validate.rs` remains the sole owner of semantic and lowering-precondition
+  validation.
+- Remove the `validate -> lower` edge by representing the existing lowering
+  validation sequence as explicit validation state owned by `validate.rs`.
+  `lower.rs` drives that state while converting each pass, preserving the
+  current validation/conversion interleaving and diagnostic precedence.
+- Do not add a callback, trait, dynamic dispatch, duplicate model, generic
+  helper, forwarding layer, or compatibility shim to conceal the cycle. Do not
+  change graph construction, lowering facts, diagnostics, test operations, or
+  test oracles.
+- Before editing and after remediation, run and record:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render semantic_graph_lowers_to_finite_runtime_pass_and_resource_vocabulary
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render runtime_lowering_preserves_dependencies_and_last_use_releases
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render runtime_lowering_derives_exact_sampler_layout_shader_and_pipeline_keys
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render zero_capture_graph_spine_is_rejected_before_preparation
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render base_graph_executor_accepts_only_clear_capture_canonicalize_source_over_and_present
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render graph_builder_rejects_forward_stale_and_read_write_aliases
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render color_filter_fixture_executes_while_public_capability_remains_diagnostic
+  ```
+
+- Acceptance: production child imports form an acyclic direction from
+  `bounds`/`filter` through `graph`, `validate`, and `lower`; `graph.rs` does not
+  import or invoke `validate`; `validate.rs` does not import or invoke `lower`;
+  semantic validation still precedes every returned planned graph; lowering
+  validation and conversion preserve their prior error order; the common
+  Cargo/structural acceptance commands from T01 and the full C02 matrix pass.
+- Intended commit: one mechanical frame dependency-direction repair responding
+  to the holistic finding, followed by a fresh task review and a fresh holistic
+  review of the complete C02 range.
 
 ## 5 Verification And Completion
 
