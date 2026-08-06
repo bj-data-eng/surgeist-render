@@ -9,11 +9,12 @@ pub(crate) use gaussian::{
 };
 #[cfg(test)]
 pub(crate) use lease::ResourceRetentionOutcome;
-pub(crate) use lease::{FrameCleanup, FrameResourceScope, ResourceLease};
+pub(crate) use lease::{
+    FrameCleanup, FrameResourceAcquisitions, FrameResourceScope, ResourceLease,
+};
 pub(crate) use manager::{
-    AllocationGeneration, FrameIdentity, FrameResourceAcquisitions, ManagerIdentity,
-    ResourceAccountingFault, ResourceAllocationPreflight, ResourceCacheKey, ResourceIdentity,
-    ResourceLifecycleStats,
+    AllocationGeneration, FrameIdentity, ManagerIdentity, ResourceAccountingFault,
+    ResourceAllocationPreflight, ResourceCacheKey, ResourceIdentity, ResourceLifecycleStats,
 };
 #[cfg(test)]
 pub(crate) use test_support::{ResourceLeaseTokenForTest, ResourceManagerObservationForTest};

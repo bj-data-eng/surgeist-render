@@ -44,27 +44,10 @@ impl ResourceIdentity {
     pub(crate) const fn get(self) -> u64 {
         self.0
     }
-
-    #[cfg(test)]
-    pub(crate) const fn from_raw_for_test(raw: u64) -> Self {
-        Self(raw)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct AllocationGeneration(pub(super) u64);
-
-impl AllocationGeneration {
-    #[cfg(test)]
-    pub(crate) const fn get_for_test(self) -> u64 {
-        self.0
-    }
-
-    #[cfg(test)]
-    pub(crate) const fn from_raw_for_test(raw: u64) -> Self {
-        Self(raw)
-    }
-}
 
 /// One non-interchangeable namespace for every resource role entering the
 /// per-device manager.
@@ -80,11 +63,6 @@ pub(crate) enum ResourceCacheKey {
 }
 
 impl ResourceCacheKey {
-    #[cfg(test)]
-    pub(super) const fn accepts_modeled_payload(self) -> bool {
-        matches!(self, Self::VelloAtlas | Self::EffectTexture(_))
-    }
-
     pub(super) const fn is_vello_atlas(self) -> bool {
         matches!(self, Self::VelloImage(key) if key.is_persistent_atlas())
     }
@@ -94,16 +72,6 @@ impl ResourceCacheKey {
             self,
             Self::EffectTexture(_) | Self::ResolvedMaskUpload(_) | Self::GaussianKernelBuffer(_)
         )
-    }
-
-    #[cfg(test)]
-    pub(super) const fn is_vello_buffer(self) -> bool {
-        matches!(self, Self::VelloBuffer(_))
-    }
-
-    #[cfg(test)]
-    pub(super) const fn is_transient_vello_image(self) -> bool {
-        matches!(self, Self::VelloImage(key) if !key.is_persistent_atlas())
     }
 }
 
@@ -133,13 +101,6 @@ impl ResourceAllocationPreflight {
             key: ResourceCacheKey::ResolvedMaskUpload(descriptor.cache_key()),
             byte_len: descriptor.byte_len(),
         }))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn zero_sized_mask_is_explicitly_empty_for_test(
-        descriptor: &ResolvedMaskUploadDescriptor,
-    ) -> bool {
-        Self::resolved_mask(descriptor).is_ok_and(|preflight| preflight.is_none())
     }
 
     pub(crate) fn gaussian_kernel(plan: &GaussianKernelPlan) -> Result<Self> {
@@ -269,40 +230,6 @@ pub(super) enum IdleReuse {
 pub(super) enum ResourceAcquisitionSource {
     Allocation,
     Reuse,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct FrameResourceAcquisitions {
-    allocations: usize,
-    reuses: usize,
-}
-
-impl FrameResourceAcquisitions {
-    pub(super) fn record(&mut self, source: ResourceAcquisitionSource) {
-        match source {
-            ResourceAcquisitionSource::Allocation => {
-                self.allocations = self.allocations.saturating_add(1);
-            }
-            ResourceAcquisitionSource::Reuse => {
-                self.reuses = self.reuses.saturating_add(1);
-            }
-        }
-    }
-
-    pub(super) fn followed_by(self, later: Self) -> Self {
-        Self {
-            allocations: self.allocations.saturating_add(later.allocations),
-            reuses: self.reuses.saturating_add(later.reuses),
-        }
-    }
-
-    pub(crate) const fn allocations(self) -> usize {
-        self.allocations
-    }
-
-    pub(crate) const fn reuses(self) -> usize {
-        self.reuses
-    }
 }
 
 impl ResourceManagerState {

@@ -5,13 +5,55 @@ use super::{
     lock_state,
     manager::{
         AllocationGeneration, FrameIdentity, ManagerIdentity, ResourceAccountingFault,
-        ResourceCacheKey, ResourceEntryState, ResourceIdentity, ResourceLifecycleStats,
+        ResourceAllocationPreflight, ResourceCacheKey, ResourceEntryState, ResourceIdentity,
+        ResourceLifecycleStats,
     },
 };
 use crate::{
-    PhysicalSize, backend::DeviceCapabilities, image::ResolvedMaskUploadKey,
-    texture::EffectTextureDescriptor, vello_engine::VelloAtlasOutcome,
+    PhysicalSize,
+    backend::DeviceCapabilities,
+    image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey},
+    texture::EffectTextureDescriptor,
+    vello_engine::VelloAtlasOutcome,
 };
+
+impl ResourceIdentity {
+    pub(crate) const fn from_raw_for_test(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl AllocationGeneration {
+    pub(crate) const fn get_for_test(self) -> u64 {
+        self.0
+    }
+
+    pub(crate) const fn from_raw_for_test(raw: u64) -> Self {
+        Self(raw)
+    }
+}
+
+impl ResourceCacheKey {
+    pub(super) const fn accepts_modeled_payload(self) -> bool {
+        matches!(self, Self::VelloAtlas | Self::EffectTexture(_))
+    }
+
+    pub(super) const fn is_vello_buffer(self) -> bool {
+        matches!(self, Self::VelloBuffer(_))
+    }
+
+    pub(super) const fn is_transient_vello_image(self) -> bool {
+        matches!(self, Self::VelloImage(key) if !key.is_persistent_atlas())
+    }
+}
+
+impl ResourceAllocationPreflight {
+    pub(crate) fn zero_sized_mask_is_explicitly_empty_for_test(
+        descriptor: &ResolvedMaskUploadDescriptor,
+    ) -> bool {
+        Self::resolved_mask(descriptor).is_ok_and(|preflight| preflight.is_none())
+    }
+}
 
 impl WorkingFormat {
     pub(crate) const fn bytes_per_pixel(self) -> u64 {

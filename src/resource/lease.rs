@@ -1,6 +1,6 @@
 use super::{
-    AllocationGeneration, FrameIdentity, FrameResourceAcquisitions, ManagerIdentity,
-    ResourceAccountingFault, ResourceCacheKey, ResourceIdentity,
+    AllocationGeneration, FrameIdentity, ManagerIdentity, ResourceAccountingFault,
+    ResourceCacheKey, ResourceIdentity,
     gaussian::{GaussianKernelBufferLimits, GaussianKernelPlan},
     lock_state,
     manager::{
@@ -671,6 +671,40 @@ pub(super) struct ResourceLeaseToken {
     pub(super) allocation_generation: AllocationGeneration,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct FrameResourceAcquisitions {
+    allocations: usize,
+    reuses: usize,
+}
+
+impl FrameResourceAcquisitions {
+    pub(super) fn record(&mut self, source: ResourceAcquisitionSource) {
+        match source {
+            ResourceAcquisitionSource::Allocation => {
+                self.allocations = self.allocations.saturating_add(1);
+            }
+            ResourceAcquisitionSource::Reuse => {
+                self.reuses = self.reuses.saturating_add(1);
+            }
+        }
+    }
+
+    pub(super) fn followed_by(self, later: Self) -> Self {
+        Self {
+            allocations: self.allocations.saturating_add(later.allocations),
+            reuses: self.reuses.saturating_add(later.reuses),
+        }
+    }
+
+    pub(crate) const fn allocations(self) -> usize {
+        self.allocations
+    }
+
+    pub(crate) const fn reuses(self) -> usize {
+        self.reuses
+    }
+}
+
 /// A production lease is intentionally neither `Clone` nor `Copy`; every
 /// resolving operation consumes it.
 #[must_use = "resource leases must be resolved by their owning frame scope"]
@@ -1227,7 +1261,7 @@ impl FrameCleanup {
         self
     }
 
-    pub(crate) const fn acquisitions(&self) -> FrameResourceAcquisitions {
+    pub(crate) const fn acquisitions(&self) -> super::FrameResourceAcquisitions {
         self.acquisitions
     }
 
