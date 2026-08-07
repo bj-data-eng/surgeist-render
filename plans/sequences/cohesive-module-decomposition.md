@@ -9,8 +9,8 @@
 - Published prerequisite: P02-I01 at
   `4f7fcb8b81d96f16b426f045b336aaba345c4cfa`.
 - Specification: `plans/specs/cohesive-module-decomposition.md` at
-  `314b8252e8db18130abb8031033b5a0be624c81a`, normalized SHA-256
-  `415257797bf18fd6d6a2d3e5a9ffcd07bc42793490da56505a83e7300aa6d1bb`.
+  `bd25c89790358054a2b51c77c5c2b83f71859cf1`, normalized SHA-256
+  `186eb7cf9366302ea5f16476720b3fc996083ea73a0af159d7794d3b0fb13e93`.
 - Initiative outcome: private modules own the cohesive responsibilities in
   specification M05, and non-plan filenames and code use rendering-domain names
   instead of planning chronology. Public API, behavior, dependencies, features,
