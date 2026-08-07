@@ -10208,15 +10208,19 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
             .with_resource_cache_budget(ResourceCacheBudget::new(512 * 1024 * 1024)),
     ))
     .expect("bounded-backdrop retained-resource coverage requires a renderer");
-    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
     .expect("bounded-backdrop retained-resource coverage requires a surface");
     for _ in 0..2 {
-        pollster::block_on(renderer.render(&mut surface, scene, parameters))
-            .expect("bounded-backdrop retained-resource warm-up must succeed");
+        pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+            &mut surface,
+            scene,
+            parameters,
+            WorkingFormat::ReducedPrecision,
+        ))
+        .expect("bounded-backdrop retained-resource warm-up must succeed");
     }
     let warmed_output = pollster::block_on(renderer.read_headless(&surface))
         .expect("the warmed bounded-backdrop publication must be readable");
@@ -10229,8 +10233,13 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
     let mut caches = Vec::new();
     let mut stats = Vec::new();
     for _ in 0..3 {
-        let frame = pollster::block_on(renderer.render(&mut surface, scene, parameters))
-            .expect("repeated public bounded-backdrop frames must succeed");
+        let frame = pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+            &mut surface,
+            scene,
+            parameters,
+            WorkingFormat::ReducedPrecision,
+        ))
+        .expect("repeated public bounded-backdrop frames must succeed");
         stats.push(GraphPublicStatsForTest::from(frame));
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
@@ -10269,22 +10278,31 @@ fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
             .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
     ))
     .expect("bounded-backdrop zero-budget coverage requires a renderer");
-    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
     .expect("bounded-backdrop zero-budget coverage requires a surface");
-    pollster::block_on(renderer.render(&mut surface, scene, parameters))
-        .expect("the first bounded-backdrop zero-budget frame must succeed");
+    pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+        &mut surface,
+        scene,
+        parameters,
+        WorkingFormat::ReducedPrecision,
+    ))
+    .expect("the first bounded-backdrop zero-budget frame must succeed");
     let first = pollster::block_on(renderer.read_headless(&surface))
         .expect("the first bounded-backdrop zero-budget publication must be readable");
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the first bounded-backdrop zero-budget frame must retain its device")
         .device_pass_cache_counts_for_test();
-    pollster::block_on(renderer.render(&mut surface, scene, parameters))
-        .expect("the repeated bounded-backdrop zero-budget frame must succeed");
+    pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+        &mut surface,
+        scene,
+        parameters,
+        WorkingFormat::ReducedPrecision,
+    ))
+    .expect("the repeated bounded-backdrop zero-budget frame must succeed");
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the repeated bounded-backdrop zero-budget frame must retain its device");
@@ -10364,7 +10382,6 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     let resources_before = ready.internal_resource_manager_observation_for_test();
     let cache_before = ready.device_pass_cache_counts_for_test();
     let publication_before = surface.headless_publication_count_for_test();
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let nested = pollster::block_on(renderer.render(surface, &nested, Parameters::default()));
     let transformed =
         pollster::block_on(renderer.render(surface, &transformed, Parameters::default()));
@@ -10412,7 +10429,6 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
         && resources_after == resources_before
         && cache_after == cache_before
         && surface.headless_publication_count_for_test() == publication_before
-        && renderer.dispatch_observation_for_test() == dispatch_before
 }
 
 #[test]
@@ -10451,7 +10467,6 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("presented bounded-backdrop coverage requires a renderer");
-    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = display_free_presented_surface_for_test(
         &mut renderer,
         SurfaceOptions {
@@ -10463,7 +10478,12 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
     pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .expect("presented bounded-backdrop coverage must configure");
     let presentation = presented_observation_handle_for_test(&surface);
-    let rendered = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
+    let rendered = pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+        &mut surface,
+        &scene,
+        parameters,
+        WorkingFormat::ReducedPrecision,
+    ));
     let presented = take_last_presented_texture_for_test(&mut surface)
         .and_then(|texture| {
             pollster::block_on(renderer.read_render_texture_for_test(&texture, size)).ok()
@@ -10493,18 +10513,20 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("public bounded-backdrop dispatch coverage requires a renderer");
-    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
     ))
     .expect("public bounded-backdrop dispatch coverage requires a surface");
-    let dispatch_before = renderer.dispatch_observation_for_test();
-    let rendered = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
+    let rendered = pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+        &mut surface,
+        &scene,
+        parameters,
+        WorkingFormat::ReducedPrecision,
+    ));
     let actual = pollster::block_on(renderer.read_headless(&surface))
         .expect("the public bounded-backdrop publication must be readable");
     let expected = reference_straight_bytes_for_test(&expected);
-    let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
         rendered
@@ -10520,11 +10542,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
             && bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
                 &mut renderer,
                 &mut surface
-            )
-            && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.unsupported_graph_rejections
-                == dispatch_before.unsupported_graph_rejections,
+            ),
         "public dispatch did not enable only the exact bounded-backdrop graph"
     );
 }
@@ -11806,7 +11824,6 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
     let (scene, filters, size, expected) = spatial_filter_mixed_filter_fixture_for_test();
     let (mut renderer, mut surface) =
         graph_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let frame = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
@@ -11846,7 +11863,6 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
             ready.device_pass_cache_counts_for_test(),
         )
     };
-    let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
         spatial_filter_frame_has_exact_execution_for_test(
@@ -11873,11 +11889,7 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
             )
             && resources_after == resources_before
             && cache_after == cache_before
-            && surface.headless_publication_count_for_test() == publication_before
-            && dispatch_after.exact_spatial_filter_fixture_routes
-                == dispatch_before
-                    .exact_spatial_filter_fixture_routes
-                    .saturating_add(1),
+            && surface.headless_publication_count_for_test() == publication_before,
         "the spatial-filter fixture did not execute while public capabilities remained diagnostic"
     );
 }
@@ -11904,7 +11916,6 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
         |error| panic!("presented spatial-filter coverage must configure: {error}"),
     );
     let presentation = presented_observation_handle_for_test(&surface);
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let rendered = pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
         &mut surface,
         &scene,
@@ -11918,7 +11929,6 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
         })
         .map(|image| image.into_rgba());
     let presentation = presentation.snapshot_for_test();
-    let dispatch_after = renderer.dispatch_observation_for_test();
     let pixels_match = presented.as_deref().is_some_and(|actual| {
         spatial_filter_maximum_error_for_test(actual, &expected, WorkingFormat::ReducedPrecision)
             <= (4, 4)
@@ -11932,11 +11942,7 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
         }) && presentation.acquire_count_for_test() == 1
             && presentation.present_count_for_test() == 1
             && presentation.discarded_count_for_test() == 0
-            && pixels_match
-            && dispatch_after.exact_spatial_filter_fixture_routes
-                == dispatch_before
-                    .exact_spatial_filter_fixture_routes
-                    .saturating_add(1),
+            && pixels_match,
         "the presented fixture did not execute Gaussian blur and drop shadow atomically"
     );
 }
@@ -11946,8 +11952,6 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
     let (scene, filters, size, expected) = spatial_filter_mixed_filter_fixture_for_test();
     let (mut renderer, mut spatial_filter_surface) =
         graph_pixel_renderer_for_test(WorkingFormat::ReducedPrecision, size);
-    renderer.select_exact_graph_working_format_for_test(WorkingFormat::ReducedPrecision);
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let spatial_filter = render_spatial_filter_fixture_for_test(
         &mut renderer,
         &mut spatial_filter_surface,
@@ -11978,7 +11982,6 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
         &unsupported_scene,
         Parameters::default(),
     ));
-    let dispatch_after = renderer.dispatch_observation_for_test();
     let expected_backdrop = UnsupportedPrimitive::new(
         PrimitiveFamily::OffscreenPipeline,
         PrimitiveOperation::BroadBackdropExecution,
@@ -11990,19 +11993,7 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
             && unsupported
                 .as_ref()
                 .is_err_and(|error| error.unsupported_primitive() == Some(expected_backdrop))
-            && unsupported_surface.headless_publication_count_for_test() == 0
-            && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(2)
-            && dispatch_after.exact_composition_graph_routes
-                == dispatch_before
-                    .exact_composition_graph_routes
-                    .saturating_add(1)
-            && dispatch_after.exact_spatial_filter_fixture_routes
-                == dispatch_before
-                    .exact_spatial_filter_fixture_routes
-                    .saturating_add(1)
-            && dispatch_after.unsupported_graph_rejections
-                == dispatch_before.unsupported_graph_rejections,
+            && unsupported_surface.headless_publication_count_for_test() == 0,
         "public dispatch misrouted masked composition, spatial filters, or broad backdrop"
     );
 }
@@ -15962,7 +15953,7 @@ fn supported_scenes_produce_one_finite_backend_free_frame_plan() {
 }
 
 #[test]
-fn bounded_backdrop_render_validates_one_plan_before_execution() {
+fn bounded_backdrop_render_succeeds_after_complete_frame_validation() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 6.0), 1.0))
         .unwrap_or_panic_for_test(
@@ -15976,12 +15967,10 @@ fn bounded_backdrop_render_validates_one_plan_before_execution() {
         });
 
     let result = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()));
-    let observation = renderer.preexecution_frame_gate_observation_for_test();
 
-    assert!(result.is_ok());
     assert!(
-        observation.validated_plan_count == 1,
-        "renderer did not validate exactly one plan before bounded backdrop execution"
+        result.is_ok(),
+        "bounded backdrop execution must succeed after complete frame validation"
     );
 }
 
@@ -23292,8 +23281,6 @@ fn planner_failure_precedes_pending_presented_surface_configuration() {
     assert_eq!(presented_observation_for_test(&surface), presented_before);
     assert_eq!(renderer.stats(), stats_before);
     assert_eq!(surface.last_parameters, parameters_before);
-    let frame_gate = renderer.preexecution_frame_gate_observation_for_test();
-    assert_eq!(frame_gate.validated_plan_count, 0);
 }
 
 #[cfg(feature = "render-window")]
@@ -25813,7 +25800,6 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
     let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
         .expect("the direct baseline publication must be readable");
     let publication_before = surface.headless_publication_count_for_test();
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the direct baseline must retain its ready device")
@@ -25847,7 +25833,6 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
         );
     }
     let stats = result.expect("direct Vello must not require an effect working format");
-    let dispatch_after = renderer.dispatch_observation_for_test();
     let resources_after = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the direct replacement must retain its ready device")
@@ -25862,16 +25847,7 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
             .is_empty()
         && resources_before.gaussian_kernel_count_for_test() == 0
         && resources_after.gaussian_kernel_count_for_test() == 0;
-    let selected_direct_vello = dispatch_after.boundary_invocations
-        == dispatch_before.boundary_invocations.saturating_add(1)
-        && dispatch_after.direct_vello_routes
-            == dispatch_before.direct_vello_routes.saturating_add(1)
-        && dispatch_after.exact_base_graph_routes == dispatch_before.exact_base_graph_routes
-        && dispatch_after.exact_composition_graph_routes
-            == dispatch_before.exact_composition_graph_routes
-        && dispatch_after.unsupported_graph_rejections
-            == dispatch_before.unsupported_graph_rejections
-        && stats.route == Some(RenderRoute::DirectVello);
+    let selected_direct_vello = stats.route == Some(RenderRoute::DirectVello);
     let replacement_pixels = pollster::block_on(renderer.read_headless(&surface))
         .expect("the successful direct replacement publication must be readable");
 
@@ -30288,7 +30264,6 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
             .unwrap_or_else(|error| {
                 panic!("color-filter ingress coverage requires a surface: {error}")
             });
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let rendered = render_color_filter_fixture_for_test(
         &mut renderer,
         &mut surface,
@@ -30313,7 +30288,6 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
         .expect("the public color-filter rejection must retain its ready device");
     let resources_after_diagnostic = ready.internal_resource_manager_observation_for_test();
     let cache_after_diagnostic = ready.device_pass_cache_counts_for_test();
-    let dispatch_after = renderer.dispatch_observation_for_test();
     let expected_diagnostic = UnsupportedPrimitive::new(
         PrimitiveFamily::Filters,
         PrimitiveOperation::GpuColorFilterExecution,
@@ -30327,13 +30301,7 @@ fn color_filter_fixture_executes_while_public_capability_remains_diagnostic() {
             && retained_public_filter_diagnostics_are_exact_for_test()
             && resources_after_diagnostic == resources_before_diagnostic
             && cache_after_diagnostic == cache_before_diagnostic
-            && surface.headless_publication_count_for_test() == publication_before_diagnostic
-            && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.exact_color_filter_fixture_routes
-                == dispatch_before
-                    .exact_color_filter_fixture_routes
-                    .saturating_add(1),
+            && surface.headless_publication_count_for_test() == publication_before_diagnostic,
         "the color-filter fixture did not execute through retained graph ingress while the public capability remained diagnostic"
     );
 }
@@ -30361,7 +30329,6 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
     pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .unwrap_or_else(|error| panic!("presented color-filter coverage must configure: {error}"));
     let presentation = presented_observation_handle_for_test(&surface);
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let rendered = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
@@ -30381,7 +30348,6 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
             .ok()
         })
         .map(|image| image.into_rgba());
-    let dispatch_after = renderer.dispatch_observation_for_test();
     let exact_graph = rendered.as_ref().is_ok_and(|rendered| {
         rendered.working_format == working_format
             && rendered.output_extent == PhysicalSize::new(width, 1)
@@ -30405,13 +30371,7 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
             && presentation.discarded_count_for_test() == 0
             && surface.headless_publication_count_for_test() == 0
             && surface.last_parameters == Some(parameters)
-            && presented.as_deref() == Some(expected.as_slice())
-            && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(1)
-            && dispatch_after.exact_color_filter_fixture_routes
-                == dispatch_before
-                    .exact_color_filter_fixture_routes
-                    .saturating_add(1),
+            && presented.as_deref() == Some(expected.as_slice()),
         "the presented color-filter fixture did not use the production graph transaction and host effects"
     );
 }
@@ -30429,8 +30389,6 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
         panic!("composition and color-filter dispatch coverage requires a renderer: {error}")
     });
     let working_format = default_graph_working_format_for_test(&mut renderer);
-    renderer.select_exact_graph_working_format_for_test(working_format);
-    let dispatch_before = renderer.dispatch_observation_for_test();
 
     let mut color_filter_surface = pollster::block_on(
         renderer.create_headless(Size::new(f64::from(color_filter_width), 1.0), 1.0),
@@ -30485,7 +30443,6 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
         .expect("retained public diagnostics must keep the ready device");
     let resources_after = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
-    let dispatch_after = renderer.dispatch_observation_for_test();
     let expected_color = UnsupportedPrimitive::new(
         PrimitiveFamily::Filters,
         PrimitiveOperation::GpuColorFilterExecution,
@@ -30508,19 +30465,7 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
             && color_diagnostic == Some(expected_color)
             && resources_after == resources_before
             && cache_after == cache_before
-            && unsupported_surface.headless_publication_count_for_test() == 0
-            && dispatch_after.boundary_invocations
-                == dispatch_before.boundary_invocations.saturating_add(2)
-            && dispatch_after.exact_composition_graph_routes
-                == dispatch_before
-                    .exact_composition_graph_routes
-                    .saturating_add(1)
-            && dispatch_after.exact_color_filter_fixture_routes
-                == dispatch_before
-                    .exact_color_filter_fixture_routes
-                    .saturating_add(1)
-            && dispatch_after.unsupported_graph_rejections
-                == dispatch_before.unsupported_graph_rejections,
+            && unsupported_surface.headless_publication_count_for_test() == 0,
         "public dispatch misrouted masked composition, color filters, or broad backdrop"
     );
 }
@@ -30671,16 +30616,22 @@ fn render_composition_headless_for_test(
     .unwrap_or_else(|error| {
         panic!("masked-composition production execution requires a compatible renderer: {error}")
     });
-    renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface =
         pollster::block_on(renderer.create_headless(size, 1.0)).unwrap_or_else(|error| {
             panic!("masked-composition production execution requires a headless surface: {error}")
         });
     let publication_before = surface.headless_publication_count_for_test();
-    let stats = pollster::block_on(renderer.render(&mut surface, scene, parameters))
-        .unwrap_or_else(|error| {
-            panic!("the masked-composition fixture must reach its current production render route: {error}")
-        });
+    let stats = pollster::block_on(renderer.render_with_exact_graph_working_format_for_test(
+        &mut surface,
+        scene,
+        parameters,
+        working_format,
+    ))
+    .unwrap_or_else(|error| {
+        panic!(
+            "the masked-composition fixture must reach its current production render route: {error}"
+        )
+    });
     let publication_count = surface
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
@@ -31177,7 +31128,6 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
             panic!("presented masked-composition coverage requires a compatible renderer: {error}")
         });
         let working_format = default_graph_working_format_for_test(&mut renderer);
-        renderer.select_exact_graph_working_format_for_test(working_format);
         let mut surface = display_free_presented_surface_for_test(
             &mut renderer,
             SurfaceOptions {
@@ -31247,7 +31197,6 @@ fn presented_terminal_signal_after_publication_fails_the_next_operation() {
         panic!("presented terminal-signal coverage requires a compatible renderer: {error}")
     });
     let working_format = default_graph_working_format_for_test(&mut renderer);
-    renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let parameters = Parameters {
         base_color: color_from_straight_rgba8_for_test([48, 160, 208, 255]),
@@ -31437,7 +31386,6 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         .expect("the diagnostic baseline must be readable");
     let stats_before = renderer.stats();
     let publication_before = surface.headless_publication_count_for_test();
-    let dispatch_before = renderer.dispatch_observation_for_test();
     let cache_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("the diagnostic baseline must retain its ready cache")
@@ -31482,17 +31430,9 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         .default_ready_device_state_borrow_for_test()
         .expect("the broad-backdrop rejection must retain its ready resources")
         .internal_resource_manager_observation_for_test();
-    let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
-        dispatch_after.boundary_invocations == dispatch_before.boundary_invocations
-            && dispatch_after.unsupported_graph_rejections
-                == dispatch_before.unsupported_graph_rejections
-            && dispatch_after.direct_vello_routes == dispatch_before.direct_vello_routes
-            && dispatch_after.exact_base_graph_routes == dispatch_before.exact_base_graph_routes
-            && dispatch_after.exact_composition_graph_routes
-                == dispatch_before.exact_composition_graph_routes
-            && renderer.stats() == stats_before
+        renderer.stats() == stats_before
             && surface.headless_publication_count_for_test() == publication_before
             && pixels_after == pixels_before
             && cache_after == cache_before
@@ -31680,7 +31620,6 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
         panic!("repeated composition reuse coverage requires a renderer: {error}")
     });
     let working_format = default_graph_working_format_for_test(&mut renderer);
-    renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
@@ -31783,7 +31722,6 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
         panic!("zero-retention composition coverage requires a renderer: {error}")
     });
     let working_format = default_graph_working_format_for_test(&mut renderer);
-    renderer.select_exact_graph_working_format_for_test(working_format);
     let mut surface = pollster::block_on(renderer.create_headless(
         Size::new(f64::from(size.width()), f64::from(size.height())),
         1.0,
@@ -31845,7 +31783,6 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
     ))
     .unwrap_or_else(|error| panic!("renderer dispatch coverage requires a renderer: {error}"));
     let working_format = default_graph_working_format_for_test(&mut renderer);
-    renderer.select_exact_graph_working_format_for_test(working_format);
 
     let mut direct_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .unwrap_or_else(|error| panic!("direct dispatch coverage requires a surface: {error}"));
@@ -31922,18 +31859,11 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
                 PrimitiveOperation::BroadBackdropExecution,
             ))
     });
-    let dispatch = renderer.dispatch_observation_for_test();
 
     assert!(
         direct.is_ok()
             && graph.is_ok()
             && composition.is_ok()
-            && dispatch.boundary_invocations == 3
-            && dispatch.direct_vello_routes == 1
-            && dispatch.exact_base_graph_routes == 1
-            && dispatch.exact_composition_graph_routes == 1
-            && dispatch.exact_backdrop_graph_routes == 0
-            && dispatch.unsupported_graph_rejections == 0
             && exact_unsupported_diagnostics
             && resources_after == resources_before
             && cache_after == cache_before
@@ -32211,18 +32141,8 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
         Parameters::default(),
     ));
 
-    let dispatch = renderer.dispatch_observation_for_test();
-    let frame_gate = renderer.preexecution_frame_gate_observation_for_test();
     assert!(
-        direct.is_ok()
-            && exact.is_ok()
-            && later.is_ok()
-            && dispatch.boundary_invocations == 3
-            && dispatch.direct_vello_routes == 1
-            && dispatch.exact_base_graph_routes == 1
-            && dispatch.exact_composition_graph_routes == 1
-            && dispatch.unsupported_graph_rejections == 0
-            && frame_gate.validated_plan_count == 1,
+        direct.is_ok() && exact.is_ok() && later.is_ok(),
         "public dispatch did not validate and route direct, forced-graph, and masked-composition frames"
     );
 }

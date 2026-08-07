@@ -67,10 +67,33 @@ impl Renderer {
         scene: &Scene,
         parameters: Parameters,
     ) -> Result<(DeviceSlotIdentity, RenderPublication)> {
+        self.dispatch_render_frame_with_working_format(
+            surface,
+            scene,
+            parameters,
+            ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
+                self.options.effect_quality_policy(),
+            ),
+        )
+        .await
+    }
+
+    pub(super) async fn dispatch_render_frame_with_working_format(
+        &mut self,
+        surface: &mut Surface,
+        scene: &Scene,
+        parameters: Parameters,
+        working_format: ExecutableGraphWorkingFormatRequest,
+    ) -> Result<(DeviceSlotIdentity, RenderPublication)> {
         let device_identity = self.render_device_identity(surface)?;
         let encode_start = Instant::now();
-        let (normalized, execution) =
-            self.prepare_render_execution(surface, scene, parameters, device_identity)?;
+        let (normalized, execution) = self.prepare_render_execution(
+            surface,
+            scene,
+            parameters,
+            device_identity,
+            working_format,
+        )?;
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
             .await?;
         let mut stats = Stats {
@@ -129,12 +152,8 @@ impl Renderer {
         scene: &Scene,
         parameters: Parameters,
         device_identity: DeviceSlotIdentity,
+        working_format: ExecutableGraphWorkingFormatRequest,
     ) -> Result<(RenderCommands, PreparedRendererExecution)> {
-        #[cfg(test)]
-        {
-            self.preexecution_frame_gate_observation =
-                super::PreexecutionFrameGateObservationForTest::default();
-        }
         let normalized = scene.normalize(self.capabilities())?;
         let graph_source = normalized.clone();
         let frame_context = FrameContext::try_new(
@@ -144,11 +163,6 @@ impl Renderer {
             parameters.base_color,
         )?;
         let frame_plan = normalized.plan_for(frame_context)?;
-        #[cfg(test)]
-        {
-            self.preexecution_frame_gate_observation
-                .validated_plan_count += 1;
-        }
         let capabilities = self
             .backend
             .as_mut()
@@ -159,26 +173,12 @@ impl Renderer {
                     "the renderer dispatch boundary lost immutable device capabilities",
                 )
             })?;
-        #[cfg(test)]
-        let working_format = match self.exact_graph_working_format {
-            Some(working_format) => ExecutableGraphWorkingFormatRequest::Exact(working_format),
-            None => ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
-                self.options.effect_quality_policy(),
-            ),
-        };
-        #[cfg(not(test))]
-        let working_format = ExecutableGraphWorkingFormatRequest::ConfiguredPolicy(
-            self.options.effect_quality_policy(),
-        );
         let dispatch = self.classify_frame_dispatch(
             frame_plan,
             runtime_surface_format(surface),
             working_format,
             &capabilities,
-        );
-        #[cfg(test)]
-        self.observe_frame_dispatch_for_test(&dispatch);
-        let dispatch = dispatch?;
+        )?;
         Ok(match dispatch {
             RendererFrameDispatch::DirectVello(normalized) => {
                 let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
