@@ -3,9 +3,12 @@
 ## M01 Outcome
 
 The largest `surgeist-render` source files are decomposed into private modules
-that each own one coherent rendering responsibility. The refactor is mechanical:
-public API, rendering behavior, diagnostics, resource and lifecycle semantics,
-feature behavior, and dependency direction remain unchanged.
+that each own one coherent rendering responsibility. The decomposition is
+mechanical, and one bounded semantic cleanup replaces historical planning
+identifiers in non-plan filenames and code with rendering-domain names. Public
+API, rendering behavior, resource and lifecycle semantics, feature behavior,
+and dependency direction remain unchanged; diagnostic wording changes only to
+remove project chronology.
 
 The initiative addresses file-level concentration, not function length. It does
 not impose a physical-line lint, maximum file size, item-count target, or rule
@@ -25,7 +28,10 @@ The initiative is complete when:
 5. no compatibility shim, forwarding layer, glob-reexport maze, or duplicated
    model is introduced solely to make the move compile;
 6. the final hierarchy makes each named responsibility directly discoverable
-   from its module path.
+   from its module path;
+7. no filename or code artifact outside `plans/` retains an identifier whose
+   meaning is a completed project, initiative, sequence, cycle, task, or
+   specification-section number.
 
 ## M02 Ownership And Boundary
 
@@ -43,13 +49,16 @@ In scope:
   children in M05;
 - the smallest `pub(super)` or `pub(crate)` visibility adjustment required for
   a real sibling-module relationship;
-- internal import and documentation-link repair caused by those moves.
+- internal import and documentation-link repair caused by those moves;
+- semantic replacement of historical planning identifiers in every tracked
+  filename and Rust or WGSL code artifact outside `plans/`, including symbols,
+  diagnostics, labels, comments, and test support.
 
 Out of scope:
 
 - the public hierarchical front-door redesign discussed separately;
 - public type, function, trait, error, default, feature, or reexport changes;
-- semantic renaming of production models, including P01-era internal names;
+- semantic renaming other than removal of historical planning identifiers;
 - algorithm, rendering, shader, capability, error, lifecycle, cache, or resource
   behavior changes;
 - another function-size or file-size lint, tracked size ledger, generated module
@@ -85,6 +94,12 @@ concentrations are:
 The numbers explain why the files were inspected; they are not acceptance
 thresholds. M05 is based on the independent owners visible in the item groups,
 not on the physical counts.
+
+At the published C05 base, the non-plan Rust/WGSL inventory contains 2,013
+matching lines across 22 files for the historical `C03`, `C06`-`C12`, `S21`,
+`S34`, and lowercase symbol families. No tracked non-plan filename currently
+matches a planning identifier. These are finite planning facts, not a required
+count or permanent source-inspection test.
 
 ## M04 Decomposition Principles
 
@@ -136,6 +151,44 @@ If source inspection reveals a correctness or modeling defect, report it as a
 separate initiative candidate. Do not repair it inside this mechanical range
 unless the unchanged code cannot compile after a faithful move and the issue is
 solely an import or visibility consequence.
+
+### M04.5 Mixed Production And Test Owners
+
+An intermediate task may move `#[cfg(test)]` fields and collectors with the
+production type whose invariant they currently observe when separating them in
+the same task would require global state, a leak, indirection, or changed test
+semantics. The immediately following test-support task extracts that support to
+the named `test_support.rs` owner. The final hierarchy still prohibits a
+production child from importing test support. No intermediate bridge may detach
+an observation from the value or operation that produced it.
+
+### M04.6 Semantic Planning-Name Retirement
+
+Planning identifiers are chronology such as `P02`, `I01`, `S34`, `C08`, `T03`,
+or `sequence2` when they denote completed planning structure. Replace each with
+the shortest rendering-domain term that identifies its actual owner or behavior;
+do not perform a blind prefix substitution. The established semantic families
+are:
+
+| Historical family | Semantic vocabulary |
+| --- | --- |
+| `C03` | prepared Vello scene, checked encoding, or private raster behavior |
+| `C06` | graph planning, bounds, filter planning, or graph validation |
+| `C07` | prepared-graph or generation-bound handoff |
+| `C08` | base/custom-spine graph, graph submission, or core pass shader |
+| `C09` | composition, mask/blend, or layer-composite behavior |
+| `C10` | ordered color-filter behavior |
+| `C11` | spatial filter, blur, or drop-shadow behavior |
+| `C12` | bounded-backdrop behavior |
+| `S21` | reference color transform or reference color matrix |
+| `S34` | GPU pixel, edge, or centroid tolerance |
+
+Module context supplies information already present in the path, so renamed
+items do not repeat module names or add weasel words. Closed graph-classification
+variants use `Base`, `Composition`, `ColorFilter`, `SpatialFilter`, and
+`Backdrop`; preparable graph types use the corresponding semantic prefix.
+Test names continue to state a triggering condition and observable outcome.
+Git history and `plans/` remain the only provenance owners.
 
 ## M05 Required Private Hierarchy
 
@@ -348,6 +401,11 @@ Each implementation range is behavior-preserving. Its worker records:
 - the complete file-move and visibility-change inventory in the commit diff;
 - confirmation that no algorithm or oracle changed.
 
+The planning-name task additionally records a transient exact inventory over
+tracked non-plan filenames and Rust/WGSL code. Its acceptance predicate is empty
+after semantic renaming. This source inspection is workflow evidence only: it is
+not committed as a parser, test, inventory, generated index, lint, or CI rule.
+
 The final command matrix is derived from current `AGENTS.md`, `Cargo.toml`, and
 `README.md` and uses already installed artifacts offline:
 
@@ -383,7 +441,8 @@ check.
 ## M08 Product Impacts
 
 - Public API: internal-only and source-compatible; root exports unchanged.
-- Behavior: unchanged.
+- Behavior: unchanged; diagnostic prose and backend labels change only to remove
+  planning chronology while preserving error codes, conditions, and context.
 - Dependencies/features/targets: unchanged.
 - Generated artifacts: none in this leaf; root-owned API artifacts untouched.
 - Documentation/examples: public docs and examples unchanged except paths in
@@ -399,5 +458,6 @@ check.
 P02-I02 is accepted when every M05 responsibility has its named private owner,
 the public front door and observable behavior remain unchanged, focused and full
 verification pass, no size enforcement or relocation workaround was introduced,
-and the reviewed leaf candidate is published to the authority remote `main` with
-a complete root handoff.
+no tracked filename or Rust/WGSL code outside `plans/` retains a planning
+identifier, and the reviewed leaf candidate is published to the authority remote
+`main` with a complete root handoff.
