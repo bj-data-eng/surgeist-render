@@ -95,15 +95,24 @@ The numbers explain why the files were inspected; they are not acceptance
 thresholds. M05 is based on the independent owners visible in the item groups,
 not on the physical counts.
 
-At the published C05 base, the non-plan Rust/WGSL inventory contains 2,139 token
-matches on 2,013 lines across 22 files for the historical `C03`, `C06`-`C12`,
-`S21`, `S34`, and lowercase symbol families. The bounded token grammar is an
-uppercase `P`, `I`, `S`, `C`, or `T` followed by exactly two digits and optional
-ASCII identifier continuation, or the lowercase equivalent followed by exactly
-two digits, an underscore, and optional ASCII identifier continuation. Requiring
-the lowercase underscore excludes Rust primitives such as `i32`. No tracked
-non-plan filename currently matches a planning identifier. These are finite
-planning facts, not a required count or permanent source-inspection test.
+At the published C05 base
+`14b0ab5f8d7fbb2d93e2a958587e1075657f0f7b`, the tracked non-`plans/`
+`*.rs`/`*.wgsl` inventory contains 2,139 token matches on 2,013 matching lines
+across 22 files. The exact PCRE2 content predicate is:
+
+```text
+(?<![A-Za-z0-9_])(?:[PISCT][0-9]{2}[A-Za-z0-9_]*|[pisct][0-9]{2}_[A-Za-z0-9_]*)(?![A-Za-z0-9_])
+```
+
+Token count means every non-overlapping match, line count means every matching
+source line, and file count means every matching selected file. The lowercase
+underscore excludes Rust primitives such as `i32`. Apply that predicate to every
+tracked non-`plans/` pathname as well as content, and additionally reject the
+case-insensitive filename-segment predicate
+`(?:^|[/_.-])[pisct][0-9]{2}(?=$|[/_.-])|sequence[0-9]+` so a lowercase path such
+as `c08-graph.rs` cannot escape. Both filename predicates are empty at the base.
+These are finite planning facts, not a required count or permanent
+source-inspection test.
 
 ## M04 Decomposition Principles
 
