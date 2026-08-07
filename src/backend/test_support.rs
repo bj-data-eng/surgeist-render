@@ -328,7 +328,7 @@ impl DeviceSignal {
 pub(crate) fn require_presented_device_identity_for_test(
     identity: Option<DeviceSlotIdentity>,
 ) -> Result<DeviceSlotIdentity> {
-    super::device::require_presented_device_identity(identity)
+    super::present::require_presented_device_identity(identity)
 }
 
 impl DeviceSlotIdentity {

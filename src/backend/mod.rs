@@ -1,21 +1,21 @@
 mod device;
 mod offscreen;
+mod present;
 #[cfg(test)]
 mod test_support;
 mod texture;
 
 #[cfg(test)]
 use device::ReadyDeviceState;
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-use device::require_presented_device_identity;
 pub(crate) use device::{
     DeviceCapabilities, DeviceSignal, DeviceSlotIdentity, DeviceState, DeviceTerminalSignal,
 };
 #[cfg(test)]
 pub(crate) use offscreen::offscreen_local_scene_texture_descriptor;
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) use present::{
+    ScopedDisplayFreePreferredDeviceIncompatibilityForTest, ScopedPresentedConfigureControlForTest,
+};
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) use test_support::require_presented_device_identity_for_test;
 #[cfg(test)]
@@ -57,14 +57,6 @@ use super::shader::{
     ColorFilterOperationBufferLimits, DevicePassCache, DevicePassCacheCountsForTest,
 };
 use super::stats::GpuGraphStatsObservation;
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-use super::surface::{
-    AcquiredPresentedSurfaceTexture, PresentedResourceBundle, PresentedSurface,
-    PresentedSurfaceAcquire, PresentedSurfaceState,
-};
 use super::surface::{HeadlessPublication, SurfaceBackend};
 #[cfg(test)]
 use super::surface::{HeadlessResources, RendererIdentity};
@@ -72,7 +64,7 @@ use super::surface::{HeadlessResources, RendererIdentity};
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-use super::surface::{PresentedConfigurationDraft, PresentedLifecycle};
+use super::surface::{PresentedSurface, PresentedSurfaceState};
 use super::vello_engine::{
     ActiveVelloEncodingScope, EncodedVelloPass, RasterParameters, TransactionEncodingState,
     TransactionTargetIntent, scene::VelloScene,
@@ -94,112 +86,6 @@ use std::{
 
 #[cfg(test)]
 use std::task::{Context, Poll, Waker};
-
-#[cfg(all(test, feature = "render-window"))]
-use std::{
-    cell::RefCell,
-    sync::mpsc::{Receiver, SyncSender, sync_channel},
-};
-
-#[cfg(all(test, feature = "render-window"))]
-thread_local! {
-    static ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST: RefCell<Option<PresentedConfigureControlForTest>> = const { RefCell::new(None) };
-    static ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
-}
-
-#[cfg(all(test, feature = "render-window"))]
-#[derive(Clone)]
-enum PresentedConfigureControlForTest {
-    Fail {
-        scope_resolution_observed: SyncSender<()>,
-    },
-    Pause {
-        reached: SyncSender<()>,
-    },
-}
-
-/// Private deterministic control for the production Configure transaction path.
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) struct ScopedPresentedConfigureControlForTest {
-    observed: Receiver<()>,
-    failure_scope_resolution: Option<Receiver<()>>,
-    previous: Option<PresentedConfigureControlForTest>,
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl ScopedPresentedConfigureControlForTest {
-    pub(crate) fn failing() -> Self {
-        let (scope_resolution_observed, observed) = sync_channel(1);
-        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(PresentedConfigureControlForTest::Fail {
-                scope_resolution_observed,
-            }))
-        });
-        let (_unused, reached) = sync_channel(1);
-        Self {
-            observed: reached,
-            failure_scope_resolution: Some(observed),
-            previous,
-        }
-    }
-
-    pub(crate) fn paused() -> Self {
-        let (reached, observed) = sync_channel(1);
-        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(PresentedConfigureControlForTest::Pause { reached }))
-        });
-        Self {
-            observed,
-            failure_scope_resolution: None,
-            previous,
-        }
-    }
-
-    pub(crate) fn wait_for_draft_for_test(&self, deadline: Duration) {
-        self.observed
-            .recv_timeout(deadline)
-            .expect("the Configure transaction did not reach its bounded draft checkpoint");
-    }
-
-    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
-        self.failure_scope_resolution
-            .as_ref()
-            .is_some_and(|observed| observed.try_recv().is_ok())
-    }
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl Drop for ScopedPresentedConfigureControlForTest {
-    fn drop(&mut self) {
-        ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-/// Models a replacement target that the installed device cannot present to.
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) struct ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
-    previous: bool,
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
-    pub(crate) fn active() -> Self {
-        let previous = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
-            .with(|active| active.replace(true));
-        Self { previous }
-    }
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl Drop for ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
-    fn drop(&mut self) {
-        ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous;
-        });
-    }
-}
 
 pub(crate) struct Backend {
     instance: wgpu::Instance,
@@ -1409,74 +1295,21 @@ impl Backend {
         }
     }
 
-    #[cfg(any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    ))]
-    pub(crate) async fn create_presented_surface(
+    pub(crate) async fn select_device(
         &mut self,
-        target: impl Into<wgpu::SurfaceTarget<'static>>,
-        preferred: Option<DeviceSlotIdentity>,
-        operation: RuntimeOperation,
-    ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
-        let surface = self
-            .instance
-            .create_surface(target.into())
-            .map_err(|source| {
-                Error::new(
-                    BackendErrorCode::SurfaceCreateFailed,
-                    "failed to create a WGPU presentation surface",
-                )
-                .with_source(source)
-            })?;
-        let identity = require_presented_device_identity(
-            self.select_presented_device(&surface, preferred).await?,
-        )?;
-        let ready = self.ready_state_mut(
-            identity,
-            operation,
-            BackendErrorCode::SurfaceCreateFailed,
-            "the selected presentation device is unavailable",
-        )?;
-        let presented = PresentedSurface::new(surface, &ready.adapter)?;
-        Ok((presented, identity))
-    }
-
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) async fn create_display_free_presented_surface_for_test(
-        &mut self,
-        preferred: Option<DeviceSlotIdentity>,
-        operation: RuntimeOperation,
-        format: Format,
-    ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
-        let exclude_preferred = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
-            .with(|active| *active.borrow());
-        let compatible = if exclude_preferred {
-            self.device_states
-                .iter_mut()
-                .enumerate()
-                .find_map(|(slot, state)| {
-                    let identity = DeviceSlotIdentity::new(slot, state.generation);
-                    (Some(identity) != preferred
-                        && state.ready_after_observing_terminal().is_some())
-                    .then_some(identity)
-                })
-        } else {
-            self.compatible_ready_device(preferred, |_| true)
-        };
-        let identity = if let Some(identity) = compatible {
-            Some(identity)
-        } else {
-            self.new_device(None).await?
-        };
-        let identity = require_presented_device_identity(identity)?;
-        self.ready_state_mut(
-            identity,
-            operation,
-            BackendErrorCode::SurfaceCreateFailed,
-            "the selected presentation device is unavailable",
-        )?;
-        Ok((PresentedSurface::display_free_for_test(format), identity))
+        compatible_surface: Option<&wgpu::Surface<'_>>,
+    ) -> Result<Option<DeviceSlotIdentity>> {
+        if let Some(surface) = compatible_surface {
+            return self.select_presented_device(surface, None).await;
+        }
+        let existing = self
+            .device_states
+            .first()
+            .map(|state| DeviceSlotIdentity::new(0, state.generation));
+        if existing.is_some() {
+            return Ok(existing);
+        }
+        self.new_device(compatible_surface).await
     }
 
     fn create_headless_surface_texture(
@@ -1585,66 +1418,6 @@ impl Backend {
             Some(update),
             RuntimeOperation::EffectRendering,
         )
-    }
-
-    #[cfg(any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    ))]
-    pub(crate) async fn configure_presented_surface(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        operation: RuntimeOperation,
-        surface: &PresentedSurface,
-        physical_size: PhysicalSize,
-        present_mode: wgpu::PresentMode,
-    ) -> Result<PresentedConfigurationDraft> {
-        let transaction =
-            self.begin_gpu_operation(identity, GpuOperationStage::Configure, operation)?;
-        let ready = self.ready_state_mut(
-            identity,
-            operation,
-            BackendErrorCode::SurfaceConfigureFailed,
-            "presented device resources are unavailable before configuration",
-        )?;
-        let draft = surface.configure_draft(&ready.device, physical_size, present_mode);
-        #[cfg(all(test, feature = "render-window"))]
-        let control =
-            ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
-        #[cfg(all(test, feature = "render-window"))]
-        if let Some(PresentedConfigureControlForTest::Fail { .. }) = &control {
-            let _ = ready.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Surgeist test-injected Configure validation failure"),
-                size: wgpu::Extent3d {
-                    width: 0,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-        }
-        #[cfg(all(test, feature = "render-window"))]
-        if let Some(PresentedConfigureControlForTest::Pause { reached }) = &control {
-            reached
-                .send(())
-                .expect("the Configure test must observe the draft checkpoint");
-            std::future::pending::<()>().await;
-        }
-        let result = transaction.finish(operation).await;
-        #[cfg(all(test, feature = "render-window"))]
-        if let Some(PresentedConfigureControlForTest::Fail {
-            scope_resolution_observed,
-        }) = control
-        {
-            let _ = scope_resolution_observed.send(());
-        }
-        result?;
-        Ok(draft)
     }
 
     pub(crate) fn begin_gpu_operation(
@@ -4080,7 +3853,7 @@ pub(crate) struct SurfaceFrameCommit {
 }
 
 impl SurfaceFrameCommit {
-    fn without_headless_publication(timings: RenderTimings) -> Self {
+    pub(super) fn without_headless_publication(timings: RenderTimings) -> Self {
         Self {
             timings,
             headless_publication: None,
@@ -4318,7 +4091,7 @@ pub(crate) async fn render_exact_presented_graph_surface(
     graph: ExactSurfaceGraph,
 ) -> Result<SurfaceFrameCommit> {
     let (device_identity, physical_size, output_format, selected_working_format) =
-        exact_presented_graph_target(surface, &graph)?;
+        present::exact_presented_graph_target(surface, &graph)?;
     let capabilities = backend
         .device_capabilities(device_identity)
         .ok_or_else(|| {
@@ -4357,7 +4130,8 @@ pub(crate) async fn render_exact_presented_graph_surface(
 
     let present_start = Instant::now();
     let acquired =
-        acquire_exact_presented_graph_texture(surface, &device, prepared, transaction).await?;
+        present::acquire_exact_presented_graph_texture(surface, &device, prepared, transaction)
+            .await?;
     let (acquired, mut prepared, transaction) = acquired;
     let output_view = acquired.create_view();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -4409,283 +4183,6 @@ pub(crate) async fn render_exact_presented_graph_surface(
             render_time: present_start.duration_since(render_start),
             present_time: present_start.elapsed(),
         },
-    ))
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-fn exact_presented_graph_target(
-    surface: &Surface,
-    graph: &ExactSurfaceGraph,
-) -> Result<(DeviceSlotIdentity, PhysicalSize, Format, WorkingFormat)> {
-    let selected_working_format = graph.working_format();
-    let graph_output_format = graph.output_format();
-    let known_output_extent = graph.known_output_extent()?;
-    let (device_identity, physical_size, output_format) = match &surface.backend {
-        SurfaceBackend::Presented {
-            surface: native,
-            device_identity,
-            state,
-        } => {
-            match state.lifecycle() {
-                PresentedLifecycle::Ready { .. } => {}
-                PresentedLifecycle::ResizePending { .. } => {
-                    return Err(Error::new(
-                        BackendErrorCode::SurfaceConfigureFailed,
-                        "presented exact graph execution started before configuration committed",
-                    ));
-                }
-                PresentedLifecycle::NonRenderable { .. } => {
-                    return Err(Error::runtime_unavailable(
-                        RuntimeOperation::SurfaceRendering,
-                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                            state: RenderSurfaceAvailability::NonRenderable,
-                        },
-                        "presented exact graph output is not renderable",
-                    ));
-                }
-                PresentedLifecycle::Occluded { .. } => {
-                    return Err(Error::runtime_unavailable(
-                        RuntimeOperation::SurfaceRendering,
-                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                            state: RenderSurfaceAvailability::Occluded,
-                        },
-                        "presented exact graph output is occluded",
-                    ));
-                }
-                PresentedLifecycle::Lost => {
-                    return Err(Error::runtime_unavailable(
-                        RuntimeOperation::SurfaceRendering,
-                        RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                            state: RenderSurfaceAvailability::Lost,
-                        },
-                        "presented exact graph output is lost",
-                    ));
-                }
-            }
-            let resources = native.committed().ok_or_else(|| {
-                Error::new(
-                    BackendErrorCode::SurfaceConfigureFailed,
-                    "ready presented exact graph output has no committed configuration",
-                )
-            })?;
-            let physical_size = PhysicalSize::new(resources.config.width, resources.config.height);
-            if resources.config.format != native.format
-                || state.requested_physical_size() != physical_size
-            {
-                return Err(Error::new(
-                    BackendErrorCode::SurfaceConfigureFailed,
-                    "presented exact graph output differs from its committed configuration",
-                ));
-            }
-            let output_format = match native.format {
-                wgpu::TextureFormat::Rgba8Unorm => Format::Rgba8,
-                wgpu::TextureFormat::Bgra8Unorm => Format::Bgra8,
-                _ => {
-                    return Err(Error::new(
-                        BackendErrorCode::PresentFailed,
-                        "presented exact graph output is not an advertised RGBA8 or BGRA8 format",
-                    ));
-                }
-            };
-            (*device_identity, physical_size, output_format)
-        }
-        SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
-            return Err(Error::new(
-                BackendErrorCode::UnsupportedBackend,
-                "presented exact graph execution requires a presented surface",
-            ));
-        }
-    };
-    if physical_size.width() == 0
-        || physical_size.height() == 0
-        || graph_output_format != output_format
-        || known_output_extent.is_some_and(|extent| extent != physical_size)
-    {
-        return Err(Error::new(
-            BackendErrorCode::RenderFailed,
-            "the presented graph differs from the exact eligible output",
-        ));
-    }
-    Ok((
-        device_identity,
-        physical_size,
-        output_format,
-        selected_working_format,
-    ))
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-enum PresentedAcquireFailure {
-    Suboptimal,
-    Outdated,
-    Occluded,
-    Timeout,
-    Lost,
-    Validation,
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-async fn finish_presented_acquire_failure(
-    transaction: GpuOperationTransaction,
-    state: &mut PresentedSurfaceState,
-    failure: PresentedAcquireFailure,
-) -> Result<Error> {
-    let scope_result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
-    match failure {
-        PresentedAcquireFailure::Suboptimal | PresentedAcquireFailure::Outdated => {
-            state.mark_configuration_pending();
-        }
-        PresentedAcquireFailure::Occluded => state.mark_occluded(),
-        PresentedAcquireFailure::Lost => state.mark_lost(),
-        PresentedAcquireFailure::Timeout | PresentedAcquireFailure::Validation => {}
-    }
-    scope_result?;
-    Ok(match failure {
-        PresentedAcquireFailure::Suboptimal => Error::new(
-            BackendErrorCode::SurfaceOutdated,
-            "surface is suboptimal and requires reconfiguration",
-        ),
-        PresentedAcquireFailure::Outdated => Error::new(
-            BackendErrorCode::SurfaceOutdated,
-            "surface is outdated and requires reconfiguration",
-        ),
-        PresentedAcquireFailure::Occluded => Error::runtime_unavailable(
-            RuntimeOperation::SurfaceRendering,
-            RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                state: RenderSurfaceAvailability::Occluded,
-            },
-            "surface is occluded",
-        ),
-        PresentedAcquireFailure::Timeout => Error::new(
-            BackendErrorCode::SurfaceTimeout,
-            "timed out acquiring surface texture",
-        ),
-        PresentedAcquireFailure::Lost => Error::runtime_unavailable(
-            RuntimeOperation::SurfaceRendering,
-            RuntimeCapabilityUnavailableReason::SurfaceUnavailable {
-                state: RenderSurfaceAvailability::Lost,
-            },
-            "surface was lost",
-        ),
-        PresentedAcquireFailure::Validation => Error::new(
-            BackendErrorCode::PresentFailed,
-            "surface texture validation failed",
-        ),
-    })
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-async fn acquire_exact_presented_graph_texture<'a>(
-    surface: &mut Surface,
-    device: &wgpu::Device,
-    prepared: PreparedGraph<'a>,
-    transaction: GpuOperationTransaction,
-) -> Result<(
-    AcquiredPresentedSurfaceTexture,
-    PreparedGraph<'a>,
-    GpuOperationTransaction,
-)> {
-    let mut prepared = Some(prepared);
-    let mut transaction = Some(transaction);
-    let acquired = match &mut surface.backend {
-        SurfaceBackend::Presented {
-            surface: native,
-            state,
-            ..
-        } => match native.acquire_texture(device) {
-            PresentedSurfaceAcquire::Success(acquired) => acquired,
-            PresentedSurfaceAcquire::Suboptimal(acquired) => {
-                drop(acquired);
-                drop(prepared.take());
-                return Err(finish_presented_acquire_failure(
-                    transaction
-                        .take()
-                        .expect("presented transaction must remain available"),
-                    state,
-                    PresentedAcquireFailure::Suboptimal,
-                )
-                .await?);
-            }
-            PresentedSurfaceAcquire::Outdated => {
-                drop(prepared.take());
-                return Err(finish_presented_acquire_failure(
-                    transaction
-                        .take()
-                        .expect("presented transaction must remain available"),
-                    state,
-                    PresentedAcquireFailure::Outdated,
-                )
-                .await?);
-            }
-            PresentedSurfaceAcquire::Occluded => {
-                drop(prepared.take());
-                return Err(finish_presented_acquire_failure(
-                    transaction
-                        .take()
-                        .expect("presented transaction must remain available"),
-                    state,
-                    PresentedAcquireFailure::Occluded,
-                )
-                .await?);
-            }
-            PresentedSurfaceAcquire::Timeout => {
-                drop(prepared.take());
-                return Err(finish_presented_acquire_failure(
-                    transaction
-                        .take()
-                        .expect("presented transaction must remain available"),
-                    state,
-                    PresentedAcquireFailure::Timeout,
-                )
-                .await?);
-            }
-            PresentedSurfaceAcquire::Lost => {
-                drop(prepared.take());
-                return Err(finish_presented_acquire_failure(
-                    transaction
-                        .take()
-                        .expect("presented transaction must remain available"),
-                    state,
-                    PresentedAcquireFailure::Lost,
-                )
-                .await?);
-            }
-            PresentedSurfaceAcquire::Validation => {
-                drop(prepared.take());
-                return Err(finish_presented_acquire_failure(
-                    transaction
-                        .take()
-                        .expect("presented transaction must remain available"),
-                    state,
-                    PresentedAcquireFailure::Validation,
-                )
-                .await?);
-            }
-        },
-        SurfaceBackend::ContractOnly { .. } | SurfaceBackend::Headless { .. } => {
-            unreachable!("presented exact graph output changed after eligibility validation")
-        }
-    };
-    Ok((
-        acquired,
-        prepared
-            .take()
-            .expect("prepared graph must remain available after successful acquire"),
-        transaction
-            .take()
-            .expect("presented transaction must remain available after successful acquire"),
     ))
 }
 
@@ -4804,26 +4301,11 @@ async fn render_internal_vello_presented(
     state: &mut PresentedSurfaceState,
     frame: InternalVelloFrameParameters<'_>,
 ) -> Result<SurfaceFrameCommit> {
-    match state.lifecycle() {
-        PresentedLifecycle::NonRenderable { .. } | PresentedLifecycle::Lost => {
-            return Ok(SurfaceFrameCommit::without_headless_publication(
-                RenderTimings::default(),
-            ));
-        }
-        PresentedLifecycle::ResizePending { .. } => {
-            return Err(Error::new(
-                BackendErrorCode::SurfaceConfigureFailed,
-                "presented rendering started before configuration committed",
-            ));
-        }
-        PresentedLifecycle::Ready { .. } | PresentedLifecycle::Occluded { .. } => {}
-    }
-    let resources = native.committed().ok_or_else(|| {
-        Error::new(
-            BackendErrorCode::SurfaceConfigureFailed,
-            "ready presented lifecycle has no committed target resources",
-        )
-    })?;
+    let Some(resources) = present::internal_vello_presented_resources(native, state)? else {
+        return Ok(SurfaceFrameCommit::without_headless_publication(
+            RenderTimings::default(),
+        ));
+    };
     let _ = &resources.target_texture;
     let render_start = Instant::now();
     backend
@@ -4843,7 +4325,7 @@ async fn render_internal_vello_presented(
         )
         .await?;
     let render_time = render_start.elapsed();
-    present_internal_vello_target(
+    present::present_internal_vello_target(
         backend,
         native,
         device_identity,
@@ -4852,131 +4334,4 @@ async fn render_internal_vello_presented(
         render_time,
     )
     .await
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-async fn present_internal_vello_target(
-    backend: &mut Backend,
-    native: &PresentedSurface,
-    device_identity: DeviceSlotIdentity,
-    state: &mut PresentedSurfaceState,
-    resources: &PresentedResourceBundle,
-    render_time: Duration,
-) -> Result<SurfaceFrameCommit> {
-    let present_start = Instant::now();
-    let transaction = backend.begin_gpu_operation(
-        device_identity,
-        GpuOperationStage::Present,
-        RuntimeOperation::SurfaceRendering,
-    )?;
-    let (device, queue) = backend.present_device_queue(device_identity)?;
-    let (surface_texture, transaction) =
-        acquire_internal_vello_surface_texture(native, device, state, transaction).await?;
-    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist surface blit"),
-    });
-    let surface_view = surface_texture.create_view();
-    resources
-        .blitter
-        .copy(device, &mut encoder, &resources.target_view, &surface_view);
-    transaction
-        .submit_command_buffer_with_host_effect(
-            queue,
-            encoder.finish(),
-            || surface_texture.present(),
-            RuntimeOperation::SurfaceRendering,
-        )
-        .await?;
-    Ok(SurfaceFrameCommit::without_headless_publication(
-        RenderTimings {
-            render_time,
-            present_time: present_start.elapsed(),
-        },
-    ))
-}
-
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
-async fn acquire_internal_vello_surface_texture(
-    native: &PresentedSurface,
-    device: &wgpu::Device,
-    state: &mut PresentedSurfaceState,
-    transaction: GpuOperationTransaction,
-) -> Result<(AcquiredPresentedSurfaceTexture, GpuOperationTransaction)> {
-    let mut transaction = Some(transaction);
-    let surface_texture = match native.acquire_texture(device) {
-        PresentedSurfaceAcquire::Success(surface_texture) => surface_texture,
-        PresentedSurfaceAcquire::Suboptimal(surface_texture) => {
-            drop(surface_texture);
-            return Err(finish_presented_acquire_failure(
-                transaction
-                    .take()
-                    .expect("present transaction must remain available"),
-                state,
-                PresentedAcquireFailure::Suboptimal,
-            )
-            .await?);
-        }
-        PresentedSurfaceAcquire::Outdated => {
-            return Err(finish_presented_acquire_failure(
-                transaction
-                    .take()
-                    .expect("present transaction must remain available"),
-                state,
-                PresentedAcquireFailure::Outdated,
-            )
-            .await?);
-        }
-        PresentedSurfaceAcquire::Occluded => {
-            return Err(finish_presented_acquire_failure(
-                transaction
-                    .take()
-                    .expect("present transaction must remain available"),
-                state,
-                PresentedAcquireFailure::Occluded,
-            )
-            .await?);
-        }
-        PresentedSurfaceAcquire::Timeout => {
-            return Err(finish_presented_acquire_failure(
-                transaction
-                    .take()
-                    .expect("present transaction must remain available"),
-                state,
-                PresentedAcquireFailure::Timeout,
-            )
-            .await?);
-        }
-        PresentedSurfaceAcquire::Lost => {
-            return Err(finish_presented_acquire_failure(
-                transaction
-                    .take()
-                    .expect("present transaction must remain available"),
-                state,
-                PresentedAcquireFailure::Lost,
-            )
-            .await?);
-        }
-        PresentedSurfaceAcquire::Validation => {
-            return Err(finish_presented_acquire_failure(
-                transaction
-                    .take()
-                    .expect("present transaction must remain available"),
-                state,
-                PresentedAcquireFailure::Validation,
-            )
-            .await?);
-        }
-    };
-    Ok((
-        surface_texture,
-        transaction
-            .take()
-            .expect("present transaction must remain available after successful acquire"),
-    ))
 }
