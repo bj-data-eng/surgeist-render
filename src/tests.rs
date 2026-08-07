@@ -13,8 +13,6 @@ use super::readback::{
     NativeReadbackLateCallbackStageForTest, NativeReadbackStageForTest,
     NativeReadbackStagePhaseForTest,
 };
-#[cfg(feature = "render-window")]
-use super::renderer::ScopedPresentedCreationTerminalLossForTest;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -23895,7 +23893,7 @@ fn surface_resize_suspend_resume_and_two_surfaces_own_resources() {
             );
     assert_eq!(error.code(), ErrorCode::RuntimeCapabilityUnavailable);
     assert_eq!(presented_resource_id_for_test(&first), None);
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut first,
         Attachment::from_web_canvas("display-free-presented-test-target"),
     ))
@@ -23969,7 +23967,7 @@ fn surface_loss_can_resume_but_device_loss_requires_a_new_renderer() {
     assert!(renderer.default_device_has_no_terminal_signal_for_test());
 
     let replacement_attachment = "display-free-donor-replacement";
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas(replacement_attachment),
     ))
@@ -23999,7 +23997,7 @@ fn surface_loss_can_resume_but_device_loss_requires_a_new_renderer() {
         .expect("the default surface must remain coherent after donor-surface recreation");
 
     renderer.signal_device_loss_for_test(donor_device, DeviceLossReason::Destroyed);
-    let error = pollster::block_on(renderer.resume_surface(
+    let error = pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("display-free-presented-test-target"),
     ))
@@ -24146,9 +24144,10 @@ fn assert_explicit_lost_resize_recovery(
     committed_target: u64,
 ) {
     let replacement_attachment = "lost-resize-replacement";
-    pollster::block_on(
-        renderer.resume_surface(surface, Attachment::from_web_canvas(replacement_attachment)),
-    )
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
+        surface,
+        Attachment::from_web_canvas(replacement_attachment),
+    ))
     .expect("explicit resume must recover at the final requested extent");
     assert_eq!(surface.state(), SurfaceState::Available);
     assert_eq!(surface.physical_size(), PhysicalSize::new(3, 2));
@@ -24208,7 +24207,7 @@ fn available_resize_pending_resume_retains_installed_attachment_and_target() {
         presented_lifecycle_for_test(&surface),
         PresentedLifecycle::ResizePending { .. }
     ));
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("compatible-resume-candidate"),
     ))
@@ -24288,7 +24287,7 @@ fn available_nonrenderable_resume_retains_installed_attachment_and_target() {
         } if physical_size == PhysicalSize::new(0, 2)
     ));
 
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("different-nonrenderable-resume-candidate"),
     ))
@@ -24387,7 +24386,7 @@ fn available_occluded_resume_retains_installed_attachment_and_target() {
         PresentedLifecycle::Occluded { .. }
     ));
 
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("different-occluded-resume-candidate"),
     ))
@@ -24486,13 +24485,14 @@ fn suspended_presented_replacement_terminal_loss_before_configuration_uses_surfa
     let stats_before = renderer.stats();
     let observation_before = presented_observation_for_test(&surface);
 
-    let loss = ScopedPresentedCreationTerminalLossForTest::after_device_selection();
-    let error = pollster::block_on(renderer.resume_surface(
-        &mut surface,
-        Attachment::from_web_canvas("suspended-replacement-candidate"),
-    ))
+    let error = pollster::block_on(
+        renderer.resume_display_free_presented_surface_after_device_loss_for_test(
+            &mut surface,
+            Attachment::from_web_canvas("suspended-replacement-candidate"),
+            DeviceLossReason::Unknown,
+        ),
+    )
     .expect_err("terminal loss before replacement configuration must abort resume");
-    drop(loss);
 
     assert_runtime_device_lost(
         error,
@@ -24556,13 +24556,14 @@ fn lost_presented_recreation_terminal_loss_before_configuration_uses_surface_res
     let stats_before = renderer.stats();
     let observation_before = presented_observation_for_test(&surface);
 
-    let loss = ScopedPresentedCreationTerminalLossForTest::after_device_selection();
-    let error = pollster::block_on(renderer.resume_surface(
-        &mut surface,
-        Attachment::from_web_canvas("lost-recreation-candidate"),
-    ))
+    let error = pollster::block_on(
+        renderer.resume_display_free_presented_surface_after_device_loss_for_test(
+            &mut surface,
+            Attachment::from_web_canvas("lost-recreation-candidate"),
+            DeviceLossReason::Unknown,
+        ),
+    )
     .expect_err("terminal loss before recreation configuration must abort resume");
-    drop(loss);
 
     assert_runtime_device_lost(
         error,
@@ -24614,7 +24615,7 @@ fn presented_resume_prefers_installed_compatible_slot_over_earlier_donor_slot() 
     );
     surface.suspend().unwrap();
 
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("installed-slot-replacement"),
     ))
@@ -24694,7 +24695,7 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
         panic!("the compatibility fixture must retain a presented surface");
     };
     *device_identity = selected_device;
-    pollster::block_on(renderer.resume_surface(
+    pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("terminal-donor-replacement-target"),
     ))
@@ -24773,7 +24774,7 @@ fn available_resize_pending_resume_terminal_loss_preserves_surface_state() {
     let observation_before = presented_observation_for_test(&surface);
 
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
-    let error = pollster::block_on(renderer.resume_surface(
+    let error = pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("different-pending-resume-candidate"),
     ))
@@ -24848,7 +24849,7 @@ fn lost_recreation_resume_terminal_loss_preserves_surface_state() {
     let observation_before = presented_observation_for_test(&surface);
 
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
-    let error = pollster::block_on(renderer.resume_surface(
+    let error = pollster::block_on(renderer.resume_display_free_presented_surface_for_test(
         &mut surface,
         Attachment::from_web_canvas("different-lost-recreation-candidate"),
     ))
@@ -25020,10 +25021,14 @@ fn assert_successful_presented_resume_coherence(
     context: PresentedResumeCoherenceContextForTest<'_>,
 ) {
     let resumed_attachment = "display-free-resumed-target";
-    pollster::block_on(context.renderer.resume_surface(
-        context.first,
-        Attachment::from_web_canvas(resumed_attachment),
-    ))
+    pollster::block_on(
+        context
+            .renderer
+            .resume_display_free_presented_surface_for_test(
+                context.first,
+                Attachment::from_web_canvas(resumed_attachment),
+            ),
+    )
     .expect("resume must atomically install and configure the replacement host target");
     let first_resized = presented_resource_id_for_test(context.first).unwrap();
     assert_ne!(first_resized, context.first_initial);
@@ -25057,10 +25062,14 @@ fn assert_successful_presented_resume_coherence(
         None,
         "a committed resume configuration must return its active generation"
     );
-    pollster::block_on(context.renderer.resume_surface(
-        context.first,
-        Attachment::from_web_canvas("display-free-presented-test-target"),
-    ))
+    pollster::block_on(
+        context
+            .renderer
+            .resume_display_free_presented_surface_for_test(
+                context.first,
+                Attachment::from_web_canvas("display-free-presented-test-target"),
+            ),
+    )
     .expect("a compatible duplicate resume must retain the committed target");
     assert_eq!(
         presented_resource_id_for_test(context.first),

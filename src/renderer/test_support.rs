@@ -12,13 +12,18 @@ use crate::{
     backend::*,
     command::RenderCommands,
     frame::{FrameContext, FramePlan, GpuRenderGraph},
-    pass::ExecutableGraphWorkingFormatRequest,
+    gpu_transaction::GpuOperationStage,
+    pass::{ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest},
+    readback::read_texture_rgba,
     resource::{ResourceManagerObservationForTest, WorkingFormat},
     stats::collect_render_stats,
     *,
 };
+#[cfg(feature = "render-window")]
+use crate::{geometry::physical_size, validation::validate_surface_options};
 use std::{
     collections::HashSet,
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -32,6 +37,286 @@ pub(crate) struct ResourcePreparationObservationForTest {
     pub(crate) failure_and_drop_cleanup: bool,
     pub(crate) repeated_reuse_is_exact_and_bounded: bool,
     pub(crate) populated_pass_cache_is_preserved: bool,
+}
+
+impl Renderer {
+    pub(crate) async fn submit_prepared_vello_pass_for_test(
+        &mut self,
+        prepared: &super::super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<
+        super::super::gpu_transaction::test_support::InternalVelloSubmissionObservationForTest,
+    > {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello transaction coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello transaction coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .submit_prepared_vello_pass_for_test(device_identity, prepared, target_extent)
+            .await
+    }
+
+    pub(crate) async fn fail_prepared_vello_pass_after_submit_for_test(
+        &mut self,
+        prepared: &super::super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+        publication: &mut Option<u64>,
+    ) -> Result<()> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello failure coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello failure coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .fail_prepared_vello_pass_after_submit_for_test(
+                device_identity,
+                prepared,
+                target_extent,
+                publication,
+            )
+            .await
+    }
+
+    pub(crate) async fn fault_prepared_vello_accounting_after_submit_for_test(
+        &mut self,
+        prepared: &super::super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<()> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello accounting coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello accounting coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .fault_prepared_vello_accounting_after_submit_for_test(
+                device_identity,
+                prepared,
+                target_extent,
+            )
+            .await
+    }
+
+    pub(crate) async fn cancel_prepared_vello_pass_after_submit_for_test(
+        &mut self,
+        prepared: &super::super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<ResourceManagerObservationForTest> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello cancellation coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello cancellation coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .cancel_prepared_vello_pass_after_submit_for_test(
+                device_identity,
+                prepared,
+                target_extent,
+            )
+            .await
+    }
+
+    pub(crate) fn default_device_active_operation_generation_for_test(&mut self) -> Option<u64> {
+        let device_identity = self.default_device?;
+        self.backend
+            .as_mut()?
+            .active_operation_generation_for_test(device_identity)
+    }
+
+    pub(crate) fn default_device_has_no_terminal_signal_for_test(&mut self) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return true;
+        };
+        self.backend
+            .as_mut()
+            .is_some_and(|backend| backend.terminal_reason(device_identity).is_none())
+    }
+
+    pub(crate) fn default_device_capabilities_for_test(&mut self) -> AvailableRuntimeCapabilities {
+        let device_identity = self.default_device.expect("test requires a default device");
+        self.backend
+            .as_mut()
+            .and_then(|backend| backend.device_capabilities(device_identity))
+            .expect("test requires a ready default device")
+            .runtime_report(Format::Rgba8)
+    }
+
+    pub(crate) fn override_default_device_effect_precision_facts_for_test(
+        &mut self,
+        effect_precisions: EffectPrecisionCapabilities,
+    ) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return false;
+        };
+        self.backend.as_mut().is_some_and(|backend| {
+            backend
+                .override_device_effect_precision_facts_for_test(device_identity, effect_precisions)
+        })
+    }
+
+    pub(crate) fn destroy_default_device_for_test(&mut self) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return false;
+        };
+        let Some(backend) = self.backend.as_mut() else {
+            return false;
+        };
+        backend.destroy_device_for_test(device_identity)
+    }
+
+    pub(crate) fn wait_for_default_terminal_signal_for_test(&mut self, timeout: Duration) -> bool {
+        let Some(device_identity) = self.default_device else {
+            return false;
+        };
+        self.backend
+            .as_mut()
+            .is_some_and(|backend| backend.wait_for_terminal_for_test(device_identity, timeout))
+    }
+
+    pub(crate) async fn add_donor_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the renderer has no backend to receive a donor wgpu device",
+            )
+        })?;
+        backend.add_device_slot_for_test().await
+    }
+
+    pub(crate) async fn submit_scoped_wgpu_probe_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+    ) -> Result<()> {
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "real second-slot WGPU coverage requires a renderer backend",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let (device, queue) =
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+        let command_buffer = {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("Surgeist second-slot terminal test target"),
+                size: wgpu::Extent3d {
+                    width: 1,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Surgeist second-slot terminal test encoder"),
+            });
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Surgeist second-slot terminal test pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+            }
+            Ok(encoder.finish())
+        };
+        let scope_result = match command_buffer {
+            Ok(command_buffer) => {
+                super::super::gpu_transaction::test_support::submit_command_buffer_for_test(
+                    transaction,
+                    queue,
+                    command_buffer,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await
+            }
+            Err(error) => match transaction.finish(RuntimeOperation::SurfaceRendering).await {
+                Ok(()) => Err(error),
+                Err(scope_error) => Err(scope_error),
+            },
+        };
+        backend.observe_device_terminal(device_identity);
+        scope_result
+    }
+}
+
+pub(crate) fn unsupported_graph_diagnostic_for_test(
+    graph: &GpuRenderGraph,
+    output_format: Format,
+    capabilities: &DeviceCapabilities,
+) -> Result<Option<UnsupportedPrimitive>> {
+    match ExecutableGraphDispatchEligibility::try_classify(
+        graph,
+        output_format,
+        ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
+        capabilities,
+    )? {
+        ExecutableGraphDispatchEligibility::FuturePasses => {
+            let error = super::dispatch::reject_future_graph_with_typed_diagnostic(graph)
+                .expect_err("an unsupported graph diagnostic probe must reject before execution");
+            Ok(error.unsupported_primitive())
+        }
+        ExecutableGraphDispatchEligibility::ExactBase(_)
+        | ExecutableGraphDispatchEligibility::ExactComposition(_)
+        | ExecutableGraphDispatchEligibility::ExactBackdrop(_) => Ok(None),
+    }
 }
 
 impl Renderer {
@@ -125,6 +410,487 @@ impl Renderer {
             repeated_reuse_is_exact_and_bounded,
             populated_pass_cache_is_preserved,
         })
+    }
+}
+
+impl Renderer {
+    pub(crate) fn default_wgpu_device_queue(&mut self) -> Option<(&wgpu::Device, &wgpu::Queue)> {
+        let backend = self.backend.as_mut()?;
+        let device_identity = self.default_device?;
+        backend
+            .device_queue(device_identity, RuntimeOperation::SurfaceRendering)
+            .ok()
+    }
+
+    pub(crate) fn default_offscreen_render_context(
+        &mut self,
+    ) -> Option<OffscreenRenderGpuContext<'_>> {
+        let backend = self.backend.as_mut()?;
+        let device_identity = self.default_device?;
+        if backend
+            .terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
+            .is_some()
+        {
+            return None;
+        }
+        Some(OffscreenRenderGpuContext::new(backend, device_identity))
+    }
+
+    pub(crate) async fn read_render_texture_for_test(
+        &mut self,
+        texture: &wgpu::Texture,
+        physical_size: PhysicalSize,
+    ) -> Result<ImageBuffer> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "required render-texture readback needs an available wgpu device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "required render-texture readback needs an available wgpu backend",
+            )
+        })?;
+        read_texture_rgba(
+            backend,
+            device_identity,
+            texture,
+            physical_size,
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await
+    }
+
+    pub(crate) fn signal_default_device_loss_for_test(&mut self, reason: DeviceLossReason) {
+        if let Some(device_identity) = self.default_device {
+            self.signal_device_loss_for_test(device_identity, reason);
+        }
+    }
+
+    pub(crate) fn signal_device_loss_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+        reason: DeviceLossReason,
+    ) {
+        if let Some(backend) = self.backend.as_mut() {
+            backend.signal_loss_for_test(device_identity, reason);
+        }
+    }
+
+    pub(crate) fn device_signal_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+    ) -> Option<Arc<DeviceSignal>> {
+        self.backend
+            .as_mut()?
+            .device_signal_for_test(device_identity)
+    }
+
+    pub(crate) fn default_device_signal_for_test(&mut self) -> Option<Arc<DeviceSignal>> {
+        self.device_signal_for_test(self.default_device?)
+    }
+
+    pub(crate) fn signal_device_uncaptured_fault_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+        kind: GpuFaultKind,
+    ) {
+        if let Some(backend) = self.backend.as_mut() {
+            backend.signal_uncaptured_fault_for_test(device_identity, kind);
+        }
+    }
+
+    pub(crate) fn default_device_renderer_released_for_test(&mut self) -> bool {
+        match (self.backend.as_mut(), self.default_device) {
+            (Some(backend), Some(device_identity)) => {
+                backend.renderer_released_for_test(device_identity)
+            }
+            (None, None) => true,
+            _ => false,
+        }
+    }
+
+    pub(crate) fn device_renderer_released_for_test(
+        &mut self,
+        device_identity: DeviceSlotIdentity,
+    ) -> bool {
+        self.backend
+            .as_mut()
+            .is_some_and(|backend| backend.renderer_released_for_test(device_identity))
+    }
+
+    pub(crate) fn default_ready_device_state_borrow_for_test(
+        &mut self,
+    ) -> Option<ReadyDeviceStateBorrowForTest<'_>> {
+        let device_identity = self.default_device?;
+        self.backend
+            .as_mut()?
+            .ready_device_state_borrow_for_test(device_identity)
+    }
+
+    pub(crate) async fn deliberate_validation_error_for_test(&mut self) -> Result<Result<()>> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "real GPU error-scope coverage requires a host adapter",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "real GPU error-scope coverage requires a host adapter",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let (device, _) =
+            backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+        let _ = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("Surgeist deliberate scoped validation failure"),
+            size: wgpu::Extent3d {
+                width: 0,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let result = transaction.finish(RuntimeOperation::SurfaceRendering).await;
+        backend.observe_device_terminal(device_identity);
+        Ok(result)
+    }
+
+    pub(crate) async fn scoped_clear_fill_probe_for_test(&mut self) -> Result<ImageBuffer> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "real GPU clear/fill probe requires a host adapter",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "real GPU clear/fill probe requires a host adapter",
+            )
+        })?;
+        let transaction = backend.begin_gpu_operation(
+            device_identity,
+            GpuOperationStage::Render,
+            RuntimeOperation::SurfaceRendering,
+        )?;
+        let (result, destination_texture) = {
+            let destination = super::super::texture::TextureDescriptor::try_new(
+                PhysicalSize::new(2, 2),
+                Format::Rgba8,
+                super::super::texture::TextureUsageIntent::IntermediatePass,
+            )?;
+            let (device, queue) =
+                backend.device_queue(device_identity, RuntimeOperation::SurfaceRendering)?;
+            let (destination_texture, destination_view) =
+                create_texture(device, "Surgeist scoped clear destination", destination);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("Surgeist scoped test-only clear encoder"),
+            });
+            {
+                let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("Surgeist scoped test-only clear pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &destination_view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.25,
+                                g: 0.5,
+                                b: 0.75,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+            }
+            (
+                super::super::gpu_transaction::test_support::submit_command_buffer_for_test(
+                    transaction,
+                    queue,
+                    encoder.finish(),
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await,
+                destination_texture,
+            )
+        };
+        backend.observe_device_terminal(device_identity);
+        result?;
+        read_texture_rgba(
+            backend,
+            device_identity,
+            &destination_texture,
+            PhysicalSize::new(2, 2),
+            RuntimeOperation::SurfaceRendering,
+        )
+        .await
+    }
+}
+
+#[cfg(feature = "render-window")]
+impl Renderer {
+    pub(crate) async fn configure_presented_surface_for_test(
+        &mut self,
+        surface: &mut Surface,
+    ) -> Result<()> {
+        self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
+            .await
+    }
+
+    pub(crate) fn display_free_presented_surface_for_test(
+        &mut self,
+        options: SurfaceOptions,
+    ) -> Result<Surface> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "display-free presented configuration coverage requires a host adapter",
+            )
+        })?;
+        self.display_free_presented_surface_on_device_for_test(
+            options,
+            device_identity,
+            Attachment::from_web_canvas("display-free-presented-test-target"),
+        )
+    }
+
+    pub(crate) fn display_free_presented_surface_on_device_for_test(
+        &mut self,
+        options: SurfaceOptions,
+        device_identity: DeviceSlotIdentity,
+        attachment: Attachment,
+    ) -> Result<Surface> {
+        validate_surface_options(options)?;
+        if !matches!(&attachment, Attachment::WebCanvas(_)) {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceCreateFailed,
+                "the display-free presented fixture requires a web-canvas attachment",
+            ));
+        }
+        let physical_size = physical_size(options.size, options.scale)?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "display-free presented configuration coverage requires a renderer backend",
+            )
+        })?;
+        if !backend.has_device_slot(device_identity) {
+            return Err(Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "the display-free presented fixture requires a current device slot",
+            ));
+        }
+        if let Some(error) =
+            backend.terminal_error(device_identity, RuntimeOperation::SurfaceRendering)
+        {
+            return Err(error);
+        }
+        Ok(Surface::with_backend(
+            attachment,
+            options,
+            SurfaceBackend::Presented {
+                surface: Box::new(
+                    super::super::surface::PresentedSurface::display_free_for_test(options.format),
+                ),
+                device_identity,
+                state: super::super::surface::PresentedSurfaceState::new(
+                    physical_size,
+                    super::super::surface::ResizeState::Idle,
+                ),
+            },
+            self.identity.clone(),
+        ))
+    }
+
+    pub(crate) async fn resume_display_free_presented_surface_for_test(
+        &mut self,
+        surface: &mut Surface,
+        attachment: Attachment,
+    ) -> Result<()> {
+        self.resume_display_free_presented_surface_with_loss_for_test(surface, attachment, None)
+            .await
+    }
+
+    pub(crate) async fn resume_display_free_presented_surface_after_device_loss_for_test(
+        &mut self,
+        surface: &mut Surface,
+        attachment: Attachment,
+        reason: DeviceLossReason,
+    ) -> Result<()> {
+        self.resume_display_free_presented_surface_with_loss_for_test(
+            surface,
+            attachment,
+            Some(reason),
+        )
+        .await
+    }
+
+    async fn resume_display_free_presented_surface_with_loss_for_test(
+        &mut self,
+        surface: &mut Surface,
+        attachment: Attachment,
+        loss_before_configuration: Option<DeviceLossReason>,
+    ) -> Result<()> {
+        if !surface.is_display_free_presented_for_test() {
+            return Err(Error::new(
+                BackendErrorCode::UnsupportedBackend,
+                "display-free resume support requires its own presented fixture",
+            ));
+        }
+        self.validate_surface_renderer_identity(surface, RuntimeOperation::SurfaceResume)?;
+        self.validate_surface_operation_backend(surface, RuntimeOperation::SurfaceResume)?;
+        self.validate_surface_device_identity(surface, RuntimeOperation::SurfaceResume)?;
+        let SurfaceBackend::Presented { state, .. } = &surface.backend else {
+            unreachable!("display-free resume support requires a presented surface");
+        };
+        let action = Surface::presented_resume_action(surface.state, state.lifecycle());
+        let resizing = state.lifecycle().resize_state();
+        self.validate_surface_device_terminal(surface, RuntimeOperation::SurfaceResume)?;
+        surface.ensure_attachment_compatible(&attachment)?;
+        match action {
+            super::super::surface::PresentedResumeAction::NoOp => Ok(()),
+            super::super::surface::PresentedResumeAction::ConfigureExisting => {
+                if let Some(reason) = loss_before_configuration {
+                    let device_identity = surface
+                        .device_identity()
+                        .expect("a presented surface must retain its device slot identity");
+                    self.signal_device_loss_for_test(device_identity, reason);
+                }
+                self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceResume)
+                    .await
+            }
+            super::super::surface::PresentedResumeAction::Configure => {
+                self.recreate_display_free_presented_surface_for_resume_for_test(
+                    surface,
+                    attachment,
+                    resizing,
+                    loss_before_configuration,
+                )
+                .await
+            }
+            super::super::surface::PresentedResumeAction::Recreate => {
+                self.recreate_display_free_presented_surface_for_resume_for_test(
+                    surface,
+                    attachment,
+                    resizing,
+                    loss_before_configuration,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn recreate_display_free_presented_surface_for_resume_for_test(
+        &mut self,
+        surface: &mut Surface,
+        attachment: Attachment,
+        resizing: super::super::surface::ResizeState,
+        loss_before_configuration: Option<DeviceLossReason>,
+    ) -> Result<()> {
+        let preferred_device = surface
+            .device_identity()
+            .expect("a presented surface must retain its device slot identity");
+        let mut next = self
+            .create_display_free_presented_surface_with_configuration_operation_for_test(
+                attachment,
+                surface.options,
+                RuntimeOperation::SurfaceResume,
+                Some(preferred_device),
+                loss_before_configuration,
+            )
+            .await?;
+        next.last_parameters = surface.last_parameters;
+        next.renderer_identity = surface.renderer_identity.clone();
+        if let SurfaceBackend::Presented { state, .. } = &mut next.backend {
+            state.set_resizing(resizing);
+        }
+        *surface = next;
+        Ok(())
+    }
+
+    async fn create_display_free_presented_surface_with_configuration_operation_for_test(
+        &mut self,
+        attachment: Attachment,
+        options: SurfaceOptions,
+        configuration_operation: RuntimeOperation,
+        preferred_device: Option<DeviceSlotIdentity>,
+        loss_before_configuration: Option<DeviceLossReason>,
+    ) -> Result<Surface> {
+        validate_surface_options(options)?;
+        if !matches!(&attachment, Attachment::WebCanvas(_)) {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceCreateFailed,
+                "the display-free presented fixture requires a web-canvas attachment",
+            ));
+        }
+        let physical_size = physical_size(options.size, options.scale)?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::AdapterSelection,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "display-free presented configuration coverage requires a renderer backend",
+            )
+        })?;
+        let (surface, device_identity) = backend
+            .create_display_free_presented_surface_for_test(
+                preferred_device,
+                configuration_operation,
+                options.format,
+            )
+            .await?;
+        if let Some(reason) = loss_before_configuration {
+            backend.signal_loss_for_test(device_identity, reason);
+        }
+        super::ensure_presented_device_available_after_creation(
+            backend,
+            device_identity,
+            configuration_operation,
+        )?;
+        let mut created = Surface::with_backend(
+            attachment,
+            options,
+            SurfaceBackend::Presented {
+                surface: Box::new(surface),
+                device_identity,
+                state: super::super::surface::PresentedSurfaceState::new(
+                    physical_size,
+                    super::super::surface::ResizeState::Idle,
+                ),
+            },
+            self.identity.clone(),
+        );
+        self.configure_presented_surface_if_needed(&mut created, configuration_operation)
+            .await?;
+        Ok(created)
     }
 }
 
