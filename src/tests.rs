@@ -26254,11 +26254,23 @@ fn destroyed_device_callback_reports_terminal_loss_without_stale_resource_use() 
         pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
     let ready_slot = pollster::block_on(renderer.add_donor_device_slot_for_test())
         .expect("the destroyed-device test requires a second real WGPU device slot");
+    let device_signal = renderer
+        .default_device_signal_for_test()
+        .expect("the destroyed-device test requires the default device callback signal");
 
     assert!(renderer.destroy_default_device_for_test());
+    let terminal_timeout = Duration::from_secs(5);
+    let terminal_wait_started = std::time::Instant::now();
+    let terminal_observed = renderer.wait_for_default_terminal_signal_for_test(terminal_timeout);
+    let terminal_wait =
+        device_signal.terminal_wait_observation_for_test(terminal_timeout, terminal_wait_started);
     assert!(
-        renderer.wait_for_default_terminal_signal_for_test(Duration::from_secs(5)),
-        "device destruction did not invoke the loss callback within the diagnostic deadline"
+        terminal_observed,
+        "device destruction did not invoke the loss callback within the diagnostic deadline: final_terminal={:?}; active_operation_generation={:?}; requested_timeout={:?}; elapsed={:?}",
+        terminal_wait.final_terminal,
+        terminal_wait.active_operation_generation,
+        terminal_wait.requested_timeout,
+        terminal_wait.elapsed,
     );
 
     let error =

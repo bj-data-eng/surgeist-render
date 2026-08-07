@@ -32,6 +32,20 @@ pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
     pass_cache: &'ready DevicePassCache,
 }
 
+#[derive(Debug)]
+pub(crate) struct DeviceTerminalWaitObservationForTest {
+    pub(crate) final_terminal: Option<Arc<DeviceTerminalSignal>>,
+    pub(crate) active_operation_generation: Option<u64>,
+    pub(crate) requested_timeout: Duration,
+    pub(crate) elapsed: Duration,
+}
+
+impl DeviceTerminalWaitObservationForTest {
+    pub(crate) const fn observed_terminal_for_test(&self) -> bool {
+        self.final_terminal.is_some()
+    }
+}
+
 impl ReadyDeviceStateBorrowForTest<'_> {
     pub(crate) fn sole_resource_manager_identity_for_test(&self) -> Option<ManagerIdentity> {
         Some(self.resources.identity_for_test())
@@ -177,16 +191,38 @@ impl DeviceSignal {
         self.finish_active_generation(generation)
     }
 
-    pub(crate) fn wait_for_terminal_for_test(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
+    pub(crate) fn wait_for_terminal_for_test(
+        &self,
+        timeout: Duration,
+    ) -> DeviceTerminalWaitObservationForTest {
+        let started = Instant::now();
+        let deadline = started + timeout;
         loop {
-            if self.first_terminal().is_some() {
-                return true;
+            let current = self.terminal_wait_observation_for_test(timeout, started);
+            if current.observed_terminal_for_test() {
+                return current;
             }
             if Instant::now() >= deadline {
-                return false;
+                return self.terminal_wait_observation_for_test(timeout, started);
             }
             std::thread::yield_now();
+        }
+    }
+
+    pub(crate) fn terminal_wait_observation_for_test(
+        &self,
+        requested_timeout: Duration,
+        started: Instant,
+    ) -> DeviceTerminalWaitObservationForTest {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        DeviceTerminalWaitObservationForTest {
+            final_terminal: state.first_terminal.clone(),
+            active_operation_generation: state.active_operation_generation,
+            requested_timeout,
+            elapsed: started.elapsed(),
         }
     }
 }
@@ -286,7 +322,14 @@ impl Backend {
         self.device_states
             .get(identity.slot())
             .filter(|state| state.generation == identity.generation)
-            .is_some_and(|state| state.signal.wait_for_terminal_for_test(timeout))
+            .is_some_and(|state| {
+                let observation = state.signal.wait_for_terminal_for_test(timeout);
+                let observed_terminal = observation.observed_terminal_for_test();
+                if !observed_terminal {
+                    eprintln!("device terminal wait timed out: {observation:?}");
+                }
+                observed_terminal
+            })
     }
 
     pub(crate) fn renderer_released_for_test(&mut self, identity: DeviceSlotIdentity) -> bool {
