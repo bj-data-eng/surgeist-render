@@ -175,6 +175,17 @@ the named `test_support.rs` owner. The final hierarchy still prohibits a
 production child from importing test support. No intermediate bridge may detach
 an observation from the value or operation that produced it.
 
+When an existing test reaches a hidden transition only through a production-to-
+test-support callback, global registry, or zero-argument scoped guard, the
+test-support task replaces that harness with explicit test-owned inputs around a
+natural production stage boundary. Product-visible conditions, outcomes, error
+mapping, resource/publication effects, and public-route coverage remain fixed;
+instrumentation-only timing, identity, or wiring assertions that would preserve
+the forbidden bridge are not product oracles and may be retired or rewritten.
+The replacement exercises real production transitions; it does not simulate
+their result, add a production fault-control field, or create another global
+bridge.
+
 ### M04.6 Semantic Planning-Name Retirement
 
 Planning identifiers are chronology such as `P02`, `I01`, `S34`, `C08`, `T03`,
@@ -404,15 +415,18 @@ specification before implementation rather than improvise an architecture.
 
 ## M07 Test And Verification Contract
 
-Each implementation range is behavior-preserving. Its worker records:
+Each implementation range is product-behavior-preserving. Its worker records:
 
 - the exact pre-move focused test commands for every responsibility moved;
-- post-move results for the same tests;
+- post-move results for the same product conditions and observable outcomes;
+- any M04.5 test-harness rewrite, including the retired hidden instrumentation
+  assertion and the explicit test-owned setup or natural stage boundary that
+  replaces it; test names continue to state condition and outcome;
 - `cargo check` and warning-denied Clippy for every affected feature
   combination;
 - a public-surface comparison showing that crate-root exports are unchanged;
 - the complete file-move and visibility-change inventory in the commit diff;
-- confirmation that no algorithm or oracle changed.
+- confirmation that no production algorithm or product oracle changed.
 
 The planning-name task additionally records a transient exact inventory over
 tracked non-plan filenames and Rust/WGSL code. Its acceptance predicate is empty
