@@ -1,6 +1,10 @@
 #[cfg(test)]
-use super::gpu_transaction::{
-    AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
+use super::gpu_transaction::test_support::{
+    InternalVelloSubmissionActionForTest, InternalVelloSubmissionObservationForTest,
+    InternalVelloSubmissionOutcomeForTest, finish_vello_resources_without_submission_for_test,
+    hold_internal_vello_after_submit_for_test, submit_internal_vello_observed_for_test,
+    vello_accounting_failure_after_submission_for_test,
+    vello_scope_failure_after_submission_for_test,
 };
 use super::pass::{
     BasePreparableGraph, CompositionPreparableGraph, EncodedGpuGraphActivity,
@@ -411,7 +415,6 @@ pub(crate) struct SpatialFilterFailurePreservationObservationForTest {
     pub(crate) resources_are_unchanged: bool,
     pub(crate) cache_is_unchanged: bool,
     pub(crate) publication_is_unchanged: bool,
-    pub(crate) performs_no_submission_or_retry: bool,
 }
 
 #[cfg(test)]
@@ -433,7 +436,6 @@ pub(crate) struct BackdropFailurePreservationObservationForTest {
     pub(crate) resources_are_unchanged: bool,
     pub(crate) cache_is_unchanged: bool,
     pub(crate) publication_is_unchanged: bool,
-    pub(crate) performs_no_submission_or_retry: bool,
 }
 
 #[cfg(test)]
@@ -2597,12 +2599,13 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn submit_prepared_vello_pass_for_test(
+    async fn submit_prepared_vello_pass_with_action_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         prepared: &PreparedVelloPass,
         target_extent: PhysicalSize,
-    ) -> Result<InternalVelloSubmissionObservationForTest> {
+        action: InternalVelloSubmissionActionForTest<'_>,
+    ) -> Result<InternalVelloSubmissionOutcomeForTest> {
         let transaction = self.begin_gpu_operation(
             identity,
             GpuOperationStage::Render,
@@ -2681,17 +2684,116 @@ impl Backend {
                 return Err(failure.into_error_and_aborted_resources().0);
             }
         };
-        let observation = InternalVelloSubmissionObservationForTest::default();
-        let payload = InternalVelloPayload::observed_for_test(
+        let payload = InternalVelloPayload::new(
             command_encoder.finish(),
             super::vello_engine::PendingVelloResourceCommit::new(lease),
             logical_pass,
-            observation.clone(),
         );
-        transaction
-            .submit_internal_vello(device, queue, payload, RuntimeOperation::SurfaceRendering)
-            .await?;
-        Ok(observation)
+        match action {
+            InternalVelloSubmissionActionForTest::Observe => {
+                submit_internal_vello_observed_for_test(
+                    transaction,
+                    device,
+                    queue,
+                    payload,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await
+                .map(InternalVelloSubmissionOutcomeForTest::Observed)
+            }
+            InternalVelloSubmissionActionForTest::ScopeFailure(publication) => {
+                vello_scope_failure_after_submission_for_test(
+                    transaction,
+                    device,
+                    queue,
+                    payload,
+                    RuntimeOperation::SurfaceRendering,
+                    publication,
+                )
+                .await?;
+                Ok(InternalVelloSubmissionOutcomeForTest::Completed)
+            }
+            InternalVelloSubmissionActionForTest::AccountingFailure => {
+                vello_accounting_failure_after_submission_for_test(
+                    transaction,
+                    queue,
+                    payload,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await?;
+                Ok(InternalVelloSubmissionOutcomeForTest::Completed)
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn submit_prepared_vello_pass_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        prepared: &PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<InternalVelloSubmissionObservationForTest> {
+        match self
+            .submit_prepared_vello_pass_with_action_for_test(
+                identity,
+                prepared,
+                target_extent,
+                InternalVelloSubmissionActionForTest::Observe,
+            )
+            .await?
+        {
+            InternalVelloSubmissionOutcomeForTest::Observed(observation) => Ok(observation),
+            InternalVelloSubmissionOutcomeForTest::Completed => {
+                unreachable!("the explicit observe action must return its stage facts")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn fail_prepared_vello_pass_after_submit_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        prepared: &PreparedVelloPass,
+        target_extent: PhysicalSize,
+        publication: &mut Option<u64>,
+    ) -> Result<()> {
+        match self
+            .submit_prepared_vello_pass_with_action_for_test(
+                identity,
+                prepared,
+                target_extent,
+                InternalVelloSubmissionActionForTest::ScopeFailure(publication),
+            )
+            .await?
+        {
+            InternalVelloSubmissionOutcomeForTest::Completed => Ok(()),
+            InternalVelloSubmissionOutcomeForTest::Observed(_) => {
+                unreachable!("the explicit failure action cannot return observation facts")
+            }
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn fault_prepared_vello_accounting_after_submit_for_test(
+        &mut self,
+        identity: DeviceSlotIdentity,
+        prepared: &PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<()> {
+        match self
+            .submit_prepared_vello_pass_with_action_for_test(
+                identity,
+                prepared,
+                target_extent,
+                InternalVelloSubmissionActionForTest::AccountingFailure,
+            )
+            .await?
+        {
+            InternalVelloSubmissionOutcomeForTest::Completed => Ok(()),
+            InternalVelloSubmissionOutcomeForTest::Observed(_) => {
+                unreachable!("the explicit accounting action cannot return observation facts")
+            }
+        }
     }
 
     #[cfg(test)]
@@ -2771,18 +2873,17 @@ impl Backend {
                 return Err(failure.into_error_and_aborted_resources().0);
             }
         };
-        let (checkpoint, checkpoint_observed) = AfterInternalVelloSubmitCheckpointForTest::paused();
-        let payload = InternalVelloPayload::paused_after_submit_for_test(
+        let payload = InternalVelloPayload::new(
             command_encoder.finish(),
             super::vello_engine::PendingVelloResourceCommit::new(lease),
             logical_pass,
-            checkpoint,
         );
-        let mut submission = Box::pin(transaction.submit_internal_vello(
-            device,
+        let mut publication = None;
+        let mut submission = Box::pin(hold_internal_vello_after_submit_for_test(
+            transaction,
             queue,
             payload,
-            RuntimeOperation::SurfaceRendering,
+            &mut publication,
         ));
         let waker = Waker::noop();
         let mut context = Context::from_waker(waker);
@@ -2791,9 +2892,6 @@ impl Backend {
             matches!(poll, Poll::Pending),
             "the post-submit cancellation checkpoint must pause the real submission future"
         );
-        checkpoint_observed
-            .try_recv()
-            .expect("the real internal queue submission must reach the post-submit checkpoint");
         drop(submission);
 
         Ok(resources.observation_for_test())
@@ -4221,12 +4319,6 @@ impl Backend {
         let publication_state_before = published_surface.resource_state();
         let (resources_before, cache_before) =
             self.spatial_filter_resource_and_cache_state(identity)?;
-        let submission_scope =
-            super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
-        let submission = submission_scope.observation_for_test();
-        let direct_scope =
-            super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
-        let direct_submission = direct_scope.observation_for_test();
         let encode_error = self
             .run_spatial_filter_failed_encoding_attempt(
                 identity,
@@ -4235,10 +4327,6 @@ impl Backend {
                 SpatialFilterInjectedFailureForTest::Encode,
             )
             .await?;
-        let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
-            && direct_submission.queue_submission_count_for_test() == 0;
-        drop(direct_scope);
-        drop(submission_scope);
         let (resources_after, cache_after) =
             self.spatial_filter_resource_and_cache_state(identity)?;
         Ok(BackdropFailurePreservationObservationForTest {
@@ -4253,7 +4341,6 @@ impl Backend {
             publication_is_unchanged: published_surface.headless_publication_count_for_test()
                 == publication_count_before
                 && published_surface.resource_state() == publication_state_before,
-            performs_no_submission_or_retry,
         })
     }
 
@@ -4294,12 +4381,6 @@ impl Backend {
         let publication_state_before = published_surface.resource_state();
         let (resources_before, cache_before) =
             self.spatial_filter_resource_and_cache_state(identity)?;
-        let submission_scope =
-            super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
-        let submission = submission_scope.observation_for_test();
-        let direct_scope =
-            super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
-        let direct_submission = direct_scope.observation_for_test();
         let encode_error = self
             .run_spatial_filter_failed_encoding_attempt(
                 identity,
@@ -4316,10 +4397,6 @@ impl Backend {
                 SpatialFilterInjectedFailureForTest::Scope,
             )
             .await?;
-        let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
-            && direct_submission.queue_submission_count_for_test() == 0;
-        drop(direct_scope);
-        drop(submission_scope);
         let (resources_after, cache_after) =
             self.spatial_filter_resource_and_cache_state(identity)?;
         Ok(SpatialFilterFailurePreservationObservationForTest {
@@ -4336,7 +4413,6 @@ impl Backend {
             publication_is_unchanged: published_surface.headless_publication_count_for_test()
                 == publication_count_before
                 && published_surface.resource_state() == publication_state_before,
-            performs_no_submission_or_retry,
         })
     }
 
@@ -4698,12 +4774,12 @@ impl Backend {
         drop(prepared);
         let same_transaction = transaction_generation.is_some()
             && transaction_generation == self.active_operation_generation_for_test(identity);
-        transaction
-            .finish_vello_resources_without_submission_for_test(
-                capture_resources,
-                RuntimeOperation::EffectRendering,
-            )
-            .await?;
+        finish_vello_resources_without_submission_for_test(
+            transaction,
+            capture_resources,
+            RuntimeOperation::EffectRendering,
+        )
+        .await?;
         let after_commit = self
             .ready_device_state_borrow_for_test(identity)
             .ok_or_else(|| {

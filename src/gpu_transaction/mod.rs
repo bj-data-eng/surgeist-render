@@ -1,7 +1,7 @@
 mod graph;
 mod readback;
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 mod vello;
 
 #[expect(
@@ -15,47 +15,14 @@ pub(crate) use graph::{GraphOutputCommit, GraphSubmissionPayload};
     reason = "preserves the existing crate-visible readback transaction front-door paths"
 )]
 pub(crate) use readback::{PendingReadbackSubmission, ReadbackSubmission};
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) use test_support::graph_terminal_loss_after_submission_for_test;
-#[cfg(test)]
-pub(crate) use test_support::{
-    ScopedGpuOperationPostSubmitCheckpointForTest,
-    graph_accounting_failure_after_submission_for_test,
-    graph_cancellation_after_submission_for_test, graph_scope_failure_after_submission_for_test,
-};
 pub(crate) use vello::{InternalVelloPayload, VelloResourceCommitProof};
-
-#[cfg(test)]
-use test_support::wait_at_active_gpu_operation_post_submit_checkpoint_for_test;
 
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
 };
 
-#[cfg(test)]
-use super::vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit};
-
 use std::sync::Arc;
-
-#[cfg(test)]
-use std::sync::{
-    Mutex,
-    mpsc::{Receiver, SyncSender, sync_channel},
-};
-
-#[cfg(test)]
-use std::cell::RefCell;
-
-#[cfg(test)]
-use super::vello_engine::VelloResourceAllocationSummaryForTest;
-
-#[cfg(test)]
-thread_local! {
-    static ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<GpuOperationSubmissionObservationForTest>> = const { RefCell::new(None) };
-    static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
-    static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
-}
 
 /// Private ownership stage for a render-owned GPU operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,189 +126,9 @@ impl GpuOperationLease {
     }
 
     #[cfg(test)]
-    fn active_generation_for_test(&self) -> Option<u64> {
-        self.signal.active_generation_for_test()
-    }
-
-    #[cfg(test)]
     pub(crate) const fn generation_for_test(&self) -> u64 {
         self.generation
     }
-}
-
-/// Test-only observation of one generic transaction-owned command-buffer submission.
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct GpuOperationSubmissionObservationForTest {
-    state: Arc<Mutex<GpuOperationSubmissionObservationStateForTest>>,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct GpuOperationSubmissionObservationStateForTest {
-    queue_submission_count: usize,
-    transaction_generation: Option<u64>,
-    active_generation: Option<u64>,
-    scopes_resolved: bool,
-    readback_queue_submission_count: usize,
-    readback_transaction_generation: Option<u64>,
-    readback_active_generation: Option<u64>,
-    readback_submission_index: Option<wgpu::SubmissionIndex>,
-    readback_scopes_resolved: bool,
-}
-
-#[cfg(test)]
-impl GpuOperationSubmissionObservationForTest {
-    fn record_submission(
-        &self,
-        transaction_generation: u64,
-        active_generation: Option<u64>,
-        readback_submission_index: Option<wgpu::SubmissionIndex>,
-    ) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("GPU operation submission observation must remain available");
-        if let Some(submission_index) = readback_submission_index {
-            state.readback_queue_submission_count =
-                state.readback_queue_submission_count.saturating_add(1);
-            state.readback_transaction_generation = Some(transaction_generation);
-            state.readback_active_generation = active_generation;
-            state.readback_submission_index = Some(submission_index);
-        } else {
-            state.queue_submission_count = state.queue_submission_count.saturating_add(1);
-            state.transaction_generation = Some(transaction_generation);
-            state.active_generation = active_generation;
-        }
-    }
-
-    fn record_scope_resolution(&self, readback: bool) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("GPU operation submission observation must remain available");
-        if readback {
-            state.readback_scopes_resolved = true;
-        } else {
-            state.scopes_resolved = true;
-        }
-    }
-
-    pub(crate) fn queue_submission_count_for_test(&self) -> usize {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .queue_submission_count
-    }
-
-    pub(crate) fn transaction_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .transaction_generation
-    }
-
-    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .active_generation
-    }
-
-    pub(crate) fn readback_submission_index_for_test(&self) -> Option<wgpu::SubmissionIndex> {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .readback_submission_index
-            .clone()
-    }
-
-    pub(crate) fn readback_queue_submission_count_for_test(&self) -> usize {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .readback_queue_submission_count
-    }
-
-    pub(crate) fn readback_transaction_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .readback_transaction_generation
-    }
-
-    pub(crate) fn readback_active_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .readback_active_generation
-    }
-
-    pub(crate) fn readback_scopes_resolved_for_test(&self) -> bool {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .readback_scopes_resolved
-    }
-
-    pub(crate) fn scopes_resolved_for_test(&self) -> bool {
-        self.state
-            .lock()
-            .expect("GPU operation submission observation must remain available")
-            .scopes_resolved
-    }
-}
-
-/// Installs a private observation for generic transaction submissions on this thread.
-#[cfg(test)]
-pub(crate) struct ScopedGpuOperationSubmissionObservationForTest {
-    observation: GpuOperationSubmissionObservationForTest,
-    previous: Option<GpuOperationSubmissionObservationForTest>,
-}
-
-#[cfg(test)]
-impl ScopedGpuOperationSubmissionObservationForTest {
-    pub(crate) fn begin() -> Self {
-        let observation = GpuOperationSubmissionObservationForTest::default();
-        let previous = ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST
-            .with(|active| active.replace(Some(observation.clone())));
-        Self {
-            observation,
-            previous,
-        }
-    }
-
-    pub(crate) fn observation_for_test(&self) -> GpuOperationSubmissionObservationForTest {
-        self.observation.clone()
-    }
-}
-
-#[cfg(test)]
-impl Drop for ScopedGpuOperationSubmissionObservationForTest {
-    fn drop(&mut self) {
-        ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-#[cfg(test)]
-fn record_active_gpu_operation_submission_for_test(
-    transaction_generation: u64,
-    active_generation: Option<u64>,
-    readback_submission_index: Option<wgpu::SubmissionIndex>,
-) -> Option<GpuOperationSubmissionObservationForTest> {
-    ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
-        let observation = active.borrow().clone();
-        if let Some(observation) = &observation {
-            observation.record_submission(
-                transaction_generation,
-                active_generation,
-                readback_submission_index,
-            );
-        }
-        observation
-    })
 }
 
 impl Drop for GpuOperationLease {
@@ -361,271 +148,6 @@ pub(crate) struct GpuOperationTransaction {
     internal: Option<wgpu::ErrorScopeGuard>,
     lease: GpuOperationLease,
     stage: GpuOperationStage,
-}
-
-/// Test-only evidence carried by the real single-buffer internal raster payload.
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct InternalVelloSubmissionObservationForTest {
-    state: Arc<Mutex<InternalVelloSubmissionObservationStateForTest>>,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct InternalVelloSubmissionObservationStateForTest {
-    queue_submission_count: usize,
-    transaction_generation: Option<u64>,
-    active_generation: Option<u64>,
-    payload_raster_pass_count: usize,
-    allocation_summary: Option<VelloResourceAllocationSummaryForTest>,
-}
-
-#[cfg(test)]
-impl InternalVelloSubmissionObservationForTest {
-    fn record_payload_submission(
-        &self,
-        transaction_generation: u64,
-        active_generation: Option<u64>,
-        logical_pass: &DirectVelloLogicalPass,
-        allocation_summary: VelloResourceAllocationSummaryForTest,
-    ) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("internal Vello submission observation must remain available");
-        state.queue_submission_count = state.queue_submission_count.saturating_add(1);
-        state.transaction_generation = Some(transaction_generation);
-        state.active_generation = active_generation;
-        state.payload_raster_pass_count = logical_pass.cardinality_for_test();
-        state.allocation_summary = Some(allocation_summary);
-    }
-
-    pub(crate) fn queue_submission_count_for_test(&self) -> usize {
-        self.state
-            .lock()
-            .expect("internal Vello submission observation must remain available")
-            .queue_submission_count
-    }
-
-    pub(crate) fn transaction_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .expect("internal Vello submission observation must remain available")
-            .transaction_generation
-    }
-
-    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .expect("internal Vello submission observation must remain available")
-            .active_generation
-    }
-
-    pub(crate) fn payload_raster_pass_count_for_test(&self) -> usize {
-        self.state
-            .lock()
-            .expect("internal Vello submission observation must remain available")
-            .payload_raster_pass_count
-    }
-
-    pub(crate) fn allocation_summary_for_test(
-        &self,
-    ) -> Option<VelloResourceAllocationSummaryForTest> {
-        self.state
-            .lock()
-            .expect("internal Vello submission observation must remain available")
-            .allocation_summary
-            .clone()
-    }
-}
-
-/// Observes the actual transaction-owned internal raster submission for one test scope.
-#[cfg(test)]
-pub(crate) struct ScopedInternalVelloSubmissionObservationForTest {
-    observation: InternalVelloSubmissionObservationForTest,
-    previous: Option<InternalVelloSubmissionObservationForTest>,
-}
-
-#[cfg(test)]
-impl ScopedInternalVelloSubmissionObservationForTest {
-    pub(crate) fn begin() -> Self {
-        let observation = InternalVelloSubmissionObservationForTest::default();
-        let previous = ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST
-            .with(|active| active.replace(Some(observation.clone())));
-        Self {
-            observation,
-            previous,
-        }
-    }
-
-    pub(crate) fn observation_for_test(&self) -> InternalVelloSubmissionObservationForTest {
-        self.observation.clone()
-    }
-}
-
-#[cfg(test)]
-impl Drop for ScopedInternalVelloSubmissionObservationForTest {
-    fn drop(&mut self) {
-        ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-#[cfg(test)]
-fn record_active_internal_vello_submission_for_test(
-    transaction_generation: u64,
-    active_generation: Option<u64>,
-    logical_pass: &DirectVelloLogicalPass,
-    allocation_summary: VelloResourceAllocationSummaryForTest,
-) {
-    ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST.with(|active| {
-        if let Some(observation) = active.borrow().as_ref() {
-            observation.record_payload_submission(
-                transaction_generation,
-                active_generation,
-                logical_pass,
-                allocation_summary,
-            );
-        }
-    });
-}
-
-/// Test-only pause reached after the real queue submission and before transaction completion.
-#[cfg(test)]
-pub(crate) struct AfterInternalVelloSubmitCheckpointForTest {
-    reached: SyncSender<()>,
-}
-
-/// Private test control applied by the production submission path after `queue.submit`.
-#[cfg(test)]
-#[derive(Clone)]
-enum InternalVelloPostSubmitControlForTest {
-    Fail {
-        scope_resolution_observed: SyncSender<()>,
-    },
-    AccountingFault,
-    Pause(SyncSender<()>),
-}
-
-#[cfg(test)]
-pub(crate) struct ScopedInternalVelloPostSubmitControlForTest {
-    reached: Option<Receiver<()>>,
-    scope_resolution_observed: Option<Receiver<()>>,
-    previous: Option<InternalVelloPostSubmitControlForTest>,
-}
-
-#[cfg(test)]
-impl ScopedInternalVelloPostSubmitControlForTest {
-    pub(crate) fn failing() -> Self {
-        let (scope_resolution_observed, observed) = sync_channel(1);
-        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(InternalVelloPostSubmitControlForTest::Fail {
-                scope_resolution_observed,
-            }))
-        });
-        Self {
-            reached: None,
-            scope_resolution_observed: Some(observed),
-            previous,
-        }
-    }
-
-    pub(crate) fn paused() -> Self {
-        let (reached, observed) = sync_channel(1);
-        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(InternalVelloPostSubmitControlForTest::Pause(reached)))
-        });
-        Self {
-            reached: Some(observed),
-            scope_resolution_observed: None,
-            previous,
-        }
-    }
-
-    pub(crate) fn accounting_fault() -> Self {
-        let previous = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(InternalVelloPostSubmitControlForTest::AccountingFault))
-        });
-        Self {
-            reached: None,
-            scope_resolution_observed: None,
-            previous,
-        }
-    }
-
-    pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
-        self.reached
-            .as_ref()
-            .expect("only a paused post-submit control has a submission receiver")
-            .recv_timeout(deadline)
-            .expect(
-                "the real production submission did not reach the bounded post-submit checkpoint",
-            );
-    }
-
-    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
-        self.scope_resolution_observed
-            .as_ref()
-            .is_some_and(|observed| observed.try_recv().is_ok())
-    }
-}
-
-#[cfg(test)]
-impl Drop for ScopedInternalVelloPostSubmitControlForTest {
-    fn drop(&mut self) {
-        ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-#[cfg(test)]
-impl InternalVelloPostSubmitControlForTest {
-    async fn apply(self, device: &wgpu::Device, resources: &PendingVelloResourceCommit) {
-        match self {
-            Self::Fail { .. } => {
-                let _ = device.create_texture(&wgpu::TextureDescriptor {
-                    label: Some("Surgeist test-injected scoped validation failure"),
-                    size: wgpu::Extent3d {
-                        width: 0,
-                        height: 1,
-                        depth_or_array_layers: 1,
-                    },
-                    mip_level_count: 1,
-                    sample_count: 1,
-                    dimension: wgpu::TextureDimension::D2,
-                    format: wgpu::TextureFormat::Rgba8Unorm,
-                    usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                    view_formats: &[],
-                });
-            }
-            Self::AccountingFault => {
-                let _ = resources.poison_retained_byte_accounting_for_test();
-            }
-            Self::Pause(reached) => {
-                reached
-                    .send(())
-                    .expect("the production render test must observe the post-submit checkpoint");
-                std::future::pending::<()>().await;
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-impl AfterInternalVelloSubmitCheckpointForTest {
-    pub(crate) fn paused() -> (Self, Receiver<()>) {
-        let (reached, observed) = sync_channel(1);
-        (Self { reached }, observed)
-    }
-
-    async fn wait(self) {
-        self.reached
-            .send(())
-            .expect("the cancellation adapter must observe the post-submit checkpoint");
-        std::future::pending::<()>().await;
-    }
 }
 
 impl GpuOperationTransaction {
@@ -735,16 +257,6 @@ impl GpuOperationTransaction {
     pub(crate) async fn finish(mut self, operation: RuntimeOperation) -> Result<()> {
         let captured = self.pop_active_scopes().await;
 
-        #[cfg(test)]
-        ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST.with(|active| {
-            if let Some(InternalVelloPostSubmitControlForTest::Fail {
-                scope_resolution_observed,
-            }) = active.borrow().as_ref()
-            {
-                let _ = scope_resolution_observed.send(());
-            }
-        });
-
         self.terminal_result(self.lease.finish(), operation)?;
         if let Some(error) = captured {
             return Err(classify_captured_error(self.stage, error));
@@ -752,29 +264,11 @@ impl GpuOperationTransaction {
         Ok(())
     }
 
-    /// Submits one command buffer while this transaction owns its generation and scopes.
-    #[cfg(test)]
-    pub(crate) async fn submit_command_buffer(
-        self,
-        queue: &wgpu::Queue,
-        command_buffer: wgpu::CommandBuffer,
-        operation: RuntimeOperation,
-    ) -> Result<()> {
-        self.submit_command_buffer_with_host_effect(queue, command_buffer, || {}, operation)
-            .await
-    }
-
     /// Submits output work and applies its non-rollbackable host effect while scoped.
-    #[cfg_attr(
-        all(
-            not(test),
-            not(any(
-                feature = "render-window",
-                all(feature = "render-web", target_arch = "wasm32")
-            ))
-        ),
-        expect(dead_code, reason = "presented output submission is feature-gated")
-    )]
+    #[cfg(any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    ))]
     pub(crate) async fn submit_command_buffer_with_host_effect(
         self,
         queue: &wgpu::Queue,
@@ -783,22 +277,8 @@ impl GpuOperationTransaction {
         operation: RuntimeOperation,
     ) -> Result<()> {
         queue.submit([command_buffer]);
-        #[cfg(test)]
-        let submission_observation = record_active_gpu_operation_submission_for_test(
-            self.lease.generation(),
-            self.lease.active_generation_for_test(),
-            None,
-        );
         host_effect();
-        #[cfg(test)]
-        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
-
-        let result = self.finish(operation).await;
-        #[cfg(test)]
-        if let Some(observation) = submission_observation {
-            observation.record_scope_resolution(false);
-        }
-        result
+        self.finish(operation).await
     }
 }
 

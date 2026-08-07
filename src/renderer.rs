@@ -2699,13 +2699,13 @@ impl Renderer {
                 });
             }
             (
-                transaction
-                    .submit_command_buffer(
-                        queue,
-                        encoder.finish(),
-                        RuntimeOperation::SurfaceRendering,
-                    )
-                    .await,
+                super::gpu_transaction::test_support::submit_command_buffer_for_test(
+                    transaction,
+                    queue,
+                    encoder.finish(),
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await,
                 destination_texture,
             )
         };
@@ -2726,7 +2726,8 @@ impl Renderer {
         &mut self,
         prepared: &super::vello_engine::PreparedVelloPass,
         target_extent: PhysicalSize,
-    ) -> Result<super::gpu_transaction::InternalVelloSubmissionObservationForTest> {
+    ) -> Result<super::gpu_transaction::test_support::InternalVelloSubmissionObservationForTest>
+    {
         let device_identity = self.default_device.ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
@@ -2743,6 +2744,66 @@ impl Renderer {
         })?;
         backend
             .submit_prepared_vello_pass_for_test(device_identity, prepared, target_extent)
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn fail_prepared_vello_pass_after_submit_for_test(
+        &mut self,
+        prepared: &super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+        publication: &mut Option<u64>,
+    ) -> Result<()> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello failure coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello failure coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .fail_prepared_vello_pass_after_submit_for_test(
+                device_identity,
+                prepared,
+                target_extent,
+                publication,
+            )
+            .await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn fault_prepared_vello_accounting_after_submit_for_test(
+        &mut self,
+        prepared: &super::vello_engine::PreparedVelloPass,
+        target_extent: PhysicalSize,
+    ) -> Result<()> {
+        let device_identity = self.default_device.ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello accounting coverage requires a ready default device",
+            )
+        })?;
+        let backend = self.backend.as_mut().ok_or_else(|| {
+            Error::runtime_unavailable(
+                RuntimeOperation::SurfaceRendering,
+                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
+                "internal Vello accounting coverage requires a renderer backend",
+            )
+        })?;
+        backend
+            .fault_prepared_vello_accounting_after_submit_for_test(
+                device_identity,
+                prepared,
+                target_extent,
+            )
             .await
     }
 
@@ -2915,13 +2976,13 @@ impl Renderer {
         };
         let scope_result = match command_buffer {
             Ok(command_buffer) => {
-                transaction
-                    .submit_command_buffer(
-                        queue,
-                        command_buffer,
-                        RuntimeOperation::SurfaceRendering,
-                    )
-                    .await
+                super::gpu_transaction::test_support::submit_command_buffer_for_test(
+                    transaction,
+                    queue,
+                    command_buffer,
+                    RuntimeOperation::SurfaceRendering,
+                )
+                .await
             }
             Err(error) => match transaction.finish(RuntimeOperation::SurfaceRendering).await {
                 Ok(()) => Err(error),

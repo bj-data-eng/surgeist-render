@@ -1,9 +1,4 @@
 use super::GpuOperationTransaction;
-#[cfg(test)]
-use super::{
-    GpuOperationSubmissionObservationForTest, record_active_gpu_operation_submission_for_test,
-    wait_at_active_gpu_operation_post_submit_checkpoint_for_test,
-};
 use crate::{Result, RuntimeOperation};
 
 /// Transaction-owned result of submitting one texture readback copy.
@@ -23,8 +18,6 @@ impl ReadbackSubmission {
 pub(crate) struct PendingReadbackSubmission {
     submission_index: wgpu::SubmissionIndex,
     transaction: GpuOperationTransaction,
-    #[cfg(test)]
-    submission_observation: Option<GpuOperationSubmissionObservationForTest>,
 }
 
 impl PendingReadbackSubmission {
@@ -33,17 +26,12 @@ impl PendingReadbackSubmission {
     }
 
     pub(crate) async fn finish(self, operation: RuntimeOperation) -> Result<ReadbackSubmission> {
-        #[cfg(test)]
-        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
-
-        let result = self.transaction.finish(operation).await;
-        #[cfg(test)]
-        if let Some(observation) = self.submission_observation {
-            observation.record_scope_resolution(true);
-        }
-        result.map(|()| ReadbackSubmission {
-            submission_index: self.submission_index,
-        })
+        self.transaction
+            .finish(operation)
+            .await
+            .map(|()| ReadbackSubmission {
+                submission_index: self.submission_index,
+            })
     }
 }
 
@@ -55,18 +43,10 @@ impl GpuOperationTransaction {
         command_buffer: wgpu::CommandBuffer,
     ) -> PendingReadbackSubmission {
         let submission_index = queue.submit([command_buffer]);
-        #[cfg(test)]
-        let submission_observation = record_active_gpu_operation_submission_for_test(
-            self.lease.generation(),
-            self.lease.active_generation_for_test(),
-            Some(submission_index.clone()),
-        );
 
         PendingReadbackSubmission {
             submission_index,
             transaction: self,
-            #[cfg(test)]
-            submission_observation,
         }
     }
 }
