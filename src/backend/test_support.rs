@@ -13,8 +13,8 @@ use super::{
     offscreen::{self, OffscreenRenderTarget, OffscreenRenderedTextureLease},
 };
 use crate::{
-    Antialiasing, Attachment, BlendMode, EffectQualityPolicy, ErrorCode, Extend, FilterList,
-    Format, ImageQuality, Options, Parameters, PhysicalSize, Point, Rect, Surface, SurfaceOptions,
+    Antialiasing, Attachment, EffectQualityPolicy, ErrorCode, FilterList, Format, Options,
+    Parameters, PhysicalSize, Surface, SurfaceOptions,
     capability::EffectPrecisionCapabilities,
     command::OffscreenBounds,
     error::{
@@ -53,6 +53,8 @@ use crate::{
         TransactionTargetIntent, VelloAtlasOutcome, VelloEngineState, scene::VelloScene,
     },
 };
+#[cfg(all(test, not(target_arch = "wasm32")))]
+use crate::{BlendMode, Extend, ImageQuality, Point, Rect};
 
 /// Test-owned exact graph ingress for real production and fixture preparation stages.
 #[must_use = "an exact test surface graph must enter its GPU transaction"]
