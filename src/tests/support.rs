@@ -1,6 +1,8 @@
 use crate::{
-    BorderEdges, BorderSide, BorderStyle, Color, FontData, FontRef, ImageBuffer, Rect, TextGlyph,
-    TextPaint, TextRun, TextRunBounds, Transform, reference::PremultipliedRgba8,
+    BackdropCaptureBounds, BackdropFilterInput, BorderEdges, BorderSide, BorderStyle, Color,
+    FilterList, FilterOp, FontData, FontRef, Image, ImageBuffer, Layer, PhysicalSize, Rect,
+    ResolvedLayerAlphaMask, Scene, Size, TextGlyph, TextPaint, TextRun, TextRunBounds, Transform,
+    UnitFilterAmount, reference::PremultipliedRgba8,
 };
 
 pub(super) const AHEM_FONT_BYTES: &[u8] =
@@ -33,6 +35,58 @@ pub(super) fn ahem_font(name: &'static str) -> FontRef<'static> {
     FontRef::new(AHEM_FONT_ID)
         .named(name)
         .with_data(FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap())
+}
+
+pub(super) fn image_from_buffer(buffer: ImageBuffer) -> Image {
+    let size = buffer.size();
+    Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        buffer.into_rgba(),
+    )
+    .unwrap()
+}
+
+pub(super) fn resolved_layer_alpha_mask_from_buffer(buffer: ImageBuffer) -> ResolvedLayerAlphaMask {
+    let size = buffer.size();
+    ResolvedLayerAlphaMask::try_new(
+        image_from_buffer(buffer),
+        Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
+    )
+    .unwrap()
+}
+
+pub(super) fn add_planning_text(scene: &mut Scene, bounds: TextRunBounds) {
+    let glyphs = [TextGlyph::try_new(1, 1.0, 2.0, 5.0).unwrap()];
+    let run = TextRun::try_new(
+        FontRef::new(41).named("frame planning text"),
+        16.0,
+        Transform::identity(),
+        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
+        &glyphs,
+        bounds,
+    )
+    .unwrap();
+    scene.text_run(run);
+}
+
+pub(super) fn opaque_planning_mask(size: PhysicalSize) -> ResolvedLayerAlphaMask {
+    let byte_len = usize::try_from(size.width())
+        .unwrap()
+        .checked_mul(usize::try_from(size.height()).unwrap())
+        .and_then(|pixels| pixels.checked_mul(4))
+        .unwrap();
+    resolved_layer_alpha_mask_from_buffer(ImageBuffer::try_new(size, vec![255; byte_len]).unwrap())
+}
+
+pub(super) fn bounded_planning_backdrop() -> Layer {
+    let filters = FilterList::try_ops(vec![FilterOp::invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+    let bounds = BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap();
+    Layer::new()
+        .try_backdrop_filter(BackdropFilterInput::try_new(filters, bounds, None).unwrap())
+        .unwrap()
 }
 
 pub(super) fn assert_premultiplied(pixel: PremultipliedRgba8) {
