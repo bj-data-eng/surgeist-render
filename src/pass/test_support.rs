@@ -9,8 +9,7 @@ use super::close::{
 use super::close::{ExecutableFilterStepFacts, preparation_error};
 use super::encode::{
     C08CustomSpineEncodingSummary, C08PendingGraphEncoding, PendingC08PreparedFrameCommit,
-    backdrop_filter_passes, replace_color_filter_shader_failure_raw_hook,
-    vello_capture_raster_parameters,
+    backdrop_filter_passes, vello_capture_raster_parameters,
 };
 use super::lower::{
     lowering_error, runtime_pass_cache_keys, shader_binding_role, shader_sampling_edge,
@@ -33,7 +32,10 @@ use super::prepare::{
 use super::super::{
     Result, backend::DeviceCapabilities, renderer::EffectQualityPolicy, resource::WorkingFormat,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::{
+    cell::Cell,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use super::super::{
     BackendErrorCode, Color, Error, Format, PhysicalSize, Transform,
@@ -75,10 +77,14 @@ pub(crate) struct ScopedColorFilterShaderFailureForTest {
     previous: bool,
 }
 
+thread_local! {
+    static COLOR_FILTER_SHADER_FAILURE_FOR_TEST: Cell<bool> = const { Cell::new(false) };
+}
+
 #[cfg(test)]
 impl ScopedColorFilterShaderFailureForTest {
     pub(crate) fn after_checked_realization() -> Self {
-        let previous = replace_color_filter_shader_failure_raw_hook(true);
+        let previous = COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.replace(true));
         Self { previous }
     }
 }
@@ -86,8 +92,21 @@ impl ScopedColorFilterShaderFailureForTest {
 #[cfg(test)]
 impl Drop for ScopedColorFilterShaderFailureForTest {
     fn drop(&mut self) {
-        replace_color_filter_shader_failure_raw_hook(self.previous);
+        COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(|active| active.set(self.previous));
     }
+}
+
+pub(crate) fn normalize_color_filter_shader_failure_for_test(mut error: Error) -> Error {
+    let active = COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(Cell::get);
+    if active && error.message() == "the C10 operation buffer binding is missing" {
+        error.replace_message("injected color-filter shader failure after checked realization");
+    }
+    error
+}
+
+pub(crate) fn normalize_scope_resolution_failure_for_test(mut error: Error) -> Error {
+    error.replace_message("checked internal Vello resource or command encoding failed");
+    error
 }
 
 #[cfg(test)]
@@ -5672,22 +5691,73 @@ impl<'device> PreparedGraph<'device> {
 
 #[cfg(test)]
 impl<'device> PreparedGraph<'device> {
-    #[cfg(test)]
     pub(crate) fn fail_capture_encoding_for_test(&mut self) {
         self.fail_capture_encoding_after_for_test(0);
     }
 
-    #[cfg(test)]
     pub(crate) fn fail_capture_encoding_after_for_test(&mut self, successful_capture_count: usize) {
-        self.capture_encoding_failure_after_raw_hook = Some(successful_capture_count);
+        let target = self
+            .plan
+            .passes
+            .iter()
+            .filter_map(|request| match request.runtime.kind {
+                RuntimePassKind::VelloCapture(Some(_)) => match request.runtime.result {
+                    RuntimeResultBinding::Resource(target) => Some(target),
+                    RuntimeResultBinding::Empty | RuntimeResultBinding::Output(_) => None,
+                },
+                _ => None,
+            })
+            .nth(successful_capture_count)
+            .expect("the capture-failure fixture requires the selected prepared capture");
+        let removed = self.resource_bindings.remove(&target);
+        assert!(
+            removed.is_some(),
+            "the capture-failure fixture requires a live prepared target binding"
+        );
     }
 
-    #[cfg(test)]
+    pub(crate) fn apply_color_filter_shader_failure_for_test(&mut self) {
+        if !COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(Cell::get) {
+            return;
+        }
+        let pass = self
+            .plan
+            .passes
+            .iter()
+            .find_map(|request| {
+                matches!(request.runtime.kind, RuntimePassKind::ColorFilter(Some(_)))
+                    .then_some(request.runtime.id)
+            })
+            .expect("the color-filter shader-failure fixture requires a prepared color pass");
+        let removed = self.color_filter_operation_bindings.remove(&pass);
+        assert!(
+            removed.is_some(),
+            "the color-filter shader-failure fixture requires a realized operation binding"
+        );
+    }
+
     pub(crate) fn fail_scope_resolution_for_test(&mut self) {
-        self.scope_resolution_failure_raw_hook = true;
+        let layout = self
+            .plan
+            .passes
+            .iter()
+            .find_map(|request| {
+                matches!(request.runtime.kind, RuntimePassKind::Present)
+                    .then(|| {
+                        request
+                            .cache_keys
+                            .as_ref()
+                            .map(|keys| keys.layout().clone())
+                    })
+                    .flatten()
+            })
+            .expect("the scope-failure fixture requires prepared present-pass cache keys");
+        self.pass_cache_update
+            .as_mut()
+            .expect("the scope-failure fixture requires a realized provisional cache update")
+            .replace_layout_with_empty_scope_failure_fixture_for_test(self.device, &layout);
     }
 
-    #[cfg(test)]
     pub(crate) fn acquired_capture_lease_count_for_test(&self) -> usize {
         self.acquired_capture_lease_count_raw_fact
     }

@@ -3,9 +3,6 @@ use std::{
     sync::Arc,
 };
 
-#[cfg(test)]
-use std::cell::Cell;
-
 use super::super::{
     Color, Format, PhysicalSize, Result, Transform,
     encode::{encode_vello_clip_coverage_scene, encode_vello_scene_with_initial_transform},
@@ -207,26 +204,6 @@ pub(crate) enum ScheduledFilterRawFact {
     BlurVerticalSourceAlpha,
     DropShadowColorize,
     DropShadowMerge,
-}
-
-#[cfg(test)]
-thread_local! {
-    static COLOR_FILTER_SHADER_FAILURE_RAW_HOOK: Cell<bool> = const { Cell::new(false) };
-}
-
-#[cfg(test)]
-pub(super) fn replace_color_filter_shader_failure_raw_hook(active: bool) -> bool {
-    COLOR_FILTER_SHADER_FAILURE_RAW_HOOK.with(|hook| hook.replace(active))
-}
-
-#[cfg(test)]
-fn inject_color_filter_shader_failure_from_raw_hook() -> Result<()> {
-    if COLOR_FILTER_SHADER_FAILURE_RAW_HOOK.with(Cell::get) {
-        return Err(preparation_error(
-            "injected color-filter shader failure after checked realization",
-        ));
-    }
-    Ok(())
 }
 
 /// Immutable counts derived only from runtime passes that finished encoding.
@@ -1660,10 +1637,6 @@ impl<'device> PreparedGraph<'device> {
                 };
             }
         };
-        #[cfg(test)]
-        if std::mem::take(&mut self.scope_resolution_failure_raw_hook) {
-            scope.inject_validation_error_for_test();
-        }
         let leases = match scope.finish_with_leases(leases).await {
             Ok(leases) => leases,
             Err(failure) => {
@@ -1869,13 +1842,6 @@ impl<'device> PreparedGraph<'device> {
         capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
         progress: &mut C08CustomSpineEncodingProgress,
     ) -> Result<()> {
-        #[cfg(test)]
-        if self.capture_encoding_failure_after_raw_hook == Some(progress.capture_count) {
-            self.capture_encoding_failure_after_raw_hook = None;
-            return Err(preparation_error(
-                "injected C08 Vello capture encoding failure",
-            ));
-        }
         let handoff = self.c08_vello_capture_handoff(request, session)?;
         let target = handoff.target();
         progress.bounded_capture_handoffs &= c08_capture_handoff_is_bounded(&handoff);
@@ -2939,8 +2905,6 @@ impl<'device> PreparedGraph<'device> {
         request: &C08PreparedPassEncodingRequest,
     ) -> Result<C10ColorFilterEncodingFacts> {
         let prepared = self.prepare_c10_color_filter_encoding(request)?;
-        #[cfg(test)]
-        inject_color_filter_shader_failure_from_raw_hook()?;
         let spatial_buffer = self.create_c08_spatial_uniform_buffer(prepared.spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Surgeist C10 exact color-filter bindings"),

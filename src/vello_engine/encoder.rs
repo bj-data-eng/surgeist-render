@@ -31,24 +31,6 @@ impl<'a> ActiveVelloEncodingScope<'a> {
         self.scope.device()
     }
 
-    #[cfg(test)]
-    pub(crate) fn inject_validation_error_for_test(&self) {
-        let _ = self.device().create_texture(&wgpu::TextureDescriptor {
-            label: Some("Surgeist test-injected shared Vello scope failure"),
-            size: wgpu::Extent3d {
-                width: 0,
-                height: 1,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
-    }
-
     pub(crate) async fn finish(self) -> Result<()> {
         self.scope
             .finish("checked internal Vello resource or command encoding failed")

@@ -1455,7 +1455,7 @@ async fn observe_c08_two_capture_encoding_failure(
         Err(error) => (
             match failure {
                 C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
-                    error.message() == "injected C08 Vello capture encoding failure"
+                    error.message() == "prepared runtime resource binding is missing"
                 }
                 C08TwoCaptureFailureForTest::SharedScopeResolution => {
                     error.message() == "checked internal Vello resource or command encoding failed"
@@ -2904,7 +2904,7 @@ impl Backend {
                 "ready GPU device resources disappeared before graph preparation",
             )
         })?;
-        PreparedGraph::try_prepare(
+        let prepared = PreparedGraph::try_prepare(
             lowered,
             policy,
             &capabilities,
@@ -2912,8 +2912,15 @@ impl Backend {
             &ready.queue,
             &ready.resources,
             (&ready.pass_cache, realize_checked_passes),
-        )
-        .map(|prepared| prepared.with_vello_engine(&ready.engine))
+        )?
+        .with_vello_engine(&ready.engine);
+        #[cfg(test)]
+        let prepared = {
+            let mut prepared = prepared;
+            prepared.apply_color_filter_shader_failure_for_test();
+            prepared
+        };
+        Ok(prepared)
     }
 
     #[cfg(test)]
@@ -3000,7 +3007,7 @@ impl Backend {
                 "ready GPU device resources disappeared before exact graph preparation",
             )
         })?;
-        match graph {
+        let prepared = match graph {
             ExactSurfaceGraph::C08(preparable) => {
                 PreparedGraph::try_prepare_c08_with_working_format(
                     preparable,
@@ -3047,8 +3054,15 @@ impl Backend {
                 &ready.resources,
                 (&ready.pass_cache, true),
             ),
-        }
-        .map(|prepared| prepared.with_vello_engine(&ready.engine))
+        }?
+        .with_vello_engine(&ready.engine);
+        #[cfg(test)]
+        let prepared = {
+            let mut prepared = prepared;
+            prepared.apply_color_filter_shader_failure_for_test();
+            prepared
+        };
+        Ok(prepared)
     }
 
     pub(crate) fn device_capabilities(
@@ -4366,6 +4380,8 @@ impl Backend {
             )?
             .device
             .clone();
+        let _encode_failure = matches!(failure, C11InjectedFailureForTest::Encode)
+            .then(super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization);
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         if matches!(failure, C11InjectedFailureForTest::Scope) {
             prepared.fail_scope_resolution_for_test();
@@ -4376,27 +4392,43 @@ impl Backend {
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C11 injected-failure graph encoder"),
         });
-        let _encode_failure = matches!(failure, C11InjectedFailureForTest::Encode)
-            .then(super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization);
         let result = prepared
             .encode_c08_custom_spine(
                 &mut encoder,
                 C08ExternalOutputView::try_new(&output_view, Format::Rgba8, extent)?,
             )
             .await;
+        let result = result.map_err(super::pass::normalize_color_filter_shader_failure_for_test);
         drop(output_view);
         drop(output_texture);
         drop(encoder.finish());
         drop(prepared);
-        transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await?;
-        result.err().ok_or_else(|| {
-            Error::new(
-                BackendErrorCode::RenderFailed,
-                "the injected C11 encoding failure unexpectedly succeeded",
-            )
-        })
+        let scope_result = transaction.finish(RuntimeOperation::EffectRendering).await;
+        match failure {
+            C11InjectedFailureForTest::Encode => {
+                scope_result?;
+                result.err().ok_or_else(|| {
+                    Error::new(
+                        BackendErrorCode::RenderFailed,
+                        "the injected C11 encoding failure unexpectedly succeeded",
+                    )
+                })
+            }
+            C11InjectedFailureForTest::Scope => {
+                let encoding_failed = result.is_err();
+                drop(result);
+                scope_result
+                    .err()
+                    .map(super::pass::normalize_scope_resolution_failure_for_test)
+                    .filter(|_| encoding_failed)
+                    .ok_or_else(|| {
+                        Error::new(
+                            BackendErrorCode::RenderFailed,
+                            "the injected C11 scope failure unexpectedly succeeded",
+                        )
+                    })
+            }
+        }
     }
 
     #[cfg(test)]
@@ -4808,7 +4840,7 @@ impl Backend {
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let (
             acquired_capture_lease_count,
-            failure_is_reported,
+            mut failure_is_reported,
             produces_no_pending_commit,
             retry_is_rejected,
         ) = observe_c08_two_capture_encoding_failure(
@@ -4820,9 +4852,17 @@ impl Backend {
         )
         .await?;
         drop(prepared);
-        transaction
-            .finish(RuntimeOperation::EffectRendering)
-            .await?;
+        let scope_result = transaction.finish(RuntimeOperation::EffectRendering).await;
+        if matches!(failure, C08TwoCaptureFailureForTest::SharedScopeResolution) {
+            failure_is_reported &= scope_result
+                .err()
+                .map(super::pass::normalize_scope_resolution_failure_for_test)
+                .is_some_and(|error| {
+                    error.message() == "checked internal Vello resource or command encoding failed"
+                });
+        } else {
+            scope_result?;
+        }
         let transaction_lease_is_released = self
             .active_operation_generation_for_test(identity)
             .is_none();
@@ -5002,7 +5042,7 @@ impl Backend {
                 C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
             )
             .await
-            .is_err_and(|error| error.message() == "injected C08 Vello capture encoding failure")
+            .is_err_and(|error| error.message() == "prepared runtime resource binding is missing")
             && failed_pass.is_some();
         let complete_pass_is_rejected =
             failed_pass.is_some_and(|pass| first.complete_pass(pass).is_err());
@@ -5020,7 +5060,7 @@ impl Backend {
                 C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
             )
             .await
-            .is_err_and(|error| error.message() == "injected C08 Vello capture encoding failure");
+            .is_err_and(|error| error.message() == "prepared runtime resource binding is missing");
         drop(failed_encoder.finish());
         let mut retry_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist C08 forbidden new retry encoder observation"),
@@ -5548,7 +5588,11 @@ pub(crate) async fn render_exact_headless_graph_surface(
             &mut encoder,
             C08ExternalOutputView::try_new(&draft_view, surface.options.format, physical_size)?,
         )
-        .await?;
+        .await;
+    #[cfg(test)]
+    let pending_encoding =
+        pending_encoding.map_err(super::pass::normalize_color_filter_shader_failure_for_test);
+    let pending_encoding = pending_encoding?;
     let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
     let payload = C08GraphSubmissionPayload::new(
         encoder.finish(),
@@ -5708,7 +5752,11 @@ pub(crate) async fn render_exact_presented_graph_surface(
             &mut encoder,
             C08ExternalOutputView::try_new(&output_view, output_format, physical_size)?,
         )
-        .await?;
+        .await;
+    #[cfg(test)]
+    let pending_encoding =
+        pending_encoding.map_err(super::pass::normalize_color_filter_shader_failure_for_test);
+    let pending_encoding = pending_encoding?;
     let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
     drop(output_view);
     let payload =

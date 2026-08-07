@@ -32,6 +32,22 @@ pub(crate) enum C08ProgramForTest {
 }
 
 impl ProvisionalDevicePassCacheUpdate {
+    pub(crate) fn replace_layout_with_empty_scope_failure_fixture_for_test(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &BindGroupLayoutKey,
+    ) {
+        let malformed = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("Surgeist test-owned empty scope-failure layout"),
+            entries: &[],
+        });
+        let previous = self.layouts.insert(layout.clone(), malformed);
+        assert!(
+            previous.is_some(),
+            "the scope-failure fixture requires a realized bind-group layout"
+        );
+    }
+
     #[cfg(test)]
     pub(crate) fn realize_c08_pass_with_invalid_fragment_for_test<'a>(
         &'a mut self,

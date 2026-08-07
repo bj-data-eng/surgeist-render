@@ -911,10 +911,6 @@ pub(crate) struct PreparedGraph<'device> {
     pub(super) c08_encoding_state: Option<C08CustomSpineEncodingState>,
     pub(super) c08_completed_session: Option<Arc<()>>,
     #[cfg(test)]
-    pub(super) capture_encoding_failure_after_raw_hook: Option<usize>,
-    #[cfg(test)]
-    pub(super) scope_resolution_failure_raw_hook: bool,
-    #[cfg(test)]
     pub(super) acquired_capture_lease_count_raw_fact: usize,
     pub(super) device: &'device wgpu::Device,
     pub(super) queue: &'device wgpu::Queue,
@@ -1457,10 +1453,6 @@ impl<'device> PreparedGraph<'device> {
             next_pass: 0,
             c08_encoding_state,
             c08_completed_session: None,
-            #[cfg(test)]
-            capture_encoding_failure_after_raw_hook: None,
-            #[cfg(test)]
-            scope_resolution_failure_raw_hook: false,
             #[cfg(test)]
             acquired_capture_lease_count_raw_fact: 0,
             device,

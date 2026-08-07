@@ -123,8 +123,10 @@ pub(crate) use test_support::{
     composition_graph_observation_for_test, graph_clip_coverage_observation_for_test,
     mask_pipeline_keys_exclude_image_identity_for_test,
     mask_upload_allocation_observation_for_test,
-    mixed_color_unsupported_diagnostic_observation_for_test, pass_spatial_uniform_bytes_for_test,
-    runtime_color_filter_observation_for_test, runtime_lowering_observation_for_test,
+    mixed_color_unsupported_diagnostic_observation_for_test,
+    normalize_color_filter_shader_failure_for_test, normalize_scope_resolution_failure_for_test,
+    pass_spatial_uniform_bytes_for_test, runtime_color_filter_observation_for_test,
+    runtime_lowering_observation_for_test,
 };
 
 use super::{
