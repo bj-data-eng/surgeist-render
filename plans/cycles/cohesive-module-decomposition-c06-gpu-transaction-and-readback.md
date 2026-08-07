@@ -115,7 +115,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render multiple_composites_share_one_graph_encoder_and_transaction_commit
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fresh
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_graph_post_submit_failure_leaves_first_frame_unpublished
-  CARGO_NET_OFFLINE=true cargo test -p surgeist-render presented_graph_scope_failure_suppresses_presentation_and_commits
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_graph_scope_failure_suppresses_presentation_and_commits
   CARGO_NET_OFFLINE=true cargo fmt --check
   CARGO_NET_OFFLINE=true cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
@@ -195,7 +195,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_direct_post_submit_failure_preserves_previous_and_initial_publication
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render post_submit_scope_failure_discards_prepared_resources_with_nonzero_budget
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render terminal_signal_after_transaction_completion_preserves_public_frame_state
-  CARGO_NET_OFFLINE=true cargo test -p surgeist-render presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation
   CARGO_NET_OFFLINE=true cargo fmt --check
   CARGO_NET_OFFLINE=true cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render
