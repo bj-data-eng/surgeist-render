@@ -73,10 +73,15 @@
 - Generated artifacts, docs/examples, and migration: none. The example source
   does not change.
 - MSRV: unchanged; installed Rust 1.97 remains required.
+- Before implementation, prove the installed prerequisites without acquisition:
+  `rustup toolchain list` contains `1.97.0`, and
+  `rustup target list --installed` contains `wasm32-unknown-unknown`. Set
+  `RUSTUP_OFFLINE=1` on every version-pinned rustup-proxied command.
 - Unsafe: no Surgeist-owned unsafe may be introduced or retained.
 - Root follow-up: none in this cycle. Return only the published leaf candidate;
   root integration remains separately owned and excluded.
-- Before T01, local `main` is clean and equals `origin/main` at the cycle base.
+- Before T01, `origin/main` remains the verified C09 cycle base; local `main` is
+  the clean reviewed/in-progress C10 planning head descended from that base.
   Every task depends on the reviewed preceding task head and contributes one
   logical relocation commit.
 - Behavior-preserving relocation uses pre/post characterization; artificial RED
@@ -131,6 +136,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render resolved_alpha_mask_low_medium_high_and_extend_modes_match_boundary_oracle
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render plus_blend_clamps_high_precision_results
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
@@ -159,6 +165,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render canceled_generic_submission_after_real_submit_clears_ownership_without_public_result
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render resource_preparation_is_allocation_safe_and_submission_free
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
@@ -186,6 +193,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window surface_operation_matrix_covers_every_kind_state_and_duplicate_transition
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_graph_cancellation_after_submit_discards_without_presentation
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window -- -F unsafe-code -D warnings
@@ -213,6 +221,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render real_gpu_smoke_emits_no_uncaptured_error
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window render_window_smoke_executes_direct_and_graph_presented_frames
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-web
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
@@ -243,6 +252,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render repeated_direct_renders_keep_internal_vello_retention_bounded
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
@@ -314,9 +324,11 @@ CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features 
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
-rustc +1.97.0 --version
-CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets
-CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets --features render-window,render-web
+rustup toolchain list | rg -q '^1\.97\.0(?:-|\s)'
+rustup target list --installed | rg -qx 'wasm32-unknown-unknown'
+RUSTUP_OFFLINE=1 rustc +1.97.0 --version
+CARGO_NET_OFFLINE=true RUSTUP_OFFLINE=1 cargo +1.97.0 check -p surgeist-render --all-targets
+CARGO_NET_OFFLINE=true RUSTUP_OFFLINE=1 cargo +1.97.0 check -p surgeist-render --all-targets --features render-window,render-web
 CARGO_NET_OFFLINE=true RUSTDOCFLAGS="-D warnings" cargo doc -p surgeist-render --no-deps --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e normal --depth 1
 CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e dev --depth 1
