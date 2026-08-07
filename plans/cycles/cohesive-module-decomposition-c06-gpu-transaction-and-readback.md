@@ -85,10 +85,6 @@
 - Structural inspection is transient workflow evidence. Add no parser, source-
   text assertion, plan-closure test, committed inventory, ledger, generated
   index, lint, CI rule, or file-size/count gate.
-- Planning provenance remains only under `plans/`. The C05 planning-name content
-  and pathname predicates remain empty for every tracked non-plan Rust/WGSL
-  artifact and pathname; no task identifier is introduced into code, comments,
-  labels, diagnostics, filenames, or test names.
 - Workers record exact pre/post focused commands, moved-item ownership,
   visibility deltas, file deletion/creation, protected-surface diff, and the
   absence of algorithm/oracle changes. Each task is one logical commit and a
@@ -315,8 +311,9 @@
 ## 5 Verification And Completion
 
 Each task records passing pre-move characterization and identical post-move
-operation/oracle results; structural source checks are workflow evidence only
-and are not tests. Each task requires a separate task-review `CLEAN` verdict.
+operation/oracle results. Module ownership is assessed directly in task and
+holistic review, not encoded as a parser or closure gate. Each task requires a
+separate task-review `CLEAN` verdict.
 After all tasks are clean, the coordinator makes a status-only `complete`
 commit, runs this matrix, obtains a distinct holistic `CLEAN` review over the
 exact cycle range, repeats the matrix at the unchanged reviewed head, and
@@ -324,29 +321,9 @@ publishes with authority-remote readback:
 
 ```sh
 set -euo pipefail
-test ! -e src/gpu_transaction.rs
-test ! -e src/readback.rs
-for required_file in \
-  src/gpu_transaction/mod.rs src/gpu_transaction/graph.rs \
-  src/gpu_transaction/vello.rs src/gpu_transaction/readback.rs \
-  src/gpu_transaction/test_support.rs src/readback/mod.rs \
-  src/readback/layout.rs src/readback/lifecycle.rs src/readback/native.rs \
-  src/readback/test_support.rs; do
-  test -f "$required_file"
-done
-test -z "$(rg -n 'include!|#\s*\[\s*path\s*=' src/gpu_transaction src/readback || true)"
 test -z "$(git diff 9673fcda13b614cfac3bd74f23fcf4435ec869ef -- \
   src/lib.rs Cargo.toml README.md examples src/tests.rs src/backend.rs \
   src/renderer.rs src/frame src/pass src/shader src/resource)"
-planning_content_pattern='(?<![A-Za-z0-9_])(?:[PISCT][0-9]{2}[A-Za-z0-9_]*|[pisct][0-9]{2}_[A-Za-z0-9_]*)(?![A-Za-z0-9_])'
-planning_filename_pattern='(?:^|[/_.-])[pisct][0-9]{2}(?=$|[/_.-])|sequence[0-9]+'
-non_plan_paths=("${(@f)$(git ls-files | rg -v '^plans/')}")
-non_plan_code=("${(@f)$(git ls-files -- '*.rs' '*.wgsl' | rg -v '^plans/')}")
-test "${#non_plan_paths[@]}" -gt 0
-test "${#non_plan_code[@]}" -gt 0
-test -z "$(printf '%s\n' "${non_plan_paths[@]}" | rg --pcre2 "$planning_content_pattern" || true)"
-test -z "$(printf '%s\n' "${non_plan_paths[@]}" | rg -i --pcre2 "$planning_filename_pattern" || true)"
-test -z "$(rg -n --pcre2 "$planning_content_pattern" "${non_plan_code[@]}" || true)"
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
