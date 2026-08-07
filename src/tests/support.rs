@@ -1,6 +1,6 @@
 use crate::{
-    Color, FontData, FontRef, ImageBuffer, TextGlyph, TextPaint, TextRun, TextRunBounds, Transform,
-    reference::PremultipliedRgba8,
+    BorderEdges, BorderSide, BorderStyle, Color, FontData, FontRef, ImageBuffer, TextGlyph,
+    TextPaint, TextRun, TextRunBounds, Transform, reference::PremultipliedRgba8,
 };
 
 pub(super) const AHEM_FONT_BYTES: &[u8] =
@@ -53,4 +53,17 @@ pub(super) fn pixel_rgba(image: &ImageBuffer, x: u32, y: u32) -> [u8; 4] {
         image.rgba()[index - 1],
         image.rgba()[index],
     ]
+}
+
+pub(super) fn box_decoration_edges(
+    top: BorderSide,
+    right: BorderSide,
+    bottom: BorderSide,
+    left: BorderSide,
+) -> BorderEdges {
+    BorderEdges::new(top, right, bottom, left)
+}
+
+pub(super) fn solid_border(width: f64, color: Color) -> BorderSide {
+    BorderSide::try_new(BorderStyle::Solid, width, color).unwrap()
 }
