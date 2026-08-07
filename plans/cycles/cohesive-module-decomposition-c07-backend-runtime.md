@@ -5,79 +5,60 @@
 - Cycle: `P02/I02/S01/C07`.
 - Owning repository: `surgeist-render`.
 - Status: `draft`.
-- Cycle base: `d138f05d83a6739ebebe64d3146154c66fa58a47`, the published
-  C06 candidate verified on local and authority-remote `main`.
+- Cycle base: published/read-back C06 `d138f05d83a6739ebebe64d3146154c66fa58a47`.
 - Specification: `plans/specs/cohesive-module-decomposition.md` at
-  `bd25c89790358054a2b51c77c5c2b83f71859cf1`, SHA-256
-  `186eb7cf9366302ea5f16476720b3fc996083ea73a0af159d7794d3b0fb13e93`;
-  sections M01-M04, M05.3 backend table, and M06-M09.
+  `bd25c89790358054a2b51c77c5c2b83f71859cf1`, SHA-256 `186eb7cf9366302ea5f16476720b3fc996083ea73a0af159d7794d3b0fb13e93`;
+  M01-M04, M05.3 backend table, and M06-M09.
 - Sequence: `plans/sequences/cohesive-module-decomposition.md` at
-  `b7ce6d17a20c70dc06f68882d5347086e7c5546f`, SHA-256
-  `e4b731ecb2c38543a6011402235d4e3ebc6a587d41badb876206d9f7f703d72a`;
-  entry `C07 Backend Runtime`.
-- Outcome: replace `src/backend.rs` with a narrow `src/backend/mod.rs` and
-  `device.rs`, `execute.rs`, `offscreen.rs`, `present.rs`, `texture.rs`, and
-  test-only `test_support.rs`, preserving every current crate-visible backend
-  path and all runtime behavior.
+  `b7ce6d17a20c70dc06f68882d5347086e7c5546f`, SHA-256 `e4b731ecb2c38543a6011402235d4e3ebc6a587d41badb876206d9f7f703d72a`;
+  `C07 Backend Runtime`.
+- Outcome: replace `src/backend.rs` with narrow `backend/mod.rs`, `device.rs`,
+  `execute.rs`, `offscreen.rs`, `present.rs`, `texture.rs`, and test-only
+  `test_support.rs`, preserving crate-visible paths and runtime behavior.
 
 ## 2 Boundary
 
-- Backend front-door owner: `Backend`, its instance/device-slot collection and
-  resource-cache budget, and only coordination that genuinely requires the
-  complete backend state remain in `backend/mod.rs`.
+- Front door: `Backend`, its instance/device slots/cache budget, and only
+  coordination requiring complete backend state remain in `backend/mod.rs`.
 - Device owner: `DeviceState`, ready/terminal lifecycle, device-slot identity,
-  immutable capabilities, terminal signals, callback registration, compatible
-  device selection facts, and device/queue access move to `backend/device.rs`.
-- Texture owner: backend-safe texture descriptor realization and shared
-  headless/target texture construction move to `backend/texture.rs`.
+  capabilities/signals/callbacks, compatible selection facts, and device/queue
+  access move to `backend/device.rs`.
+- Texture owner: safe descriptor realization and shared headless/target texture
+  construction move to `backend/texture.rs`.
 - Offscreen owner: local-scene request/context, bounded target construction,
-  managed offscreen texture lease and cleanup, and local-scene rendering move
-  to `backend/offscreen.rs`.
+  managed lease/cleanup, and local rendering move to `backend/offscreen.rs`.
 - Presented owner: presented device selection, surface creation/configuration,
-  acquisition outcome mapping, target validation, resize/recovery state
-  coordination, blit, and presentation move to `backend/present.rs`.
+  acquisition mapping, target validation, resize/recovery, blit, and presentation
+  move to `backend/present.rs`.
 - Execution owner: exact graph selection, direct Vello and prepared-graph
-  execution, target construction, encoding/submission handoff, frame timings,
-  and commit results move to `backend/execute.rs`.
+  execution, targets, encoding/submission, timings, and commit results move to
+  `backend/execute.rs`.
 - Backend test owner: backend-owned failure controls, fixtures, observations,
-  explicit stage harnesses, and test-only `impl Backend` methods move to
-  `backend/test_support.rs`.
-- Preserve device generation and terminal precedence; capabilities and format
-  selection; transaction generation/lease behavior; cache/resource ownership;
-  direct and graph pass order; target formats/usages/extents; acquire/configure
-  state transitions; presentation authorization; headless publication; frame
-  statistics; cleanup, cancellation, and failure atomicity.
-- Preserve the M06 allowed backend edges to transaction, pass, resource,
-  renderer options, shader, surface, texture, and Vello owners. Child imports
-  name their owning front door or child explicitly; no trait, callback
-  abstraction, dynamic dispatch, duplicated state, generic helper, compatibility
-  module, `include!`, or `#[path]` bridge may disguise an ownership cycle.
+  stage harnesses, and test-only `impl Backend` methods move to `test_support.rs`.
+- Preserve device generation/terminal precedence, capabilities/formats,
+  transactions, cache/resources, pass order, targets, acquire/configure state,
+  presentation, publication, statistics, cleanup, cancellation, and atomicity.
+- Preserve M06 backend edges. Imports name the owning front door or child; no
+  trait/callback indirection, dynamic dispatch, duplicated state, generic helper,
+  compatibility module, `include!`, or `#[path]` may disguise a cycle.
 - M04.5 applies only in production-move tasks T01, T03, T05, and T07. A minimal
-  intrinsic test fact may travel only until the immediately following T02,
-  T04, T06, or T08 extraction. Final production children import no test support
-  and own no fixture, fault control, observation aggregation, thread-local
-  registry, global guard, or support callback.
-- When a current backend test reaches a hidden transition only through a
-  zero-argument scoped guard or production-to-test recorder, the immediately
-  following support task replaces it with explicit test-owned inputs at the
-  natural device, offscreen, presentation, or execution stage. Product-visible
-  outcomes, error mapping, resource/publication effects, and public-route
-  coverage remain; instrumentation-only timing, identity, count, or wiring
-  assertions whose only implementation is the forbidden bridge may be retired.
+  fact may travel only until T02, T04, T06, or T08. Final production children
+  own no test-support dependency, fixture, control, aggregation, registry, guard,
+  or support callback.
+- A support task replaces hidden zero-argument guards or production recorders
+  with explicit test-owned inputs at the natural stage. Product outcomes, error
+  mapping, resource/publication effects, and public-route coverage remain;
+  instrumentation-only timing/identity/count/wiring assertions may be retired.
 - `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, settled private
-  hierarchies, `src/renderer.rs`, public exports, dependencies, features, error
-  codes, and product expectations are protected. Narrow `src/tests.rs` harness
-  rewrites are permitted only under M04.5.
-- Root integration, sibling repositories, API artifacts, unrelated cleanup,
-  algorithm changes, error-policy changes, renderer decomposition, and the
-  focused-test cycles are excluded.
+  hierarchies, `src/renderer.rs`, exports, dependencies, features, errors, and
+  product expectations are protected. Only narrow M04.5 test rewrites may vary.
+- Root/sibling integration, API artifacts, unrelated cleanup, semantic changes,
+  renderer decomposition, and focused-test cycles are excluded.
 
 ## 3 Effects And Evidence Policy
 
-- API effect: none. `src/lib.rs` and all current `backend::...` crate-visible
-  paths remain source-compatible through explicit front-door reexports.
-- Dependency and feature effect: none. `Cargo.toml` and resolved trees remain
-  unchanged.
+- API effect: none; `src/lib.rs` and crate-visible backend paths remain compatible.
+- Dependency/feature effect: none; `Cargo.toml` and resolved trees are unchanged.
 - Behavior and oracle effect: none. This is a mechanical ownership move backed
   by pre/post characterization; no artificial RED applies.
 - Generated-artifact effect: none. Root owns API artifacts and is excluded.
