@@ -315,6 +315,7 @@ if rg -n --pcre2 '#\s*\[\s*(?:unsafe\s*\(|no_mangle\b|export_name\b)|\bunsafe\s*
 non_plan_code=("${(@f)$(git ls-files -- '*.rs' '*.wgsl' | rg -v '^plans/')}")
 test "${#non_plan_code[@]}" -gt 0
 if rg -n --pcre2 '(?<![A-Za-z0-9_])(?:[PISCT][0-9]{2}[A-Za-z0-9_]*|[pisct][0-9]{2}_[A-Za-z0-9_]*)(?![A-Za-z0-9_])' "${non_plan_code[@]}"; then exit 1; else test "$?" -eq 1; fi
+test -z "$(git ls-files | rg -v '^plans/' | rg --pcre2 '(?<![A-Za-z0-9_])(?:[PISCT][0-9]{2}[A-Za-z0-9_]*|[pisct][0-9]{2}_[A-Za-z0-9_]*)(?![A-Za-z0-9_])' || true)"
 test -z "$(git ls-files | rg -v '^plans/' | rg --pcre2 '(?i)(?:^|[/_.-])[pisct][0-9]{2}(?=$|[/_.-])|sequence[0-9]+' || true)"
 git diff --check 1e57d07d2595be95949caeff7b76a573a457723a..HEAD
 test "$(git rev-parse HEAD)" = "$(git rev-parse main)"
