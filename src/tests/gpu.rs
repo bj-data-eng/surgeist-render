@@ -45,7 +45,7 @@ use crate::{
         ResourceManager, ResourceRetentionOutcome, WorkingFormat,
     },
     shader::device_pass_cache_owns_exact_key_spaces_for_test,
-    style::{ColorFilterOp, ColorFilterPipeline},
+    style::ColorFilterOp,
     surface::{HeadlessResources, SurfaceBackend},
     texture::{
         EffectTextureDescriptor, EffectTextureRole, TextureDescriptor, TextureUsageIntent,
@@ -60,19 +60,24 @@ use super::{
         AHEM_GLYPH_X, COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X, GraphPublicStatsForTest, ahem_font,
         assert_finite_positive_rect, assert_premultiplied, assert_surface_unavailable,
         authored_color_filter_runs_for_test, bounded_backdrop_graph_commands_for_test,
-        bounded_backdrop_integration_fixture_for_test, bounded_planning_backdrop,
-        color_filter_retention_fixture_for_test, color_from_straight_rgba8_for_test,
-        color_then_blur_filters_for_test, composition_commands_for_test,
-        composition_mask_image_from_alpha_for_test, default_graph_working_format_for_test,
-        explicit_graph_transaction_inputs_for_test, filter_graph_commands_for_test,
-        filter_graph_context_for_test, graph_canonical_pixel_for_test, graph_pixels_match_for_test,
+        bounded_backdrop_integration_fixture_for_test, bounded_backdrop_reference_rect_for_test,
+        bounded_planning_backdrop, color_filter_list, color_filter_pipeline,
+        color_filter_retention_fixture_for_test, color_filter_signed_source_scene_for_test,
+        color_from_straight_rgba8_for_test, color_then_blur_filters_for_test,
+        composition_commands_for_test, composition_mask_image_from_alpha_for_test,
+        default_graph_working_format_for_test, explicit_graph_transaction_inputs_for_test,
+        filter_graph_commands_for_test, filter_graph_context_for_test,
+        graph_canonical_pixel_for_test, graph_pixels_match_for_test,
         graph_shader_commands_for_test, graph_shader_frame_context_for_test,
         graph_supported_working_formats_for_test, graph_transform_point_for_test,
+        high_precision_terminal_error_for_test, modeled_effect_texture_for_test,
         modeled_resource_key_for_test, opaque_planning_mask, pixel_alpha, pixel_rgba,
         premultiply_u8_channel_for_test, prepared_direct_vello_pass_for_test,
+        reduced_precision_terminal_error_for_test, reference_premultiplied_pixel_for_test,
         reference_solid_for_test, reference_straight_bytes_for_test, repeated_graph_scene_for_test,
         runtime_lowering_commands_for_test, spatial_filter_authored_filter_steps_for_test,
-        spatial_filter_maximum_error_for_test, spatial_filter_mixed_filter_fixture_for_test,
+        spatial_filter_image_scene_for_test, spatial_filter_maximum_error_for_test,
+        spatial_filter_mixed_filter_fixture_for_test, spatial_filter_reference_buffer_for_test,
     },
 };
 use crate::{
@@ -12065,166 +12070,4 @@ fn composition_reuse_scene_and_oracle_for_test()
         reference_straight_bytes_for_test(&expected),
         mask_key,
     )
-}
-
-pub(super) fn color_filter_pipeline<const N: usize>(
-    ops: [ColorFilterOp; N],
-) -> ColorFilterPipeline {
-    color_filter_list(ops)
-        .color_filter_pipeline()
-        .unwrap()
-        .unwrap()
-}
-
-pub(super) fn color_filter_list<const N: usize>(ops: [ColorFilterOp; N]) -> FilterList {
-    let ops = ops
-        .into_iter()
-        .map(|op| match op {
-            ColorFilterOp::Brightness(amount) => FilterOp::brightness(amount),
-            ColorFilterOp::Contrast(amount) => FilterOp::contrast(amount),
-            ColorFilterOp::Grayscale(amount) => FilterOp::grayscale(amount),
-            ColorFilterOp::HueRotate(angle) => FilterOp::hue_rotate(angle),
-            ColorFilterOp::Invert(amount) => FilterOp::invert(amount),
-            ColorFilterOp::Opacity(amount) => FilterOp::opacity(amount),
-            ColorFilterOp::Saturate(amount) => FilterOp::saturate(amount),
-            ColorFilterOp::Sepia(amount) => FilterOp::sepia(amount),
-        })
-        .collect();
-    FilterList::try_ops(ops).unwrap()
-}
-
-pub(super) fn modeled_effect_texture_for_test(
-    physical_size: PhysicalSize,
-) -> (ResourceCacheKey, u64) {
-    let descriptor =
-        EffectTextureDescriptor::try_capture(physical_size, wgpu::TextureUsages::TEXTURE_BINDING)
-            .unwrap();
-    (
-        ResourceCacheKey::EffectTexture(descriptor.cache_key()),
-        descriptor.checked_byte_len().unwrap(),
-    )
-}
-
-pub(super) fn bounded_backdrop_reference_rect_for_test(
-    size: PhysicalSize,
-    rect: (u32, u32, u32, u32),
-    straight: [u8; 4],
-) -> ReferencePremultipliedRgba8Buffer {
-    let mut buffer = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
-    for y in rect.1..rect.1 + rect.3 {
-        for x in rect.0..rect.0 + rect.2 {
-            buffer
-                .set_pixel(x, y, reference_premultiplied_pixel_for_test(straight))
-                .unwrap();
-        }
-    }
-    buffer
-}
-
-pub(super) fn spatial_filter_reference_buffer_for_test(
-    size: PhysicalSize,
-    opaque_pixels: &[(u32, u32, PremultipliedRgba8)],
-) -> ReferencePremultipliedRgba8Buffer {
-    let mut source = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
-    for &(x, y, pixel) in opaque_pixels {
-        source.set_pixel(x, y, pixel).unwrap();
-    }
-    source
-}
-
-pub(super) fn spatial_filter_image_scene_for_test(
-    size: PhysicalSize,
-    pixels: Vec<u8>,
-    destination: Rect,
-) -> Scene {
-    let image = Image::from_rgba(
-        Size::new(f64::from(size.width()), f64::from(size.height())),
-        Arc::<[u8]>::from(pixels),
-    )
-    .expect("the spatial-filter pixel fixture must form one RGBA image");
-    let mut scene = Scene::new();
-    scene.image(image, destination, ImageFit::Stretch);
-    scene
-}
-
-pub(super) fn high_precision_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
-    (actual.len() == expected.len() && actual.len().is_multiple_of(4)).then(|| {
-        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
-            0,
-            |maximum, (actual, expected)| {
-                // The caller first proves canonical terminal bytes. Once target
-                // alpha quantizes to zero, straight RGB has only the black form.
-                let expected_rgb = if actual[3] == 0 {
-                    [0, 0, 0]
-                } else {
-                    [expected[0], expected[1], expected[2]]
-                };
-                maximum
-                    .max(actual[0].abs_diff(expected_rgb[0]))
-                    .max(actual[1].abs_diff(expected_rgb[1]))
-                    .max(actual[2].abs_diff(expected_rgb[2]))
-                    .max(actual[3].abs_diff(expected[3]))
-            },
-        )
-    })
-}
-
-pub(super) fn reduced_precision_terminal_error_for_test(
-    actual: &[u8],
-    expected: &[u8],
-) -> Option<(u8, u8)> {
-    (actual.len() == expected.len()).then(|| {
-        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
-            (0, 0),
-            |(max_alpha, max_premul), (actual, expected)| {
-                let alpha = max_alpha.max(actual[3].abs_diff(expected[3]));
-                let premul = (0..3).fold(max_premul, |maximum, channel| {
-                    maximum.max(
-                        premultiply_u8_channel_for_test(actual[channel], actual[3]).abs_diff(
-                            premultiply_u8_channel_for_test(expected[channel], expected[3]),
-                        ),
-                    )
-                });
-                (alpha, premul)
-            },
-        )
-    })
-}
-
-pub(super) fn color_filter_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
-    let hidden_prefix = [[17, 31, 47, 255], [233, 199, 151, 127]];
-    let bytes = hidden_prefix
-        .into_iter()
-        .chain(visible_pixels.iter().copied())
-        .flat_map(|pixel| pixel.into_iter())
-        .collect::<Vec<_>>();
-    let source_width = u32::try_from(visible_pixels.len() + hidden_prefix.len())
-        .expect("the color-filter pixel vector must fit u32");
-    let image = Image::from_rgba(
-        Size::new(f64::from(source_width), 1.0),
-        Arc::<[u8]>::from(bytes),
-    )
-    .expect("the color-filter pixel vector must form one valid image");
-    let mut scene = Scene::new();
-    scene.image(
-        image,
-        Rect::new(
-            f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X),
-            0.0,
-            f64::from(source_width),
-            1.0,
-        ),
-        ImageFit::Stretch,
-    );
-    scene
-}
-
-pub(super) fn reference_premultiplied_pixel_for_test(straight: [u8; 4]) -> PremultipliedRgba8 {
-    PremultipliedRgba8::try_new(
-        premultiply_u8_channel_for_test(straight[0], straight[3]),
-        premultiply_u8_channel_for_test(straight[1], straight[3]),
-        premultiply_u8_channel_for_test(straight[2], straight[3]),
-        straight[3],
-    )
-    .unwrap()
 }
