@@ -1,9 +1,10 @@
 use crate::{
     Antialiasing, BackdropCaptureBounds, BackdropFilterInput, BlendMode, BorderEdges, BorderSide,
-    BorderStyle, Capabilities, Color, FilterAmount, FilterAngle, FilterBlur, FilterDropShadow,
-    FilterList, FilterOp, FontData, FontRef, Image, ImageBuffer, Layer, PhysicalSize, Point, Rect,
-    ResolvedLayerAlphaMask, Scene, Shape, Size, Stroke, TextGlyph, TextPaint, TextRun,
-    TextRunBounds, Transform, UnitFilterAmount, command, reference::PremultipliedRgba8,
+    BorderStyle, Capabilities, ClipInput, Color, FilterAmount, FilterAngle, FilterBlur,
+    FilterDropShadow, FilterList, FilterOp, FontData, FontRef, Image, ImageBuffer, Layer,
+    PhysicalSize, Point, Rect, ResolvedLayerAlphaMask, Scene, Shape, Size, Stroke, TextGlyph,
+    TextPaint, TextRun, TextRunBounds, Transform, UnitFilterAmount, command,
+    reference::PremultipliedRgba8,
 };
 
 pub(super) const AHEM_FONT_BYTES: &[u8] =
@@ -191,9 +192,55 @@ pub(super) fn spatial_filter_authored_filter_steps_for_test() -> Vec<FilterList>
 }
 
 pub(super) fn bounded_backdrop_graph_commands_for_test() -> command::RenderCommands {
-    super::bounded_backdrop_scene_for_test()
+    bounded_backdrop_scene_for_test()
         .normalize(Capabilities::CURRENT)
         .expect("the exact bounded-backdrop fixture must normalize")
+}
+
+fn bounded_backdrop_scene_for_test() -> Scene {
+    let filters = FilterList::try_ops(vec![
+        FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
+        FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
+        FilterOp::drop_shadow(
+            FilterDropShadow::try_new(
+                Point::new(-1.25, 0.75),
+                FilterBlur::try_new(0.5).unwrap(),
+                Color::try_rgba(0.25, 0.5, 0.75, 0.5).unwrap(),
+            )
+            .unwrap(),
+        ),
+    ])
+    .unwrap();
+    let backdrop_clip = ClipInput::try_shape(Shape::rect(Rect::new(0.5, 0.5, 7.0, 5.0))).unwrap();
+    let backdrop = Layer::new()
+        .try_clip(Shape::rect(Rect::new(0.25, 0.25, 7.5, 5.5)))
+        .unwrap()
+        .try_opacity(0.75)
+        .unwrap()
+        .blend(BlendMode::Screen)
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 8.0, 6.0)).unwrap(),
+                Some(backdrop_clip),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 8.0, 6.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(1.0, 0.0, 0.0, 0.5).unwrap(),
+            );
+        })
+        .fill(
+            Rect::new(6.0, 4.0, 1.0, 1.0),
+            Color::try_rgba(0.0, 1.0, 0.0, 0.75).unwrap(),
+        );
+    scene
 }
 
 pub(super) fn runtime_lowering_commands_for_test() -> command::RenderCommands {
