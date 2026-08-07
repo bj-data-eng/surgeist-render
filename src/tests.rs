@@ -13,7 +13,6 @@ use super::readback::{
     NativeReadbackLateCallbackStageForTest, NativeReadbackStageForTest,
     NativeReadbackStagePhaseForTest,
 };
-use super::renderer::ScopedFinalPublicationLossForTest;
 #[cfg(feature = "render-window")]
 use super::renderer::ScopedPresentedCreationTerminalLossForTest;
 #[cfg(any(
@@ -23361,10 +23360,9 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
         None
     );
 
-    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
     let error = pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .expect_err("a terminal signal at final configuration publication must prevent commit");
-    drop(loss);
+        .expect_err("a terminal device must leave the pending configuration uncommitted");
     assert_runtime_device_lost(
         error,
         RuntimeOperation::SurfaceRendering,
@@ -24762,7 +24760,7 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
 
 #[cfg(feature = "render-window")]
 #[test]
-fn available_resize_pending_resume_terminal_loss_before_publication_uses_surface_resume() {
+fn available_resize_pending_resume_terminal_loss_preserves_surface_state() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("pending resume attribution coverage requires a compatible device");
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
@@ -24787,13 +24785,12 @@ fn available_resize_pending_resume_terminal_loss_before_publication_uses_surface
     let stats_before = renderer.stats();
     let observation_before = presented_observation_for_test(&surface);
 
-    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
     let error = pollster::block_on(renderer.resume_surface(
         &mut surface,
         Attachment::from_web_canvas("different-pending-resume-candidate"),
     ))
-    .expect_err("terminal loss before resume publication must abort the pending configuration");
-    drop(loss);
+    .expect_err("terminal loss must abort the pending resume configuration");
 
     assert_eq!(
         match &surface.attachment {
@@ -24813,7 +24810,7 @@ fn available_resize_pending_resume_terminal_loss_before_publication_uses_surface
     assert_eq!(
         renderer.default_device_active_operation_generation_for_test(),
         None,
-        "the completed configure transaction must clear its active generation before publication"
+        "terminal resume preflight must not leave an active operation generation"
     );
     assert_eq!(
         renderer.runtime_capabilities(&surface),
@@ -24830,7 +24827,7 @@ fn available_resize_pending_resume_terminal_loss_before_publication_uses_surface
 
 #[cfg(feature = "render-window")]
 #[test]
-fn lost_recreation_resume_terminal_loss_before_publication_uses_surface_resume() {
+fn lost_recreation_resume_terminal_loss_preserves_surface_state() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("lost recreation attribution coverage requires a compatible device");
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
@@ -24863,13 +24860,12 @@ fn lost_recreation_resume_terminal_loss_before_publication_uses_surface_resume()
     let stats_before = renderer.stats();
     let observation_before = presented_observation_for_test(&surface);
 
-    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
     let error = pollster::block_on(renderer.resume_surface(
         &mut surface,
         Attachment::from_web_canvas("different-lost-recreation-candidate"),
     ))
-    .expect_err("terminal loss before resume publication must abort replacement installation");
-    drop(loss);
+    .expect_err("terminal loss must abort replacement installation");
 
     assert_eq!(
         match &surface.attachment {
@@ -24890,7 +24886,7 @@ fn lost_recreation_resume_terminal_loss_before_publication_uses_surface_resume()
     assert_eq!(
         renderer.default_device_active_operation_generation_for_test(),
         None,
-        "the completed recreation configure transaction must clear its active generation"
+        "terminal recreation preflight must not leave an active operation generation"
     );
     assert_eq!(
         renderer.runtime_capabilities(&surface),
@@ -28576,7 +28572,7 @@ fn assert_graph_retry_after_abort(
 }
 
 #[test]
-fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
+fn terminal_signal_after_successful_headless_publication_preserves_frame_state() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let mut surface =
         pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0)).unwrap();
@@ -28616,12 +28612,9 @@ fn terminal_signal_after_transaction_completion_preserves_public_frame_state() {
         base_color: Color::TRANSPARENT,
         debug: false,
     };
-    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
     let current = pollster::block_on(renderer.render(&mut surface, &next, next_parameters))
-        .unwrap_or_else(|error| {
-            panic!("a terminal signal after clean finish rewrote the completed frame: {error}")
-        });
-    drop(loss);
+        .unwrap_or_else(|error| panic!("the replacement frame must publish: {error}"));
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
 
     assert_eq!(surface.resource_state(), SurfaceResourceState::Ready);
     let current_texture = match &surface.backend {
@@ -31241,7 +31234,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
 
 #[cfg(feature = "render-window")]
 #[test]
-fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
+fn presented_terminal_signal_after_publication_fails_the_next_operation() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
     let scene = composition_presented_masked_blended_scene_for_test(rect);
 
@@ -31264,12 +31257,9 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     let target_before = presented_target_identity_for_test(&surface);
     let resource_before = presented_resource_id_for_test(&surface);
 
-    let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
     let stats = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
-        .unwrap_or_else(|error| {
-            panic!("a terminal signal after clean finish rewrote the completed frame: {error}")
-        });
-    drop(loss);
+        .unwrap_or_else(|error| panic!("the presented graph frame must publish: {error}"));
+    renderer.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
 
     let presented = presented_observation_for_test(&surface);
     assert_eq!(presented.acquire_attempt_count_for_test(), 1);

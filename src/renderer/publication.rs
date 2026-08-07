@@ -56,62 +56,10 @@ impl Renderer {
         GpuOperationDraft::new(&mut published, publication).commit();
         let publication =
             published.expect("a clean GPU transaction must commit its staged public state");
-        #[cfg(test)]
-        {
-            let Some(publication_signal) = self
-                .backend
-                .as_mut()
-                .and_then(|backend| backend.device_signal_for_test(device_identity))
-            else {
-                panic!("a clean frame must retain its device signal until publication");
-            };
-            inject_final_publication_loss_for_test(&publication_signal);
-        }
         let stats = publication.commit(self, surface);
         if let Some(backend) = self.backend.as_mut() {
             backend.observe_device_terminal(device_identity);
         }
         Ok(stats)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn uploaded_images_for_test(&self) -> HashSet<ImageId> {
-        self.uploaded_images.clone()
-    }
-}
-
-/// Private control that injects loss after a clean transaction and before publication.
-#[cfg(test)]
-pub(crate) struct ScopedFinalPublicationLossForTest {
-    previous: bool,
-}
-
-#[cfg(test)]
-thread_local! {
-    static ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST: std::cell::RefCell<bool> =
-        const { std::cell::RefCell::new(false) };
-}
-
-#[cfg(test)]
-impl ScopedFinalPublicationLossForTest {
-    pub(crate) fn after_transaction_completion() -> Self {
-        let previous = ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| active.replace(true));
-        Self { previous }
-    }
-}
-
-#[cfg(test)]
-impl Drop for ScopedFinalPublicationLossForTest {
-    fn drop(&mut self) {
-        ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous;
-        });
-    }
-}
-
-#[cfg(test)]
-pub(super) fn inject_final_publication_loss_for_test(signal: &super::backend::DeviceSignal) {
-    if ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| *active.borrow()) {
-        signal.record_loss_for_test(crate::DeviceLossReason::Unknown);
     }
 }

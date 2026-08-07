@@ -1,18 +1,10 @@
 mod options;
 mod publication;
+#[cfg(test)]
+mod test_support;
 
 pub use options::{Antialiasing, EffectQualityPolicy, Options, ResourceCacheBudget};
 use publication::RenderPublication;
-#[cfg(test)]
-pub(crate) use publication::ScopedFinalPublicationLossForTest;
-#[cfg(all(
-    test,
-    any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    )
-))]
-use publication::inject_final_publication_loss_for_test;
 
 #[cfg(test)]
 use super::resource::{ResourceManagerObservationForTest, WorkingFormat};
@@ -677,8 +669,6 @@ impl Renderer {
             )
             .await?;
         let publication_signal = backend.publication_signal(device_identity, operation)?;
-        #[cfg(test)]
-        inject_final_publication_loss_for_test(&publication_signal);
         let result = publication_signal.commit_if_no_terminal(operation, || {
             let SurfaceBackend::Presented { surface, state, .. } = &mut surface.backend else {
                 unreachable!("presented configuration must commit into the originating surface");
