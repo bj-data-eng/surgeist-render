@@ -60,15 +60,13 @@
   owning front door or child explicitly; no trait, callback abstraction,
   dynamic dispatch, duplicated state, compatibility module, `include!`, or
   `#[path]` bridge may disguise an ownership cycle.
-- M04.5 applies only during T01-T02 and T04-T05: a minimal intrinsic
-  `#[cfg(test)]` raw fact may travel with the production value it observes until
-  the immediately following test-support task. No production child imports
-  test support, and final production children own no fixture, fault control,
-  observation model/aggregation, or global observation bridge.
-- `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, `src/tests.rs`, the
-  already-settled frame/pass/shader/resource hierarchies, backend/renderer
-  monoliths, public exports, dependencies, features, error codes, and test
-  expectations are protected surfaces.
+- M04.5 applies only in production-move tasks T01, T03, T05, and T07: a minimal
+  intrinsic test raw fact may travel only until the immediately following T02,
+  T04, T06, or T08 extraction. Final production children import no test support
+  and own no fixture, fault control, observation aggregation, or global bridge.
+- `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, `src/tests.rs`, settled
+  hierarchies, backend/renderer monoliths, public exports, dependencies,
+  features, error codes, and test expectations are protected surfaces.
 - Root integration, sibling repositories, API artifacts, unrelated cleanup,
   algorithm changes, error-policy changes, and the future backend, renderer,
   and focused-test cycles are excluded.
@@ -108,7 +106,8 @@
   visibility.
 - Keep Vello, transaction-readback, and test-support implementation temporarily
   in `mod.rs`. Graph-coupled observations may remain attached under M04.5 until
-  T03; do not detach them into global state or redesign the graph commit path.
+  the immediately following T02; do not detach them into global state or
+  redesign the graph commit path.
 - Before and after, run:
 
   ```sh
@@ -128,16 +127,39 @@
   cancellation, and publication observations are identical.
 - Intended commit: one transaction-front-door/graph-owner move.
 
-### 4.2 T02 Move Vello And Transaction-Readback Owners
+### 4.2 T02 Extract Graph Transaction Test Support
 
-- Start only from the reviewed T01 head. Move internal Vello payload,
+- Start only from the reviewed T01 head. Create test-gated
+  `gpu_transaction/test_support.rs` and move graph submission observations,
+  graph post-submit controls, scoped guards, checkpoints, and graph recorders
+  out of `graph.rs`; also move separable operation-wide test support.
+- Production files retain only minimal intrinsic per-value raw facts/accessors;
+  they do not import test support or own a fault control, observation
+  model/aggregation, or global bridge.
+- Before and after, run all T01 focused tests plus:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render post_submit_scope_failure_discards_prepared_resources_with_nonzero_budget
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: graph/operation test support is test-only immediately after the
+  graph move; graph/shared transaction owners have no test-support dependency
+  or global bridge; focused behavior and observations are identical.
+- Intended commit: one graph-transaction-test-support extraction.
+
+### 4.3 T03 Move Vello And Transaction-Readback Owners
+
+- Start only from the reviewed T02 head. Move internal Vello payload,
   submission, and resource commit proof to `vello.rs`. Move pending/committed
   readback submission facts and transitions to `readback.rs`. Reconcile shared
   transaction methods in `mod.rs` through explicit child contracts.
-- Preserve one transaction generation, scope resolution, queue submission,
+- Preserve transaction generation, scope resolution, queue submission,
   post-submit ordering, lease commit/discard, device-signal precedence, and
   readback submission index. Vello-coupled observations may remain attached
-  under M04.5 until T03.
+  only until the immediately following T04.
 - Before and after, run:
 
   ```sh
@@ -152,23 +174,22 @@
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
   ```
 
-- Acceptance: all four production transaction files exist; each M05.3
-  responsibility has one owner; shared transaction coordination remains narrow;
-  operation, Vello, and readback submission behavior and observations are
-  identical; no new crate-level edge exists.
+- Acceptance: all four production transaction files exist; each M05.3 owner is
+  distinct; shared coordination remains narrow; operation, Vello, and readback
+  submission behavior and observations are identical; no new crate edge exists.
 - Intended commit: one Vello/readback transaction-owner move.
 
-### 4.3 T03 Move Transaction Test Support And Reconcile Front Door
+### 4.4 T04 Complete Transaction Test Support And Reconcile Front Door
 
-- Start only from the reviewed T02 head. Move operation, graph, and Vello
-  submission observation models/aggregation, post-submit controls, scoped test
-  guards, checkpoints, and test-only recorders to test-gated
-  `gpu_transaction/test_support.rs`.
+- Start only from the reviewed T03 head. Move remaining Vello observation
+  models/aggregation, post-submit controls, scoped guards, checkpoints, and
+  recorders to the existing test-gated `gpu_transaction/test_support.rs`;
+  reconcile any remaining operation-wide support there.
 - Leave production children only minimal intrinsic per-value raw facts or
   accessors that cannot be derived from production state without changing
   semantics. Production children may not import test support or own a fixture,
   fault control, observation model/aggregation, or global bridge.
-- Before and after, run all T01 and T02 focused tests plus:
+- Before and after, run all T01 and T03 focused tests plus:
 
   ```sh
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_direct_post_submit_failure_preserves_previous_and_initial_publication
@@ -187,15 +208,16 @@
   default suite and all focused observations remain identical.
 - Intended commit: one transaction-test-support reconciliation.
 
-### 4.4 T04 Establish Readback Front Door, Layout, And Lifecycle Owners
+### 4.5 T05 Establish Readback Front Door, Layout, And Lifecycle Owners
 
-- Start only from the reviewed T03 head. Replace `src/readback.rs` with
+- Start only from the reviewed T04 head. Replace `src/readback.rs` with
   `src/readback/mod.rs`. Move row-layout construction/validation, mapped-range
   validation, and padded-row decode to `layout.rs`. Move phase, owner, staging
   disposition, cleanup, map state, and lifecycle transitions to `lifecycle.rs`.
 - Keep native completion/polling/future and readback test support temporarily in
   `mod.rs`. Lifecycle-coupled test facts may remain attached under M04.5 until
-  T06; row bytes, ranges, cleanup actions, and state transitions do not change.
+  the immediately following T06; row bytes, ranges, cleanup actions, and state
+  transitions do not change.
 - Before and after, run:
 
   ```sh
@@ -215,12 +237,32 @@
   waking, and publication behavior are unchanged.
 - Intended commit: one readback-front-door/layout/lifecycle move.
 
-### 4.5 T05 Move Native Readback Owner
+### 4.6 T06 Extract Readback Lifecycle Test Support
 
-- Start only from the reviewed T04 head. Move completion callback/state, native
+- Start only from the reviewed T05 head. Create test-gated
+  `readback/test_support.rs`; move lifecycle probes/observations/aggregation out
+  of production. Native observations remain with the staged operation until T07.
+- Before and after, run all T05 focused tests plus:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: lifecycle support is test-only immediately after its production
+  move; layout/lifecycle have no test-support dependency or global bridge;
+  native observations remain attached to their staged native operation.
+- Intended commit: one readback-lifecycle-test-support extraction.
+
+### 4.7 T07 Move Native Readback Owner
+
+- Start only from the reviewed T06 head. Move completion callback/state, native
   polling decision and helper, helper/callback ownership, `ReadbackMapFuture`,
   and native completion behavior to `native.rs`. Keep the operation entry point
   in `mod.rs` and communicate through explicit layout/lifecycle/native facts.
+  Native-coupled test facts may remain attached only until the immediately
+  following T08.
 - Preserve callback-at-most-once behavior, latest-waker replacement, native
   polling deadline, helper lifetime, cancel/drop behavior, late callback
   discard, staging cleanup, and diagnostic text/error conditions.
@@ -242,15 +284,15 @@
   focused completion/cancellation behavior and diagnostics are unchanged.
 - Intended commit: one native-readback-owner move.
 
-### 4.6 T06 Move Readback Test Support And Reconcile Front Door
+### 4.8 T08 Complete Readback Test Support And Reconcile Front Door
 
-- Start only from the reviewed T05 head. Move native observation models,
+- Start only from the reviewed T07 head. Move native observation models,
   standalone state-machine/completion probes, scoped guards, test lifetimes,
   and test-only aggregation to test-gated `readback/test_support.rs`.
 - Reconcile `readback/mod.rs` to test-gated child declaration/reexports, the
   readback operation entry point, and only genuine coordination spanning
-  production children. Apply the same final production/test boundary as T03.
-- Before and after, run all T04 and T05 focused tests plus:
+  production children. Apply the same final production/test boundary as T04.
+- Before and after, run all T05 and T07 focused tests plus:
 
   ```sh
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render readback_transaction_maps_validation_internal_oom_and_terminal_failures
