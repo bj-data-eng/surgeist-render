@@ -1,3 +1,11 @@
+#[cfg(test)]
+use self::lifecycle::{
+    ReadbackLifecycle, ReadbackPhase, ReadbackStagingCleanupAction, ReadbackStagingDisposition,
+};
+use self::{
+    layout::{ReadbackLayout, decode_padded_rows},
+    lifecycle::{ReadbackOwner, ReadbackStagingMapState},
+};
 use super::{
     BackendErrorCode, Error, ImageBuffer, PhysicalSize, Result, RuntimeOperation,
     backend::{Backend, DeviceSlotIdentity},
@@ -5,11 +13,13 @@ use super::{
 };
 use std::{
     future::Future,
-    ops::Range,
     pin::Pin,
     sync::{Arc, Mutex},
     task::{Context, Poll, Waker},
 };
+
+mod layout;
+mod lifecycle;
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{thread, time::Duration};
@@ -21,268 +31,9 @@ use std::{
     time::Instant,
 };
 
-const RGBA8_BYTES_PER_PIXEL: u64 = 4;
-const COPY_BYTES_PER_ROW_ALIGNMENT: u64 = 256;
-
 #[cfg(all(test, not(target_arch = "wasm32")))]
 thread_local! {
     static ACTIVE_NATIVE_READBACK_OBSERVATION_FOR_TEST: RefCell<Option<NativeReadbackObservationForTest>> = const { RefCell::new(None) };
-}
-
-struct ReadbackLayout {
-    width: u32,
-    height: u32,
-    row_bytes: usize,
-    padded_bytes_per_row: u32,
-    buffer_size: u64,
-    decoded_len: usize,
-    mapped_range: ValidatedMappedRange,
-}
-
-impl ReadbackLayout {
-    fn try_new(size: PhysicalSize) -> Result<Self> {
-        let width = size.width();
-        let height = size.height();
-        let row_bytes_u64 = u64::from(width)
-            .checked_mul(RGBA8_BYTES_PER_PIXEL)
-            .ok_or_else(|| readback_failed("readback row byte count overflowed"))?;
-        let padded_bytes_per_row_u64 = row_bytes_u64
-            .checked_add(COPY_BYTES_PER_ROW_ALIGNMENT - 1)
-            .map(|bytes| bytes / COPY_BYTES_PER_ROW_ALIGNMENT * COPY_BYTES_PER_ROW_ALIGNMENT)
-            .ok_or_else(|| readback_failed("aligned readback row byte count overflowed"))?;
-        let padded_bytes_per_row = u32::try_from(padded_bytes_per_row_u64)
-            .map_err(|_| readback_failed("aligned readback row byte count exceeds WGPU limits"))?;
-        let buffer_size = padded_bytes_per_row_u64
-            .checked_mul(u64::from(height))
-            .ok_or_else(|| readback_failed("readback staging buffer size overflowed"))?;
-        let row_bytes = usize::try_from(row_bytes_u64)
-            .map_err(|_| readback_failed("readback row byte count exceeds addressable memory"))?;
-        let decoded_len = row_bytes
-            .checked_mul(
-                usize::try_from(height)
-                    .map_err(|_| readback_failed("readback height exceeds addressable memory"))?,
-            )
-            .ok_or_else(|| readback_failed("decoded readback byte count overflowed"))?;
-        let mapped_range = ValidatedMappedRange::try_new(buffer_size)?;
-        Ok(Self {
-            width,
-            height,
-            row_bytes,
-            padded_bytes_per_row,
-            buffer_size,
-            decoded_len,
-            mapped_range,
-        })
-    }
-}
-
-#[derive(Clone)]
-struct ValidatedMappedRange {
-    bytes: Range<wgpu::BufferAddress>,
-}
-
-impl ValidatedMappedRange {
-    fn try_new(buffer_size: u64) -> Result<Self> {
-        let bytes = 0..buffer_size;
-        let length = bytes
-            .end
-            .checked_sub(bytes.start)
-            .ok_or_else(|| readback_failed("readback mapped range was reversed"))?;
-        if length == 0 {
-            return Err(readback_failed("readback mapped range must be nonempty"));
-        }
-        if bytes.start % wgpu::MAP_ALIGNMENT != 0 {
-            return Err(readback_failed(
-                "readback mapped range offset was not map-aligned",
-            ));
-        }
-        if length % wgpu::COPY_BUFFER_ALIGNMENT != 0 {
-            return Err(readback_failed(
-                "readback mapped range length was not four-byte aligned",
-            ));
-        }
-        Ok(Self { bytes })
-    }
-
-    fn bytes(&self) -> Range<wgpu::BufferAddress> {
-        self.bytes.clone()
-    }
-}
-
-enum ReadbackPhase<I> {
-    Allocated,
-    CopySubmitted { submission_index: I },
-    MapPending,
-    Mapped,
-    PublishedBytes,
-    Failed,
-    Canceled,
-}
-
-struct ReadbackLifecycle<I> {
-    phase: ReadbackPhase<I>,
-}
-
-impl<I> ReadbackLifecycle<I> {
-    const fn allocated() -> Self {
-        Self {
-            phase: ReadbackPhase::Allocated,
-        }
-    }
-
-    fn copy_submitted(&mut self, submission_index: I) {
-        assert!(
-            matches!(&self.phase, ReadbackPhase::Allocated),
-            "readback copy submission must follow allocation"
-        );
-        self.phase = ReadbackPhase::CopySubmitted { submission_index };
-    }
-
-    fn map_pending(&mut self) {
-        let previous = std::mem::replace(&mut self.phase, ReadbackPhase::MapPending);
-        let ReadbackPhase::CopySubmitted { submission_index } = previous else {
-            self.phase = previous;
-            panic!("readback mapping must follow copy submission");
-        };
-        drop(submission_index);
-    }
-
-    fn mapped(&mut self) {
-        assert!(
-            matches!(&self.phase, ReadbackPhase::MapPending),
-            "mapped readback bytes require callback success"
-        );
-        self.phase = ReadbackPhase::Mapped;
-    }
-
-    fn published(&mut self) {
-        assert!(
-            matches!(&self.phase, ReadbackPhase::Mapped),
-            "readback bytes may publish only from the mapped phase"
-        );
-        self.phase = ReadbackPhase::PublishedBytes;
-    }
-
-    fn fail(&mut self) -> bool {
-        if self.is_uncertain() {
-            self.phase = ReadbackPhase::Failed;
-            true
-        } else {
-            false
-        }
-    }
-
-    fn cancel(&mut self) -> bool {
-        if self.is_uncertain() {
-            self.phase = ReadbackPhase::Canceled;
-            true
-        } else {
-            false
-        }
-    }
-
-    const fn is_uncertain(&self) -> bool {
-        matches!(
-            &self.phase,
-            ReadbackPhase::Allocated
-                | ReadbackPhase::CopySubmitted { .. }
-                | ReadbackPhase::MapPending
-                | ReadbackPhase::Mapped
-        )
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReadbackStagingDisposition {
-    Idle,
-    MapPending,
-    MappedActive,
-    Released,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ReadbackStagingCleanupAction {
-    Drop,
-    UnmapThenDrop,
-    None,
-}
-
-struct ReadbackStagingMapState {
-    disposition: Mutex<ReadbackStagingDisposition>,
-}
-
-impl ReadbackStagingMapState {
-    fn idle() -> Self {
-        Self {
-            disposition: Mutex::new(ReadbackStagingDisposition::Idle),
-        }
-    }
-
-    fn map_pending(&self) {
-        let mut disposition = self
-            .disposition
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        assert_eq!(
-            *disposition,
-            ReadbackStagingDisposition::Idle,
-            "a readback map request requires known-idle staging"
-        );
-        *disposition = ReadbackStagingDisposition::MapPending;
-    }
-
-    fn map_callback_completed(&self, succeeded: bool) {
-        let mut disposition = self
-            .disposition
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match *disposition {
-            ReadbackStagingDisposition::MapPending => {
-                *disposition = if succeeded {
-                    ReadbackStagingDisposition::MappedActive
-                } else {
-                    ReadbackStagingDisposition::Idle
-                };
-            }
-            ReadbackStagingDisposition::Released => {}
-            ReadbackStagingDisposition::Idle | ReadbackStagingDisposition::MappedActive => {
-                panic!("a readback map request callback may complete only once")
-            }
-        }
-    }
-
-    fn assert_mapped_active(&self) {
-        assert_eq!(
-            *self
-                .disposition
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()),
-            ReadbackStagingDisposition::MappedActive,
-            "map callback success must make staging actively mapped"
-        );
-    }
-
-    fn take_cleanup_action(&self) -> ReadbackStagingCleanupAction {
-        let mut disposition = self
-            .disposition
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match std::mem::replace(&mut *disposition, ReadbackStagingDisposition::Released) {
-            ReadbackStagingDisposition::Idle => ReadbackStagingCleanupAction::Drop,
-            ReadbackStagingDisposition::MapPending | ReadbackStagingDisposition::MappedActive => {
-                ReadbackStagingCleanupAction::UnmapThenDrop
-            }
-            ReadbackStagingDisposition::Released => ReadbackStagingCleanupAction::None,
-        }
-    }
-
-    #[cfg(test)]
-    fn disposition_for_test(&self) -> ReadbackStagingDisposition {
-        *self
-            .disposition
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
@@ -678,159 +429,6 @@ fn take_native_readback_observation_for_test() -> Option<NativeReadbackObservati
     ACTIVE_NATIVE_READBACK_OBSERVATION_FOR_TEST.with(|active| active.borrow_mut().take())
 }
 
-struct ReadbackOwner {
-    lifecycle: ReadbackLifecycle<wgpu::SubmissionIndex>,
-    staging: Option<wgpu::Buffer>,
-    staging_map: Arc<ReadbackStagingMapState>,
-    layout: ReadbackLayout,
-    physical_size: PhysicalSize,
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    observation: Option<NativeReadbackObservationForTest>,
-}
-
-impl ReadbackOwner {
-    fn allocated(
-        staging: wgpu::Buffer,
-        layout: ReadbackLayout,
-        physical_size: PhysicalSize,
-    ) -> Self {
-        Self {
-            lifecycle: ReadbackLifecycle::allocated(),
-            staging: Some(staging),
-            staging_map: Arc::new(ReadbackStagingMapState::idle()),
-            layout,
-            physical_size,
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            observation: None,
-        }
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn attach_observation_for_test(&mut self, observation: NativeReadbackObservationForTest) {
-        observation.attach_staging(&self.staging_map);
-        self.observation = Some(observation);
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn observation_for_test(&self) -> Option<NativeReadbackObservationForTest> {
-        self.observation.clone()
-    }
-
-    fn staging(&self) -> &wgpu::Buffer {
-        self.staging
-            .as_ref()
-            .expect("an uncertain readback phase must own its staging buffer")
-    }
-
-    fn copy_submitted(&mut self, submission_index: wgpu::SubmissionIndex) {
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &self.observation {
-            observation.record_copy_submitted(&submission_index);
-        }
-        self.lifecycle.copy_submitted(submission_index);
-    }
-
-    fn map_pending(&mut self) {
-        self.lifecycle.map_pending();
-        self.staging_map.map_pending();
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &self.observation {
-            observation.record_phase(NativeReadbackPhaseForTest::MapPending);
-        }
-    }
-
-    fn mapped(&mut self) {
-        self.staging_map.assert_mapped_active();
-        self.lifecycle.mapped();
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &self.observation {
-            observation.record_phase(NativeReadbackPhaseForTest::Mapped);
-        }
-    }
-
-    fn staging_map(&self) -> Arc<ReadbackStagingMapState> {
-        Arc::clone(&self.staging_map)
-    }
-
-    fn mapped_range(&self) -> Range<wgpu::BufferAddress> {
-        self.layout.mapped_range.bytes()
-    }
-
-    fn fail(&mut self) {
-        if self.lifecycle.fail() {
-            self.release_staging();
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            if let Some(observation) = &self.observation {
-                observation.record_phase(NativeReadbackPhaseForTest::Failed);
-            }
-        }
-    }
-
-    fn cancel(&mut self) {
-        if self.lifecycle.cancel() {
-            self.release_staging();
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            if let Some(observation) = &self.observation {
-                observation.record_phase(NativeReadbackPhaseForTest::Canceled);
-            }
-        }
-    }
-
-    fn publish_mapped(mut self, rgba: Vec<u8>) -> Result<ImageBuffer> {
-        self.release_staging();
-        match ImageBuffer::try_new(self.physical_size, rgba) {
-            Ok(image) => {
-                self.lifecycle.published();
-                #[cfg(all(test, not(target_arch = "wasm32")))]
-                if let Some(observation) = &self.observation {
-                    observation.record_phase(NativeReadbackPhaseForTest::PublishedBytes);
-                }
-                Ok(image)
-            }
-            Err(source) => {
-                self.lifecycle.fail();
-                #[cfg(all(test, not(target_arch = "wasm32")))]
-                if let Some(observation) = &self.observation {
-                    observation.record_phase(NativeReadbackPhaseForTest::Failed);
-                }
-                Err(Error::new(
-                    BackendErrorCode::ReadbackFailed,
-                    "decoded readback bytes did not form a valid RGBA8 image",
-                )
-                .with_source(source))
-            }
-        }
-    }
-
-    fn release_staging(&mut self) {
-        let action = self.staging_map.take_cleanup_action();
-        let Some(staging) = self.staging.take() else {
-            assert_eq!(
-                action,
-                ReadbackStagingCleanupAction::None,
-                "readback staging cleanup action must be consumed with ownership"
-            );
-            return;
-        };
-        match action {
-            ReadbackStagingCleanupAction::Drop => drop(staging),
-            ReadbackStagingCleanupAction::UnmapThenDrop => {
-                staging.unmap();
-                drop(staging);
-            }
-            ReadbackStagingCleanupAction::None => {
-                unreachable!("owned readback staging cannot already be released")
-            }
-        }
-    }
-}
-
-impl Drop for ReadbackOwner {
-    fn drop(&mut self) {
-        self.cancel();
-    }
-}
-
 enum ReadbackCompletionResult {
     Map(std::result::Result<(), wgpu::BufferAsyncError>),
     #[cfg(not(target_arch = "wasm32"))]
@@ -1214,7 +812,7 @@ pub(crate) async fn read_texture_rgba(
         )?;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("Surgeist scoped texture readback"),
-            size: layout.buffer_size,
+            size: layout.buffer_size(),
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -1232,13 +830,13 @@ pub(crate) async fn read_texture_rgba(
                 buffer: owner.staging(),
                 layout: wgpu::TexelCopyBufferLayout {
                     offset: 0,
-                    bytes_per_row: Some(owner.layout.padded_bytes_per_row),
+                    bytes_per_row: Some(owner.layout.padded_bytes_per_row()),
                     rows_per_image: None,
                 },
             },
             wgpu::Extent3d {
-                width: owner.layout.width,
-                height: owner.layout.height,
+                width: owner.layout.width(),
+                height: owner.layout.height(),
                 depth_or_array_layers: 1,
             },
         );
@@ -1279,33 +877,6 @@ pub(crate) async fn read_texture_rgba(
         return Err(error);
     }
     readback_result
-}
-
-fn decode_padded_rows(layout: &ReadbackLayout, mapped: &[u8]) -> Result<Vec<u8>> {
-    let mut rgba = Vec::with_capacity(layout.decoded_len);
-    for row in 0..layout.height {
-        let start = u64::from(row)
-            .checked_mul(u64::from(layout.padded_bytes_per_row))
-            .and_then(|offset| usize::try_from(offset).ok())
-            .ok_or_else(|| readback_failed("mapped readback row offset overflowed"))?;
-        let end = start
-            .checked_add(layout.row_bytes)
-            .ok_or_else(|| readback_failed("mapped readback row end overflowed"))?;
-        let row = mapped
-            .get(start..end)
-            .ok_or_else(|| readback_failed("mapped readback row was incomplete"))?;
-        rgba.extend_from_slice(row);
-    }
-    if rgba.len() != layout.decoded_len {
-        return Err(readback_failed(
-            "decoded readback byte count did not match the validated layout",
-        ));
-    }
-    Ok(rgba)
-}
-
-fn readback_failed(message: &'static str) -> Error {
-    Error::new(BackendErrorCode::ReadbackFailed, message)
 }
 
 #[cfg(test)]
