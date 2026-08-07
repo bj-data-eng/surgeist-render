@@ -1,10 +1,10 @@
 use crate::{
     Antialiasing, BackdropCaptureBounds, BackdropFilterInput, BlendMode, Capabilities, Color,
     EffectQualityPolicy, ErrorCode, Extend, FilterAmount, FilterAngle, FilterCapabilities,
-    FilterList, FilterOp, Format, ImageQuality, InvalidValue, Layer, MaskClipCapabilities,
+    FilterList, FilterOp, Format, Image, ImageQuality, InvalidValue, Layer, MaskClipCapabilities,
     OffscreenPipelineCapabilities, Options, Parameters, PhysicalSize, Point, PrimitiveFamily,
-    PrimitiveOperation, Rect, RenderRoute, Renderer, ResourceCacheBudget, Result, Scene, Size,
-    Transform, UnitFilterAmount, UnsupportedPrimitive,
+    PrimitiveOperation, Rect, RenderRoute, Renderer, ResolvedLayerAlphaMask, ResourceCacheBudget,
+    Result, Scene, Shape, Size, Transform, UnitFilterAmount, UnsupportedPrimitive,
     backend::{Backend, DeviceCapabilities},
     command,
     pass::pass_spatial_uniform_bytes_for_test,
@@ -18,8 +18,7 @@ use super::{
     UnwrapOrPanicForTest, assert_gaussian_kernel_upload_lifecycle,
     composition_composite_requests_for_test, composition_frame_context_for_test,
     composition_mask_image_for_test, composition_selected_backend_and_requests_for_test,
-    composition_shader_composite_commands_for_test,
-    composition_single_mask_composition_commands_for_test, default_graph_working_format_for_test,
+    composition_shader_composite_commands_for_test, default_graph_working_format_for_test,
     graph_encoding_backend_for_test,
     support::{
         authored_color_filter_runs_for_test, bounded_backdrop_graph_commands_for_test,
@@ -777,6 +776,33 @@ fn expected_composite_parameter_bytes_for_test() -> [u8; 112] {
     write_u32(&mut bytes, 96, 1);
     write_u32(&mut bytes, 100, 1);
     bytes
+}
+
+fn composition_single_mask_composition_commands_for_test(
+    image: Image,
+    bounds: Rect,
+    transform: Transform,
+    opacity: f32,
+    blend: BlendMode,
+    with_clip: bool,
+) -> command::RenderCommands {
+    let mut layer = Layer::new()
+        .try_transform(transform)
+        .unwrap()
+        .try_opacity(opacity)
+        .unwrap()
+        .blend(blend)
+        .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(image, bounds).unwrap());
+    if with_clip {
+        layer = layer
+            .try_clip(Shape::rect(Rect::new(-3.0, -2.0, 12.0, 9.0)))
+            .unwrap();
+    }
+    let mut scene = Scene::new();
+    scene.layer(layer, |scene| {
+        scene.fill(Rect::new(-1.0, 0.5, 6.0, 3.0), Color::BLACK);
+    });
+    scene.normalize(Capabilities::CURRENT).unwrap()
 }
 
 #[test]

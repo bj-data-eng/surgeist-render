@@ -6769,33 +6769,6 @@ fn composition_mask_image_for_test(
     .extend(extend)
 }
 
-fn composition_single_mask_composition_commands_for_test(
-    image: Image,
-    bounds: Rect,
-    transform: Transform,
-    opacity: f32,
-    blend: BlendMode,
-    with_clip: bool,
-) -> command::RenderCommands {
-    let mut layer = Layer::new()
-        .try_transform(transform)
-        .unwrap()
-        .try_opacity(opacity)
-        .unwrap()
-        .blend(blend)
-        .with_resolved_alpha_mask(ResolvedLayerAlphaMask::try_new(image, bounds).unwrap());
-    if with_clip {
-        layer = layer
-            .try_clip(Shape::rect(Rect::new(-3.0, -2.0, 12.0, 9.0)))
-            .unwrap();
-    }
-    let mut scene = Scene::new();
-    scene.layer(layer, |scene| {
-        scene.fill(Rect::new(-1.0, 0.5, 6.0, 3.0), Color::BLACK);
-    });
-    scene.normalize(Capabilities::CURRENT).unwrap()
-}
-
 fn composition_frame_context_for_test() -> super::frame::FrameContext {
     super::frame::FrameContext::try_new(
         Size::new(64.0, 48.0),
