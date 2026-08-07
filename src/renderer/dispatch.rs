@@ -55,7 +55,7 @@ pub(super) enum RendererFrameDispatch {
 }
 
 #[must_use = "prepared renderer execution must reach its selected GPU transaction"]
-pub(super) enum PreparedRendererExecution {
+enum PreparedRendererExecution {
     DirectVello(Box<VelloScene>),
     ExactGraph(Box<ExactSurfaceGraph>),
 }
