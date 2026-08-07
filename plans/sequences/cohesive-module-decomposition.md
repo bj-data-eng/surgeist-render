@@ -9,12 +9,13 @@
 - Published prerequisite: P02-I01 at
   `4f7fcb8b81d96f16b426f045b336aaba345c4cfa`.
 - Specification: `plans/specs/cohesive-module-decomposition.md` at
-  `3365399`, normalized SHA-256
-  `892c5c1c2162a07c83bc124c3687e05ff62c6906930c154f25117792ec63d035`.
+  `314b8252e8db18130abb8031033b5a0be624c81a`, normalized SHA-256
+  `415257797bf18fd6d6a2d3e5a9ffcd07bc42793490da56505a83e7300aa6d1bb`.
 - Initiative outcome: private modules own the cohesive responsibilities in
-  specification M05 while public API, behavior, diagnostics, dependencies,
-  features, targets, and safety remain unchanged and no numerical size gate is
-  introduced.
+  specification M05, and non-plan filenames and code use rendering-domain names
+  instead of planning chronology. Public API, behavior, dependencies, features,
+  targets, and safety remain unchanged; diagnostic wording changes only to
+  remove planning identifiers, and no numerical size gate is introduced.
 
 ## 2 Ordering Constraints
 
@@ -33,6 +34,9 @@
   parameter construction, and pass-owned test support. The intermediate
   `pass/mod.rs` may retain the not-yet-moved second-cycle implementation, but it
   may not introduce a temporary shim or alternate model.
+- Encoding-coupled test observations may move with their production value during
+  C05 only when required to preserve per-value semantics; C05 extracts them to
+  pass test support before its final state and introduces no global bridge.
 - GPU transaction and readback ownership precede backend decomposition so the
   backend can import stable transaction/readback front doors while it moves.
 - Renderer moves after frame, pass, resource, transaction, readback, and backend
@@ -128,16 +132,20 @@
   realization, and prepared bindings to `prepare.rs`; move graph encoding,
   capture handoff, scheduling, and receipts to `encode.rs`; move pass-specific
   uniform construction to `parameters.rs`; move pass-owned fixtures,
-  injections, malformed plans, and observations to `test_support.rs`.
-- Mechanical boundary: leave only true pass orchestration and explicit
+  injections, malformed plans, and observations to `test_support.rs`; replace
+  every planning identifier in tracked non-plan filenames and Rust/WGSL code
+  with the semantic M04.6 vocabulary.
+- Boundary: leave only true pass orchestration and explicit
   crate-visible reexports in `pass/mod.rs`; preserve preparation failure
   atomicity, cache/resource publication, encoded order, receipt facts, and all
-  allowed pass edges.
+  allowed pass edges; preserve per-summary test observations during their staged
+  move and change diagnostic prose/labels only to remove planning chronology.
 - Exit evidence: pre/post preparation, encoding, parameter, failure,
   cancellation, and observation tests; all feature checks/Clippy; no remaining
-  M05.2-owned item in `pass/mod.rs`; configured cycle matrix; task and holistic
-  reviews.
-- Handoff: publish the complete runtime-pass private hierarchy.
+  M05.2-owned item in `pass/mod.rs`; empty transient non-plan filename and code
+  predicates; configured cycle matrix; task and holistic reviews.
+- Handoff: publish the complete runtime-pass private hierarchy and semantically
+  named non-plan source.
 
 ### C06 GPU Transaction And Readback
 
@@ -239,8 +247,9 @@
 
 - No cycle changes `src/lib.rs` public exports except a private `mod` file-to-
   directory resolution that preserves the same module name.
-- No public signature, default, diagnostic, behavior, dependency, feature,
-  target, example contract, or safety policy changes.
+- No public signature, default, behavior, dependency, feature, target, example
+  contract, or safety policy changes. Diagnostics change only to replace planning
+  chronology with equivalent rendering-domain context.
 - No algorithm or test oracle changes. A discovered semantic defect is reported
   separately and is not repaired within this sequence.
 - No `include!`, `#[path]`, generated concatenation, copied definition,
@@ -260,5 +269,6 @@
 P02-I02 completes only after C01-C10 are each task-reviewed, holistically
 reviewed, published, and read back in order; every M05 child owns its specified
 responsibility; the public front door and observable rendering behavior remain
-unchanged; the full M07 evidence is green; and no numerical size enforcement or
+unchanged; tracked non-plan filenames and Rust/WGSL code contain no planning
+identifier; the full M07 evidence is green; and no numerical size enforcement or
 root integration change has been introduced.
