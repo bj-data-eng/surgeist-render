@@ -4,7 +4,7 @@
 
 - Cycle: `P02/I02/S01/C08`.
 - Owning repository: `surgeist-render`.
-- Status: `reviewed`.
+- Status: `in_progress`.
 - Cycle base: published/read-back C07
   `a8719e7633bc6445542bb4c5d3b2ac16294b117b`.
 - Specification: `plans/specs/cohesive-module-decomposition.md` at
