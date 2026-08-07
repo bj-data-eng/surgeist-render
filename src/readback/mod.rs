@@ -1,7 +1,3 @@
-#[cfg(test)]
-use self::lifecycle::{
-    ReadbackLifecycle, ReadbackPhase, ReadbackStagingCleanupAction, ReadbackStagingDisposition,
-};
 use self::{
     layout::{ReadbackLayout, decode_padded_rows},
     lifecycle::{ReadbackOwner, ReadbackStagingMapState},
@@ -20,6 +16,14 @@ use std::{
 
 mod layout;
 mod lifecycle;
+#[cfg(test)]
+mod test_support;
+
+#[cfg(test)]
+pub(crate) use test_support::{
+    ReadbackCleanupEventForTest, ReadbackCompletionForTest, ReadbackPhaseForTest,
+    ReadbackStagingDispositionForTest, ReadbackStateMachineForTest,
+};
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::{thread, time::Duration};
@@ -165,14 +169,17 @@ impl NativeReadbackObservationForTest {
         self.condition.changed.notify_all();
     }
 
-    fn record_completion_counts(&self, accepted_results: usize, discarded_results: usize) {
+    fn record_completion_result(&self, accepted: bool) {
         let mut state = self
             .condition
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.accepted_results = accepted_results;
-        state.discarded_results = discarded_results;
+        if accepted {
+            state.accepted_results = state.accepted_results.saturating_add(1);
+        } else {
+            state.discarded_results = state.discarded_results.saturating_add(1);
+        }
         self.condition.changed.notify_all();
     }
 
@@ -444,10 +451,6 @@ enum ReadbackCompletionStatus {
 
 struct ReadbackCompletionState {
     status: ReadbackCompletionStatus,
-    #[cfg(test)]
-    accepted_results: usize,
-    #[cfg(test)]
-    discarded_results: usize,
 }
 
 struct ReadbackCompletion {
@@ -461,10 +464,6 @@ impl ReadbackCompletion {
         Self {
             state: Mutex::new(ReadbackCompletionState {
                 status: ReadbackCompletionStatus::Pending { waker: None },
-                #[cfg(test)]
-                accepted_results: 0,
-                #[cfg(test)]
-                discarded_results: 0,
             }),
             #[cfg(all(test, not(target_arch = "wasm32")))]
             observation: None,
@@ -490,17 +489,17 @@ impl ReadbackCompletion {
             match previous {
                 ReadbackCompletionStatus::Pending { waker } => {
                     state.status = ReadbackCompletionStatus::Ready(result);
-                    #[cfg(test)]
-                    {
-                        state.accepted_results = state.accepted_results.saturating_add(1);
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
+                    if let Some(observation) = &self.observation {
+                        observation.record_completion_result(true);
                     }
                     waker
                 }
                 terminal => {
                     state.status = terminal;
-                    #[cfg(test)]
-                    {
-                        state.discarded_results = state.discarded_results.saturating_add(1);
+                    #[cfg(all(test, not(target_arch = "wasm32")))]
+                    if let Some(observation) = &self.observation {
+                        observation.record_completion_result(false);
                     }
                     None
                 }
@@ -509,18 +508,6 @@ impl ReadbackCompletion {
         if let Some(waker) = waker {
             waker.wake();
         }
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    fn record_completion_counts_for_test(&self) {
-        let Some(observation) = &self.observation else {
-            return;
-        };
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        observation.record_completion_counts(state.accepted_results, state.discarded_results);
     }
 
     fn poll(&self, context: &mut Context<'_>) -> Poll<ReadbackCompletionResult> {
@@ -591,8 +578,6 @@ fn map_completion_callback(
         }
         staging_map.map_callback_completed(result.is_ok());
         completion.complete(ReadbackCompletionResult::Map(result));
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        completion.record_completion_counts_for_test();
     }
 }
 
@@ -687,14 +672,20 @@ impl ReadbackMapFuture {
         mut owner: ReadbackOwner,
         device: wgpu::Device,
         submission_index: wgpu::SubmissionIndex,
+        #[cfg(all(test, not(target_arch = "wasm32")))] observation: Option<
+            NativeReadbackObservationForTest,
+        >,
     ) -> Result<Self> {
         #[cfg(all(test, not(target_arch = "wasm32")))]
-        let completion = Arc::new(
-            ReadbackCompletion::new().with_observation_for_test(owner.observation_for_test()),
-        );
+        let completion =
+            Arc::new(ReadbackCompletion::new().with_observation_for_test(observation.clone()));
         #[cfg(not(all(test, not(target_arch = "wasm32"))))]
         let completion = Arc::new(ReadbackCompletion::new());
         owner.map_pending();
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = &observation {
+            observation.record_phase(NativeReadbackPhaseForTest::MapPending);
+        }
         let staging_map = owner.staging_map();
         owner.staging().slice(owner.mapped_range()).map_async(
             wgpu::MapMode::Read,
@@ -709,6 +700,10 @@ impl ReadbackMapFuture {
                     Err(source) => {
                         completion.cancel();
                         owner.fail();
+                        #[cfg(all(test, not(target_arch = "wasm32")))]
+                        if let Some(observation) = &observation {
+                            observation.record_phase(NativeReadbackPhaseForTest::Failed);
+                        }
                         return Err(Error::new(
                             BackendErrorCode::ReadbackFailed,
                             "failed to start the native readback progress helper",
@@ -749,10 +744,18 @@ impl Future for ReadbackMapFuture {
             .expect("a readback map future must be polled to completion only once");
         if let Err(error) = completion_result(completion) {
             owner.fail();
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            if let Some(observation) = &this.completion.observation {
+                observation.record_phase(NativeReadbackPhaseForTest::Failed);
+            }
             return Poll::Ready(Err(error));
         }
 
         owner.mapped();
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = &this.completion.observation {
+            observation.record_phase(NativeReadbackPhaseForTest::Mapped);
+        }
         let decoded = {
             let mapped = owner
                 .staging()
@@ -761,9 +764,24 @@ impl Future for ReadbackMapFuture {
             decode_padded_rows(&owner.layout, &mapped)
         };
         match decoded {
-            Ok(rgba) => Poll::Ready(owner.publish_mapped(rgba)),
+            Ok(rgba) => {
+                let result = owner.publish_mapped(rgba);
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                if let Some(observation) = &this.completion.observation {
+                    observation.record_phase(if result.is_ok() {
+                        NativeReadbackPhaseForTest::PublishedBytes
+                    } else {
+                        NativeReadbackPhaseForTest::Failed
+                    });
+                }
+                Poll::Ready(result)
+            }
             Err(error) => {
                 owner.fail();
+                #[cfg(all(test, not(target_arch = "wasm32")))]
+                if let Some(observation) = &this.completion.observation {
+                    observation.record_phase(NativeReadbackPhaseForTest::Failed);
+                }
                 Poll::Ready(Err(error))
             }
         }
@@ -775,6 +793,10 @@ impl Drop for ReadbackMapFuture {
         if let Some(mut owner) = self.owner.take() {
             self.completion.cancel();
             owner.cancel();
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            if let Some(observation) = &self.completion.observation {
+                observation.record_phase(NativeReadbackPhaseForTest::Canceled);
+            }
         }
     }
 }
@@ -818,8 +840,8 @@ pub(crate) async fn read_texture_rgba(
         });
         let mut owner = ReadbackOwner::allocated(buffer, layout, physical_size);
         #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = observation {
-            owner.attach_observation_for_test(observation);
+        if let Some(observation) = &observation {
+            observation.attach_staging(&owner.staging_map());
         }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist scoped texture readback copy"),
@@ -841,7 +863,12 @@ pub(crate) async fn read_texture_rgba(
             },
         );
         let pending_submission = transaction.submit_readback(queue, encoder.finish());
-        owner.copy_submitted(pending_submission.submission_index());
+        let submission_index = pending_submission.submission_index();
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        if let Some(observation) = &observation {
+            observation.record_copy_submitted(&submission_index);
+        }
+        owner.copy_submitted(submission_index);
         (owner, pending_submission)
     };
 
@@ -851,6 +878,10 @@ pub(crate) async fn read_texture_rgba(
         Ok(submission) => submission,
         Err(error) => {
             owner.fail();
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            if let Some(observation) = &observation {
+                observation.record_phase(NativeReadbackPhaseForTest::Failed);
+            }
             return Err(error);
         }
     };
@@ -863,360 +894,27 @@ pub(crate) async fn read_texture_rgba(
         Ok((device, _)) => device.clone(),
         Err(error) => {
             owner.fail();
+            #[cfg(all(test, not(target_arch = "wasm32")))]
+            if let Some(observation) = &observation {
+                observation.record_phase(NativeReadbackPhaseForTest::Failed);
+            }
             return Err(error);
         }
     };
-    let readback_result =
-        match ReadbackMapFuture::start(owner, device, submission.into_submission_index()) {
-            Ok(readback) => readback.await,
-            Err(error) => Err(error),
-        };
+    let readback_result = match ReadbackMapFuture::start(
+        owner,
+        device,
+        submission.into_submission_index(),
+        #[cfg(all(test, not(target_arch = "wasm32")))]
+        observation,
+    ) {
+        Ok(readback) => readback.await,
+        Err(error) => Err(error),
+    };
 
     backend.observe_device_terminal(device_identity);
     if let Some(error) = backend.terminal_error(device_identity, operation) {
         return Err(error);
     }
     readback_result
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReadbackPhaseForTest {
-    Allocated,
-    CopySubmitted { submission_index: u64 },
-    MapPending,
-    Mapped,
-    PublishedBytes,
-    Failed,
-    Canceled,
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReadbackStagingDispositionForTest {
-    Idle,
-    MapPending,
-    MappedActive,
-    Released,
-}
-
-#[cfg(test)]
-impl From<ReadbackStagingDisposition> for ReadbackStagingDispositionForTest {
-    fn from(disposition: ReadbackStagingDisposition) -> Self {
-        match disposition {
-            ReadbackStagingDisposition::Idle => Self::Idle,
-            ReadbackStagingDisposition::MapPending => Self::MapPending,
-            ReadbackStagingDisposition::MappedActive => Self::MappedActive,
-            ReadbackStagingDisposition::Released => Self::Released,
-        }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ReadbackCleanupEventForTest {
-    MappedViewDropped,
-    StagingUnmapped,
-    StagingDropped,
-    PublishedBytes,
-}
-
-#[cfg(test)]
-#[derive(Default)]
-struct ReadbackStateMachineObservationStateForTest {
-    terminal_phase: Option<ReadbackPhaseForTest>,
-    cleanup_events: Vec<ReadbackCleanupEventForTest>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ReadbackStateMachineObservationForTest {
-    state: Arc<Mutex<ReadbackStateMachineObservationStateForTest>>,
-    staging_map: Arc<ReadbackStagingMapState>,
-}
-
-#[cfg(test)]
-impl Default for ReadbackStateMachineObservationForTest {
-    fn default() -> Self {
-        Self {
-            state: Arc::new(Mutex::new(
-                ReadbackStateMachineObservationStateForTest::default(),
-            )),
-            staging_map: Arc::new(ReadbackStagingMapState::idle()),
-        }
-    }
-}
-
-#[cfg(test)]
-impl ReadbackStateMachineObservationForTest {
-    pub(crate) fn terminal_phase_for_test(&self) -> Option<ReadbackPhaseForTest> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .terminal_phase
-    }
-
-    pub(crate) fn staging_disposition_for_test(&self) -> ReadbackStagingDispositionForTest {
-        self.staging_map.disposition_for_test().into()
-    }
-
-    pub(crate) fn cleanup_events_for_test(&self) -> Vec<ReadbackCleanupEventForTest> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .cleanup_events
-            .clone()
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct ReadbackStateMachineForTest {
-    lifecycle: ReadbackLifecycle<u64>,
-    observation: ReadbackStateMachineObservationForTest,
-}
-
-#[cfg(test)]
-impl ReadbackStateMachineForTest {
-    pub(crate) fn allocated() -> Self {
-        Self {
-            lifecycle: ReadbackLifecycle::allocated(),
-            observation: ReadbackStateMachineObservationForTest::default(),
-        }
-    }
-
-    pub(crate) fn phase_for_test(&self) -> ReadbackPhaseForTest {
-        match &self.lifecycle.phase {
-            ReadbackPhase::Allocated => ReadbackPhaseForTest::Allocated,
-            ReadbackPhase::CopySubmitted { submission_index } => {
-                ReadbackPhaseForTest::CopySubmitted {
-                    submission_index: *submission_index,
-                }
-            }
-            ReadbackPhase::MapPending => ReadbackPhaseForTest::MapPending,
-            ReadbackPhase::Mapped => ReadbackPhaseForTest::Mapped,
-            ReadbackPhase::PublishedBytes => ReadbackPhaseForTest::PublishedBytes,
-            ReadbackPhase::Failed => ReadbackPhaseForTest::Failed,
-            ReadbackPhase::Canceled => ReadbackPhaseForTest::Canceled,
-        }
-    }
-
-    pub(crate) fn copy_submitted_for_test(&mut self, submission_index: u64) {
-        self.lifecycle.copy_submitted(submission_index);
-    }
-
-    pub(crate) fn map_pending_for_test(&mut self) {
-        self.lifecycle.map_pending();
-        self.observation.staging_map.map_pending();
-    }
-
-    pub(crate) fn map_callback_succeeded_for_test(&self) {
-        self.observation.staging_map.map_callback_completed(true);
-    }
-
-    pub(crate) fn map_callback_failed_for_test(&self) {
-        self.observation.staging_map.map_callback_completed(false);
-    }
-
-    pub(crate) fn mapped_for_test(&mut self) {
-        self.observation.staging_map.assert_mapped_active();
-        self.lifecycle.mapped();
-    }
-
-    pub(crate) fn fail_for_test(&mut self) {
-        if self.lifecycle.fail() {
-            self.record_terminal_phase_for_test();
-            self.release_staging_for_test();
-        }
-    }
-
-    pub(crate) fn cancel_for_test(&mut self) {
-        if self.lifecycle.cancel() {
-            self.record_terminal_phase_for_test();
-            self.release_staging_for_test();
-        }
-    }
-
-    pub(crate) fn finish_mapped_for_test(
-        &mut self,
-        size: PhysicalSize,
-        mapped: &[u8],
-    ) -> Result<ImageBuffer> {
-        assert!(matches!(&self.lifecycle.phase, ReadbackPhase::Mapped));
-        let layout = ReadbackLayout::try_new(size)?;
-        let decoded = decode_padded_rows(&layout, mapped);
-        self.observation
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .cleanup_events
-            .push(ReadbackCleanupEventForTest::MappedViewDropped);
-        let rgba = match decoded {
-            Ok(rgba) => rgba,
-            Err(error) => {
-                self.fail_for_test();
-                return Err(error);
-            }
-        };
-        self.release_staging_for_test();
-        match ImageBuffer::try_new(size, rgba) {
-            Ok(image) => {
-                self.lifecycle.published();
-                self.record_terminal_phase_for_test();
-                self.observation
-                    .state
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .cleanup_events
-                    .push(ReadbackCleanupEventForTest::PublishedBytes);
-                Ok(image)
-            }
-            Err(source) => {
-                self.lifecycle.fail();
-                self.record_terminal_phase_for_test();
-                Err(Error::new(
-                    BackendErrorCode::ReadbackFailed,
-                    "decoded readback bytes did not form a valid RGBA8 image",
-                )
-                .with_source(source))
-            }
-        }
-    }
-
-    pub(crate) fn staging_disposition_for_test(&self) -> ReadbackStagingDispositionForTest {
-        self.observation.staging_disposition_for_test()
-    }
-
-    pub(crate) fn cleanup_events_for_test(&self) -> Vec<ReadbackCleanupEventForTest> {
-        self.observation.cleanup_events_for_test()
-    }
-
-    pub(crate) fn observation_for_test(&self) -> ReadbackStateMachineObservationForTest {
-        self.observation.clone()
-    }
-
-    fn release_staging_for_test(&mut self) {
-        let action = self.observation.staging_map.take_cleanup_action();
-        let mut observation = self
-            .observation
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match action {
-            ReadbackStagingCleanupAction::Drop => {
-                observation
-                    .cleanup_events
-                    .push(ReadbackCleanupEventForTest::StagingDropped);
-            }
-            ReadbackStagingCleanupAction::UnmapThenDrop => {
-                observation
-                    .cleanup_events
-                    .push(ReadbackCleanupEventForTest::StagingUnmapped);
-                observation
-                    .cleanup_events
-                    .push(ReadbackCleanupEventForTest::StagingDropped);
-            }
-            ReadbackStagingCleanupAction::None => {}
-        }
-    }
-
-    fn record_terminal_phase_for_test(&self) {
-        self.observation
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .terminal_phase = Some(self.phase_for_test());
-    }
-}
-
-#[cfg(test)]
-impl Drop for ReadbackStateMachineForTest {
-    fn drop(&mut self) {
-        self.cancel_for_test();
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct ReadbackCompletionForTest {
-    completion: Arc<ReadbackCompletion>,
-    staging_map: Arc<ReadbackStagingMapState>,
-}
-
-#[cfg(test)]
-impl ReadbackCompletionForTest {
-    pub(crate) fn new() -> Self {
-        let staging_map = Arc::new(ReadbackStagingMapState::idle());
-        staging_map.map_pending();
-        Self {
-            completion: Arc::new(ReadbackCompletion::new()),
-            staging_map,
-        }
-    }
-
-    pub(crate) fn poll_for_test(&self, context: &mut Context<'_>) -> Poll<Result<()>> {
-        self.completion.poll(context).map(completion_result)
-    }
-
-    pub(crate) fn invoke_map_callback_for_test(
-        &self,
-        result: std::result::Result<(), wgpu::BufferAsyncError>,
-    ) {
-        map_completion_callback(Arc::clone(&self.completion), Arc::clone(&self.staging_map))(
-            result,
-        );
-    }
-
-    pub(crate) fn deliver_late_map_result_for_test(
-        &self,
-        result: std::result::Result<(), wgpu::BufferAsyncError>,
-    ) {
-        self.completion
-            .complete(ReadbackCompletionResult::Map(result));
-    }
-
-    pub(crate) fn cancel_for_test(&self) {
-        self.completion.cancel();
-    }
-
-    pub(crate) fn is_canceled_for_test(&self) -> bool {
-        matches!(
-            &self
-                .completion
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .status,
-            ReadbackCompletionStatus::Canceled
-        )
-    }
-
-    pub(crate) fn accepted_result_count_for_test(&self) -> usize {
-        self.completion
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .accepted_results
-    }
-
-    pub(crate) fn discarded_result_count_for_test(&self) -> usize {
-        self.completion
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .discarded_results
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn timeout_slice_for_test(&self) -> bool {
-        handle_native_poll_result(self.completion.as_ref(), Err(wgpu::PollError::Timeout))
-            == NativePollAction::Continue
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn wrong_submission_index_for_test(&self, requested: u64, successful: u64) {
-        let action = handle_native_poll_result(
-            self.completion.as_ref(),
-            Err(wgpu::PollError::WrongSubmissionIndex(requested, successful)),
-        );
-        assert_eq!(action, NativePollAction::Stop);
-    }
 }

@@ -1,6 +1,4 @@
 use super::{BackendErrorCode, Error, ImageBuffer, PhysicalSize, Result, layout::ReadbackLayout};
-#[cfg(all(test, not(target_arch = "wasm32")))]
-use super::{NativeReadbackObservationForTest, NativeReadbackPhaseForTest};
 use std::{
     ops::Range,
     sync::{Arc, Mutex},
@@ -188,8 +186,6 @@ pub(super) struct ReadbackOwner {
     staging_map: Arc<ReadbackStagingMapState>,
     pub(super) layout: ReadbackLayout,
     physical_size: PhysicalSize,
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    observation: Option<NativeReadbackObservationForTest>,
 }
 
 impl ReadbackOwner {
@@ -204,23 +200,7 @@ impl ReadbackOwner {
             staging_map: Arc::new(ReadbackStagingMapState::idle()),
             layout,
             physical_size,
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            observation: None,
         }
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(super) fn attach_observation_for_test(
-        &mut self,
-        observation: NativeReadbackObservationForTest,
-    ) {
-        observation.attach_staging(&self.staging_map);
-        self.observation = Some(observation);
-    }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(super) fn observation_for_test(&self) -> Option<NativeReadbackObservationForTest> {
-        self.observation.clone()
     }
 
     pub(super) fn staging(&self) -> &wgpu::Buffer {
@@ -230,29 +210,17 @@ impl ReadbackOwner {
     }
 
     pub(super) fn copy_submitted(&mut self, submission_index: wgpu::SubmissionIndex) {
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &self.observation {
-            observation.record_copy_submitted(&submission_index);
-        }
         self.lifecycle.copy_submitted(submission_index);
     }
 
     pub(super) fn map_pending(&mut self) {
         self.lifecycle.map_pending();
         self.staging_map.map_pending();
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &self.observation {
-            observation.record_phase(NativeReadbackPhaseForTest::MapPending);
-        }
     }
 
     pub(super) fn mapped(&mut self) {
         self.staging_map.assert_mapped_active();
         self.lifecycle.mapped();
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &self.observation {
-            observation.record_phase(NativeReadbackPhaseForTest::Mapped);
-        }
     }
 
     pub(super) fn staging_map(&self) -> Arc<ReadbackStagingMapState> {
@@ -266,20 +234,12 @@ impl ReadbackOwner {
     pub(super) fn fail(&mut self) {
         if self.lifecycle.fail() {
             self.release_staging();
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            if let Some(observation) = &self.observation {
-                observation.record_phase(NativeReadbackPhaseForTest::Failed);
-            }
         }
     }
 
     pub(super) fn cancel(&mut self) {
         if self.lifecycle.cancel() {
             self.release_staging();
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            if let Some(observation) = &self.observation {
-                observation.record_phase(NativeReadbackPhaseForTest::Canceled);
-            }
         }
     }
 
@@ -288,18 +248,10 @@ impl ReadbackOwner {
         match ImageBuffer::try_new(self.physical_size, rgba) {
             Ok(image) => {
                 self.lifecycle.published();
-                #[cfg(all(test, not(target_arch = "wasm32")))]
-                if let Some(observation) = &self.observation {
-                    observation.record_phase(NativeReadbackPhaseForTest::PublishedBytes);
-                }
                 Ok(image)
             }
             Err(source) => {
                 self.lifecycle.fail();
-                #[cfg(all(test, not(target_arch = "wasm32")))]
-                if let Some(observation) = &self.observation {
-                    observation.record_phase(NativeReadbackPhaseForTest::Failed);
-                }
                 Err(Error::new(
                     BackendErrorCode::ReadbackFailed,
                     "decoded readback bytes did not form a valid RGBA8 image",
