@@ -3,6 +3,11 @@ use super::{
     dispatch::{RendererFrameDispatch, runtime_surface_format},
     publication::RenderPublication,
 };
+#[cfg(any(
+    feature = "render-window",
+    all(feature = "render-web", target_arch = "wasm32")
+))]
+use crate::surface::SurfaceBackend;
 use crate::{
     backend::*,
     command::RenderCommands,

@@ -31196,7 +31196,6 @@ fn presented_terminal_signal_after_publication_fails_the_next_operation() {
     .unwrap_or_else(|error| {
         panic!("presented terminal-signal coverage requires a compatible renderer: {error}")
     });
-    let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let parameters = Parameters {
         base_color: color_from_straight_rgba8_for_test([48, 160, 208, 255]),
