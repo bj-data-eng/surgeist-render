@@ -60,7 +60,9 @@
   artifacts are excluded.
 - The active macOS exception remains controlling: do not execute either native
   `render_window_smoke` cargo-run command until the user requests it. Record
-  both as deferred and run every other configured gate.
+  both as deferred and run every other configured gate. Implementation and
+  task review continue, but final holistic review and publication stop until
+  the user authorizes both commands and both render and exit successfully.
 
 ## 3 Impacts And Preconditions
 
@@ -137,9 +139,11 @@
 
 ### 4.3 T03 Complete GPU Resource, Cache, And Transaction Ownership
 
-- Move resource identity/accounting/leasing/retention, texture and shader
+- Move resource identity/accounting/leasing/retention, texture/effect/resource
   caches, GPU operation transaction stages, submission/commit, graph encoding
   transaction behavior, and transaction-owned cancellation cases into `gpu.rs`.
+- Shader key/layout/pipeline cache realization is already owned by T01 and does
+  not move in this task.
 - Surface publication/readback cancellation stays for T04; Vello atlas and
   direct-render transaction characterization stays for T06.
 - Dependency/intended commit: reviewed T02 head; one resource/cache/transaction
@@ -311,7 +315,7 @@ if rg -n --pcre2 '#\s*\[\s*(?:unsafe\s*\(|no_mangle\b|export_name\b)|\bunsafe\s*
 non_plan_code=("${(@f)$(git ls-files -- '*.rs' '*.wgsl' | rg -v '^plans/')}")
 test "${#non_plan_code[@]}" -gt 0
 if rg -n --pcre2 '(?<![A-Za-z0-9_])(?:[PISCT][0-9]{2}[A-Za-z0-9_]*|[pisct][0-9]{2}_[A-Za-z0-9_]*)(?![A-Za-z0-9_])' "${non_plan_code[@]}"; then exit 1; else test "$?" -eq 1; fi
-test -z "$(git ls-files | rg --pcre2 '(?i)(?:^|[/_.-])[pisct][0-9]{2}(?=$|[/_.-])|sequence[0-9]+' || true)"
+test -z "$(git ls-files | rg -v '^plans/' | rg --pcre2 '(?i)(?:^|[/_.-])[pisct][0-9]{2}(?=$|[/_.-])|sequence[0-9]+' || true)"
 git diff --check 1e57d07d2595be95949caeff7b76a573a457723a..HEAD
 test "$(git rev-parse HEAD)" = "$(git rev-parse main)"
 test -z "$(git status --porcelain)"
@@ -325,6 +329,10 @@ CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smok
 CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window,render-web
 ```
 
+All other final gates, task reviews, and implementation may proceed while they
+are deferred. Do not start final holistic review or publication until the user
+authorizes these commands and both render and exit successfully.
+
 Before and after each task and at final verification, record raw/equivalent test
 counts and sorted leaf names for default, `render-window`, `render-web`, and
 combined configurations as ephemeral equality evidence. Compare the public
@@ -336,4 +344,6 @@ behavior/public surface/dependencies/features/artifacts, complete M05.6
 ownership, empty planning-identifier scans, no owned unsafe, clean status,
 publication to leaf `main`, authority readback, and the P02-I02 leaf candidate
 handoff. Root integration is excluded. A missing non-smoke prerequisite is a
-blocker; the recorded native-smoke deferral is not rerun without user direction.
+blocker. If native-smoke authorization is still absent after implementation and
+task review, stop before holistic review and publication with the clean task
+head preserved; do not convert the deferral into completion.
