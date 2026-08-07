@@ -1,5 +1,5 @@
 use crate::{
-    BorderEdges, BorderSide, BorderStyle, Color, FontData, FontRef, ImageBuffer, TextGlyph,
+    BorderEdges, BorderSide, BorderStyle, Color, FontData, FontRef, ImageBuffer, Rect, TextGlyph,
     TextPaint, TextRun, TextRunBounds, Transform, reference::PremultipliedRgba8,
 };
 
@@ -66,4 +66,13 @@ pub(super) fn box_decoration_edges(
 
 pub(super) fn solid_border(width: f64, color: Color) -> BorderSide {
     BorderSide::try_new(BorderStyle::Solid, width, color).unwrap()
+}
+
+pub(super) fn assert_finite_positive_rect(rect: Rect) {
+    assert!(rect.x().is_finite());
+    assert!(rect.y().is_finite());
+    assert!(rect.width().is_finite());
+    assert!(rect.height().is_finite());
+    assert!(rect.width() > 0.0);
+    assert!(rect.height() > 0.0);
 }
