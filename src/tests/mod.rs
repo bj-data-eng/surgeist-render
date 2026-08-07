@@ -223,10 +223,7 @@ fn scene_lowering_preserves_authored_text_run_bounds() {
     assert_eq!(*shadow_bounds, bounds);
 }
 
-#[cfg(any(
-    feature = "render-window",
-    all(feature = "render-web", target_arch = "wasm32")
-))]
+#[cfg(feature = "render-window")]
 use super::surface::{PresentedLifecycle, ResizeState};
 #[test]
 fn unfiltered_images_preserve_direct_sampling_normalization() {
