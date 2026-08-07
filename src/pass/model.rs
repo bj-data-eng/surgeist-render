@@ -547,7 +547,7 @@ pub(crate) struct RuntimeReadBinding {
     not(test),
     expect(
         dead_code,
-        reason = "C08 consumes these exact immutable runtime read-binding facts"
+        reason = "graph encoding consumes these exact immutable runtime read-binding facts"
     )
 )]
 impl RuntimeReadBinding {

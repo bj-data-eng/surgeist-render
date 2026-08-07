@@ -127,7 +127,7 @@ pub(crate) mod scene;
     not(test),
     expect(
         unused_imports,
-        reason = "C03 T3 exposes scene-owned prepared passes for T4 checked realization and T7 cutover."
+        reason = "Scene-owned prepared passes remain available for checked realization and private lowering."
     )
 )]
 pub(crate) use raster::{

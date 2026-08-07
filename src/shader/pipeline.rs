@@ -9,9 +9,9 @@ use super::{
         ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
     validate::{
-        BlurAxis, BlurInput, BlurPassDescription, C08PassDescription, C08Program,
-        ColorFilterPassDescription, CompositePassDescription, CopyBackdropPassDescription,
-        DropShadowColorizePassDescription,
+        BlurAxis, BlurInput, BlurPassDescription, ColorFilterPassDescription,
+        CompositePassDescription, CopyBackdropPassDescription, CorePassDescription,
+        CorePassProgram, DropShadowColorizePassDescription,
     },
 };
 
@@ -53,9 +53,9 @@ fn sampler_descriptor(key: SamplerKey) -> wgpu::SamplerDescriptor<'static> {
     }
 }
 
-pub(super) fn create_c08_bind_group_layout(
+pub(super) fn create_core_pass_bind_group_layout(
     device: &wgpu::Device,
-    description: C08PassDescription,
+    description: CorePassDescription,
 ) -> wgpu::BindGroupLayout {
     let entries = [
         wgpu::BindGroupLayoutEntry {
@@ -86,36 +86,38 @@ pub(super) fn create_c08_bind_group_layout(
         },
     ];
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some(c08_bind_group_layout_label(description.program)),
+        label: Some(core_pass_bind_group_layout_label(description.program)),
         entries: &entries,
     })
 }
 
-pub(super) fn create_c08_shader_module(
+pub(super) fn create_core_pass_shader_module(
     device: &wgpu::Device,
-    description: C08PassDescription,
+    description: CorePassDescription,
 ) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(c08_shader_label(description.program)),
-        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(c08_shader_source(description.program))),
+        label: Some(core_pass_shader_label(description.program)),
+        source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(core_pass_shader_source(
+            description.program,
+        ))),
     })
 }
 
-pub(super) fn create_c08_render_pipeline(
+pub(super) fn create_core_pass_render_pipeline(
     device: &wgpu::Device,
-    description: C08PassDescription,
+    description: CorePassDescription,
     layout: &wgpu::BindGroupLayout,
     shader: &wgpu::ShaderModule,
     fragment_entry: &'static str,
 ) -> Result<wgpu::RenderPipeline> {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some(c08_pipeline_layout_label(description.program)),
+        label: Some(core_pass_pipeline_layout_label(description.program)),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
     let blend = matches!(
         description.program,
-        C08Program::SpanSourceOver | C08Program::DropShadowMerge
+        CorePassProgram::SpanSourceOver | CorePassProgram::DropShadowMerge
     )
     .then_some(span_source_over_blend());
     let target = wgpu::ColorTargetState {
@@ -125,7 +127,7 @@ pub(super) fn create_c08_render_pipeline(
     };
     Ok(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some(c08_pipeline_label(description.program)),
+            label: Some(core_pass_pipeline_label(description.program)),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader,
@@ -203,14 +205,14 @@ pub(super) fn create_composite_bind_group_layout(
         count: None,
     });
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C09 layer-composite bindings"),
+        label: Some("Surgeist composition layer-composite bindings"),
         entries: &entries,
     })
 }
 
 pub(super) fn create_composite_shader_module(device: &wgpu::Device) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Surgeist C09 layer-composite shader"),
+        label: Some("Surgeist composition layer-composite shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(LAYER_COMPOSITE_WGSL)),
     })
 }
@@ -223,7 +225,7 @@ pub(super) fn create_composite_render_pipeline(
     fragment_entry_override: Option<&'static str>,
 ) -> Result<wgpu::RenderPipeline> {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Surgeist C09 layer-composite pipeline layout"),
+        label: Some("Surgeist composition layer-composite pipeline layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
@@ -239,7 +241,7 @@ pub(super) fn create_composite_render_pipeline(
         fragment_entry_override.unwrap_or_else(|| composite_fragment_entry(description));
     Ok(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Surgeist C09 layer-composite pipeline"),
+            label: Some("Surgeist composition layer-composite pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader,
@@ -297,14 +299,14 @@ pub(super) fn create_copy_backdrop_bind_group_layout(
         },
     ];
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C12 backdrop-copy bindings"),
+        label: Some("Surgeist backdrop-copy bindings"),
         entries: &entries,
     })
 }
 
 pub(super) fn create_copy_backdrop_shader_module(device: &wgpu::Device) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Surgeist C12 backdrop-copy shader"),
+        label: Some("Surgeist backdrop-copy shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COPY_BACKDROP_WGSL)),
     })
 }
@@ -316,7 +318,7 @@ pub(super) fn create_copy_backdrop_pipeline(
     shader: &wgpu::ShaderModule,
 ) -> Result<wgpu::RenderPipeline> {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Surgeist C12 backdrop-copy pipeline layout"),
+        label: Some("Surgeist backdrop-copy pipeline layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
@@ -327,7 +329,7 @@ pub(super) fn create_copy_backdrop_pipeline(
     };
     Ok(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Surgeist C12 backdrop-copy pipeline"),
+            label: Some("Surgeist backdrop-copy pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader,
@@ -395,14 +397,14 @@ pub(super) fn create_color_filter_bind_group_layout(
         },
     ];
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C10 color-filter bindings"),
+        label: Some("Surgeist color-filter bindings"),
         entries: &entries,
     })
 }
 
 pub(super) fn create_color_filter_shader_module(device: &wgpu::Device) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Surgeist C10 color-filter shader"),
+        label: Some("Surgeist color-filter shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(COLOR_FILTER_WGSL)),
     })
 }
@@ -414,7 +416,7 @@ pub(super) fn create_color_filter_render_pipeline(
     shader: &wgpu::ShaderModule,
 ) -> Result<wgpu::RenderPipeline> {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Surgeist C10 color-filter pipeline layout"),
+        label: Some("Surgeist color-filter pipeline layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
@@ -425,7 +427,7 @@ pub(super) fn create_color_filter_render_pipeline(
     };
     Ok(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Surgeist C10 color-filter pipeline"),
+            label: Some("Surgeist color-filter pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader,
@@ -604,7 +606,7 @@ pub(super) fn create_drop_shadow_colorize_bind_group_layout(
         },
     ];
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("Surgeist C11 drop-shadow colorize bindings"),
+        label: Some("Surgeist spatial-filter drop-shadow colorize bindings"),
         entries: &entries,
     })
 }
@@ -613,7 +615,7 @@ pub(super) fn create_drop_shadow_colorize_shader_module(
     device: &wgpu::Device,
 ) -> wgpu::ShaderModule {
     device.create_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some("Surgeist C11 drop-shadow colorize shader"),
+        label: Some("Surgeist spatial-filter drop-shadow colorize shader"),
         source: wgpu::ShaderSource::Wgsl(Cow::Borrowed(DROP_SHADOW_WGSL)),
     })
 }
@@ -625,7 +627,7 @@ pub(super) fn create_drop_shadow_colorize_render_pipeline(
     shader: &wgpu::ShaderModule,
 ) -> Result<wgpu::RenderPipeline> {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-        label: Some("Surgeist C11 drop-shadow colorize pipeline layout"),
+        label: Some("Surgeist spatial-filter drop-shadow colorize pipeline layout"),
         bind_group_layouts: &[Some(layout)],
         immediate_size: 0,
     });
@@ -636,7 +638,7 @@ pub(super) fn create_drop_shadow_colorize_render_pipeline(
     };
     Ok(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("Surgeist C11 drop-shadow colorize pipeline"),
+            label: Some("Surgeist spatial-filter drop-shadow colorize pipeline"),
             layout: Some(&pipeline_layout),
             vertex: wgpu::VertexState {
                 module: shader,
@@ -715,47 +717,51 @@ const fn composite_fragment_entry(description: CompositePassDescription) -> &'st
     }
 }
 
-const fn c08_shader_source(program: C08Program) -> &'static str {
+const fn core_pass_shader_source(program: CorePassProgram) -> &'static str {
     match program {
-        C08Program::CanonicalizeCapture => CANONICALIZE_CAPTURE_WGSL,
-        C08Program::SpanSourceOver | C08Program::DropShadowMerge => SPAN_SOURCE_OVER_WGSL,
-        C08Program::Present => PRESENT_WGSL,
+        CorePassProgram::CanonicalizeCapture => CANONICALIZE_CAPTURE_WGSL,
+        CorePassProgram::SpanSourceOver | CorePassProgram::DropShadowMerge => SPAN_SOURCE_OVER_WGSL,
+        CorePassProgram::Present => PRESENT_WGSL,
     }
 }
 
-const fn c08_shader_label(program: C08Program) -> &'static str {
+const fn core_pass_shader_label(program: CorePassProgram) -> &'static str {
     match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture shader",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over shader",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge shader",
-        C08Program::Present => "Surgeist C08 present shader",
+        CorePassProgram::CanonicalizeCapture => "Surgeist core-pass canonicalize-capture shader",
+        CorePassProgram::SpanSourceOver => "Surgeist core-pass span source-over shader",
+        CorePassProgram::DropShadowMerge => "Surgeist spatial-filter drop-shadow merge shader",
+        CorePassProgram::Present => "Surgeist core-pass present shader",
     }
 }
 
-const fn c08_bind_group_layout_label(program: C08Program) -> &'static str {
+const fn core_pass_bind_group_layout_label(program: CorePassProgram) -> &'static str {
     match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture bindings",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over bindings",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge bindings",
-        C08Program::Present => "Surgeist C08 present bindings",
+        CorePassProgram::CanonicalizeCapture => "Surgeist core-pass canonicalize-capture bindings",
+        CorePassProgram::SpanSourceOver => "Surgeist core-pass span source-over bindings",
+        CorePassProgram::DropShadowMerge => "Surgeist spatial-filter drop-shadow merge bindings",
+        CorePassProgram::Present => "Surgeist core-pass present bindings",
     }
 }
 
-const fn c08_pipeline_layout_label(program: C08Program) -> &'static str {
+const fn core_pass_pipeline_layout_label(program: CorePassProgram) -> &'static str {
     match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture pipeline layout",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over pipeline layout",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge pipeline layout",
-        C08Program::Present => "Surgeist C08 present pipeline layout",
+        CorePassProgram::CanonicalizeCapture => {
+            "Surgeist core-pass canonicalize-capture pipeline layout"
+        }
+        CorePassProgram::SpanSourceOver => "Surgeist core-pass span source-over pipeline layout",
+        CorePassProgram::DropShadowMerge => {
+            "Surgeist spatial-filter drop-shadow merge pipeline layout"
+        }
+        CorePassProgram::Present => "Surgeist core-pass present pipeline layout",
     }
 }
 
-const fn c08_pipeline_label(program: C08Program) -> &'static str {
+const fn core_pass_pipeline_label(program: CorePassProgram) -> &'static str {
     match program {
-        C08Program::CanonicalizeCapture => "Surgeist C08 canonicalize-capture pipeline",
-        C08Program::SpanSourceOver => "Surgeist C08 span source-over pipeline",
-        C08Program::DropShadowMerge => "Surgeist C11 drop-shadow merge pipeline",
-        C08Program::Present => "Surgeist C08 present pipeline",
+        CorePassProgram::CanonicalizeCapture => "Surgeist core-pass canonicalize-capture pipeline",
+        CorePassProgram::SpanSourceOver => "Surgeist core-pass span source-over pipeline",
+        CorePassProgram::DropShadowMerge => "Surgeist spatial-filter drop-shadow merge pipeline",
+        CorePassProgram::Present => "Surgeist core-pass present pipeline",
     }
 }
 

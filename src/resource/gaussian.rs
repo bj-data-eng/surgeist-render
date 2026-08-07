@@ -8,7 +8,7 @@ pub(crate) enum GaussianKernelSamplingForm {
         not(test),
         expect(
             dead_code,
-            reason = "C08 retains the validated non-filtering kernel route for exact sampling"
+            reason = "base graph retains the validated non-filtering kernel route for exact sampling"
         )
     )]
     FullNearest,

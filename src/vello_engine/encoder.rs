@@ -187,7 +187,7 @@ impl VelloEncodingFailure {
         not(test),
         expect(
             dead_code,
-            reason = "C03 T4 keeps typed checked-encoding failures inspectable by the later T6 transaction route."
+            reason = "Typed checked-encoding failures remain inspectable by the transaction route."
         )
     )]
     pub(crate) fn error(&self) -> &Error {
@@ -198,7 +198,7 @@ impl VelloEncodingFailure {
         not(test),
         expect(
             dead_code,
-            reason = "C03 T4 keeps the typed abort outcome consumable by the later T6 resource manager."
+            reason = "The typed abort outcome remains consumable by the resource manager."
         )
     )]
     pub(crate) fn into_aborted_resources(self) -> AbortedVelloResources {
@@ -219,7 +219,7 @@ impl VelloEngineState {
         not(test),
         expect(
             dead_code,
-            reason = "C03 T4 checked engine construction is staged until T7 invokes private lowering."
+            reason = "Checked engine construction remains private to scene lowering."
         )
     )]
     pub(crate) async fn new_checked(device: &wgpu::Device) -> Result<Self> {

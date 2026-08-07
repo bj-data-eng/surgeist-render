@@ -12,8 +12,9 @@ use super::super::{
     shader::{
         BlurEdgeParameterBytes, ColorFilterOperationBufferLimits, ColorFilterOperationBytes,
         CompositeParameterBytes, DevicePassCache, DropShadowParameterBytes,
-        PassSpatialUniformBytes, ProvisionalC08PassObjects, ProvisionalColorFilterPassObjects,
-        ProvisionalCompositePassObjects, ProvisionalDevicePassCacheUpdate, ShaderCompositePathKey,
+        PassSpatialUniformBytes, ProvisionalColorFilterPassObjects,
+        ProvisionalCompositePassObjects, ProvisionalCorePassObjects,
+        ProvisionalDevicePassCacheUpdate, ShaderCompositePathKey,
     },
     vello_engine::{
         ActiveVelloEncodingScope, EncodedVelloCaptureProof, PendingVelloResourceCommit,
@@ -30,9 +31,9 @@ use super::{
         RuntimeResourceId, RuntimeResourceRole, RuntimeResultBinding, RuntimeSamplingEdge,
         RuntimeSamplingFilter, RuntimeSpatialDescriptor, RuntimeVelloCapture,
     },
-    parameters::c12_blur_edge_uniform_bytes,
+    parameters::backdrop_blur_edge_uniform_bytes,
     prepare::{
-        PreparedC11PassObjects, PreparedGraph, PreparedTextureBinding,
+        PreparedGraph, PreparedSpatialFilterPassObjects, PreparedTextureBinding,
         RuntimePassPreparationRequest, VELLO_CAPTURE_TEXTURE_USAGES,
     },
 };
@@ -63,7 +64,7 @@ pub(super) fn vello_capture_raster_parameters(
     RasterParameters::try_new(target_extent, peniko::Color::TRANSPARENT, antialiasing)
 }
 
-pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
+pub(crate) struct VelloCaptureEncodingHandoff<'prepared> {
     pass: RuntimePassId,
     target: RuntimeResourceId,
     work: &'prepared RuntimeVelloCapture,
@@ -76,19 +77,19 @@ pub(crate) struct C08VelloCaptureEncodingHandoff<'prepared> {
     session: Arc<()>,
 }
 
-struct C08VelloCaptureCompletionSeal;
+struct VelloCaptureCompletionSeal;
 
-/// Opaque proof that one exact capture finished inside the active C08 encoding
+/// Opaque proof that one exact capture finished inside the active graph encoding
 /// session. Only a successfully encoded internal Vello capture can seal it.
-#[must_use = "a capture completion receipt must return to the owning C08 scheduler"]
-pub(crate) struct C08VelloCaptureCompletionReceipt {
+#[must_use = "a capture completion receipt must return to the owning custom-spine scheduler"]
+pub(crate) struct VelloCaptureCompletionReceipt {
     pass: RuntimePassId,
     target: RuntimeResourceId,
     session: Arc<()>,
-    _seal: C08VelloCaptureCompletionSeal,
+    _seal: VelloCaptureCompletionSeal,
 }
 
-impl C08VelloCaptureEncodingHandoff<'_> {
+impl VelloCaptureEncodingHandoff<'_> {
     pub(crate) const fn target(&self) -> RuntimeResourceId {
         self.target
     }
@@ -131,7 +132,7 @@ impl C08VelloCaptureEncodingHandoff<'_> {
     fn complete_after_encoded_capture(
         self,
         proof: EncodedVelloCaptureProof,
-    ) -> Result<C08VelloCaptureCompletionReceipt> {
+    ) -> Result<VelloCaptureCompletionReceipt> {
         if !proof.proves_capture_contract(
             self.target_extent,
             wgpu::TextureFormat::Rgba8Unorm,
@@ -139,25 +140,25 @@ impl C08VelloCaptureEncodingHandoff<'_> {
             self.antialiasing,
         ) {
             return Err(preparation_error(
-                "encoded C08 Vello capture proof changed its exact raster target contract",
+                "encoded graph Vello capture proof changed its exact raster target contract",
             ));
         }
-        Ok(C08VelloCaptureCompletionReceipt {
+        Ok(VelloCaptureCompletionReceipt {
             pass: self.pass,
             target: self.target,
             session: self.session,
-            _seal: C08VelloCaptureCompletionSeal,
+            _seal: VelloCaptureCompletionSeal,
         })
     }
 }
 
-pub(crate) struct C08ExternalOutputView<'output> {
+pub(crate) struct GraphExternalOutputView<'output> {
     view: &'output wgpu::TextureView,
     format: Format,
     extent: PhysicalSize,
 }
 
-impl<'output> C08ExternalOutputView<'output> {
+impl<'output> GraphExternalOutputView<'output> {
     pub(crate) fn try_new(
         view: &'output wgpu::TextureView,
         format: Format,
@@ -165,7 +166,7 @@ impl<'output> C08ExternalOutputView<'output> {
     ) -> Result<Self> {
         if extent.width() == 0 || extent.height() == 0 {
             return Err(preparation_error(
-                "C08 external output view must have a positive exact extent",
+                "graph external output view must have a positive exact extent",
             ));
         }
         Ok(Self {
@@ -177,7 +178,7 @@ impl<'output> C08ExternalOutputView<'output> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum C08ScheduledEncodingKind {
+pub(super) enum GraphScheduledEncodingKind {
     ClearRoot,
     VelloCapture,
     CanonicalizeCapture,
@@ -218,7 +219,7 @@ pub(crate) struct EncodedGpuGraphActivity {
 
 impl EncodedGpuGraphActivity {
     fn from_scheduled(
-        scheduled: &[C08ScheduledEncodingKind],
+        scheduled: &[GraphScheduledEncodingKind],
         destination_parent_copies: usize,
     ) -> Self {
         let mut activity = Self {
@@ -227,28 +228,28 @@ impl EncodedGpuGraphActivity {
         };
         for kind in scheduled {
             match kind {
-                C08ScheduledEncodingKind::VelloCapture => {
+                GraphScheduledEncodingKind::VelloCapture => {
                     activity.vello_passes = activity.vello_passes.saturating_add(1);
                 }
-                C08ScheduledEncodingKind::ClearRoot
-                | C08ScheduledEncodingKind::CanonicalizeCapture
-                | C08ScheduledEncodingKind::ColorFilter
-                | C08ScheduledEncodingKind::BlurHorizontalRgba
-                | C08ScheduledEncodingKind::BlurVerticalRgba
-                | C08ScheduledEncodingKind::BlurHorizontalSourceAlpha
-                | C08ScheduledEncodingKind::BlurVerticalSourceAlpha
-                | C08ScheduledEncodingKind::DropShadowColorize => {
+                GraphScheduledEncodingKind::ClearRoot
+                | GraphScheduledEncodingKind::CanonicalizeCapture
+                | GraphScheduledEncodingKind::ColorFilter
+                | GraphScheduledEncodingKind::BlurHorizontalRgba
+                | GraphScheduledEncodingKind::BlurVerticalRgba
+                | GraphScheduledEncodingKind::BlurHorizontalSourceAlpha
+                | GraphScheduledEncodingKind::BlurVerticalSourceAlpha
+                | GraphScheduledEncodingKind::DropShadowColorize => {
                     activity.image_passes = activity.image_passes.saturating_add(1);
                 }
-                C08ScheduledEncodingKind::CopyBackdrop => {
+                GraphScheduledEncodingKind::CopyBackdrop => {
                     activity.copy_operations = activity.copy_operations.saturating_add(1);
                 }
-                C08ScheduledEncodingKind::DropShadowMerge
-                | C08ScheduledEncodingKind::SpanSourceOver
-                | C08ScheduledEncodingKind::LayerComposite => {
+                GraphScheduledEncodingKind::DropShadowMerge
+                | GraphScheduledEncodingKind::SpanSourceOver
+                | GraphScheduledEncodingKind::LayerComposite => {
                     activity.composite_passes = activity.composite_passes.saturating_add(1);
                 }
-                C08ScheduledEncodingKind::Present => {
+                GraphScheduledEncodingKind::Present => {
                     activity.custom_present_passes =
                         activity.custom_present_passes.saturating_add(1);
                 }
@@ -279,14 +280,14 @@ impl EncodedGpuGraphActivity {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(super) enum C08CustomSpineEncodingState {
+pub(super) enum CustomSpineEncodingState {
     Ready,
     Encoding,
     Complete,
     AbortOnly,
 }
 
-pub(crate) struct C08CustomSpineEncodingSummary {
+pub(crate) struct CustomSpineEncodingSummary {
     activity: EncodedGpuGraphActivity,
     pub(crate) encodes_custom_passes_in_order: bool,
     pub(crate) clears_full_root_once: bool,
@@ -321,23 +322,23 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) copy_backdrop_source_and_result_are_distinct: bool,
     pub(crate) copy_backdrop_uses_validated_viewport_and_scissor: bool,
     pub(crate) copy_backdrop_preserves_signed_mapping: bool,
-    pub(crate) c12_group_order_is_exact: bool,
-    pub(crate) c12_group_resources_are_distinct: bool,
+    pub(crate) backdrop_group_order_is_exact: bool,
+    pub(crate) backdrop_group_resources_are_distinct: bool,
     #[cfg(test)]
-    pub(crate) c12_later_sibling_transition_is_exact: bool,
+    pub(crate) backdrop_later_sibling_transition_is_exact: bool,
     pub(crate) blur_pass_count: usize,
     pub(crate) drop_shadow_colorize_count: usize,
     pub(crate) drop_shadow_merge_count: usize,
-    pub(crate) c11_binds_exact_prepared_resources: bool,
-    pub(crate) c11_uses_signed_viewport_and_scissor: bool,
+    pub(crate) spatial_filter_binds_exact_prepared_resources: bool,
+    pub(crate) spatial_filter_uses_signed_viewport_and_scissor: bool,
     pub(crate) blur_sources_intermediates_and_results_are_distinct: bool,
-    pub(crate) c11_kernels_release_at_validated_last_use: bool,
-    pub(crate) c11_textures_release_at_validated_last_use: bool,
+    pub(crate) spatial_filter_kernels_release_at_validated_last_use: bool,
+    pub(crate) spatial_filter_textures_release_at_validated_last_use: bool,
     pub(crate) drop_shadow_reads_original_source_twice: bool,
     pub(crate) original_source_releases_after_merge: bool,
     pub(crate) advances_every_pass_once: bool,
     #[cfg(test)]
-    pub(crate) c11_pass_order: Vec<ScheduledFilterRawFact>,
+    pub(crate) spatial_filter_pass_order: Vec<ScheduledFilterRawFact>,
     #[cfg(test)]
     pub(crate) capture_count: usize,
     #[cfg(test)]
@@ -350,8 +351,8 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) capture_observations: Vec<EncodedCaptureRawFact>,
 }
 
-struct C08CustomSpineEncodingProgress {
-    scheduled: Vec<C08ScheduledEncodingKind>,
+struct CustomSpineEncodingProgress {
+    scheduled: Vec<GraphScheduledEncodingKind>,
     expected_capture_count: usize,
     expected_pass_count: usize,
     capture_count: usize,
@@ -393,11 +394,11 @@ struct C08CustomSpineEncodingProgress {
     blur_pass_count: usize,
     drop_shadow_colorize_count: usize,
     drop_shadow_merge_count: usize,
-    c11_bindings_are_exact: bool,
-    c11_regions_are_exact: bool,
+    spatial_filter_bindings_are_exact: bool,
+    spatial_filter_regions_are_exact: bool,
     blur_allocations_are_distinct: bool,
-    c11_kernels_released: bool,
-    c11_textures_released: bool,
+    spatial_filter_kernels_released: bool,
+    spatial_filter_textures_released: bool,
     shadow_source_read_twice: bool,
     shadow_source_released_after_merge: bool,
     #[cfg(test)]
@@ -406,7 +407,7 @@ struct C08CustomSpineEncodingProgress {
     composite_encoder_identities: Vec<usize>,
 }
 
-impl C08CustomSpineEncodingProgress {
+impl CustomSpineEncodingProgress {
     fn new(expected_pass_count: usize, expected_capture_count: usize) -> Self {
         Self {
             scheduled: Vec::with_capacity(expected_pass_count),
@@ -451,11 +452,11 @@ impl C08CustomSpineEncodingProgress {
             blur_pass_count: 0,
             drop_shadow_colorize_count: 0,
             drop_shadow_merge_count: 0,
-            c11_bindings_are_exact: true,
-            c11_regions_are_exact: true,
+            spatial_filter_bindings_are_exact: true,
+            spatial_filter_regions_are_exact: true,
             blur_allocations_are_distinct: true,
-            c11_kernels_released: true,
-            c11_textures_released: true,
+            spatial_filter_kernels_released: true,
+            spatial_filter_textures_released: true,
             shadow_source_read_twice: true,
             shadow_source_released_after_merge: true,
             #[cfg(test)]
@@ -465,7 +466,7 @@ impl C08CustomSpineEncodingProgress {
         }
     }
 
-    fn record_custom_completion(&mut self, kind: C08ScheduledEncodingKind) {
+    fn record_custom_completion(&mut self, kind: GraphScheduledEncodingKind) {
         self.scheduled.push(kind);
         self.custom_encoded = self.custom_encoded.saturating_add(1);
         self.custom_completed = self.custom_completed.saturating_add(1);
@@ -473,23 +474,24 @@ impl C08CustomSpineEncodingProgress {
     }
 
     fn record_capture_completion(&mut self) {
-        self.scheduled.push(C08ScheduledEncodingKind::VelloCapture);
+        self.scheduled
+            .push(GraphScheduledEncodingKind::VelloCapture);
         self.capture_count = self.capture_count.saturating_add(1);
         self.validated_capture_receipts = self.validated_capture_receipts.saturating_add(1);
         self.completed_pass_count = self.completed_pass_count.saturating_add(1);
     }
 
-    fn finish(self, prepared: &PreparedGraph<'_>) -> C08CustomSpineEncodingSummary {
+    fn finish(self, prepared: &PreparedGraph<'_>) -> CustomSpineEncodingSummary {
         let total_composites = self
             .source_over_count
             .saturating_add(self.layer_composite_count);
-        let c12 = c12_execution_receipt(prepared);
-        C08CustomSpineEncodingSummary {
+        let backdrop = backdrop_execution_receipt(prepared);
+        CustomSpineEncodingSummary {
             activity: EncodedGpuGraphActivity::from_scheduled(
                 &self.scheduled,
                 self.destination_composite_count,
             ),
-            encodes_custom_passes_in_order: c08_scheduled_encoding_order_is_exact(
+            encodes_custom_passes_in_order: graph_scheduled_encoding_order_is_exact(
                 &self.scheduled,
                 &prepared.plan.passes,
             ),
@@ -544,24 +546,26 @@ impl C08CustomSpineEncodingProgress {
                 && self.copy_backdrop_regions_are_validated,
             copy_backdrop_preserves_signed_mapping: self.copy_backdrop_count > 0
                 && self.copy_backdrop_signed_mapping_is_exact,
-            c12_group_order_is_exact: c12.group_order_is_exact,
-            c12_group_resources_are_distinct: c12.group_resources_are_distinct,
+            backdrop_group_order_is_exact: backdrop.group_order_is_exact,
+            backdrop_group_resources_are_distinct: backdrop.group_resources_are_distinct,
             #[cfg(test)]
-            c12_later_sibling_transition_is_exact: c12.later_sibling_transition_is_exact,
+            backdrop_later_sibling_transition_is_exact: backdrop.later_sibling_transition_is_exact,
             blur_pass_count: self.blur_pass_count,
             drop_shadow_colorize_count: self.drop_shadow_colorize_count,
             drop_shadow_merge_count: self.drop_shadow_merge_count,
-            c11_binds_exact_prepared_resources: self.c11_bindings_are_exact,
-            c11_uses_signed_viewport_and_scissor: self.c11_regions_are_exact,
+            spatial_filter_binds_exact_prepared_resources: self.spatial_filter_bindings_are_exact,
+            spatial_filter_uses_signed_viewport_and_scissor: self.spatial_filter_regions_are_exact,
             blur_sources_intermediates_and_results_are_distinct: self.blur_allocations_are_distinct,
-            c11_kernels_release_at_validated_last_use: self.c11_kernels_released,
-            c11_textures_release_at_validated_last_use: self.c11_textures_released,
+            spatial_filter_kernels_release_at_validated_last_use: self
+                .spatial_filter_kernels_released,
+            spatial_filter_textures_release_at_validated_last_use: self
+                .spatial_filter_textures_released,
             drop_shadow_reads_original_source_twice: self.shadow_source_read_twice,
             original_source_releases_after_merge: self.shadow_source_released_after_merge,
             advances_every_pass_once: self.completed_pass_count == self.expected_pass_count
                 && prepared.next_pass == self.expected_pass_count,
             #[cfg(test)]
-            c11_pass_order: scheduled_filter_raw_facts(&self.scheduled),
+            spatial_filter_pass_order: scheduled_filter_raw_facts(&self.scheduled),
             #[cfg(test)]
             capture_count: self.capture_count,
             #[cfg(test)]
@@ -570,9 +574,9 @@ impl C08CustomSpineEncodingProgress {
             captures_share_one_active_vello_scope: self.captures_share_one_active_vello_scope(),
             #[cfg(test)]
             graph_work_shares_one_command_encoder: self.graph_work_shares_one_command_encoder(
-                prepared.c10_execution.is_some()
-                    || prepared.c11_execution.is_some()
-                    || prepared.c12_execution.is_some(),
+                prepared.color_filter_execution.is_some()
+                    || prepared.spatial_filter_execution.is_some()
+                    || prepared.backdrop_execution.is_some(),
             ),
             #[cfg(test)]
             capture_observations: self.capture_observations,
@@ -622,55 +626,55 @@ impl C08CustomSpineEncodingProgress {
 
 #[cfg(test)]
 fn scheduled_filter_raw_facts(
-    scheduled: &[C08ScheduledEncodingKind],
+    scheduled: &[GraphScheduledEncodingKind],
 ) -> Vec<ScheduledFilterRawFact> {
     scheduled
         .iter()
         .filter_map(|kind| match kind {
-            C08ScheduledEncodingKind::ColorFilter => Some(ScheduledFilterRawFact::Color),
-            C08ScheduledEncodingKind::BlurHorizontalRgba => {
+            GraphScheduledEncodingKind::ColorFilter => Some(ScheduledFilterRawFact::Color),
+            GraphScheduledEncodingKind::BlurHorizontalRgba => {
                 Some(ScheduledFilterRawFact::BlurHorizontalRgba)
             }
-            C08ScheduledEncodingKind::BlurVerticalRgba => {
+            GraphScheduledEncodingKind::BlurVerticalRgba => {
                 Some(ScheduledFilterRawFact::BlurVerticalRgba)
             }
-            C08ScheduledEncodingKind::BlurHorizontalSourceAlpha => {
+            GraphScheduledEncodingKind::BlurHorizontalSourceAlpha => {
                 Some(ScheduledFilterRawFact::BlurHorizontalSourceAlpha)
             }
-            C08ScheduledEncodingKind::BlurVerticalSourceAlpha => {
+            GraphScheduledEncodingKind::BlurVerticalSourceAlpha => {
                 Some(ScheduledFilterRawFact::BlurVerticalSourceAlpha)
             }
-            C08ScheduledEncodingKind::DropShadowColorize => {
+            GraphScheduledEncodingKind::DropShadowColorize => {
                 Some(ScheduledFilterRawFact::DropShadowColorize)
             }
-            C08ScheduledEncodingKind::DropShadowMerge => {
+            GraphScheduledEncodingKind::DropShadowMerge => {
                 Some(ScheduledFilterRawFact::DropShadowMerge)
             }
-            C08ScheduledEncodingKind::ClearRoot
-            | C08ScheduledEncodingKind::VelloCapture
-            | C08ScheduledEncodingKind::CanonicalizeCapture
-            | C08ScheduledEncodingKind::CopyBackdrop
-            | C08ScheduledEncodingKind::SpanSourceOver
-            | C08ScheduledEncodingKind::LayerComposite
-            | C08ScheduledEncodingKind::Present => None,
+            GraphScheduledEncodingKind::ClearRoot
+            | GraphScheduledEncodingKind::VelloCapture
+            | GraphScheduledEncodingKind::CanonicalizeCapture
+            | GraphScheduledEncodingKind::CopyBackdrop
+            | GraphScheduledEncodingKind::SpanSourceOver
+            | GraphScheduledEncodingKind::LayerComposite
+            | GraphScheduledEncodingKind::Present => None,
         })
         .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C12ExecutionReceipt {
+struct BackdropExecutionReceipt {
     group_order_is_exact: bool,
     group_resources_are_distinct: bool,
     #[cfg(test)]
     later_sibling_transition_is_exact: bool,
 }
 
-fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
-    let Some(execution) = prepared.c12_execution.as_ref() else {
-        return C12ExecutionReceipt::default();
+fn backdrop_execution_receipt(prepared: &PreparedGraph<'_>) -> BackdropExecutionReceipt {
+    let Some(execution) = prepared.backdrop_execution.as_ref() else {
+        return BackdropExecutionReceipt::default();
     };
     let [backdrop] = execution.backdrops.as_slice() else {
-        return C12ExecutionReceipt::default();
+        return BackdropExecutionReceipt::default();
     };
     let positions = prepared
         .plan
@@ -680,16 +684,16 @@ fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
         .map(|(position, pass)| (pass.runtime.id, position))
         .collect::<BTreeMap<_, _>>();
     let Some(copy) = positions.get(&backdrop.copy).copied() else {
-        return C12ExecutionReceipt::default();
+        return BackdropExecutionReceipt::default();
     };
     let Some(clear) = positions.get(&backdrop.group_clear).copied() else {
-        return C12ExecutionReceipt::default();
+        return BackdropExecutionReceipt::default();
     };
     let Some(backdrop_composite) = positions.get(&backdrop.backdrop_composite).copied() else {
-        return C12ExecutionReceipt::default();
+        return BackdropExecutionReceipt::default();
     };
     let Some(outer) = positions.get(&backdrop.outer_composite).copied() else {
-        return C12ExecutionReceipt::default();
+        return BackdropExecutionReceipt::default();
     };
     let filters = backdrop_filter_passes(&backdrop.filter_steps);
     let filters_are_ordered = filters.iter().all(|pass| {
@@ -725,7 +729,7 @@ fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
                     .iter()
                     .any(|read| read.resource == backdrop.result)
         });
-    C12ExecutionReceipt {
+    BackdropExecutionReceipt {
         group_order_is_exact: filters_are_ordered
             && clear < backdrop_composite
             && backdrop_composite < outer
@@ -736,7 +740,7 @@ fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
     }
 }
 
-impl C08CustomSpineEncodingSummary {
+impl CustomSpineEncodingSummary {
     pub(crate) const fn activity(&self) -> EncodedGpuGraphActivity {
         self.activity
     }
@@ -772,11 +776,11 @@ impl C08CustomSpineEncodingSummary {
             .blur_pass_count
             .saturating_add(self.drop_shadow_colorize_count)
             .saturating_add(self.drop_shadow_merge_count);
-        let exact_c08 = self.layer_composite_count == 0
+        let exact_base = self.layer_composite_count == 0
             && self.color_filter_count == 0
             && self.copy_backdrop_count == 0
             && spatial_pass_count == 0;
-        let exact_c09 = self.layer_composite_count > 0
+        let exact_composition = self.layer_composite_count > 0
             && self.color_filter_count == 0
             && self.copy_backdrop_count == 0
             && spatial_pass_count == 0
@@ -792,7 +796,7 @@ impl C08CustomSpineEncodingSummary {
                     && self.destination_composites_avoid_read_write_alias))
             && self.layer_composites_bind_exact_resources_and_parameters
             && self.layer_composites_preserve_signed_mapping;
-        let exact_c10 = self.color_filter_count > 0
+        let exact_color_filter = self.color_filter_count > 0
             && self.copy_backdrop_count == 0
             && spatial_pass_count == 0
             && self.color_filters_preserve_authored_order
@@ -820,33 +824,38 @@ impl C08CustomSpineEncodingSummary {
             && self.drop_shadow_merge_count == 0)
             || (self.blur_pass_count > 0
                 && exact_drop_shadows
-                && self.c11_binds_exact_prepared_resources
-                && self.c11_uses_signed_viewport_and_scissor
+                && self.spatial_filter_binds_exact_prepared_resources
+                && self.spatial_filter_uses_signed_viewport_and_scissor
                 && self.blur_sources_intermediates_and_results_are_distinct
-                && self.c11_kernels_release_at_validated_last_use
-                && self.c11_textures_release_at_validated_last_use);
-        let exact_c11 = self.copy_backdrop_count == 0
+                && self.spatial_filter_kernels_release_at_validated_last_use
+                && self.spatial_filter_textures_release_at_validated_last_use);
+        let exact_spatial_filter = self.copy_backdrop_count == 0
             && self.blur_pass_count > 0
             && exact_layers
             && exact_color_filters
             && exact_spatial_passes;
-        let exact_c12 = self.copy_backdrop_count == 1
+        let exact_backdrop = self.copy_backdrop_count == 1
             && self.color_filter_count.saturating_add(self.blur_pass_count) > 0
             && self.copy_backdrop_binds_exact_prepared_resources
             && self.copy_backdrop_source_and_result_are_distinct
             && self.copy_backdrop_uses_validated_viewport_and_scissor
             && self.copy_backdrop_preserves_signed_mapping
-            && self.c12_group_order_is_exact
-            && self.c12_group_resources_are_distinct
+            && self.backdrop_group_order_is_exact
+            && self.backdrop_group_resources_are_distinct
             && exact_layers
             && exact_color_filters
             && exact_spatial_passes;
-        common && (exact_c08 || exact_c09 || exact_c10 || exact_c11 || exact_c12)
+        common
+            && (exact_base
+                || exact_composition
+                || exact_color_filter
+                || exact_spatial_filter
+                || exact_backdrop)
     }
 }
 
-struct C08EncodedCaptureResult {
-    receipt: C08VelloCaptureCompletionReceipt,
+struct EncodedVelloCaptureResult {
+    receipt: VelloCaptureCompletionReceipt,
     #[cfg(test)]
     observation: EncodedCaptureRawFact,
 }
@@ -865,7 +874,7 @@ pub(crate) struct EncodedCaptureRawFact {
     scope_identity: usize,
 }
 
-struct C08VelloCaptureEncodingContext<'encoding, 'device> {
+struct VelloCaptureEncodingContext<'encoding, 'device> {
     engine: &'device VelloEngineState,
     resources: &'device ResourceManager,
     queue: &'device wgpu::Queue,
@@ -873,44 +882,44 @@ struct C08VelloCaptureEncodingContext<'encoding, 'device> {
     leases: &'encoding mut VelloResourceLeaseAggregate,
 }
 
-/// Owns the scope-clean capture leases until T5 gives them to the transaction
+/// Owns the scope-clean capture leases until they enter the transaction
 /// submission payload. Dropping this value aborts every capture lease.
-#[must_use = "encoded C08 graph captures must remain pending until transaction resolution"]
-pub(crate) struct C08PendingGraphEncoding {
-    pub(super) summary: C08CustomSpineEncodingSummary,
+#[must_use = "encoded graph captures must remain pending until transaction resolution"]
+pub(crate) struct PendingGraphEncoding {
+    pub(super) summary: CustomSpineEncodingSummary,
     pub(super) resources: PendingVelloResourceCommit,
     session: Arc<()>,
 }
 
-#[must_use = "prepared C08 frame state must commit only after graph transaction success"]
-pub(crate) struct PendingC08PreparedFrameCommit {
+#[must_use = "prepared graph frame state must commit only after graph transaction success"]
+pub(crate) struct PendingPreparedFrameCommit {
     pub(super) frame_scope: FrameResourceScope,
     pass_cache_update: ProvisionalDevicePassCacheUpdate,
 }
 
 /// Sealed one-shot state proving that the prepared frame and provisional cache
 /// can still complete without an accounting or cache-identity fault.
-#[must_use = "accounting-ready C08 prepared state must be committed or aborted on drop"]
-pub(crate) struct AccountingReadyC08PreparedFrameCommit {
+#[must_use = "accounting-ready prepared graph state must be committed or aborted on drop"]
+pub(crate) struct AccountingReadyPreparedFrameCommit {
     frame_scope: FrameResourceScope,
     pass_cache_update: ProvisionalDevicePassCacheUpdate,
 }
 
-impl PendingC08PreparedFrameCommit {
+impl PendingPreparedFrameCommit {
     pub(crate) fn into_accounting_ready(
         self,
         pass_cache: &DevicePassCache,
-    ) -> Result<AccountingReadyC08PreparedFrameCommit> {
+    ) -> Result<AccountingReadyPreparedFrameCommit> {
         self.pass_cache_update.ensure_commit_ready(pass_cache)?;
         self.frame_scope.ensure_commit_ready(&[])?;
-        Ok(AccountingReadyC08PreparedFrameCommit {
+        Ok(AccountingReadyPreparedFrameCommit {
             frame_scope: self.frame_scope,
             pass_cache_update: self.pass_cache_update,
         })
     }
 }
 
-impl AccountingReadyC08PreparedFrameCommit {
+impl AccountingReadyPreparedFrameCommit {
     pub(crate) fn ensure_commit_ready(&self, pass_cache: &DevicePassCache) -> Result<()> {
         self.pass_cache_update.ensure_commit_ready(pass_cache)?;
         self.frame_scope.ensure_commit_ready(&[])
@@ -924,19 +933,19 @@ impl AccountingReadyC08PreparedFrameCommit {
     }
 }
 
-#[must_use = "C08 graph submission state must remain owned by one transaction payload"]
-pub(crate) struct C08PreparedGraphSubmission {
+#[must_use = "graph submission state must remain owned by one transaction payload"]
+pub(crate) struct PreparedGraphSubmission {
     capture_resources: PendingVelloResourceCommit,
-    prepared_frame: PendingC08PreparedFrameCommit,
+    prepared_frame: PendingPreparedFrameCommit,
     activity: EncodedGpuGraphActivity,
 }
 
-impl C08PreparedGraphSubmission {
+impl PreparedGraphSubmission {
     pub(crate) fn into_parts(
         self,
     ) -> (
         PendingVelloResourceCommit,
-        PendingC08PreparedFrameCommit,
+        PendingPreparedFrameCommit,
         EncodedGpuGraphActivity,
     ) {
         (self.capture_resources, self.prepared_frame, self.activity)
@@ -944,7 +953,7 @@ impl C08PreparedGraphSubmission {
 }
 
 #[derive(Clone)]
-struct C08PreparedPassEncodingRequest {
+struct PreparedPassEncodingRequest {
     id: RuntimePassId,
     kind: RuntimePassKind,
     reads: Vec<RuntimeReadBinding>,
@@ -959,7 +968,7 @@ struct C08PreparedPassEncodingRequest {
     kernel_releases: Vec<GaussianKernelKey>,
 }
 
-impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
+impl From<&RuntimePassPreparationRequest> for PreparedPassEncodingRequest {
     fn from(request: &RuntimePassPreparationRequest) -> Self {
         Self {
             id: request.runtime.id,
@@ -979,7 +988,7 @@ impl From<&RuntimePassPreparationRequest> for C08PreparedPassEncodingRequest {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct C08RenderRegion {
+struct GraphRenderRegion {
     viewport_x: f32,
     viewport_y: f32,
     viewport_width: f32,
@@ -993,7 +1002,7 @@ struct C08RenderRegion {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C08PassEncodingFacts {
+struct CorePassEncodingFacts {
     full_target: bool,
     exact_spatial_uniform: bool,
     external_output_exact: bool,
@@ -1005,7 +1014,7 @@ struct C08PassEncodingFacts {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct C09LayerCompositeEncodingFacts {
+struct LayerCompositeEncodingFacts {
     normal_path: bool,
     destination_path: bool,
     fixed_premultiplied_blend: bool,
@@ -1019,7 +1028,7 @@ struct C09LayerCompositeEncodingFacts {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C10ColorFilterEncodingFacts {
+struct ColorFilterEncodingFacts {
     exact_operation_bytes: bool,
     exact_source_spatial_and_operations: bool,
     source_and_result_are_distinct: bool,
@@ -1028,7 +1037,7 @@ struct C10ColorFilterEncodingFacts {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C12CopyBackdropEncodingFacts {
+struct CopyBackdropEncodingFacts {
     exact_prepared_bindings: bool,
     source_and_result_are_distinct: bool,
     validated_viewport_and_scissor: bool,
@@ -1036,7 +1045,7 @@ struct C12CopyBackdropEncodingFacts {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C11BlurEncodingFacts {
+struct BlurEncodingFacts {
     exact_prepared_bindings: bool,
     distinct_source_and_result: bool,
     validated_region: bool,
@@ -1044,7 +1053,7 @@ struct C11BlurEncodingFacts {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C11DropShadowColorizeEncodingFacts {
+struct DropShadowColorizeEncodingFacts {
     exact_prepared_bindings: bool,
     distinct_source_and_result: bool,
     validated_region: bool,
@@ -1052,7 +1061,7 @@ struct C11DropShadowColorizeEncodingFacts {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-struct C11DropShadowMergeEncodingFacts {
+struct DropShadowMergeEncodingFacts {
     exact_prepared_bindings: bool,
     distinct_source_shadow_and_result: bool,
     validated_region: bool,
@@ -1061,17 +1070,17 @@ struct C11DropShadowMergeEncodingFacts {
     reads_original_source_and_shadow: bool,
 }
 
-struct PreparedC10ColorFilterEncoding<'prepared> {
+struct PreparedColorFilterEncoding<'prepared> {
     source_binding: PreparedTextureBinding<'prepared>,
     target_binding: PreparedTextureBinding<'prepared>,
     objects: ProvisionalColorFilterPassObjects<'prepared>,
     spatial: &'prepared PassSpatialUniformBytes,
     operation_buffer: &'prepared wgpu::Buffer,
-    region: C08RenderRegion,
-    facts: C10ColorFilterEncodingFacts,
+    region: GraphRenderRegion,
+    facts: ColorFilterEncodingFacts,
 }
 
-struct C09CompositeSemantic<'prepared> {
+struct LayerCompositeSemantic<'prepared> {
     transform: Transform,
     parameters: &'prepared RuntimeLayerCompositeParameters,
     parent: RuntimeReadBinding,
@@ -1083,8 +1092,8 @@ struct C09CompositeSemantic<'prepared> {
     destination_path: bool,
 }
 
-struct C09CompositeBindings<'prepared> {
-    semantic: C09CompositeSemantic<'prepared>,
+struct LayerCompositeBindings<'prepared> {
+    semantic: LayerCompositeSemantic<'prepared>,
     parent: PreparedTextureBinding<'prepared>,
     source: PreparedTextureBinding<'prepared>,
     target: PreparedTextureBinding<'prepared>,
@@ -1097,26 +1106,26 @@ struct C09CompositeBindings<'prepared> {
     sampled_allocations_are_distinct: bool,
 }
 
-struct C08SampledRenderTarget<'target> {
+struct CorePassSampledRenderTarget<'target> {
     view: &'target wgpu::TextureView,
     extent: PhysicalSize,
-    region: Option<C08RenderRegion>,
+    region: Option<GraphRenderRegion>,
     load: wgpu::LoadOp<wgpu::Color>,
     label: &'static str,
 }
 
-impl C08RenderRegion {
+impl GraphRenderRegion {
     fn full(extent: PhysicalSize) -> Result<Self> {
         if extent.width() == 0 || extent.height() == 0 {
             return Err(preparation_error(
-                "the C08 render region requires a positive target extent",
+                "the graph render region requires a positive target extent",
             ));
         }
         let viewport_width = extent.width() as f32;
         let viewport_height = extent.height() as f32;
         if !viewport_width.is_finite() || !viewport_height.is_finite() {
             return Err(preparation_error(
-                "the C08 render extent cannot be represented by WGPU viewport coordinates",
+                "the graph render extent cannot be represented by WGPU viewport coordinates",
             ));
         }
         Ok(Self {
@@ -1152,8 +1161,8 @@ impl C08RenderRegion {
         Self::bounded_unclipped(
             [unclipped_x, unclipped_y, unclipped_end_x, unclipped_end_y],
             destination,
-            "the C08 signed bounded render mapping is non-finite",
-            "the C08 bounded viewport or scissor cannot represent its signed mapping",
+            "the graph signed bounded render mapping is non-finite",
+            "the graph bounded viewport or scissor cannot represent its signed mapping",
         )
     }
 
@@ -1162,13 +1171,16 @@ impl C08RenderRegion {
         destination: RuntimeSpatialDescriptor,
         source_to_destination: Transform,
     ) -> Result<(Option<Self>, [f64; 4])> {
-        let bounds =
-            c09_transformed_source_device_bounds(source, destination, source_to_destination)?;
+        let bounds = composition_transformed_source_device_bounds(
+            source,
+            destination,
+            source_to_destination,
+        )?;
         let region = Self::bounded_unclipped(
             bounds,
             destination,
-            "the C09 transformed bounded render mapping is non-finite",
-            "the C09 transformed viewport or scissor cannot represent its signed mapping",
+            "the composition transformed bounded render mapping is non-finite",
+            "the composition transformed viewport or scissor cannot represent its signed mapping",
         )?;
         Ok((region, bounds))
     }
@@ -1230,7 +1242,7 @@ impl C08RenderRegion {
     }
 }
 
-fn c09_transformed_source_device_bounds(
+fn composition_transformed_source_device_bounds(
     source: RuntimeSpatialDescriptor,
     destination: RuntimeSpatialDescriptor,
     source_to_destination: Transform,
@@ -1256,7 +1268,7 @@ fn c09_transformed_source_device_bounds(
         let device_y = (destination_y - destination.texel_origin.y()) * destination.raster_scale;
         if !device_x.is_finite() || !device_y.is_finite() {
             return Err(preparation_error(
-                "the C09 transformed source bounds are non-finite",
+                "the composition transformed source bounds are non-finite",
             ));
         }
         minimum_x = minimum_x.min(device_x);
@@ -1267,12 +1279,12 @@ fn c09_transformed_source_device_bounds(
     Ok([minimum_x, minimum_y, maximum_x, maximum_y])
 }
 
-fn encode_c11_full_target_pass(
+fn encode_spatial_filter_full_target_pass(
     encoder: &mut wgpu::CommandEncoder,
     target: &wgpu::TextureView,
     pipeline: &wgpu::RenderPipeline,
     bind_group: &wgpu::BindGroup,
-    region: C08RenderRegion,
+    region: GraphRenderRegion,
     label: &'static str,
 ) {
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1310,7 +1322,7 @@ fn encode_c11_full_target_pass(
     pass.draw(0..3, 0..1);
 }
 
-fn c11_full_region_is_exact(region: C08RenderRegion, extent: PhysicalSize) -> bool {
+fn spatial_filter_full_region_is_exact(region: GraphRenderRegion, extent: PhysicalSize) -> bool {
     region.viewport_x == 0.0
         && region.viewport_y == 0.0
         && region.viewport_width == extent.width() as f32
@@ -1321,64 +1333,64 @@ fn c11_full_region_is_exact(region: C08RenderRegion, extent: PhysicalSize) -> bo
         && region.scissor_height == extent.height()
 }
 
-fn exact_c08_read(
-    request: &C08PreparedPassEncodingRequest,
+fn exact_core_pass_read(
+    request: &PreparedPassEncodingRequest,
     role: RuntimeReadRole,
 ) -> Result<&RuntimeReadBinding> {
     let mut matching = request.reads.iter().filter(|read| read.role == role);
     let read = matching
         .next()
-        .ok_or_else(|| preparation_error("the C08 prepared source binding is missing"))?;
+        .ok_or_else(|| preparation_error("the prepared graph source binding is missing"))?;
     if matching.next().is_some() {
         return Err(preparation_error(
-            "the C08 prepared source binding is duplicated",
+            "the prepared graph source binding is duplicated",
         ));
     }
     Ok(read)
 }
 
-fn c08_scheduled_encoding_order_is_exact(
-    scheduled: &[C08ScheduledEncodingKind],
+fn graph_scheduled_encoding_order_is_exact(
+    scheduled: &[GraphScheduledEncodingKind],
     passes: &[RuntimePassPreparationRequest],
 ) -> bool {
     scheduled.len() == passes.len()
         && scheduled.iter().zip(passes).all(|(scheduled, pass)| {
             let expected = match &pass.runtime.kind {
-                RuntimePassKind::ClearRoot { .. } => C08ScheduledEncodingKind::ClearRoot,
-                RuntimePassKind::VelloCapture(Some(_)) => C08ScheduledEncodingKind::VelloCapture,
+                RuntimePassKind::ClearRoot { .. } => GraphScheduledEncodingKind::ClearRoot,
+                RuntimePassKind::VelloCapture(Some(_)) => GraphScheduledEncodingKind::VelloCapture,
                 RuntimePassKind::CanonicalizeCapture => {
-                    C08ScheduledEncodingKind::CanonicalizeCapture
+                    GraphScheduledEncodingKind::CanonicalizeCapture
                 }
-                RuntimePassKind::CopyBackdrop => C08ScheduledEncodingKind::CopyBackdrop,
-                RuntimePassKind::ColorFilter(Some(_)) => C08ScheduledEncodingKind::ColorFilter,
+                RuntimePassKind::CopyBackdrop => GraphScheduledEncodingKind::CopyBackdrop,
+                RuntimePassKind::ColorFilter(Some(_)) => GraphScheduledEncodingKind::ColorFilter,
                 RuntimePassKind::BlurHorizontal(Some(blur)) => match blur.input {
-                    RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurHorizontalRgba,
+                    RuntimeBlurInput::Rgba => GraphScheduledEncodingKind::BlurHorizontalRgba,
                     RuntimeBlurInput::SourceAlpha => {
-                        C08ScheduledEncodingKind::BlurHorizontalSourceAlpha
+                        GraphScheduledEncodingKind::BlurHorizontalSourceAlpha
                     }
                 },
                 RuntimePassKind::BlurVertical(Some(blur)) => match blur.input {
-                    RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurVerticalRgba,
+                    RuntimeBlurInput::Rgba => GraphScheduledEncodingKind::BlurVerticalRgba,
                     RuntimeBlurInput::SourceAlpha => {
-                        C08ScheduledEncodingKind::BlurVerticalSourceAlpha
+                        GraphScheduledEncodingKind::BlurVerticalSourceAlpha
                     }
                 },
                 RuntimePassKind::DropShadowColorize(Some(_)) => {
-                    C08ScheduledEncodingKind::DropShadowColorize
+                    GraphScheduledEncodingKind::DropShadowColorize
                 }
                 RuntimePassKind::Composite(Some(RuntimeComposite {
                     kind: RuntimeCompositeKind::SpanSourceOver,
                     ..
-                })) => C08ScheduledEncodingKind::SpanSourceOver,
+                })) => GraphScheduledEncodingKind::SpanSourceOver,
                 RuntimePassKind::Composite(Some(RuntimeComposite {
                     kind: RuntimeCompositeKind::DropShadow,
                     ..
-                })) => C08ScheduledEncodingKind::DropShadowMerge,
+                })) => GraphScheduledEncodingKind::DropShadowMerge,
                 RuntimePassKind::Composite(Some(RuntimeComposite {
                     kind: RuntimeCompositeKind::Layer { .. },
                     ..
-                })) => C08ScheduledEncodingKind::LayerComposite,
-                RuntimePassKind::Present => C08ScheduledEncodingKind::Present,
+                })) => GraphScheduledEncodingKind::LayerComposite,
+                RuntimePassKind::Present => GraphScheduledEncodingKind::Present,
                 RuntimePassKind::VelloCapture(None)
                 | RuntimePassKind::ColorFilter(None)
                 | RuntimePassKind::BlurHorizontal(None)
@@ -1390,7 +1402,7 @@ fn c08_scheduled_encoding_order_is_exact(
         })
 }
 
-fn c08_capture_handoff_is_bounded(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> bool {
+fn vello_capture_handoff_is_bounded(handoff: &VelloCaptureEncodingHandoff<'_>) -> bool {
     handoff.has_bounded_work()
         && handoff.target_extent().width() > 0
         && handoff.target_extent().height() > 0
@@ -1408,7 +1420,7 @@ fn c08_capture_handoff_is_bounded(handoff: &C08VelloCaptureEncodingHandoff<'_>) 
             .all(|value| value.is_finite())
 }
 
-fn c08_spatial_uniform_preserves_source_origin(
+fn core_pass_spatial_uniform_preserves_source_origin(
     bytes: &PassSpatialUniformBytes,
     source: RuntimeSpatialDescriptor,
 ) -> bool {
@@ -1422,37 +1434,38 @@ fn close_f64(left: f64, right: f64) -> bool {
     (left - right).abs() <= tolerance
 }
 
-fn validate_c10_render_region(
+fn validate_color_filter_render_region(
     spatial: &PassSpatialUniformBytes,
     source: RuntimeSpatialDescriptor,
     target: RuntimeSpatialDescriptor,
-) -> Result<(C08RenderRegion, bool, bool)> {
-    let region = C08RenderRegion::bounded_source(source, target)?
-        .ok_or_else(|| preparation_error("the C10 color pass has an empty bounded region"))?;
+) -> Result<(GraphRenderRegion, bool, bool)> {
+    let region = GraphRenderRegion::bounded_source(source, target)?.ok_or_else(|| {
+        preparation_error("the color-filter color pass has an empty bounded region")
+    })?;
     let viewport_and_scissor = region.scissor_x.saturating_add(region.scissor_width)
         <= target.device_extent.width()
         && region.scissor_y.saturating_add(region.scissor_height) <= target.device_extent.height()
         && region.viewport_width > 0.0
         && region.viewport_height > 0.0;
-    let signed_texel_mapping = c08_spatial_uniform_preserves_source_origin(spatial, source)
+    let signed_texel_mapping = core_pass_spatial_uniform_preserves_source_origin(spatial, source)
         && close_f64(region.unclipped_x, 0.0)
         && close_f64(region.unclipped_y, 0.0)
         && source.texel_origin == target.texel_origin
         && source.device_origin == target.device_origin;
     if !viewport_and_scissor || !signed_texel_mapping {
         return Err(preparation_error(
-            "the C10 bounded viewport or signed texel mapping changed after validation",
+            "the color-filter bounded viewport or signed texel mapping changed after validation",
         ));
     }
     Ok((region, viewport_and_scissor, signed_texel_mapping))
 }
 
-fn encode_c09_composite_region(
+fn encode_layer_composite_region(
     encoder: &mut wgpu::CommandEncoder,
     target: &PreparedTextureBinding<'_>,
     objects: &ProvisionalCompositePassObjects<'_>,
     bind_group: &wgpu::BindGroup,
-    region: Option<C08RenderRegion>,
+    region: Option<GraphRenderRegion>,
     target_spatial: RuntimeSpatialDescriptor,
 ) -> Result<()> {
     let Some(region) = region else {
@@ -1463,11 +1476,11 @@ fn encode_c09_composite_region(
             > target_spatial.device_extent.height()
     {
         return Err(preparation_error(
-            "the C09 bounded composite exceeds its exact parent extent",
+            "the composition bounded composite exceeds its exact parent extent",
         ));
     }
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Surgeist C09 bounded layer composite"),
+        label: Some("Surgeist composition bounded layer composite"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: target.view(),
             resolve_target: None,
@@ -1502,7 +1515,7 @@ fn encode_c09_composite_region(
     Ok(())
 }
 
-fn copy_c09_composite_parent(
+fn copy_layer_composite_parent(
     encoder: &mut wgpu::CommandEncoder,
     parent: &PreparedTextureBinding<'_>,
     target: &PreparedTextureBinding<'_>,
@@ -1525,7 +1538,7 @@ fn copy_c09_composite_parent(
     );
 }
 
-fn c09_composite_copy_extent(spatial: RuntimeSpatialDescriptor) -> wgpu::Extent3d {
+fn layer_composite_copy_extent(spatial: RuntimeSpatialDescriptor) -> wgpu::Extent3d {
     wgpu::Extent3d {
         width: spatial.device_extent.width(),
         height: spatial.device_extent.height(),
@@ -1533,15 +1546,15 @@ fn c09_composite_copy_extent(spatial: RuntimeSpatialDescriptor) -> wgpu::Extent3
     }
 }
 
-fn c09_composite_region_mapping(
+fn layer_composite_region_mapping(
     spatial: &PassSpatialUniformBytes,
     source: RuntimeSpatialDescriptor,
     target: RuntimeSpatialDescriptor,
     transform: Transform,
-) -> Result<(Option<C08RenderRegion>, bool)> {
+) -> Result<(Option<GraphRenderRegion>, bool)> {
     let (region, transformed_source_bounds) =
-        C08RenderRegion::bounded_transformed_source(source, target, transform)?;
-    let preserved = c08_spatial_uniform_preserves_source_origin(spatial, source)
+        GraphRenderRegion::bounded_transformed_source(source, target, transform)?;
+    let preserved = core_pass_spatial_uniform_preserves_source_origin(spatial, source)
         && region.is_none_or(|region| {
             close_f64(region.unclipped_x, transformed_source_bounds[0])
                 && close_f64(region.unclipped_y, transformed_source_bounds[1])
@@ -1549,9 +1562,9 @@ fn c09_composite_region_mapping(
     Ok((region, preserved))
 }
 
-/// One allocation-backed, generation-bound C07 handoff. Its lifetime prevents
-/// the ready device bundle from transitioning while C08 owns its frame scope.
-fn validate_c08_vello_capture_target(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> Result<()> {
+/// One allocation-backed, generation-bound prepared-graph handoff. Its lifetime prevents
+/// the ready device bundle from transitioning while graph encoding owns its frame scope.
+fn validate_vello_capture_target(handoff: &VelloCaptureEncodingHandoff<'_>) -> Result<()> {
     let target_extent = handoff.target_extent();
     if target_extent.width() == 0
         || target_extent.height() == 0
@@ -1565,13 +1578,13 @@ fn validate_c08_vello_capture_target(handoff: &C08VelloCaptureEncodingHandoff<'_
         || handoff.texture().usage() != VELLO_CAPTURE_TEXTURE_USAGES
     {
         return Err(preparation_error(
-            "the C08 Vello capture target changed its exact RGBA8 storage contract",
+            "the graph Vello capture target changed its exact RGBA8 storage contract",
         ));
     }
     Ok(())
 }
 
-fn c08_vello_capture_scene(handoff: &C08VelloCaptureEncodingHandoff<'_>) -> Result<VelloScene> {
+fn vello_capture_scene(handoff: &VelloCaptureEncodingHandoff<'_>) -> Result<VelloScene> {
     let initial_transform = handoff.initial_transform();
     match handoff.work() {
         RuntimeVelloCapture::Span(span) => {
@@ -1593,14 +1606,14 @@ impl<'device> PreparedGraph<'device> {
         self.vello_engine = Some(engine);
         self
     }
-    pub(crate) async fn encode_c08_custom_spine(
+    pub(crate) async fn encode_custom_spine(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        output: C08ExternalOutputView<'_>,
-    ) -> Result<C08PendingGraphEncoding> {
-        let expected_capture_count = self.c08_custom_spine_requirements(&output)?;
+        output: GraphExternalOutputView<'_>,
+    ) -> Result<PendingGraphEncoding> {
+        let expected_capture_count = self.custom_spine_requirements(&output)?;
         let engine = self.vello_engine.ok_or_else(|| {
-            preparation_error("the C08 capture scheduler has no ready internal Vello engine")
+            preparation_error("the Vello capture scheduler has no ready internal Vello engine")
         })?;
         let resources = self.resources;
         let queue = self.queue;
@@ -1608,16 +1621,16 @@ impl<'device> PreparedGraph<'device> {
         let session = Arc::new(());
         let mut scope = ActiveVelloEncodingScope::begin(self.device);
         let mut leases = VelloResourceLeaseAggregate::new();
-        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Encoding);
+        self.custom_spine_encoding_state = Some(CustomSpineEncodingState::Encoding);
         let result = {
-            let mut capture_encoding = C08VelloCaptureEncodingContext {
+            let mut capture_encoding = VelloCaptureEncodingContext {
                 engine,
                 resources,
                 queue,
                 scope: &mut scope,
                 leases: &mut leases,
             };
-            self.encode_c08_custom_spine_once(
+            self.encode_custom_spine_once(
                 encoder,
                 &output,
                 expected_capture_count,
@@ -1630,7 +1643,7 @@ impl<'device> PreparedGraph<'device> {
             Err(encoding_error) => {
                 let _ = leases.abort();
                 let scope_result = scope.finish().await;
-                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
+                self.custom_spine_encoding_state = Some(CustomSpineEncodingState::AbortOnly);
                 return match scope_result {
                     Ok(()) => Err(encoding_error),
                     Err(scope_error) => Err(scope_error),
@@ -1640,63 +1653,63 @@ impl<'device> PreparedGraph<'device> {
         let leases = match scope.finish_with_leases(leases).await {
             Ok(leases) => leases,
             Err(failure) => {
-                self.c08_encoding_state = Some(C08CustomSpineEncodingState::AbortOnly);
+                self.custom_spine_encoding_state = Some(CustomSpineEncodingState::AbortOnly);
                 return Err(failure.into_error_and_aborted_resources().0);
             }
         };
-        self.c08_encoding_state = Some(C08CustomSpineEncodingState::Complete);
-        self.c08_completed_session = Some(Arc::clone(&session));
-        Ok(C08PendingGraphEncoding {
+        self.custom_spine_encoding_state = Some(CustomSpineEncodingState::Complete);
+        self.custom_spine_completed_session = Some(Arc::clone(&session));
+        Ok(PendingGraphEncoding {
             summary,
             resources: PendingVelloResourceCommit::from_aggregate(leases),
             session,
         })
     }
 
-    fn c08_custom_spine_requirements(&self, output: &C08ExternalOutputView<'_>) -> Result<usize> {
-        match self.c08_encoding_state {
-            Some(C08CustomSpineEncodingState::Ready) => {}
+    fn custom_spine_requirements(&self, output: &GraphExternalOutputView<'_>) -> Result<usize> {
+        match self.custom_spine_encoding_state {
+            Some(CustomSpineEncodingState::Ready) => {}
             Some(
-                C08CustomSpineEncodingState::Encoding
-                | C08CustomSpineEncodingState::Complete
-                | C08CustomSpineEncodingState::AbortOnly,
+                CustomSpineEncodingState::Encoding
+                | CustomSpineEncodingState::Complete
+                | CustomSpineEncodingState::AbortOnly,
             ) => {
                 return Err(preparation_error(
-                    "the C08 custom encoding is one-shot; discard this prepared graph and its encoder",
+                    "the custom-spine encoding is one-shot; discard this prepared graph and its encoder",
                 ));
             }
             None => {
                 return Err(preparation_error(
-                    "the C08 custom scheduler requires validated execution facts",
+                    "the custom-spine scheduler requires validated execution facts",
                 ));
             }
         }
         let (execution_working_format, execution_output_format, expected_capture_count) =
-            if let Some(execution) = self.c08_execution.as_ref() {
+            if let Some(execution) = self.base_execution.as_ref() {
                 (
                     execution.working_format(),
                     execution.output_format(),
                     execution.captures().len(),
                 )
-            } else if let Some(execution) = self.c09_execution.as_ref() {
+            } else if let Some(execution) = self.composition_execution.as_ref() {
                 (
                     execution.working_format,
                     execution.output_format,
                     execution.captures.len(),
                 )
-            } else if let Some(execution) = self.c10_execution.as_ref() {
+            } else if let Some(execution) = self.color_filter_execution.as_ref() {
                 (
                     execution.working_format,
                     execution.output_format,
                     execution.captures.len(),
                 )
-            } else if let Some(execution) = self.c11_execution.as_ref() {
+            } else if let Some(execution) = self.spatial_filter_execution.as_ref() {
                 (
                     execution.working_format,
                     execution.output_format,
                     execution.captures.len(),
                 )
-            } else if let Some(execution) = self.c12_execution.as_ref() {
+            } else if let Some(execution) = self.backdrop_execution.as_ref() {
                 (
                     execution.working_format,
                     execution.output_format,
@@ -1704,7 +1717,7 @@ impl<'device> PreparedGraph<'device> {
                 )
             } else {
                 return Err(preparation_error(
-                    "the C08 custom scheduler requires validated execution facts",
+                    "the custom-spine scheduler requires validated execution facts",
                 ));
             };
         if execution_working_format != self.plan.working_format
@@ -1713,39 +1726,39 @@ impl<'device> PreparedGraph<'device> {
             || output.extent != self.output_extent()?
         {
             return Err(preparation_error(
-                "the C08 external output differs from the exact prepared format or extent",
+                "the graph external output differs from the exact prepared format or extent",
             ));
         }
         if self.pass_cache_update.is_none() {
             return Err(preparation_error(
-                "the C08 custom scheduler requires transaction-provisional pass objects",
+                "the custom-spine scheduler requires transaction-provisional pass objects",
             ));
         }
         if expected_capture_count == 0 || self.next_pass != 0 {
             return Err(preparation_error(
-                "the C08 custom scheduler requires one unstarted capture spine",
+                "the custom-spine scheduler requires one unstarted capture spine",
             ));
         }
         Ok(expected_capture_count)
     }
 
-    fn encode_c08_custom_spine_once(
+    fn encode_custom_spine_once(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        output: &C08ExternalOutputView<'_>,
+        output: &GraphExternalOutputView<'_>,
         expected_capture_count: usize,
         session: &Arc<()>,
-        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
-    ) -> Result<C08CustomSpineEncodingSummary> {
+        capture_encoding: &mut VelloCaptureEncodingContext<'_, '_>,
+    ) -> Result<CustomSpineEncodingSummary> {
         let mut progress =
-            C08CustomSpineEncodingProgress::new(self.plan.passes.len(), expected_capture_count);
+            CustomSpineEncodingProgress::new(self.plan.passes.len(), expected_capture_count);
         while let Some(request) = self
             .plan
             .passes
             .get(self.next_pass)
-            .map(C08PreparedPassEncodingRequest::from)
+            .map(PreparedPassEncodingRequest::from)
         {
-            self.encode_c08_custom_request(
+            self.encode_custom_spine_request(
                 encoder,
                 output,
                 session,
@@ -1757,54 +1770,58 @@ impl<'device> PreparedGraph<'device> {
         Ok(progress.finish(self))
     }
 
-    fn encode_c08_custom_request(
+    fn encode_custom_spine_request(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        output: &C08ExternalOutputView<'_>,
+        output: &GraphExternalOutputView<'_>,
         session: &Arc<()>,
-        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        capture_encoding: &mut VelloCaptureEncodingContext<'_, '_>,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
         match &request.kind {
             RuntimePassKind::ClearRoot { initialization, .. } => {
-                self.encode_c08_clear_step(encoder, request, *initialization, progress)
+                self.encode_clear_root_step(encoder, request, *initialization, progress)
             }
-            RuntimePassKind::VelloCapture(Some(_)) => {
-                self.encode_c08_capture_step(encoder, request, session, capture_encoding, progress)
-            }
+            RuntimePassKind::VelloCapture(Some(_)) => self.encode_vello_capture_step(
+                encoder,
+                request,
+                session,
+                capture_encoding,
+                progress,
+            ),
             RuntimePassKind::CanonicalizeCapture => {
-                self.encode_c08_canonicalize_step(encoder, request, progress)
+                self.encode_canonicalize_capture_step(encoder, request, progress)
             }
             RuntimePassKind::CopyBackdrop => {
-                self.encode_c12_copy_backdrop_step(encoder, request, progress)
+                self.encode_copy_backdrop_step(encoder, request, progress)
             }
             RuntimePassKind::ColorFilter(Some(_)) => {
-                self.encode_c10_color_filter_step(encoder, request, progress)
+                self.encode_color_filter_step(encoder, request, progress)
             }
             RuntimePassKind::BlurHorizontal(Some(_)) | RuntimePassKind::BlurVertical(Some(_)) => {
-                self.encode_c11_blur_step(encoder, request, progress)
+                self.encode_blur_step(encoder, request, progress)
             }
             RuntimePassKind::DropShadowColorize(Some(_)) => {
-                self.encode_c11_drop_shadow_colorize_step(encoder, request, progress)
+                self.encode_drop_shadow_colorize_step(encoder, request, progress)
             }
             RuntimePassKind::Composite(Some(composite))
                 if matches!(composite.kind, RuntimeCompositeKind::DropShadow) =>
             {
-                self.encode_c11_drop_shadow_merge_step(encoder, request, progress)
+                self.encode_drop_shadow_merge_step(encoder, request, progress)
             }
             RuntimePassKind::Composite(Some(composite))
                 if matches!(composite.kind, RuntimeCompositeKind::SpanSourceOver) =>
             {
-                self.encode_c08_source_over_step(encoder, request, progress)
+                self.encode_span_source_over_step(encoder, request, progress)
             }
             RuntimePassKind::Composite(Some(composite))
                 if matches!(composite.kind, RuntimeCompositeKind::Layer { .. }) =>
             {
-                self.encode_c09_layer_step(encoder, request, progress)
+                self.encode_composition_layer_step(encoder, request, progress)
             }
             RuntimePassKind::Present => {
-                self.encode_c08_present_step(encoder, output, request, progress)
+                self.encode_base_graph_present_step(encoder, output, request, progress)
             }
             RuntimePassKind::VelloCapture(None)
             | RuntimePassKind::ColorFilter(None)
@@ -1812,43 +1829,43 @@ impl<'device> PreparedGraph<'device> {
             | RuntimePassKind::BlurVertical(None)
             | RuntimePassKind::DropShadowColorize(None)
             | RuntimePassKind::Composite(_) => Err(preparation_error(
-                "a non-C08 pass reached the custom graph spine scheduler",
+                "a non-core pass reached the custom graph spine scheduler",
             )),
         }
     }
 
-    fn encode_c08_clear_step(
+    fn encode_clear_root_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
+        request: &PreparedPassEncodingRequest,
         initialization: RuntimeInitialization,
-        progress: &mut C08CustomSpineEncodingProgress,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c08_clear_root(encoder, request)?;
+        let facts = self.encode_clear_root(encoder, request)?;
         if initialization == RuntimeInitialization::SurfaceBaseColor {
             progress.root_clear_count = progress.root_clear_count.saturating_add(1);
             progress.clears_full_root &= facts.full_target;
         }
-        self.complete_c08_custom_pass(request.id)?;
-        progress.record_custom_completion(C08ScheduledEncodingKind::ClearRoot);
+        self.complete_custom_spine_pass(request.id)?;
+        progress.record_custom_completion(GraphScheduledEncodingKind::ClearRoot);
         Ok(())
     }
 
-    fn encode_c08_capture_step(
+    fn encode_vello_capture_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
+        request: &PreparedPassEncodingRequest,
         session: &Arc<()>,
-        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
-        progress: &mut C08CustomSpineEncodingProgress,
+        capture_encoding: &mut VelloCaptureEncodingContext<'_, '_>,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let handoff = self.c08_vello_capture_handoff(request, session)?;
+        let handoff = self.vello_capture_handoff(request, session)?;
         let target = handoff.target();
-        progress.bounded_capture_handoffs &= c08_capture_handoff_is_bounded(&handoff);
-        let encoded = Self::encode_c08_vello_capture(handoff, encoder, capture_encoding)?;
+        progress.bounded_capture_handoffs &= vello_capture_handoff_is_bounded(&handoff);
+        let encoded = Self::encode_vello_capture(handoff, encoder, capture_encoding)?;
         #[cfg(test)]
         progress.capture_observations.push(encoded.observation);
-        self.complete_c08_capture(request.id, target, session, encoded.receipt)?;
+        self.complete_vello_capture(request.id, target, session, encoded.receipt)?;
         #[cfg(test)]
         {
             self.acquired_capture_lease_count_raw_fact =
@@ -1858,26 +1875,26 @@ impl<'device> PreparedGraph<'device> {
         Ok(())
     }
 
-    fn encode_c08_canonicalize_step(
+    fn encode_canonicalize_capture_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c08_canonicalize(encoder, request)?;
+        let facts = self.encode_canonicalize_capture(encoder, request)?;
         progress.exact_spatial &= facts.exact_spatial_uniform;
-        self.complete_c08_custom_pass(request.id)?;
-        progress.record_custom_completion(C08ScheduledEncodingKind::CanonicalizeCapture);
+        self.complete_custom_spine_pass(request.id)?;
+        progress.record_custom_completion(GraphScheduledEncodingKind::CanonicalizeCapture);
         Ok(())
     }
 
-    fn encode_c10_color_filter_step(
+    fn encode_color_filter_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c10_color_filter(encoder, request)?;
+        let facts = self.encode_color_filter(encoder, request)?;
         progress.color_filter_count = progress.color_filter_count.saturating_add(1);
         progress.color_filters_preserve_authored_order &= facts.exact_operation_bytes;
         progress.color_filter_bindings_are_exact &= facts.exact_source_spatial_and_operations;
@@ -1885,22 +1902,22 @@ impl<'device> PreparedGraph<'device> {
             facts.source_and_result_are_distinct;
         progress.color_filter_regions_are_validated &= facts.validated_viewport_and_scissor;
         progress.color_filter_signed_texel_mapping_is_exact &= facts.preserved_signed_texel_mapping;
-        self.complete_c08_custom_pass(request.id)?;
+        self.complete_custom_spine_pass(request.id)?;
         progress.color_filter_operation_buffers_released &= self
             .color_filter_operation_bindings
             .get(&request.id)
             .is_some_and(|binding| binding.buffer.is_none());
-        progress.record_custom_completion(C08ScheduledEncodingKind::ColorFilter);
+        progress.record_custom_completion(GraphScheduledEncodingKind::ColorFilter);
         Ok(())
     }
 
-    fn encode_c12_copy_backdrop_step(
+    fn encode_copy_backdrop_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c12_copy_backdrop(encoder, request)?;
+        let facts = self.encode_copy_backdrop(encoder, request)?;
         progress.copy_backdrop_count = progress.copy_backdrop_count.saturating_add(1);
         progress.copy_backdrop_bindings_are_exact &= facts.exact_prepared_bindings;
         progress.copy_backdrop_allocations_are_distinct &= facts.source_and_result_are_distinct;
@@ -1910,37 +1927,39 @@ impl<'device> PreparedGraph<'device> {
         progress
             .composite_encoder_identities
             .push(std::ptr::from_mut(&mut *encoder) as usize);
-        self.complete_c08_custom_pass(request.id)?;
-        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+        self.complete_custom_spine_pass(request.id)?;
+        progress.spatial_filter_textures_released &= request.releases.iter().all(|resource| {
             self.resource_bindings
                 .get(resource)
                 .is_some_and(|binding| binding.lease.is_none())
         });
-        progress.record_custom_completion(C08ScheduledEncodingKind::CopyBackdrop);
+        progress.record_custom_completion(GraphScheduledEncodingKind::CopyBackdrop);
         Ok(())
     }
 
-    fn encode_c11_blur_step(
+    fn encode_blur_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c11_blur(encoder, request)?;
+        let facts = self.encode_blur(encoder, request)?;
         let kind = match &request.kind {
             RuntimePassKind::BlurHorizontal(Some(blur)) => match blur.input {
-                RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurHorizontalRgba,
+                RuntimeBlurInput::Rgba => GraphScheduledEncodingKind::BlurHorizontalRgba,
                 RuntimeBlurInput::SourceAlpha => {
-                    C08ScheduledEncodingKind::BlurHorizontalSourceAlpha
+                    GraphScheduledEncodingKind::BlurHorizontalSourceAlpha
                 }
             },
             RuntimePassKind::BlurVertical(Some(blur)) => match blur.input {
-                RuntimeBlurInput::Rgba => C08ScheduledEncodingKind::BlurVerticalRgba,
-                RuntimeBlurInput::SourceAlpha => C08ScheduledEncodingKind::BlurVerticalSourceAlpha,
+                RuntimeBlurInput::Rgba => GraphScheduledEncodingKind::BlurVerticalRgba,
+                RuntimeBlurInput::SourceAlpha => {
+                    GraphScheduledEncodingKind::BlurVerticalSourceAlpha
+                }
             },
             _ => {
                 return Err(preparation_error(
-                    "the C11 blur scheduler lost its pass kind",
+                    "the spatial-filter blur scheduler lost its pass kind",
                 ));
             }
         };
@@ -1948,17 +1967,18 @@ impl<'device> PreparedGraph<'device> {
         progress
             .composite_encoder_identities
             .push(std::ptr::from_mut(&mut *encoder) as usize);
-        self.complete_c08_custom_pass(request.id)?;
+        self.complete_custom_spine_pass(request.id)?;
         progress.blur_pass_count = progress.blur_pass_count.saturating_add(1);
-        progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
-        progress.c11_regions_are_exact &= facts.validated_region && facts.preserved_signed_mapping;
+        progress.spatial_filter_bindings_are_exact &= facts.exact_prepared_bindings;
+        progress.spatial_filter_regions_are_exact &=
+            facts.validated_region && facts.preserved_signed_mapping;
         progress.blur_allocations_are_distinct &= facts.distinct_source_and_result;
-        progress.c11_kernels_released &= request.kernel_releases.iter().all(|kernel| {
+        progress.spatial_filter_kernels_released &= request.kernel_releases.iter().all(|kernel| {
             self.kernel_bindings
                 .get(kernel)
                 .is_some_and(|binding| binding.lease.is_none())
         });
-        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+        progress.spatial_filter_textures_released &= request.releases.iter().all(|resource| {
             self.resource_bindings
                 .get(resource)
                 .is_some_and(|binding| binding.lease.is_none())
@@ -1967,44 +1987,45 @@ impl<'device> PreparedGraph<'device> {
         Ok(())
     }
 
-    fn encode_c11_drop_shadow_colorize_step(
+    fn encode_drop_shadow_colorize_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c11_drop_shadow_colorize(encoder, request)?;
+        let facts = self.encode_drop_shadow_colorize(encoder, request)?;
         #[cfg(test)]
         progress
             .composite_encoder_identities
             .push(std::ptr::from_mut(&mut *encoder) as usize);
-        self.complete_c08_custom_pass(request.id)?;
+        self.complete_custom_spine_pass(request.id)?;
         progress.drop_shadow_colorize_count = progress.drop_shadow_colorize_count.saturating_add(1);
-        progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
-        progress.c11_regions_are_exact &= facts.validated_region && facts.preserved_signed_mapping;
+        progress.spatial_filter_bindings_are_exact &= facts.exact_prepared_bindings;
+        progress.spatial_filter_regions_are_exact &=
+            facts.validated_region && facts.preserved_signed_mapping;
         progress.blur_allocations_are_distinct &= facts.distinct_source_and_result;
-        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+        progress.spatial_filter_textures_released &= request.releases.iter().all(|resource| {
             self.resource_bindings
                 .get(resource)
                 .is_some_and(|binding| binding.lease.is_none())
         });
-        progress.record_custom_completion(C08ScheduledEncodingKind::DropShadowColorize);
+        progress.record_custom_completion(GraphScheduledEncodingKind::DropShadowColorize);
         Ok(())
     }
 
-    fn encode_c11_drop_shadow_merge_step(
+    fn encode_drop_shadow_merge_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c11_drop_shadow_merge(encoder, request)?;
-        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?.resource();
+        let facts = self.encode_drop_shadow_merge(encoder, request)?;
+        let source = exact_core_pass_read(request, RuntimeReadRole::CompositeSource)?.resource();
         let source_is_live = self
             .resource_bindings
             .get(&source)
             .is_some_and(|binding| binding.lease.is_some());
-        let source_read_twice = [&self.c11_execution, &self.c12_execution]
+        let source_read_twice = [&self.spatial_filter_execution, &self.backdrop_execution]
             .into_iter()
             .flatten()
             .any(|execution| {
@@ -2020,15 +2041,16 @@ impl<'device> PreparedGraph<'device> {
         progress
             .composite_encoder_identities
             .push(std::ptr::from_mut(&mut *encoder) as usize);
-        self.complete_c08_custom_pass(request.id)?;
+        self.complete_custom_spine_pass(request.id)?;
         let source_is_released = self
             .resource_bindings
             .get(&source)
             .is_some_and(|binding| binding.lease.is_none());
         progress.drop_shadow_merge_count = progress.drop_shadow_merge_count.saturating_add(1);
         progress.source_over_count = progress.source_over_count.saturating_add(1);
-        progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
-        progress.c11_regions_are_exact &= facts.validated_region && facts.preserved_signed_mapping;
+        progress.spatial_filter_bindings_are_exact &= facts.exact_prepared_bindings;
+        progress.spatial_filter_regions_are_exact &=
+            facts.validated_region && facts.preserved_signed_mapping;
         progress.parent_and_result_are_distinct &= facts.distinct_source_shadow_and_result;
         progress.full_copy_before_bounded_render &= facts.distinct_source_shadow_and_result;
         progress.samples_source_with_fixed_blend &= facts.fixed_source_over_blend;
@@ -2037,22 +2059,22 @@ impl<'device> PreparedGraph<'device> {
             facts.reads_original_source_and_shadow && source_read_twice;
         progress.shadow_source_released_after_merge &=
             source_is_live && source_is_released && request.releases.contains(&source);
-        progress.c11_textures_released &= request.releases.iter().all(|resource| {
+        progress.spatial_filter_textures_released &= request.releases.iter().all(|resource| {
             self.resource_bindings
                 .get(resource)
                 .is_some_and(|binding| binding.lease.is_none())
         });
-        progress.record_custom_completion(C08ScheduledEncodingKind::DropShadowMerge);
+        progress.record_custom_completion(GraphScheduledEncodingKind::DropShadowMerge);
         Ok(())
     }
 
-    fn encode_c08_source_over_step(
+    fn encode_span_source_over_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c08_span_source_over(encoder, request)?;
+        let facts = self.encode_span_source_over(encoder, request)?;
         progress.source_over_count = progress.source_over_count.saturating_add(1);
         progress.exact_spatial &= facts.exact_spatial_uniform;
         progress.parent_and_result_are_distinct &= facts.parent_and_result_distinct;
@@ -2060,18 +2082,18 @@ impl<'device> PreparedGraph<'device> {
         progress.samples_source_with_fixed_blend &=
             facts.sampled_only_source && facts.fixed_source_over_blend;
         progress.preserves_signed_origin &= facts.preserved_signed_source_origin;
-        self.complete_c08_custom_pass(request.id)?;
-        progress.record_custom_completion(C08ScheduledEncodingKind::SpanSourceOver);
+        self.complete_custom_spine_pass(request.id)?;
+        progress.record_custom_completion(GraphScheduledEncodingKind::SpanSourceOver);
         Ok(())
     }
 
-    fn encode_c09_layer_step(
+    fn encode_composition_layer_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c09_layer_composite(encoder, request)?;
+        let facts = self.encode_composition_layer_composite(encoder, request)?;
         progress.layer_composite_count = progress.layer_composite_count.saturating_add(1);
         progress.normal_composite_count = progress
             .normal_composite_count
@@ -2098,35 +2120,35 @@ impl<'device> PreparedGraph<'device> {
         progress
             .composite_encoder_identities
             .push(facts.encoder_identity);
-        self.complete_c08_custom_pass(request.id)?;
-        progress.record_custom_completion(C08ScheduledEncodingKind::LayerComposite);
+        self.complete_custom_spine_pass(request.id)?;
+        progress.record_custom_completion(GraphScheduledEncodingKind::LayerComposite);
         Ok(())
     }
 
-    fn encode_c08_present_step(
+    fn encode_base_graph_present_step(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
-        output: &C08ExternalOutputView<'_>,
-        request: &C08PreparedPassEncodingRequest,
-        progress: &mut C08CustomSpineEncodingProgress,
+        output: &GraphExternalOutputView<'_>,
+        request: &PreparedPassEncodingRequest,
+        progress: &mut CustomSpineEncodingProgress,
     ) -> Result<()> {
-        let facts = self.encode_c08_present(encoder, request, output)?;
+        let facts = self.encode_base_graph_present(encoder, request, output)?;
         progress.exact_spatial &= facts.exact_spatial_uniform;
         progress.exact_external_output |= facts.external_output_exact;
-        self.complete_c08_custom_pass(request.id)?;
-        progress.record_custom_completion(C08ScheduledEncodingKind::Present);
+        self.complete_custom_spine_pass(request.id)?;
+        progress.record_custom_completion(GraphScheduledEncodingKind::Present);
         Ok(())
     }
 
-    fn encode_c08_vello_capture(
-        handoff: C08VelloCaptureEncodingHandoff<'_>,
+    fn encode_vello_capture(
+        handoff: VelloCaptureEncodingHandoff<'_>,
         encoder: &mut wgpu::CommandEncoder,
-        capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
-    ) -> Result<C08EncodedCaptureResult> {
+        capture_encoding: &mut VelloCaptureEncodingContext<'_, '_>,
+    ) -> Result<EncodedVelloCaptureResult> {
         let target_extent = handoff.target_extent();
         let antialiasing = handoff.antialiasing();
-        validate_c08_vello_capture_target(&handoff)?;
-        let scene = c08_vello_capture_scene(&handoff)?;
+        validate_vello_capture_target(&handoff)?;
+        let scene = vello_capture_scene(&handoff)?;
         #[cfg(test)]
         let lowers_with_exact_initial_transform = match handoff.work() {
             RuntimeVelloCapture::Span(_) => scene
@@ -2196,7 +2218,7 @@ impl<'device> PreparedGraph<'device> {
             }
         };
         capture_encoding.leases.push(lease);
-        Ok(C08EncodedCaptureResult {
+        Ok(EncodedVelloCaptureResult {
             receipt,
             #[cfg(test)]
             observation,
@@ -2226,19 +2248,19 @@ impl<'device> PreparedGraph<'device> {
             || texture.format() != expected_format
         {
             return Err(preparation_error(
-                "the C08 prepared texture differs from its exact runtime binding",
+                "the prepared graph texture differs from its exact runtime binding",
             ));
         }
         Ok(request.spatial)
     }
 
-    fn c08_pass_objects<'prepared>(
+    fn core_pass_objects<'prepared>(
         &'prepared self,
         keys: &RuntimePassCacheKeys,
-    ) -> Result<ProvisionalC08PassObjects<'prepared>> {
+    ) -> Result<ProvisionalCorePassObjects<'prepared>> {
         self.pass_cache_update
             .as_ref()
-            .ok_or_else(|| preparation_error("C08 provisional pass objects are unavailable"))?
+            .ok_or_else(|| preparation_error("core-pass provisional pass objects are unavailable"))?
             .encoding_objects(
                 self.pass_cache,
                 keys.samplers(),
@@ -2248,13 +2270,15 @@ impl<'device> PreparedGraph<'device> {
             )
     }
 
-    fn c09_composite_pass_objects<'prepared>(
+    fn layer_composite_pass_objects<'prepared>(
         &'prepared self,
         keys: &RuntimePassCacheKeys,
     ) -> Result<ProvisionalCompositePassObjects<'prepared>> {
         self.pass_cache_update
             .as_ref()
-            .ok_or_else(|| preparation_error("C09 provisional pass objects are unavailable"))?
+            .ok_or_else(|| {
+                preparation_error("composition provisional pass objects are unavailable")
+            })?
             .composite_encoding_objects(
                 self.pass_cache,
                 keys.samplers(),
@@ -2264,13 +2288,15 @@ impl<'device> PreparedGraph<'device> {
             )
     }
 
-    fn c10_color_filter_pass_objects<'prepared>(
+    fn color_filter_pass_objects<'prepared>(
         &'prepared self,
         keys: &RuntimePassCacheKeys,
     ) -> Result<ProvisionalColorFilterPassObjects<'prepared>> {
         self.pass_cache_update
             .as_ref()
-            .ok_or_else(|| preparation_error("C10 provisional pass objects are unavailable"))?
+            .ok_or_else(|| {
+                preparation_error("color-filter provisional pass objects are unavailable")
+            })?
             .color_filter_encoding_objects(
                 self.pass_cache,
                 keys.samplers(),
@@ -2280,7 +2306,7 @@ impl<'device> PreparedGraph<'device> {
             )
     }
 
-    fn c12_copy_backdrop_pass_objects(
+    fn copy_backdrop_pass_objects(
         &self,
         pass: RuntimePassId,
     ) -> Result<(
@@ -2288,23 +2314,23 @@ impl<'device> PreparedGraph<'device> {
         &wgpu::BindGroupLayout,
         &wgpu::RenderPipeline,
     )> {
-        match self.c11_pass_objects.get(&pass) {
-            Some(PreparedC11PassObjects::CopyBackdrop {
+        match self.spatial_filter_pass_objects.get(&pass) {
+            Some(PreparedSpatialFilterPassObjects::CopyBackdrop {
                 parent_sampler,
                 layout,
                 pipeline,
             }) => Ok((parent_sampler, layout, pipeline)),
             Some(
-                PreparedC11PassObjects::Blur { .. }
-                | PreparedC11PassObjects::DropShadowColorize { .. },
+                PreparedSpatialFilterPassObjects::Blur { .. }
+                | PreparedSpatialFilterPassObjects::DropShadowColorize { .. },
             )
             | None => Err(preparation_error(
-                "the C12 backdrop-copy pass lost its exact prepared object handles",
+                "the backdrop-copy pass lost its exact prepared object handles",
             )),
         }
     }
 
-    fn c11_blur_pass_objects(
+    fn blur_pass_objects(
         &self,
         pass: RuntimePassId,
     ) -> Result<(
@@ -2312,23 +2338,23 @@ impl<'device> PreparedGraph<'device> {
         &wgpu::BindGroupLayout,
         &wgpu::RenderPipeline,
     )> {
-        match self.c11_pass_objects.get(&pass) {
-            Some(PreparedC11PassObjects::Blur {
+        match self.spatial_filter_pass_objects.get(&pass) {
+            Some(PreparedSpatialFilterPassObjects::Blur {
                 source_sampler,
                 layout,
                 pipeline,
             }) => Ok((source_sampler, layout, pipeline)),
             Some(
-                PreparedC11PassObjects::CopyBackdrop { .. }
-                | PreparedC11PassObjects::DropShadowColorize { .. },
+                PreparedSpatialFilterPassObjects::CopyBackdrop { .. }
+                | PreparedSpatialFilterPassObjects::DropShadowColorize { .. },
             )
             | None => Err(preparation_error(
-                "the C11 blur pass lost its exact prepared object handles",
+                "the spatial-filter blur pass lost its exact prepared object handles",
             )),
         }
     }
 
-    fn c11_drop_shadow_colorize_pass_objects(
+    fn drop_shadow_colorize_pass_objects(
         &self,
         pass: RuntimePassId,
     ) -> Result<(
@@ -2336,24 +2362,28 @@ impl<'device> PreparedGraph<'device> {
         &wgpu::BindGroupLayout,
         &wgpu::RenderPipeline,
     )> {
-        match self.c11_pass_objects.get(&pass) {
-            Some(PreparedC11PassObjects::DropShadowColorize {
+        match self.spatial_filter_pass_objects.get(&pass) {
+            Some(PreparedSpatialFilterPassObjects::DropShadowColorize {
                 source_sampler,
                 layout,
                 pipeline,
             }) => Ok((source_sampler, layout, pipeline)),
             Some(
-                PreparedC11PassObjects::CopyBackdrop { .. } | PreparedC11PassObjects::Blur { .. },
+                PreparedSpatialFilterPassObjects::CopyBackdrop { .. }
+                | PreparedSpatialFilterPassObjects::Blur { .. },
             )
             | None => Err(preparation_error(
-                "the C11 drop-shadow pass lost its exact prepared object handles",
+                "the spatial-filter drop-shadow pass lost its exact prepared object handles",
             )),
         }
     }
 
-    fn create_c08_spatial_uniform_buffer(&self, bytes: &PassSpatialUniformBytes) -> wgpu::Buffer {
+    fn create_core_pass_spatial_uniform_buffer(
+        &self,
+        bytes: &PassSpatialUniformBytes,
+    ) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Surgeist C08 pass spatial uniform"),
+            label: Some("Surgeist core pass spatial uniform"),
             size: bytes.as_bytes().len() as u64,
             usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -2362,12 +2392,12 @@ impl<'device> PreparedGraph<'device> {
         buffer
     }
 
-    fn create_c09_composite_parameter_buffer(
+    fn create_layer_composite_parameter_buffer(
         &self,
         bytes: &CompositeParameterBytes,
     ) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Surgeist C09 composite parameter uniform"),
+            label: Some("Surgeist composition composite parameter uniform"),
             size: bytes.as_bytes().len() as u64,
             usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -2376,12 +2406,12 @@ impl<'device> PreparedGraph<'device> {
         buffer
     }
 
-    fn create_c11_drop_shadow_parameter_buffer(
+    fn create_drop_shadow_parameter_buffer(
         &self,
         bytes: &DropShadowParameterBytes,
     ) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Surgeist C11 drop-shadow parameter uniform"),
+            label: Some("Surgeist spatial-filter drop-shadow parameter uniform"),
             size: bytes.as_bytes().len() as u64,
             usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -2390,9 +2420,9 @@ impl<'device> PreparedGraph<'device> {
         buffer
     }
 
-    fn create_c12_blur_edge_parameter_buffer(&self, bytes: &[u8; 16]) -> wgpu::Buffer {
+    fn create_backdrop_blur_edge_parameter_buffer(&self, bytes: &[u8; 16]) -> wgpu::Buffer {
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Surgeist C12 semantic backdrop edge uniform"),
+            label: Some("Surgeist backdrop semantic backdrop edge uniform"),
             size: bytes.len() as u64,
             usage: wgpu::BufferUsages::UNIFORM.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -2401,18 +2431,18 @@ impl<'device> PreparedGraph<'device> {
         buffer
     }
 
-    fn c08_vello_capture_handoff<'prepared>(
+    fn vello_capture_handoff<'prepared>(
         &'prepared self,
-        request: &C08PreparedPassEncodingRequest,
+        request: &PreparedPassEncodingRequest,
         session: &Arc<()>,
-    ) -> Result<C08VelloCaptureEncodingHandoff<'prepared>> {
+    ) -> Result<VelloCaptureEncodingHandoff<'prepared>> {
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C08 Vello capture has no exact prepared target",
+                "the graph Vello capture has no exact prepared target",
             ));
         };
         let capture: &ExecutableVelloCaptureFacts =
-            self.c08_execution
+            self.base_execution
                 .as_ref()
                 .and_then(|execution| {
                     execution
@@ -2421,34 +2451,36 @@ impl<'device> PreparedGraph<'device> {
                         .find(|capture| capture.pass() == request.id && capture.target() == target)
                 })
                 .or_else(|| {
-                    self.c09_execution.as_ref().and_then(|execution| {
+                    self.composition_execution.as_ref().and_then(|execution| {
                         execution.captures.iter().find(|capture| {
                             capture.pass() == request.id && capture.target() == target
                         })
                     })
                 })
                 .or_else(|| {
-                    self.c10_execution.as_ref().and_then(|execution| {
+                    self.color_filter_execution.as_ref().and_then(|execution| {
                         execution.captures.iter().find(|capture| {
                             capture.pass() == request.id && capture.target() == target
                         })
                     })
                 })
                 .or_else(|| {
-                    self.c11_execution.as_ref().and_then(|execution| {
-                        execution.captures.iter().find(|capture| {
-                            capture.pass() == request.id && capture.target() == target
+                    self.spatial_filter_execution
+                        .as_ref()
+                        .and_then(|execution| {
+                            execution.captures.iter().find(|capture| {
+                                capture.pass() == request.id && capture.target() == target
+                            })
                         })
-                    })
                 })
                 .or_else(|| {
-                    self.c12_execution.as_ref().and_then(|execution| {
+                    self.backdrop_execution.as_ref().and_then(|execution| {
                         execution.captures.iter().find(|capture| {
                             capture.pass() == request.id && capture.target() == target
                         })
                     })
                 })
-                .ok_or_else(|| preparation_error("the bounded C08 capture handoff is missing"))?;
+                .ok_or_else(|| preparation_error("the bounded Vello capture handoff is missing"))?;
         let binding = self.texture_binding_for_pass(request.id, target)?;
         let spatial = self.validate_texture_binding(&binding, target)?;
         if spatial.device_extent != capture.target_extent()
@@ -2456,10 +2488,10 @@ impl<'device> PreparedGraph<'device> {
             || spatial.raster_scale != capture.raster_scale()
         {
             return Err(preparation_error(
-                "the bounded C08 capture target changed after preparation",
+                "the bounded Vello capture target changed after preparation",
             ));
         }
-        Ok(C08VelloCaptureEncodingHandoff {
+        Ok(VelloCaptureEncodingHandoff {
             pass: request.id,
             target,
             work: capture.work(),
@@ -2473,22 +2505,22 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    fn encode_c08_clear_root(
+    fn encode_clear_root(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C08PassEncodingFacts> {
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<CorePassEncodingFacts> {
         let RuntimePassKind::ClearRoot {
             initialization,
             color,
         } = &request.kind
         else {
             return Err(preparation_error(
-                "the C08 root clear changed its initialization contract",
+                "the base-graph root clear changed its initialization contract",
             ));
         };
         let RuntimeResultBinding::Resource(target) = request.result else {
-            return Err(preparation_error("the C08 root clear has no target"));
+            return Err(preparation_error("the base-graph root clear has no target"));
         };
         let target_request = self.resource_request(target)?;
         let exact_initialization = match initialization {
@@ -2509,7 +2541,7 @@ impl<'device> PreparedGraph<'device> {
             || request.cache_keys.is_some()
         {
             return Err(preparation_error(
-                "the C08 root clear has non-root or sampled bindings",
+                "the base-graph root clear has non-root or sampled bindings",
             ));
         }
         let binding = self.texture_binding_for_pass(request.id, target)?;
@@ -2517,7 +2549,7 @@ impl<'device> PreparedGraph<'device> {
         let alpha = f64::from(color.a());
         {
             let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Surgeist C08 full root clear"),
+                label: Some("Surgeist base graph full root clear"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: binding.view(),
                     resolve_target: None,
@@ -2538,21 +2570,21 @@ impl<'device> PreparedGraph<'device> {
                 multiview_mask: None,
             });
         }
-        Ok(C08PassEncodingFacts {
+        Ok(CorePassEncodingFacts {
             full_target: spatial.device_extent == target_request.spatial.device_extent,
-            ..C08PassEncodingFacts::default()
+            ..CorePassEncodingFacts::default()
         })
     }
 
-    fn encode_c08_canonicalize(
+    fn encode_canonicalize_capture(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C08PassEncodingFacts> {
-        let source = exact_c08_read(request, RuntimeReadRole::CaptureSource)?;
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<CorePassEncodingFacts> {
+        let source = exact_core_pass_read(request, RuntimeReadRole::CaptureSource)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C08 canonicalization pass has no prepared result",
+                "the core-pass canonicalization pass has no prepared result",
             ));
         };
         let source_binding = self.texture_binding_for_pass(request.id, source.resource)?;
@@ -2566,40 +2598,40 @@ impl<'device> PreparedGraph<'device> {
                 != RuntimeResourceFormat::Working(self.plan.working_format)
         {
             return Err(preparation_error(
-                "C08 canonicalization changed its exact capture-to-working binding",
+                "core-pass canonicalization changed its exact capture-to-working binding",
             ));
         }
-        let region = C08RenderRegion::full(target_spatial.device_extent)?;
-        let fixed_blend = self.encode_c08_sampled_render_pass(
+        let region = GraphRenderRegion::full(target_spatial.device_extent)?;
+        let fixed_blend = self.encode_core_sampled_render_pass(
             encoder,
             request,
             source,
-            C08SampledRenderTarget {
+            CorePassSampledRenderTarget {
                 view: target_binding.view(),
                 extent: target_spatial.device_extent,
                 region: Some(region),
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                label: "Surgeist C08 canonicalize capture",
+                label: "Surgeist core-pass canonicalize capture",
             },
         )?;
-        Ok(C08PassEncodingFacts {
+        Ok(CorePassEncodingFacts {
             full_target: true,
             exact_spatial_uniform: true,
             fixed_source_over_blend: fixed_blend,
-            ..C08PassEncodingFacts::default()
+            ..CorePassEncodingFacts::default()
         })
     }
 
-    fn encode_c08_span_source_over(
+    fn encode_span_source_over(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C08PassEncodingFacts> {
-        let parent = exact_c08_read(request, RuntimeReadRole::CompositeParent)?;
-        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<CorePassEncodingFacts> {
+        let parent = exact_core_pass_read(request, RuntimeReadRole::CompositeParent)?;
+        let source = exact_core_pass_read(request, RuntimeReadRole::CompositeSource)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C08 source-over pass has no prepared result",
+                "the core-pass source-over pass has no prepared result",
             ));
         };
         let parent_binding = self.texture_binding_for_pass(request.id, parent.resource)?;
@@ -2621,17 +2653,17 @@ impl<'device> PreparedGraph<'device> {
                 != RuntimeResourceFormat::Working(self.plan.working_format)
         {
             return Err(preparation_error(
-                "C08 source-over parent, source, and distinct result bindings are inconsistent",
+                "core-pass source-over parent, source, and distinct result bindings are inconsistent",
             ));
         }
 
-        let copy_extent = c09_composite_copy_extent(parent_spatial);
-        copy_c09_composite_parent(encoder, &parent_binding, &target_binding, copy_extent);
+        let copy_extent = layer_composite_copy_extent(parent_spatial);
+        copy_layer_composite_parent(encoder, &parent_binding, &target_binding, copy_extent);
 
-        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
+        let region = GraphRenderRegion::bounded_source(source_spatial, target_spatial)?;
         let preserved_signed_source_origin =
             request.spatial_uniform.as_ref().is_some_and(|bytes| {
-                c08_spatial_uniform_preserves_source_origin(bytes, source_spatial)
+                core_pass_spatial_uniform_preserves_source_origin(bytes, source_spatial)
                     && region.is_none_or(|region| {
                         let expected_x = (source_spatial.texel_origin.x()
                             - target_spatial.texel_origin.x())
@@ -2643,19 +2675,19 @@ impl<'device> PreparedGraph<'device> {
                             && close_f64(region.unclipped_y, expected_y)
                     })
             });
-        let fixed_blend = self.encode_c08_sampled_render_pass(
+        let fixed_blend = self.encode_core_sampled_render_pass(
             encoder,
             request,
             source,
-            C08SampledRenderTarget {
+            CorePassSampledRenderTarget {
                 view: target_binding.view(),
                 extent: target_spatial.device_extent,
                 region,
                 load: wgpu::LoadOp::Load,
-                label: "Surgeist C08 bounded span source-over",
+                label: "Surgeist graph bounded span source-over",
             },
         )?;
-        Ok(C08PassEncodingFacts {
+        Ok(CorePassEncodingFacts {
             exact_spatial_uniform: true,
             parent_and_result_distinct,
             copied_full_parent_before_render: copy_extent.width == target_binding.texture().width()
@@ -2663,24 +2695,24 @@ impl<'device> PreparedGraph<'device> {
             sampled_only_source: request.reads.len() == 2,
             fixed_source_over_blend: fixed_blend,
             preserved_signed_source_origin,
-            ..C08PassEncodingFacts::default()
+            ..CorePassEncodingFacts::default()
         })
     }
 
-    fn encode_c12_copy_backdrop(
+    fn encode_copy_backdrop(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C12CopyBackdropEncodingFacts> {
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<CopyBackdropEncodingFacts> {
         if !matches!(request.kind, RuntimePassKind::CopyBackdrop) {
             return Err(preparation_error(
-                "the C12 backdrop-copy payload changed after preparation",
+                "the backdrop-copy payload changed after preparation",
             ));
         }
-        let parent = exact_c08_read(request, RuntimeReadRole::CompletedParent)?;
+        let parent = exact_core_pass_read(request, RuntimeReadRole::CompletedParent)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C12 backdrop-copy pass has no prepared result",
+                "the backdrop-copy pass has no prepared result",
             ));
         };
         let parent_binding = self.texture_binding_for_pass(request.id, parent.resource())?;
@@ -2692,7 +2724,7 @@ impl<'device> PreparedGraph<'device> {
         let spatial = request
             .spatial_uniform
             .as_ref()
-            .ok_or_else(|| preparation_error("the C12 backdrop-copy spatial bytes are missing"))?;
+            .ok_or_else(|| preparation_error("the backdrop-copy spatial bytes are missing"))?;
         let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
             parent_spatial,
             target_spatial,
@@ -2700,8 +2732,8 @@ impl<'device> PreparedGraph<'device> {
         let keys = request
             .cache_keys
             .as_ref()
-            .ok_or_else(|| preparation_error("the C12 backdrop-copy cache keys are missing"))?;
-        let (sampler, layout, pipeline) = self.c12_copy_backdrop_pass_objects(request.id)?;
+            .ok_or_else(|| preparation_error("the backdrop-copy cache keys are missing"))?;
+        let (sampler, layout, pipeline) = self.copy_backdrop_pass_objects(request.id)?;
         if request.reads.len() != 1
             || !distinct
             || spatial != &expected_spatial
@@ -2723,13 +2755,13 @@ impl<'device> PreparedGraph<'device> {
                 .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
         {
             return Err(preparation_error(
-                "the C12 backdrop-copy bindings differ from the checked pass",
+                "the backdrop-copy bindings differ from the checked pass",
             ));
         }
-        let region = C08RenderRegion::full(target_spatial.device_extent)?;
-        let uniform = self.create_c08_spatial_uniform_buffer(spatial);
+        let region = GraphRenderRegion::full(target_spatial.device_extent)?;
+        let uniform = self.create_core_pass_spatial_uniform_buffer(spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C12 exact backdrop-copy bindings"),
+            label: Some("Surgeist backdrop exact backdrop-copy bindings"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2746,46 +2778,46 @@ impl<'device> PreparedGraph<'device> {
                 },
             ],
         });
-        encode_c11_full_target_pass(
+        encode_spatial_filter_full_target_pass(
             encoder,
             target_binding.view(),
             pipeline,
             &bind_group,
             region,
-            "Surgeist C12 bounded completed-parent copy",
+            "Surgeist backdrop bounded completed-parent copy",
         );
-        Ok(C12CopyBackdropEncodingFacts {
+        Ok(CopyBackdropEncodingFacts {
             exact_prepared_bindings: true,
             source_and_result_are_distinct: distinct,
-            validated_viewport_and_scissor: c11_full_region_is_exact(
+            validated_viewport_and_scissor: spatial_filter_full_region_is_exact(
                 region,
                 target_spatial.device_extent,
             ),
-            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+            preserved_signed_mapping: core_pass_spatial_uniform_preserves_source_origin(
                 spatial,
                 parent_spatial,
             ),
         })
     }
 
-    fn prepare_c10_color_filter_encoding<'prepared>(
+    fn prepare_color_filter_encoding<'prepared>(
         &'prepared self,
-        request: &'prepared C08PreparedPassEncodingRequest,
-    ) -> Result<PreparedC10ColorFilterEncoding<'prepared>> {
+        request: &'prepared PreparedPassEncodingRequest,
+    ) -> Result<PreparedColorFilterEncoding<'prepared>> {
         let RuntimePassKind::ColorFilter(Some(filter)) = &request.kind else {
             return Err(preparation_error(
-                "the C10 color pass changed its checked semantic payload",
+                "the color-filter color pass changed its checked semantic payload",
             ));
         };
-        let source = exact_c08_read(request, RuntimeReadRole::FilterSource)?;
+        let source = exact_core_pass_read(request, RuntimeReadRole::FilterSource)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C10 color pass has no prepared working result",
+                "the color-filter color pass has no prepared working result",
             ));
         };
         if request.reads.len() != 1 || filter.operations().is_empty() {
             return Err(preparation_error(
-                "the C10 color pass must have one source and a nonempty ordered program",
+                "the color-filter color pass must have one source and a nonempty ordered program",
             ));
         }
         let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
@@ -2815,45 +2847,43 @@ impl<'device> PreparedGraph<'device> {
                 .contains(wgpu::TextureUsages::RENDER_ATTACHMENT)
         {
             return Err(preparation_error(
-                "the C10 source and distinct working result bindings are inconsistent",
+                "the color-filter source and distinct working result bindings are inconsistent",
             ));
         }
-        let keys = request
-            .cache_keys
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C10 color pass has no provisional cache keys"))?;
+        let keys = request.cache_keys.as_ref().ok_or_else(|| {
+            preparation_error("the color-filter color pass has no provisional cache keys")
+        })?;
         if keys.samplers() != [source.sampler_key()] {
             return Err(preparation_error(
-                "the C10 color pass changed its nearest ClampToExtent sampler",
+                "the color-filter color pass changed its nearest ClampToExtent sampler",
             ));
         }
-        let spatial = request
-            .spatial_uniform
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C10 color pass has no prepared spatial bytes"))?;
+        let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
+            preparation_error("the color-filter color pass has no prepared spatial bytes")
+        })?;
         let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
             source_spatial,
             target_spatial,
         )?;
         if spatial != &expected_spatial {
             return Err(preparation_error(
-                "the C10 color spatial bytes changed after immutable preparation",
+                "the color-filter color spatial bytes changed after immutable preparation",
             ));
         }
         let (operation_buffer, exact_operation_bytes) =
-            self.validate_c10_operation_buffer(request, filter)?;
-        let objects = self.c10_color_filter_pass_objects(keys)?;
+            self.validate_color_filter_operation_buffer(request, filter)?;
+        let objects = self.color_filter_pass_objects(keys)?;
         objects.require_encoding_ready()?;
         let (region, validated_viewport_and_scissor, preserved_signed_texel_mapping) =
-            validate_c10_render_region(spatial, source_spatial, target_spatial)?;
-        Ok(PreparedC10ColorFilterEncoding {
+            validate_color_filter_render_region(spatial, source_spatial, target_spatial)?;
+        Ok(PreparedColorFilterEncoding {
             source_binding,
             target_binding,
             objects,
             spatial,
             operation_buffer,
             region,
-            facts: C10ColorFilterEncodingFacts {
+            facts: ColorFilterEncodingFacts {
                 exact_operation_bytes,
                 exact_source_spatial_and_operations: spatial == &expected_spatial,
                 source_and_result_are_distinct,
@@ -2863,13 +2893,13 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    fn validate_c10_operation_buffer<'prepared>(
+    fn validate_color_filter_operation_buffer<'prepared>(
         &'prepared self,
-        request: &'prepared C08PreparedPassEncodingRequest,
+        request: &'prepared PreparedPassEncodingRequest,
         filter: &RuntimeColorFilter,
     ) -> Result<(&'prepared wgpu::Buffer, bool)> {
         let operation_bytes = request.color_filter_operations.as_ref().ok_or_else(|| {
-            preparation_error("the C10 color pass has no checked operation bytes")
+            preparation_error("the color-filter color pass has no checked operation bytes")
         })?;
         let expected_operation_bytes =
             ColorFilterOperationBytes::try_from_runtime_operations_with_limits(
@@ -2879,35 +2909,37 @@ impl<'device> PreparedGraph<'device> {
         let operation_binding = self
             .color_filter_operation_bindings
             .get(&request.id)
-            .ok_or_else(|| preparation_error("the C10 operation buffer binding is missing"))?;
+            .ok_or_else(|| {
+                preparation_error("the color-filter operation buffer binding is missing")
+            })?;
         let operation_buffer = operation_binding.buffer.as_ref().ok_or_else(|| {
-            preparation_error("the C10 operation buffer is stale or already released")
+            preparation_error("the color-filter operation buffer is stale or already released")
         })?;
         let exact = operation_bytes == &expected_operation_bytes
             && &operation_binding.bytes == operation_bytes
             && operation_buffer.size()
                 == u64::try_from(operation_bytes.as_bytes().len()).map_err(|_| {
-                    preparation_error("the C10 operation buffer size does not fit u64")
+                    preparation_error("the color-filter operation buffer size does not fit u64")
                 })?
             && operation_buffer.usage()
                 == wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST);
         if !exact {
             return Err(preparation_error(
-                "the C10 operation buffer differs from its exact checked bytes",
+                "the color-filter operation buffer differs from its exact checked bytes",
             ));
         }
         Ok((operation_buffer, exact))
     }
 
-    fn encode_c10_color_filter(
+    fn encode_color_filter(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C10ColorFilterEncodingFacts> {
-        let prepared = self.prepare_c10_color_filter_encoding(request)?;
-        let spatial_buffer = self.create_c08_spatial_uniform_buffer(prepared.spatial);
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<ColorFilterEncodingFacts> {
+        let prepared = self.prepare_color_filter_encoding(request)?;
+        let spatial_buffer = self.create_core_pass_spatial_uniform_buffer(prepared.spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C10 exact color-filter bindings"),
+            label: Some("Surgeist color-filter exact color-filter bindings"),
             layout: prepared.objects.bind_group_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
@@ -2929,7 +2961,7 @@ impl<'device> PreparedGraph<'device> {
             ],
         });
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("Surgeist C10 bounded ordered color filter"),
+            label: Some("Surgeist color-filter bounded ordered color filter"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: prepared.target_binding.view(),
                 resolve_target: None,
@@ -2965,19 +2997,25 @@ impl<'device> PreparedGraph<'device> {
         Ok(prepared.facts)
     }
 
-    fn encode_c11_blur(
+    fn encode_blur(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C11BlurEncodingFacts> {
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<BlurEncodingFacts> {
         let blur = match &request.kind {
             RuntimePassKind::BlurHorizontal(Some(blur))
             | RuntimePassKind::BlurVertical(Some(blur)) => blur,
-            _ => return Err(preparation_error("the C11 blur payload is missing")),
+            _ => {
+                return Err(preparation_error(
+                    "the spatial-filter blur payload is missing",
+                ));
+            }
         };
-        let source = exact_c08_read(request, RuntimeReadRole::FilterSource)?;
+        let source = exact_core_pass_read(request, RuntimeReadRole::FilterSource)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
-            return Err(preparation_error("the C11 blur result is missing"));
+            return Err(preparation_error(
+                "the spatial-filter blur result is missing",
+            ));
         };
         let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
         let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
@@ -2985,24 +3023,25 @@ impl<'device> PreparedGraph<'device> {
         let target_spatial = self.validate_texture_binding(&target_binding, target)?;
         let distinct = source.resource() != target
             && source_binding.allocation_resource() != target_binding.allocation_resource();
-        let spatial = request
-            .spatial_uniform
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C11 blur spatial bytes are missing"))?;
+        let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
+            preparation_error("the spatial-filter blur spatial bytes are missing")
+        })?;
         let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
             source_spatial,
             target_spatial,
         )?;
         let kernel = self
             .gaussian_kernel_binding_for_pass(request.id)?
-            .ok_or_else(|| preparation_error("the C11 blur kernel binding is missing"))?;
+            .ok_or_else(|| {
+                preparation_error("the spatial-filter blur kernel binding is missing")
+            })?;
         let keys = request
             .cache_keys
             .as_ref()
-            .ok_or_else(|| preparation_error("the C11 blur cache keys are missing"))?;
-        let (sampler, layout, pipeline) = self.c11_blur_pass_objects(request.id)?;
+            .ok_or_else(|| preparation_error("the spatial-filter blur cache keys are missing"))?;
+        let (sampler, layout, pipeline) = self.blur_pass_objects(request.id)?;
         let edge_bytes =
-            c12_blur_edge_uniform_bytes(blur, source, request.blur_edge_parameters.as_ref())?;
+            backdrop_blur_edge_uniform_bytes(blur, source, request.blur_edge_parameters.as_ref())?;
         if request.reads.len() != 1
             || !distinct
             || blur.spatial.source != source_spatial
@@ -3017,14 +3056,14 @@ impl<'device> PreparedGraph<'device> {
                 != RuntimeResourceFormat::Working(self.plan.working_format)
         {
             return Err(preparation_error(
-                "the C11 blur bindings differ from the checked pass",
+                "the spatial-filter blur bindings differ from the checked pass",
             ));
         }
-        let region = C08RenderRegion::full(target_spatial.device_extent)?;
-        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
+        let region = GraphRenderRegion::full(target_spatial.device_extent)?;
+        let spatial_buffer = self.create_core_pass_spatial_uniform_buffer(spatial);
         let edge_buffer = edge_bytes
             .as_ref()
-            .map(|bytes| self.create_c12_blur_edge_parameter_buffer(bytes));
+            .map(|bytes| self.create_backdrop_blur_edge_parameter_buffer(bytes));
         let mut entries = vec![
             wgpu::BindGroupEntry {
                 binding: 0,
@@ -3050,40 +3089,47 @@ impl<'device> PreparedGraph<'device> {
             });
         }
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C11 exact blur bindings"),
+            label: Some("Surgeist spatial-filter exact blur bindings"),
             layout,
             entries: &entries,
         });
-        encode_c11_full_target_pass(
+        encode_spatial_filter_full_target_pass(
             encoder,
             target_binding.view(),
             pipeline,
             &bind_group,
             region,
-            "Surgeist C11 Gaussian blur",
+            "Surgeist spatial-filter Gaussian blur",
         );
-        Ok(C11BlurEncodingFacts {
+        Ok(BlurEncodingFacts {
             exact_prepared_bindings: true,
             distinct_source_and_result: distinct,
-            validated_region: c11_full_region_is_exact(region, target_spatial.device_extent),
-            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+            validated_region: spatial_filter_full_region_is_exact(
+                region,
+                target_spatial.device_extent,
+            ),
+            preserved_signed_mapping: core_pass_spatial_uniform_preserves_source_origin(
                 spatial,
                 source_spatial,
             ),
         })
     }
 
-    fn encode_c11_drop_shadow_colorize(
+    fn encode_drop_shadow_colorize(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C11DropShadowColorizeEncodingFacts> {
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<DropShadowColorizeEncodingFacts> {
         let RuntimePassKind::DropShadowColorize(Some(shadow)) = &request.kind else {
-            return Err(preparation_error("the C11 drop-shadow payload is missing"));
+            return Err(preparation_error(
+                "the spatial-filter drop-shadow payload is missing",
+            ));
         };
-        let source = exact_c08_read(request, RuntimeReadRole::BlurredSourceAlpha)?;
+        let source = exact_core_pass_read(request, RuntimeReadRole::BlurredSourceAlpha)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
-            return Err(preparation_error("the C11 drop-shadow result is missing"));
+            return Err(preparation_error(
+                "the spatial-filter drop-shadow result is missing",
+            ));
         };
         let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
         let source_spatial = self.validate_texture_binding(&source_binding, source.resource())?;
@@ -3091,24 +3137,21 @@ impl<'device> PreparedGraph<'device> {
         let target_spatial = self.validate_texture_binding(&target_binding, target)?;
         let distinct = source.resource() != target
             && source_binding.allocation_resource() != target_binding.allocation_resource();
-        let spatial = request
-            .spatial_uniform
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C11 drop-shadow spatial bytes are missing"))?;
+        let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
+            preparation_error("the spatial-filter drop-shadow spatial bytes are missing")
+        })?;
         let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
             source_spatial,
             target_spatial,
         )?;
-        let parameters = request
-            .drop_shadow_parameters
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C11 drop-shadow parameter bytes are missing"))?;
+        let parameters = request.drop_shadow_parameters.as_ref().ok_or_else(|| {
+            preparation_error("the spatial-filter drop-shadow parameter bytes are missing")
+        })?;
         let expected_parameters = DropShadowParameterBytes::try_new(shadow.offset, shadow.color)?;
-        let keys = request
-            .cache_keys
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C11 drop-shadow cache keys are missing"))?;
-        let (sampler, layout, pipeline) = self.c11_drop_shadow_colorize_pass_objects(request.id)?;
+        let keys = request.cache_keys.as_ref().ok_or_else(|| {
+            preparation_error("the spatial-filter drop-shadow cache keys are missing")
+        })?;
+        let (sampler, layout, pipeline) = self.drop_shadow_colorize_pass_objects(request.id)?;
         if request.reads.len() != 1
             || !distinct
             || shadow.spatial.source != source_spatial
@@ -3120,14 +3163,14 @@ impl<'device> PreparedGraph<'device> {
             || source.sampling_edge() != RuntimeSamplingEdge::TransparentBlack
         {
             return Err(preparation_error(
-                "the C11 drop-shadow bindings differ from the checked pass",
+                "the spatial-filter drop-shadow bindings differ from the checked pass",
             ));
         }
-        let region = C08RenderRegion::full(target_spatial.device_extent)?;
-        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
-        let parameter_buffer = self.create_c11_drop_shadow_parameter_buffer(parameters);
+        let region = GraphRenderRegion::full(target_spatial.device_extent)?;
+        let spatial_buffer = self.create_core_pass_spatial_uniform_buffer(spatial);
+        let parameter_buffer = self.create_drop_shadow_parameter_buffer(parameters);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C11 exact drop-shadow colorize bindings"),
+            label: Some("Surgeist spatial-filter exact drop-shadow colorize bindings"),
             layout,
             entries: &[
                 wgpu::BindGroupEntry {
@@ -3148,44 +3191,47 @@ impl<'device> PreparedGraph<'device> {
                 },
             ],
         });
-        encode_c11_full_target_pass(
+        encode_spatial_filter_full_target_pass(
             encoder,
             target_binding.view(),
             pipeline,
             &bind_group,
             region,
-            "Surgeist C11 drop-shadow colorize",
+            "Surgeist spatial-filter drop-shadow colorize",
         );
-        Ok(C11DropShadowColorizeEncodingFacts {
+        Ok(DropShadowColorizeEncodingFacts {
             exact_prepared_bindings: true,
             distinct_source_and_result: distinct,
-            validated_region: c11_full_region_is_exact(region, target_spatial.device_extent),
-            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+            validated_region: spatial_filter_full_region_is_exact(
+                region,
+                target_spatial.device_extent,
+            ),
+            preserved_signed_mapping: core_pass_spatial_uniform_preserves_source_origin(
                 spatial,
                 source_spatial,
             ),
         })
     }
 
-    fn encode_c11_drop_shadow_merge(
+    fn encode_drop_shadow_merge(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C11DropShadowMergeEncodingFacts> {
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<DropShadowMergeEncodingFacts> {
         let RuntimePassKind::Composite(Some(RuntimeComposite {
             kind: RuntimeCompositeKind::DropShadow,
             source_captured_before_outer_semantics: true,
         })) = &request.kind
         else {
             return Err(preparation_error(
-                "the C11 drop-shadow merge payload is missing",
+                "the spatial-filter drop-shadow merge payload is missing",
             ));
         };
-        let source = exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
-        let shadow = exact_c08_read(request, RuntimeReadRole::Shadow)?;
+        let source = exact_core_pass_read(request, RuntimeReadRole::CompositeSource)?;
+        let shadow = exact_core_pass_read(request, RuntimeReadRole::Shadow)?;
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C11 drop-shadow merge result is missing",
+                "the spatial-filter drop-shadow merge result is missing",
             ));
         };
         let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
@@ -3199,33 +3245,32 @@ impl<'device> PreparedGraph<'device> {
             && shadow_binding.allocation_resource() != target_binding.allocation_resource();
         if request.reads.len() != 2 || !distinct || shadow_spatial != target_spatial {
             return Err(preparation_error(
-                "the C11 drop-shadow merge aliases or changed its shadow grid",
+                "the spatial-filter drop-shadow merge aliases or changed its shadow grid",
             ));
         }
-        copy_c09_composite_parent(
+        copy_layer_composite_parent(
             encoder,
             &shadow_binding,
             &target_binding,
-            c09_composite_copy_extent(shadow_spatial),
+            layer_composite_copy_extent(shadow_spatial),
         );
-        let region = C08RenderRegion::bounded_source(source_spatial, target_spatial)?;
-        let fixed_blend = self.encode_c08_sampled_render_pass(
+        let region = GraphRenderRegion::bounded_source(source_spatial, target_spatial)?;
+        let fixed_blend = self.encode_core_sampled_render_pass(
             encoder,
             request,
             source,
-            C08SampledRenderTarget {
+            CorePassSampledRenderTarget {
                 view: target_binding.view(),
                 extent: target_spatial.device_extent,
                 region,
                 load: wgpu::LoadOp::Load,
-                label: "Surgeist C11 unchanged source over drop shadow",
+                label: "Surgeist spatial-filter unchanged source over drop shadow",
             },
         )?;
-        let spatial = request
-            .spatial_uniform
-            .as_ref()
-            .ok_or_else(|| preparation_error("the C11 merge spatial bytes are missing"))?;
-        Ok(C11DropShadowMergeEncodingFacts {
+        let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
+            preparation_error("the spatial-filter merge spatial bytes are missing")
+        })?;
+        Ok(DropShadowMergeEncodingFacts {
             exact_prepared_bindings: true,
             distinct_source_shadow_and_result: distinct,
             validated_region: region.is_none_or(|region| {
@@ -3234,7 +3279,7 @@ impl<'device> PreparedGraph<'device> {
                     && region.scissor_y.saturating_add(region.scissor_height)
                         <= target_spatial.device_extent.height()
             }),
-            preserved_signed_mapping: c08_spatial_uniform_preserves_source_origin(
+            preserved_signed_mapping: core_pass_spatial_uniform_preserves_source_origin(
                 spatial,
                 source_spatial,
             ),
@@ -3245,9 +3290,9 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    fn c09_composite_semantic<'prepared>(
-        request: &'prepared C08PreparedPassEncodingRequest,
-    ) -> Result<C09CompositeSemantic<'prepared>> {
+    fn layer_composite_semantic<'prepared>(
+        request: &'prepared PreparedPassEncodingRequest,
+    ) -> Result<LayerCompositeSemantic<'prepared>> {
         let RuntimePassKind::Composite(Some(RuntimeComposite {
             kind:
                 RuntimeCompositeKind::Layer {
@@ -3260,17 +3305,17 @@ impl<'device> PreparedGraph<'device> {
         })) = &request.kind
         else {
             return Err(preparation_error(
-                "the C09 layer composite changed its checked semantic payload",
+                "the composition layer composite changed its checked semantic payload",
             ));
         };
-        let parent = *exact_c08_read(request, RuntimeReadRole::CompositeParent)?;
-        let source = *exact_c08_read(request, RuntimeReadRole::CompositeSource)?;
+        let parent = *exact_core_pass_read(request, RuntimeReadRole::CompositeParent)?;
+        let source = *exact_core_pass_read(request, RuntimeReadRole::CompositeSource)?;
         let clip = clip_coverage
             .map(|resource| {
-                let read = *exact_c08_read(request, RuntimeReadRole::ClipCoverage)?;
+                let read = *exact_core_pass_read(request, RuntimeReadRole::ClipCoverage)?;
                 if read.resource() != resource {
                     return Err(preparation_error(
-                        "the C09 clip coverage read changed its exact resource",
+                        "the composition clip coverage read changed its exact resource",
                     ));
                 }
                 Ok(read)
@@ -3279,10 +3324,10 @@ impl<'device> PreparedGraph<'device> {
         let alpha_mask = parameters
             .alpha_mask()
             .map(|mask| {
-                let read = *exact_c08_read(request, RuntimeReadRole::AlphaMask)?;
+                let read = *exact_core_pass_read(request, RuntimeReadRole::AlphaMask)?;
                 if read.resource() != mask.resource() {
                     return Err(preparation_error(
-                        "the C09 alpha-mask read changed its exact retained upload",
+                        "the composition alpha-mask read changed its exact retained upload",
                     ));
                 }
                 Ok(read)
@@ -3290,7 +3335,7 @@ impl<'device> PreparedGraph<'device> {
             .transpose()?;
         let RuntimeResultBinding::Resource(target) = request.result else {
             return Err(preparation_error(
-                "the C09 layer composite has no prepared result",
+                "the composition layer composite has no prepared result",
             ));
         };
         let expected_read_count = 2usize
@@ -3298,11 +3343,11 @@ impl<'device> PreparedGraph<'device> {
             .saturating_add(usize::from(alpha_mask.is_some()));
         if request.reads.len() != expected_read_count {
             return Err(preparation_error(
-                "the C09 layer composite contains an absent or duplicated semantic read",
+                "the composition layer composite contains an absent or duplicated semantic read",
             ));
         }
         let normal_path = parameters.blend() == BlendMode::Normal;
-        Ok(C09CompositeSemantic {
+        Ok(LayerCompositeSemantic {
             transform: *transform,
             parameters,
             parent,
@@ -3315,11 +3360,11 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    fn c09_composite_bindings<'prepared>(
+    fn layer_composite_bindings<'prepared>(
         &'prepared self,
-        request: &'prepared C08PreparedPassEncodingRequest,
-        semantic: C09CompositeSemantic<'prepared>,
-    ) -> Result<C09CompositeBindings<'prepared>> {
+        request: &'prepared PreparedPassEncodingRequest,
+        semantic: LayerCompositeSemantic<'prepared>,
+    ) -> Result<LayerCompositeBindings<'prepared>> {
         let parent = self.texture_binding_for_pass(request.id, semantic.parent.resource())?;
         let parent_spatial = self.validate_texture_binding(&parent, semantic.parent.resource())?;
         let source = self.texture_binding_for_pass(request.id, semantic.source.resource())?;
@@ -3332,7 +3377,7 @@ impl<'device> PreparedGraph<'device> {
                 let binding = self.texture_binding_for_pass(request.id, read.resource())?;
                 if self.validate_texture_binding(&binding, read.resource())? != target_spatial {
                     return Err(preparation_error(
-                        "the C09 clip coverage grid changed from its parent mapping",
+                        "the composition clip coverage grid changed from its parent mapping",
                     ));
                 }
                 Ok(binding)
@@ -3349,7 +3394,7 @@ impl<'device> PreparedGraph<'device> {
                     .is_none_or(|mask| spatial.device_extent != mask.image_dimensions())
                 {
                     return Err(preparation_error(
-                        "the C09 alpha-mask texture changed from its exact image extent",
+                        "the composition alpha-mask texture changed from its exact image extent",
                     ));
                 }
                 Ok(binding)
@@ -3365,7 +3410,7 @@ impl<'device> PreparedGraph<'device> {
             && mask.as_ref().is_none_or(|binding| {
                 binding.allocation_resource() != target.allocation_resource()
             });
-        let bindings = C09CompositeBindings {
+        let bindings = LayerCompositeBindings {
             semantic,
             parent,
             source,
@@ -3378,11 +3423,14 @@ impl<'device> PreparedGraph<'device> {
             parent_and_result_are_distinct,
             sampled_allocations_are_distinct,
         };
-        self.validate_c09_composite_bindings(&bindings)?;
+        self.validate_layer_composite_bindings(&bindings)?;
         Ok(bindings)
     }
 
-    fn validate_c09_composite_bindings(&self, bindings: &C09CompositeBindings<'_>) -> Result<()> {
+    fn validate_layer_composite_bindings(
+        &self,
+        bindings: &LayerCompositeBindings<'_>,
+    ) -> Result<()> {
         let semantic = &bindings.semantic;
         let clip_format_is_exact = semantic.clip.is_none_or(|read| {
             self.resource_request(read.resource()).is_ok_and(|request| {
@@ -3441,22 +3489,22 @@ impl<'device> PreparedGraph<'device> {
             })
         {
             return Err(preparation_error(
-                "C09 parent, source, and distinct composite result bindings are inconsistent",
+                "composition parent, source, and distinct composite result bindings are inconsistent",
             ));
         }
         Ok(())
     }
 
-    fn create_c09_composite_bind_group(
+    fn create_layer_composite_bind_group(
         &self,
-        bindings: &C09CompositeBindings<'_>,
+        bindings: &LayerCompositeBindings<'_>,
         objects: &ProvisionalCompositePassObjects<'_>,
         spatial: &PassSpatialUniformBytes,
         parameters: &CompositeParameterBytes,
         expected_read_count: usize,
     ) -> Result<(wgpu::BindGroup, bool)> {
-        let spatial_buffer = self.create_c08_spatial_uniform_buffer(spatial);
-        let parameter_buffer = self.create_c09_composite_parameter_buffer(parameters);
+        let spatial_buffer = self.create_core_pass_spatial_uniform_buffer(spatial);
+        let parameter_buffer = self.create_layer_composite_parameter_buffer(parameters);
         let mut entries = Vec::with_capacity(expected_read_count.saturating_add(4));
         entries.push(wgpu::BindGroupEntry {
             binding: 0,
@@ -3501,12 +3549,12 @@ impl<'device> PreparedGraph<'device> {
             || binds_parent_sample != bindings.semantic.destination_path
         {
             return Err(preparation_error(
-                "the C09 composite bind group contains a dummy or missing resource",
+                "the composition composite bind group contains a dummy or missing resource",
             ));
         }
         Ok((
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("Surgeist C09 exact layer-composite bindings"),
+                label: Some("Surgeist composition exact layer-composite bindings"),
                 layout: objects.bind_group_layout(),
                 entries: &entries,
             }),
@@ -3514,13 +3562,13 @@ impl<'device> PreparedGraph<'device> {
         ))
     }
 
-    fn encode_c09_layer_composite(
+    fn encode_composition_layer_composite(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-    ) -> Result<C09LayerCompositeEncodingFacts> {
-        let semantic = Self::c09_composite_semantic(request)?;
-        let bindings = self.c09_composite_bindings(request, semantic)?;
+        request: &PreparedPassEncodingRequest,
+    ) -> Result<LayerCompositeEncodingFacts> {
+        let semantic = Self::layer_composite_semantic(request)?;
+        let bindings = self.layer_composite_bindings(request, semantic)?;
         let normal_path = bindings.semantic.normal_path;
         let destination_path = bindings.semantic.destination_path;
         let source = bindings.semantic.source;
@@ -3536,15 +3584,15 @@ impl<'device> PreparedGraph<'device> {
         let expected_read_count = request.reads.len();
 
         let keys = request.cache_keys.as_ref().ok_or_else(|| {
-            preparation_error("the C09 layer composite has no provisional cache keys")
+            preparation_error("the composition layer composite has no provisional cache keys")
         })?;
         if keys.samplers() != [source.sampler_key()] {
             return Err(preparation_error(
-                "the C09 layer composite changed its one exact source sampler",
+                "the composition layer composite changed its one exact source sampler",
             ));
         }
         let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
-            preparation_error("the C09 layer composite has no prepared spatial bytes")
+            preparation_error("the composition layer composite has no prepared spatial bytes")
         })?;
         let expected_spatial = PassSpatialUniformBytes::try_from_runtime_spatial_descriptors(
             source_spatial,
@@ -3552,19 +3600,19 @@ impl<'device> PreparedGraph<'device> {
         )?;
         if spatial != &expected_spatial {
             return Err(preparation_error(
-                "the C09 layer composite spatial bytes changed after preparation",
+                "the composition layer composite spatial bytes changed after preparation",
             ));
         }
         let composite_parameters = request.composite_parameters.as_ref().ok_or_else(|| {
-            preparation_error("the C09 layer composite has no prepared parameter bytes")
+            preparation_error("the composition layer composite has no prepared parameter bytes")
         })?;
         let expected_parameters = CompositeParameterBytes::try_from_runtime_layer(parameters)?;
         if composite_parameters != &expected_parameters {
             return Err(preparation_error(
-                "the C09 layer composite parameter bytes changed after preparation",
+                "the composition layer composite parameter bytes changed after preparation",
             ));
         }
-        let objects = self.c09_composite_pass_objects(keys)?;
+        let objects = self.layer_composite_pass_objects(keys)?;
         objects.require_encoding_ready()?;
         if objects.path()
             != if normal_path {
@@ -3576,16 +3624,16 @@ impl<'device> PreparedGraph<'device> {
             || objects.has_alpha_mask() != bindings.mask.is_some()
         {
             return Err(preparation_error(
-                "the C09 composite objects changed their checked entry-point interface",
+                "the composition composite objects changed their checked entry-point interface",
             ));
         }
 
-        let copy_extent = c09_composite_copy_extent(parent_spatial);
-        copy_c09_composite_parent(encoder, parent_binding, target_binding, copy_extent);
+        let copy_extent = layer_composite_copy_extent(parent_spatial);
+        copy_layer_composite_parent(encoder, parent_binding, target_binding, copy_extent);
 
         let (region, preserved_signed_mapping) =
-            c09_composite_region_mapping(spatial, source_spatial, target_spatial, transform)?;
-        let (bind_group, binds_parent_sample) = self.create_c09_composite_bind_group(
+            layer_composite_region_mapping(spatial, source_spatial, target_spatial, transform)?;
+        let (bind_group, binds_parent_sample) = self.create_layer_composite_bind_group(
             &bindings,
             &objects,
             spatial,
@@ -3594,7 +3642,7 @@ impl<'device> PreparedGraph<'device> {
         )?;
         #[cfg(test)]
         let encoder_identity = std::ptr::from_mut(&mut *encoder) as usize;
-        encode_c09_composite_region(
+        encode_layer_composite_region(
             encoder,
             target_binding,
             &objects,
@@ -3603,7 +3651,7 @@ impl<'device> PreparedGraph<'device> {
             target_spatial,
         )?;
 
-        Ok(C09LayerCompositeEncodingFacts {
+        Ok(LayerCompositeEncodingFacts {
             normal_path,
             destination_path,
             fixed_premultiplied_blend: normal_path && objects.uses_fixed_source_over_blend(),
@@ -3623,70 +3671,70 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    fn encode_c08_present(
+    fn encode_base_graph_present(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
-        output: &C08ExternalOutputView<'_>,
-    ) -> Result<C08PassEncodingFacts> {
-        let source = exact_c08_read(request, RuntimeReadRole::FinalWorkingImage)?;
+        request: &PreparedPassEncodingRequest,
+        output: &GraphExternalOutputView<'_>,
+    ) -> Result<CorePassEncodingFacts> {
+        let source = exact_core_pass_read(request, RuntimeReadRole::FinalWorkingImage)?;
         if request.result != RuntimeResultBinding::Output(output.format)
             || output.format != self.plan.output_format
             || output.extent != self.output_extent()?
         {
             return Err(preparation_error(
-                "the C08 present pass changed its external output binding",
+                "the core-pass present pass changed its external output binding",
             ));
         }
         let source_binding = self.texture_binding_for_pass(request.id, source.resource)?;
         let _ = self.validate_texture_binding(&source_binding, source.resource)?;
-        let region = C08RenderRegion::full(output.extent)?;
-        let fixed_blend = self.encode_c08_sampled_render_pass(
+        let region = GraphRenderRegion::full(output.extent)?;
+        let fixed_blend = self.encode_core_sampled_render_pass(
             encoder,
             request,
             source,
-            C08SampledRenderTarget {
+            CorePassSampledRenderTarget {
                 view: output.view,
                 extent: output.extent,
                 region: Some(region),
                 load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                label: "Surgeist C08 present external output",
+                label: "Surgeist core-pass present external output",
             },
         )?;
-        Ok(C08PassEncodingFacts {
+        Ok(CorePassEncodingFacts {
             full_target: true,
             exact_spatial_uniform: true,
             external_output_exact: true,
             fixed_source_over_blend: fixed_blend,
-            ..C08PassEncodingFacts::default()
+            ..CorePassEncodingFacts::default()
         })
     }
 
-    fn encode_c08_sampled_render_pass(
+    fn encode_core_sampled_render_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        request: &C08PreparedPassEncodingRequest,
+        request: &PreparedPassEncodingRequest,
         source: &RuntimeReadBinding,
-        target: C08SampledRenderTarget<'_>,
+        target: CorePassSampledRenderTarget<'_>,
     ) -> Result<bool> {
         let spatial = request.spatial_uniform.as_ref().ok_or_else(|| {
-            preparation_error("the C08 sampled pass has no exact prepared spatial uniform")
+            preparation_error("the core sampled pass has no exact prepared spatial uniform")
         })?;
         let keys = request.cache_keys.as_ref().ok_or_else(|| {
-            preparation_error("the C08 sampled pass has no provisional cache keys")
+            preparation_error("the core sampled pass has no provisional cache keys")
         })?;
         if keys.samplers() != [source.sampler_key()] {
             return Err(preparation_error(
-                "the C08 sampled pass changed its exact source sampler",
+                "the core sampled pass changed its exact source sampler",
             ));
         }
         let source_binding = self.texture_binding_for_pass(request.id, source.resource())?;
         let _ = self.validate_texture_binding(&source_binding, source.resource())?;
-        let objects = self.c08_pass_objects(keys)?;
+        let objects = self.core_pass_objects(keys)?;
         objects.require_encoding_ready()?;
-        let uniform = self.create_c08_spatial_uniform_buffer(spatial);
+        let uniform = self.create_core_pass_spatial_uniform_buffer(spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C08 sampled pass bindings"),
+            label: Some("Surgeist core sampled pass bindings"),
             layout: objects.bind_group_layout(),
             entries: &[
                 wgpu::BindGroupEntry {
@@ -3708,7 +3756,7 @@ impl<'device> PreparedGraph<'device> {
                 || region.scissor_y.saturating_add(region.scissor_height) > target.extent.height()
             {
                 return Err(preparation_error(
-                    "the C08 bounded render region exceeds its exact target extent",
+                    "the graph bounded render region exceeds its exact target extent",
                 ));
             }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -3752,36 +3800,36 @@ impl<'device> PreparedGraph<'device> {
         not(test),
         expect(
             dead_code,
-            reason = "C08 resolves prepared leases at each validated runtime last-use point"
+            reason = "graph encoding resolves prepared leases at each validated runtime last-use point"
         )
     )]
     pub(crate) fn complete_pass(&mut self, pass: RuntimePassId) -> Result<()> {
-        if self.c08_encoding_state.is_some() {
+        if self.custom_spine_encoding_state.is_some() {
             return Err(preparation_error(
-                "C08 pass completion belongs to its one-shot scheduler; discard an aborted graph and encoder",
+                "core pass completion belongs to its one-shot scheduler; discard an aborted graph and encoder",
             ));
         }
         self.complete_pass_inner(pass)
     }
 
-    fn complete_c08_custom_pass(&mut self, pass: RuntimePassId) -> Result<()> {
-        if self.c08_encoding_state != Some(C08CustomSpineEncodingState::Encoding) {
+    fn complete_custom_spine_pass(&mut self, pass: RuntimePassId) -> Result<()> {
+        if self.custom_spine_encoding_state != Some(CustomSpineEncodingState::Encoding) {
             return Err(preparation_error(
-                "C08 custom-pass progress requires the active one-shot encoding session",
+                "custom-spine-pass progress requires the active one-shot encoding session",
             ));
         }
         self.complete_pass_inner(pass)
     }
 
-    fn complete_c08_capture(
+    fn complete_vello_capture(
         &mut self,
         pass: RuntimePassId,
         target: RuntimeResourceId,
         session: &Arc<()>,
-        receipt: C08VelloCaptureCompletionReceipt,
+        receipt: VelloCaptureCompletionReceipt,
     ) -> Result<()> {
         let request = self.require_current_pass(pass)?;
-        if self.c08_encoding_state != Some(C08CustomSpineEncodingState::Encoding)
+        if self.custom_spine_encoding_state != Some(CustomSpineEncodingState::Encoding)
             || !matches!(request.runtime.kind, RuntimePassKind::VelloCapture(Some(_)))
             || request.runtime.result != RuntimeResultBinding::Resource(target)
             || receipt.pass != pass
@@ -3789,7 +3837,7 @@ impl<'device> PreparedGraph<'device> {
             || !Arc::ptr_eq(&receipt.session, session)
         {
             return Err(preparation_error(
-                "C08 capture completion does not match the exact pass, target, and encoding session",
+                "Vello capture completion does not match the exact pass, target, and encoding session",
             ));
         }
         self.complete_pass_inner(pass)
@@ -3882,14 +3930,14 @@ impl<'device> PreparedGraph<'device> {
         Ok(())
     }
 
-    pub(crate) fn finish_c08_submission(
+    pub(crate) fn finish_graph_submission(
         mut self,
-        pending: C08PendingGraphEncoding,
-    ) -> Result<C08PreparedGraphSubmission> {
-        let completed_session = self.c08_completed_session.take().ok_or_else(|| {
-            preparation_error("the prepared C08 graph has no completed encoding session")
+        pending: PendingGraphEncoding,
+    ) -> Result<PreparedGraphSubmission> {
+        let completed_session = self.custom_spine_completed_session.take().ok_or_else(|| {
+            preparation_error("the prepared graph has no completed encoding session")
         })?;
-        if self.c08_encoding_state != Some(C08CustomSpineEncodingState::Complete)
+        if self.custom_spine_encoding_state != Some(CustomSpineEncodingState::Complete)
             || !Arc::ptr_eq(&completed_session, &pending.session)
             || !pending.summary.proves_complete_submission()
             || self.next_pass != self.plan.passes.len()
@@ -3907,23 +3955,23 @@ impl<'device> PreparedGraph<'device> {
                 .any(|binding| binding.buffer.is_some())
         {
             return Err(preparation_error(
-                "the C08 graph submission does not own one exact completed prepared frame",
+                "the graph submission does not own one exact completed prepared frame",
             ));
         }
         let pass_cache_update = self.pass_cache_update.take().ok_or_else(|| {
-            preparation_error("the completed C08 graph lost its provisional pass-cache update")
+            preparation_error("the completed graph lost its provisional pass-cache update")
         })?;
         let frame_scope = self.frame_scope.take().ok_or_else(|| {
-            preparation_error("the completed C08 graph lost its prepared frame scope")
+            preparation_error("the completed graph lost its prepared frame scope")
         })?;
-        let C08PendingGraphEncoding {
+        let PendingGraphEncoding {
             summary,
             resources: capture_resources,
             session: _,
         } = pending;
-        Ok(C08PreparedGraphSubmission {
+        Ok(PreparedGraphSubmission {
             capture_resources,
-            prepared_frame: PendingC08PreparedFrameCommit {
+            prepared_frame: PendingPreparedFrameCommit {
                 frame_scope,
                 pass_cache_update,
             },
@@ -3935,7 +3983,7 @@ impl<'device> PreparedGraph<'device> {
         not(test),
         expect(
             dead_code,
-            reason = "C08 finishes a completely released prepared frame scope after execution"
+            reason = "graph encoding finishes a completely released prepared frame scope after execution"
         )
     )]
     pub(crate) fn finish(mut self) -> Result<FrameCleanup> {

@@ -45,7 +45,7 @@ impl RasterParameters {
         not(test),
         expect(
             dead_code,
-            reason = "C03 T3 keeps antialiasing selection symbolic until production scene lowering reaches the engine."
+            reason = "Antialiasing selection remains symbolic until production scene lowering reaches the engine."
         )
     )]
     pub(crate) const fn with_antialiasing(mut self, antialiasing: Antialiasing) -> Self {

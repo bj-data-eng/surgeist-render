@@ -214,7 +214,7 @@ enum GraphBuildPhase {
     not(test),
     expect(
         dead_code,
-        reason = "C06 T4 typed graph failures are consumed by the staged C06 planner tests."
+        reason = "Typed graph failures remain available to graph-validation tests."
     )
 )]
 pub(super) enum GraphValidationError {
@@ -400,7 +400,7 @@ pub(super) struct SemanticGraphBuilder {
     not(test),
     expect(
         dead_code,
-        reason = "C06 T4 stages the private graph builder that C06 T5-T6 will invoke."
+        reason = "The private graph builder is consumed by graph planning and validation."
     )
 )]
 impl SemanticGraphBuilder {
@@ -1132,7 +1132,7 @@ impl CaptureBoundsCoordinateSpace {
             #[cfg(test)]
             Self::ForcedMappedForTest => {
                 match LogicalBounds::NonEmpty(bounds)
-                    .try_transform(_transform, "forced C08 mapped capture bounds")?
+                    .try_transform(_transform, "forced base graph mapped capture bounds")?
                 {
                     LogicalBounds::Empty(_) => Ok(None),
                     LogicalBounds::NonEmpty(bounds) => Ok(Some(bounds)),

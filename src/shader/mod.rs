@@ -7,8 +7,8 @@ mod test_support;
 mod validate;
 
 pub(crate) use cache::{
-    DevicePassCache, ProvisionalC08PassObjects, ProvisionalColorFilterPassObjects,
-    ProvisionalCompositePassObjects, ProvisionalCopyBackdropPassObjects,
+    DevicePassCache, ProvisionalColorFilterPassObjects, ProvisionalCompositePassObjects,
+    ProvisionalCopyBackdropPassObjects, ProvisionalCorePassObjects,
     ProvisionalDevicePassCacheUpdate,
 };
 #[cfg(test)]
@@ -33,13 +33,13 @@ pub(crate) use parameters::{
 };
 #[cfg(test)]
 pub(crate) use test_support::{
-    C08PassKeyFactsForTest, C08ProgramForTest, C09CompositePassKeyFactsForTest,
-    C10ColorFilterPassKeyFactsForTest, C11BlurPassKeyFactsForTest,
-    C11DropShadowColorizeKeyFactsForTest, C12BackdropBlurPassKeyFactsForTest,
-    C12CopyBackdropPassKeyFactsForTest, DevicePassCacheCountsForTest, c08_pass_key_facts_for_test,
-    c09_composite_pass_key_facts_for_test, c10_color_filter_pass_key_facts_for_test,
-    c11_blur_pass_key_facts_for_test, c11_drop_shadow_colorize_key_facts_for_test,
-    c12_backdrop_blur_pass_key_facts_for_test,
-    c12_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test,
-    c12_copy_backdrop_pass_key_facts_for_test, device_pass_cache_owns_exact_key_spaces_for_test,
+    BackdropBlurPassKeyFactsForTest, BlurPassKeyFactsForTest, ColorFilterPassKeyFactsForTest,
+    CopyBackdropPassKeyFactsForTest, CorePassKeyFactsForTest, CorePassProgramForTest,
+    DevicePassCacheCountsForTest, DropShadowColorizeKeyFactsForTest,
+    LayerCompositePassKeyFactsForTest, backdrop_blur_pass_key_facts_for_test,
+    backdrop_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test,
+    blur_pass_key_facts_for_test, color_filter_pass_key_facts_for_test,
+    copy_backdrop_pass_key_facts_for_test, core_pass_key_facts_for_test,
+    device_pass_cache_owns_exact_key_spaces_for_test, drop_shadow_colorize_key_facts_for_test,
+    layer_composite_pass_key_facts_for_test,
 };

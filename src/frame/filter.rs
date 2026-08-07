@@ -190,7 +190,7 @@ impl SemanticSourceContribution {
     not(test),
     expect(
         dead_code,
-        reason = "C06 T3 stages ordinary and backdrop plans for C06 T5-T6 consumers."
+        reason = "Ordinary and backdrop filter plans remain available to graph construction and validation."
     )
 )]
 pub(super) enum FilterSourceRole {

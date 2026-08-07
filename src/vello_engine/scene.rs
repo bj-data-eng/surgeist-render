@@ -188,7 +188,7 @@ impl VelloScene {
         not(test),
         expect(
             dead_code,
-            reason = "C03 T2 private text encoding entry point is intentionally staged for T7 cutover."
+            reason = "The private text encoding entry point is consumed by scene lowering."
         )
     )]
     pub(crate) fn encode_text_run(&mut self, run: &TextRun<'_>) -> Result<()> {

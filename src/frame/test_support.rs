@@ -25,26 +25,26 @@ use crate::{
 };
 
 #[cfg(test)]
-pub(crate) fn forced_c08_graph_for_test(
+pub(crate) fn forced_base_graph_for_test(
     commands: RenderCommands,
     context: FrameContext,
 ) -> Result<GpuRenderGraph> {
-    forced_c08_graph_with_capture_mapping_for_test(
+    forced_base_graph_with_capture_mapping_for_test(
         commands,
         context,
-        ForcedC08CaptureMappingForTest::identity(),
+        ForcedVelloCaptureMappingForTest::identity(),
     )
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ForcedC08CaptureMappingForTest {
+pub(crate) struct ForcedVelloCaptureMappingForTest {
     capture_transform: Transform,
     parent_to_surface: Transform,
 }
 
 #[cfg(test)]
-impl ForcedC08CaptureMappingForTest {
+impl ForcedVelloCaptureMappingForTest {
     pub(crate) const fn identity() -> Self {
         Self {
             capture_transform: Transform::IDENTITY,
@@ -61,16 +61,16 @@ impl ForcedC08CaptureMappingForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn forced_c08_graph_with_capture_mapping_for_test(
+pub(crate) fn forced_base_graph_with_capture_mapping_for_test(
     commands: RenderCommands,
     context: FrameContext,
-    mapping: ForcedC08CaptureMappingForTest,
+    mapping: ForcedVelloCaptureMappingForTest,
 ) -> Result<GpuRenderGraph> {
     let output_spatial = match context.output_spatial_plan()? {
         FrameSpatialPlan::NonEmpty(spatial) => spatial,
         FrameSpatialPlan::Empty(_) => {
             return Err(Error::invalid_value(
-                "forced C08 graph output bounds",
+                "forced graph output bounds",
                 "empty",
                 "must be non-empty before the private graph fixture is planned",
             ));
@@ -107,7 +107,7 @@ pub(crate) fn authored_filter_graph_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct ForcedC08GraphCaptureObservationForTest {
+pub(crate) struct ForcedGraphCaptureObservationForTest {
     pub(crate) antialiasing: Antialiasing,
     pub(crate) capture_transform: Transform,
     pub(crate) parent_to_surface: Transform,
@@ -121,7 +121,7 @@ impl GpuRenderGraph {
     #[cfg(test)]
     pub(crate) fn forced_capture_observations_for_test(
         &self,
-    ) -> Vec<ForcedC08GraphCaptureObservationForTest> {
+    ) -> Vec<ForcedGraphCaptureObservationForTest> {
         self.vello_spans
             .iter()
             .map(|span| {
@@ -129,17 +129,17 @@ impl GpuRenderGraph {
                     .passes
                     .iter()
                     .find(|pass| pass.id == span.capture_pass)
-                    .expect("a validated C08 span must retain its capture pass");
+                    .expect("a validated base graph span must retain its capture pass");
                 let SemanticPassResult::Resource(resource_id) = pass.result else {
-                    unreachable!("a validated C08 capture pass must produce one resource");
+                    unreachable!("a validated Vello capture pass must produce one resource");
                 };
                 let resource = self
                     .resources
                     .iter()
                     .find(|resource| resource.id == resource_id)
-                    .expect("a validated C08 capture must retain its output resource");
+                    .expect("a validated Vello capture must retain its output resource");
                 let spatial = resource.descriptor;
-                ForcedC08GraphCaptureObservationForTest {
+                ForcedGraphCaptureObservationForTest {
                     antialiasing: span.antialiasing,
                     capture_transform: span.capture_transform,
                     parent_to_surface: span.parent_to_surface,

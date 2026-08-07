@@ -1,9 +1,9 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::gpu_transaction::GpuOperationSubmissionObservationForTest;
 use super::gpu_transaction::{
-    C08GraphResourceRetentionForTest, GpuOperationLease, GpuOperationStage,
-    ScopedC08GraphPostSubmitControlForTest, ScopedC08GraphSubmissionObservationForTest,
+    GpuOperationLease, GpuOperationStage, GraphResourceRetentionForTest,
     ScopedGpuOperationPostSubmitCheckpointForTest, ScopedGpuOperationSubmissionObservationForTest,
+    ScopedGraphPostSubmitControlForTest, ScopedGraphSubmissionObservationForTest,
     ScopedInternalVelloPostSubmitControlForTest, ScopedInternalVelloSubmissionObservationForTest,
 };
 use super::image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey};
@@ -329,7 +329,7 @@ fn assert_colr_glyph_preflight_cases() {
     let mut color_scene = VelloScene::default();
     let color_error = color_scene
         .encode_text_run(&color_run)
-        .expect_err("valid COLR data must reach the explicit T2 omission boundary");
+        .expect_err("valid COLR data must reach the explicit unsupported glyph-rendering boundary");
     assert_render_failed_without_font_diagnostic(&color_error);
     assert_no_glyph_encoding(&color_scene);
 
@@ -357,9 +357,9 @@ fn assert_png_bitmap_glyph_preflight_cases() {
         },
     );
     let mut bitmap_scene = VelloScene::default();
-    let bitmap_error = bitmap_scene
-        .encode_text_run(&bitmap_run)
-        .expect_err("valid PNG bitmap data must reach the explicit T2 omission boundary");
+    let bitmap_error = bitmap_scene.encode_text_run(&bitmap_run).expect_err(
+        "valid PNG bitmap data must reach the explicit unsupported glyph-rendering boundary",
+    );
     assert_render_failed_without_font_diagnostic(&bitmap_error);
     assert_no_glyph_encoding(&bitmap_scene);
 
@@ -838,9 +838,9 @@ fn assert_bdt_selected_bitmap(
         },
     );
     let mut scene = VelloScene::default();
-    let error = scene
-        .encode_text_run(&run)
-        .expect_err("a valid selected BDT bitmap must reach the explicit T2 omission boundary");
+    let error = scene.encode_text_run(&run).expect_err(
+        "a valid selected BDT bitmap must reach the explicit unsupported glyph-rendering boundary",
+    );
 
     assert_render_failed_without_font_diagnostic(&error);
     assert_no_glyph_encoding(&scene);
@@ -1001,7 +1001,7 @@ fn assert_bitmap_format_selection_cases(glyphs: &[TextGlyph]) {
             BitmapFormatExpected::Bitmap { .. } => {
                 let error = scene
                     .encode_text_run(&run)
-                    .expect_err("a selected bitmap must reach the explicit T2 omission boundary");
+                    .expect_err("a selected bitmap must reach the explicit unsupported glyph-rendering boundary");
                 assert_render_failed_without_font_diagnostic(&error);
                 assert_no_glyph_encoding(&scene);
             }
@@ -3567,7 +3567,7 @@ fn assert_literal_color_filter_primary_vectors() {
     assert_eq!(
         red_primary.apply_color_filter_pipeline(&grayscale).unwrap(),
         PremultipliedRgba8::try_new(11, 11, 11, 54).unwrap(),
-        "the grayscale primary vector differs from the literal S21 result"
+        "the grayscale primary vector differs from the literal reference color-matrix result"
     );
 
     let green_primary = PremultipliedRgba8::try_new(0, 79, 0, 79).unwrap();
@@ -3576,7 +3576,7 @@ fn assert_literal_color_filter_primary_vectors() {
             .apply_color_filter_pipeline(&grayscale)
             .unwrap(),
         PremultipliedRgba8::try_new(57, 57, 57, 79).unwrap(),
-        "the grayscale green primary differs from literal S21"
+        "the grayscale green primary differs from the literal reference color matrix"
     );
     let blue_primary = PremultipliedRgba8::try_new(0, 0, 104, 104).unwrap();
     assert_eq!(
@@ -3584,7 +3584,7 @@ fn assert_literal_color_filter_primary_vectors() {
             .apply_color_filter_pipeline(&grayscale)
             .unwrap(),
         PremultipliedRgba8::try_new(8, 8, 8, 104).unwrap(),
-        "the grayscale blue primary differs from literal S21"
+        "the grayscale blue primary differs from the literal reference color matrix"
     );
 
     let saturation_zero =
@@ -3614,7 +3614,7 @@ fn assert_literal_color_filter_identity_and_matrix_vectors() {
                 .apply_color_filter_pipeline(&identity)
                 .unwrap(),
             identity_sample,
-            "a literal S21 zero or identity vector changed the source"
+            "a literal reference color-matrix zero or identity vector changed the source"
         );
     }
 
@@ -3627,7 +3627,7 @@ fn assert_literal_color_filter_identity_and_matrix_vectors() {
             .apply_color_filter_pipeline(&hue_quarter_turn)
             .unwrap(),
         PremultipliedRgba8::try_new(0, 91, 0, 255).unwrap(),
-        "quarter-turn hue rotation differs from the literal S21 matrix"
+        "quarter-turn hue rotation differs from the literal reference color matrix"
     );
 
     let sepia = color_filter_pipeline([ColorFilterOp::Sepia(
@@ -3636,7 +3636,7 @@ fn assert_literal_color_filter_identity_and_matrix_vectors() {
     assert_eq!(
         opaque_red.apply_color_filter_pipeline(&sepia).unwrap(),
         PremultipliedRgba8::try_new(100, 89, 69, 255).unwrap(),
-        "full sepia differs from the literal S21 matrix"
+        "full sepia differs from the literal reference color matrix"
     );
 }
 
@@ -9130,7 +9130,7 @@ fn assert_runtime_color_filter_lowering(
                 .operations
                 .iter()
                 .all(|operation| operation.clamps_straight_rgba_then_premultiplies),
-        "runtime color scalars are not finite normalized S21 values"
+        "runtime color scalars are not finite normalized reference color-matrix values"
     );
 
     assert_eq!(
@@ -9331,7 +9331,7 @@ fn color_filter_cache_realizes_checked_high_and_reduced_programs() {
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
     let observed = pollster::block_on(
-        super::pass::c10_color_filter_cache_realization_observation_for_test(
+        super::pass::color_filter_cache_realization_observation_for_test(
             ready.device_for_test(),
             color_filter_commands_for_shader_test(),
             color_filter_frame_context_for_shader_test(),
@@ -9351,7 +9351,7 @@ fn color_filter_cache_realizes_checked_high_and_reduced_programs() {
 
 #[test]
 fn color_filter_layout_binds_exact_source_spatial_and_operations() {
-    let observed = super::pass::c10_color_filter_layout_observation_for_test(
+    let observed = super::pass::color_filter_layout_observation_for_test(
         color_filter_commands_for_shader_test(),
         color_filter_frame_context_for_shader_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -9430,7 +9430,7 @@ fn color_then_drop_shadow_filters_for_test() -> Vec<FilterList> {
 
 #[test]
 fn gpu_graph_executor_accepts_only_spine_composition_and_ordered_color_filters() {
-    let observed = super::pass::c10_executable_graph_observation_for_test(
+    let observed = super::pass::color_filter_executable_graph_observation_for_test(
         authored_color_filter_runs_for_test(),
         color_then_blur_filters_for_test(),
         color_then_drop_shadow_filters_for_test(),
@@ -9445,7 +9445,7 @@ fn gpu_graph_executor_accepts_only_spine_composition_and_ordered_color_filters()
             && observed.rejects_empty_missing_and_malformed_color_facts
             && observed.rejects_copy_blur_shadow_and_drop_shadow_composite
             && observed.rejects_unsupported_output
-            && observed.preserves_public_c09_dispatch_boundary,
+            && observed.preserves_public_composition_dispatch_boundary,
         "the ordered color-filter executor has no closed pre-allocation subset"
     );
 }
@@ -9464,7 +9464,7 @@ fn color_filter_graph_preserves_authored_order_clamps_and_exact_lifetimes() {
         vec![Tag::Brightness, Tag::Contrast, Tag::Invert],
         vec![Tag::HueRotate, Tag::Opacity, Tag::Sepia],
     ];
-    let expected_spatial = super::pass::C10ColorSpatialObservationForTest {
+    let expected_spatial = super::pass::ColorFilterSpatialObservationForTest {
         logical_bounds: [-2.25, 1.5, 4.0, 3.0],
         device_origin: (-3, 1),
         device_extent: PhysicalSize::new(6, 5),
@@ -9498,7 +9498,7 @@ fn mixed_color_and_spatial_filters_preserve_the_unsupported_operation_diagnostic
     assert!(
         observed.pure_color_retains_gpu_color_diagnostic
             && observed.color_then_blur_reports_gpu_blur_diagnostic
-            && observed.mixed_graph_stays_outside_c10_preparation,
+            && observed.mixed_graph_stays_outside_color_filter_preparation,
         "a spatial-filter pass was admitted or color filtering masked its diagnostic"
     );
 }
@@ -9523,7 +9523,7 @@ fn spatial_filter_authored_filter_steps_for_test() -> Vec<FilterList> {
 
 #[test]
 fn gpu_graph_executor_accepts_only_color_blur_and_drop_shadow_filter_graphs() {
-    let observed = super::pass::c11_executable_graph_observation_for_test(
+    let observed = super::pass::spatial_filter_executable_graph_observation_for_test(
         spatial_filter_authored_filter_steps_for_test(),
         filter_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -9535,7 +9535,7 @@ fn gpu_graph_executor_accepts_only_color_blur_and_drop_shadow_filter_graphs() {
             && observed.preserves_ordered_nonzero_filter_steps
             && observed.rejects_empty_missing_and_malformed_spatial_facts
             && observed.rejects_wrong_axes_inputs_edges_and_aliases
-            && observed.rejects_copy_backdrop_stale_forward_and_c12_plus
+            && observed.rejects_copy_backdrop_stale_forward_and_backdrop_plus
             && observed.rejects_before_resource_acquisition,
         "the spatial-filter executor has no closed pre-allocation color, blur, and drop-shadow subset"
     );
@@ -9543,9 +9543,9 @@ fn gpu_graph_executor_accepts_only_color_blur_and_drop_shadow_filter_graphs() {
 
 #[test]
 fn blur_and_drop_shadow_graph_preserves_order_edges_and_lifetimes() {
-    use super::pass::C11FilterPassTagForTest as Tag;
+    use super::pass::SpatialFilterPassTagForTest as Tag;
 
-    let observed = super::pass::c11_filter_graph_observation_for_test(
+    let observed = super::pass::spatial_filter_graph_observation_for_test(
         spatial_filter_authored_filter_steps_for_test(),
         filter_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -9646,7 +9646,7 @@ fn render_bounded_backdrop_fixture_for_test(
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -10280,7 +10280,7 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
     let warmed_cache = ready.device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -10317,7 +10317,7 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
         && warmed_resources.gaussian_kernel_count_for_test() > 0
         && warmed_resources.effect_texture_count_for_test() > 0
         && color_filter_prepared_resource_identities_are_stable_for_test(&prepared)
-        && retention == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3]
+        && retention == vec![GraphResourceRetentionForTest::RetainedReusable; 3]
         && warmed_cache.has_render_pipelines()
         && caches.iter().all(|actual| *actual == warmed_cache)
         && stats
@@ -10356,7 +10356,7 @@ fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
         .device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -10388,7 +10388,7 @@ fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
         && resources.effect_texture_count_for_test() == 0
         && resources.gaussian_kernel_count_for_test() == 0
         && graph_submission.resource_retention_history_for_test()
-            == [C08GraphResourceRetentionForTest::ReleasedAllIdle]
+            == [GraphResourceRetentionForTest::ReleasedAllIdle]
         && cache_before == cache_after
         && cache_after.has_render_pipelines()
         && one_submission
@@ -10454,7 +10454,7 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let nested = pollster::block_on(renderer.render(surface, &nested, Parameters::default()));
@@ -10565,7 +10565,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
     let presentation = presented_observation_handle_for_test(&surface);
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -10616,7 +10616,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -10657,7 +10657,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
 
 #[test]
 fn gpu_graph_executor_accepts_only_bounded_top_level_backdrop_graphs() {
-    let observed = super::pass::c12_executable_graph_observation_for_test(
+    let observed = super::pass::backdrop_executable_graph_observation_for_test(
         bounded_backdrop_graph_commands_for_test(),
         super::frame::FrameContext::try_new(
             Size::new(16.0, 12.0),
@@ -10679,7 +10679,7 @@ fn gpu_graph_executor_accepts_only_bounded_top_level_backdrop_graphs() {
 
 #[test]
 fn backdrop_graph_reads_completed_parent_once_and_preserves_group_order() {
-    let observed = super::pass::c12_backdrop_graph_observation_for_test(
+    let observed = super::pass::backdrop_graph_observation_for_test(
         bounded_backdrop_graph_commands_for_test(),
         super::frame::FrameContext::try_new(
             Size::new(16.0, 12.0),
@@ -10704,7 +10704,7 @@ fn backdrop_graph_reads_completed_parent_once_and_preserves_group_order() {
 
 #[test]
 fn copy_backdrop_layout_binds_parent_and_spatial_mapping() {
-    let observed = super::pass::c12_copy_backdrop_layout_observation_for_test(
+    let observed = super::pass::copy_backdrop_layout_observation_for_test(
         bounded_backdrop_graph_commands_for_test(),
         super::frame::FrameContext::try_new(
             Size::new(16.0, 12.0),
@@ -10739,7 +10739,7 @@ fn copy_backdrop_cache_realizes_checked_working_format_programs() {
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
     let observed = pollster::block_on(
-        super::pass::c12_copy_backdrop_cache_realization_observation_for_test(
+        super::pass::copy_backdrop_cache_realization_observation_for_test(
             ready.device_for_test(),
             bounded_backdrop_graph_commands_for_test(),
             super::frame::FrameContext::try_new(
@@ -10787,7 +10787,7 @@ fn backdrop_blur_cache_separates_transparent_and_mirrored_edge_programs() {
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
     let observed = pollster::block_on(
-        super::pass::c12_blur_cache_realization_observation_for_test(
+        super::pass::backdrop_blur_cache_realization_observation_for_test(
             ready.device_for_test(),
             spatial_filter_authored_filter_steps_for_test(),
             filter_graph_commands_for_test(),
@@ -10811,7 +10811,7 @@ fn backdrop_blur_cache_separates_transparent_and_mirrored_edge_programs() {
 
 #[test]
 fn backdrop_blur_layout_carries_semantic_mirror_bounds() {
-    let observed = super::pass::c12_backdrop_blur_layout_observation_for_test(
+    let observed = super::pass::backdrop_blur_layout_observation_for_test(
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -10831,9 +10831,9 @@ fn backdrop_blur_layout_carries_semantic_mirror_bounds() {
 
 #[test]
 fn backdrop_filter_chain_preserves_authored_order_and_clamp_boundaries() {
-    use super::pass::C11FilterPassTagForTest as Tag;
+    use super::pass::SpatialFilterPassTagForTest as Tag;
 
-    let observed = super::pass::c12_backdrop_filter_chain_observation_for_test(
+    let observed = super::pass::backdrop_filter_chain_observation_for_test(
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -10862,7 +10862,7 @@ fn backdrop_filter_chain_preserves_authored_order_and_clamp_boundaries() {
 #[test]
 fn backdrop_graph_encodes_copy_filter_clip_foreground_and_group_in_order() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
+    let observed = pollster::block_on(backend.backdrop_graph_encoding_observation_for_test(
         identity,
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -10882,7 +10882,7 @@ fn backdrop_graph_encodes_copy_filter_clip_foreground_and_group_in_order() {
 #[test]
 fn backdrop_copy_filter_and_group_use_distinct_resources() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
+    let observed = pollster::block_on(backend.backdrop_graph_encoding_observation_for_test(
         identity,
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -10900,8 +10900,8 @@ fn backdrop_copy_filter_and_group_use_distinct_resources() {
 #[test]
 fn later_sibling_dependency_follows_completed_backdrop_group() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let observed = pollster::block_on(backend.c12_backdrop_graph_encoding_observation_for_test(
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(backend.backdrop_graph_encoding_observation_for_test(
         identity,
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -10926,8 +10926,8 @@ fn later_sibling_dependency_follows_completed_backdrop_group() {
 #[test]
 fn backdrop_encode_failure_preserves_resources_cache_and_publication() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
-    let observed = pollster::block_on(backend.c12_failure_preservation_observation_for_test(
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
+    let observed = pollster::block_on(backend.backdrop_failure_preservation_observation_for_test(
         identity,
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -10980,7 +10980,7 @@ fn gaussian_kernel_bytes_are_symmetric_normalized_and_exactly_cached() {
 
 #[test]
 fn blur_layout_binds_exact_source_spatial_and_kernel() {
-    let observed = super::pass::c11_blur_layout_observation_for_test(
+    let observed = super::pass::blur_layout_observation_for_test(
         spatial_filter_authored_filter_steps_for_test(),
         filter_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -11009,15 +11009,13 @@ fn blur_cache_realizes_checked_axis_input_and_precision_programs() {
         .unwrap_or_panic_for_test("checked blur realization requires a ready device");
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
-    let observed = pollster::block_on(
-        super::pass::c11_blur_cache_realization_observation_for_test(
-            ready.device_for_test(),
-            spatial_filter_authored_filter_steps_for_test(),
-            filter_graph_commands_for_test(),
-            filter_graph_context_for_test(),
-            capabilities,
-        ),
-    )
+    let observed = pollster::block_on(super::pass::blur_cache_realization_observation_for_test(
+        ready.device_for_test(),
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
+        capabilities,
+    ))
     .unwrap_or_panic_for_test("the checked blur shader must reach real WGPU realization");
 
     assert!(
@@ -11056,7 +11054,7 @@ fn drop_shadow_parameter_bytes_preserve_fractional_offset_and_solid_color() {
 
 #[test]
 fn drop_shadow_layout_binds_blurred_alpha_spatial_and_parameters() {
-    let observed = super::pass::c11_drop_shadow_layout_observation_for_test(
+    let observed = super::pass::drop_shadow_layout_observation_for_test(
         spatial_filter_authored_filter_steps_for_test(),
         filter_graph_commands_for_test(),
         filter_graph_context_for_test(),
@@ -11086,7 +11084,7 @@ fn drop_shadow_cache_realizes_checked_colorize_and_merge_programs() {
     let capabilities =
         DeviceCapabilities::from_device(ready.adapter_for_test(), ready.device_for_test());
     let observed = pollster::block_on(
-        super::pass::c11_drop_shadow_cache_realization_observation_for_test(
+        super::pass::drop_shadow_cache_realization_observation_for_test(
             ready.device_for_test(),
             spatial_filter_authored_filter_steps_for_test(),
             filter_graph_commands_for_test(),
@@ -11127,19 +11125,17 @@ fn prepared_spatial_filter_objects_expose_exact_encoding_handles() {
 
 #[test]
 fn spatial_filter_graph_encodes_blur_and_drop_shadow_in_authored_order() {
-    use super::pass::C11FilterPassTagForTest as Tag;
+    use super::pass::SpatialFilterPassTagForTest as Tag;
 
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let observed = pollster::block_on(
-        backend.c11_spatial_filter_graph_encoding_observation_for_test(
-            identity,
-            spatial_filter_authored_filter_steps_for_test(),
-            filter_graph_commands_for_test(),
-            filter_graph_context_for_test(),
-        ),
-    )
+    let observed = pollster::block_on(backend.spatial_filter_graph_encoding_observation_for_test(
+        identity,
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
+    ))
     .unwrap_or_panic_for_test(
         "the spatial-filter fixture must reach its shared GPU graph executor",
     );
@@ -11174,14 +11170,12 @@ fn spatial_filter_graph_encodes_blur_and_drop_shadow_in_authored_order() {
 #[test]
 fn blur_passes_use_distinct_source_intermediate_and_result() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let observed = pollster::block_on(
-        backend.c11_spatial_filter_graph_encoding_observation_for_test(
-            identity,
-            spatial_filter_authored_filter_steps_for_test(),
-            filter_graph_commands_for_test(),
-            filter_graph_context_for_test(),
-        ),
-    )
+    let observed = pollster::block_on(backend.spatial_filter_graph_encoding_observation_for_test(
+        identity,
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
+    ))
     .unwrap_or_panic_for_test("the blur fixture must reach its shared GPU graph executor");
     assert!(
         observed.blur_pass_count == 4
@@ -11196,14 +11190,12 @@ fn blur_passes_use_distinct_source_intermediate_and_result() {
 #[test]
 fn drop_shadow_reads_source_twice_and_releases_after_merge() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let observed = pollster::block_on(
-        backend.c11_spatial_filter_graph_encoding_observation_for_test(
-            identity,
-            spatial_filter_authored_filter_steps_for_test(),
-            filter_graph_commands_for_test(),
-            filter_graph_context_for_test(),
-        ),
-    )
+    let observed = pollster::block_on(backend.spatial_filter_graph_encoding_observation_for_test(
+        identity,
+        spatial_filter_authored_filter_steps_for_test(),
+        filter_graph_commands_for_test(),
+        filter_graph_context_for_test(),
+    ))
     .unwrap_or_panic_for_test("the drop-shadow fixture must reach its shared GPU graph executor");
 
     assert!(
@@ -11220,12 +11212,14 @@ fn drop_shadow_reads_source_twice_and_releases_after_merge() {
 #[test]
 fn spatial_filter_encode_and_scope_failures_preserve_resources_cache_and_publication() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let observed = pollster::block_on(backend.c11_failure_preservation_observation_for_test(
-        identity,
-        spatial_filter_authored_filter_steps_for_test(),
-        filter_graph_commands_for_test(),
-        filter_graph_context_for_test(),
-    ))
+    let observed = pollster::block_on(
+        backend.spatial_filter_failure_preservation_observation_for_test(
+            identity,
+            spatial_filter_authored_filter_steps_for_test(),
+            filter_graph_commands_for_test(),
+            filter_graph_context_for_test(),
+        ),
+    )
     .unwrap_or_panic_for_test("the spatial-filter failure fixture must exercise both abort paths");
 
     assert!(
@@ -11289,7 +11283,7 @@ fn render_spatial_filter_fixture_for_test(
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -11870,7 +11864,7 @@ fn repeated_spatial_filter_resources_are_stable_for_test(
     let warmed_cache = ready.device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -11911,7 +11905,7 @@ fn repeated_spatial_filter_resources_are_stable_for_test(
         && warmed_resources.gaussian_kernel_count_for_test() > 0
         && warmed_resources.effect_texture_count_for_test() > 0
         && color_filter_prepared_resource_identities_are_stable_for_test(&prepared)
-        && retention == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3]
+        && retention == vec![GraphResourceRetentionForTest::RetainedReusable; 3]
         && warmed_cache.has_render_pipelines()
         && caches.iter().all(|actual| *actual == warmed_cache)
         && one_submission_per_frame
@@ -11955,7 +11949,7 @@ fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
         .device_pass_cache_counts_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -11994,7 +11988,7 @@ fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
         && resources.committed_transient_image_count_for_test() == 0
         && resources.effect_texture_count_for_test() == 0
         && resources.gaussian_kernel_count_for_test() == 0
-        && retention == [C08GraphResourceRetentionForTest::ReleasedAllIdle]
+        && retention == [GraphResourceRetentionForTest::ReleasedAllIdle]
         && cache_before == cache_after
         && cache_after.has_render_pipelines()
         && one_submission
@@ -12109,7 +12103,7 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -12211,8 +12205,10 @@ fn public_dispatch_routes_composition_and_spatial_filters_but_rejects_broad_back
             && unsupported_surface.headless_publication_count_for_test() == 0
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(2)
-            && dispatch_after.exact_c09_graph_routes
-                == dispatch_before.exact_c09_graph_routes.saturating_add(1)
+            && dispatch_after.exact_composition_graph_routes
+                == dispatch_before
+                    .exact_composition_graph_routes
+                    .saturating_add(1)
             && dispatch_after.exact_spatial_filter_fixture_routes
                 == dispatch_before
                     .exact_spatial_filter_fixture_routes
@@ -12235,7 +12231,7 @@ fn graph_encoding_backend_for_test() -> (Backend, DeviceSlotIdentity) {
 fn color_filter_graph_encodes_fused_operations_in_authored_order() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(
-        backend.c10_ordered_color_graph_encoding_observation_for_test(
+        backend.ordered_color_filter_graph_encoding_observation_for_test(
             identity,
             authored_color_filter_runs_for_test(),
             filter_graph_commands_for_test(),
@@ -12258,7 +12254,7 @@ fn color_filter_graph_encodes_fused_operations_in_authored_order() {
 fn color_filter_pass_uses_distinct_source_and_result() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
     let observed = pollster::block_on(
-        backend.c10_ordered_color_graph_encoding_observation_for_test(
+        backend.ordered_color_filter_graph_encoding_observation_for_test(
             identity,
             authored_color_filter_runs_for_test(),
             filter_graph_commands_for_test(),
@@ -12280,9 +12276,9 @@ fn color_filter_pass_uses_distinct_source_and_result() {
 #[test]
 fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(
-        backend.c10_ordered_color_graph_encoding_observation_for_test(
+        backend.ordered_color_filter_graph_encoding_observation_for_test(
             identity,
             authored_color_filter_runs_for_test(),
             composition_commands_for_test(),
@@ -12312,9 +12308,9 @@ fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
 #[test]
 fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(
-        backend.c10_oversized_buffer_preservation_observation_for_test(
+        backend.color_filter_oversized_buffer_preservation_observation_for_test(
             identity,
             authored_color_filter_runs_for_test(),
             filter_graph_commands_for_test(),
@@ -12604,7 +12600,7 @@ fn base_graph_executor_accepts_only_clear_capture_canonicalize_source_over_and_p
         Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
     )
     .unwrap();
-    let observed = super::pass::c08_executable_subset_observation_for_test(
+    let observed = super::pass::base_graph_executable_subset_observation_for_test(
         base_graph_commands,
         runtime_lowering_commands_for_test(),
         context,
@@ -13140,7 +13136,7 @@ fn composition_graph_executor_accepts_only_spine_and_ordered_layer_composition()
         Color::try_rgba(0.125, 0.25, 0.5, 1.0).unwrap(),
     )
     .unwrap();
-    let observed = super::pass::c09_executable_graph_observation_for_test(
+    let observed = super::pass::composition_executable_graph_observation_for_test(
         base_graph_commands,
         composition_commands_for_test(),
         runtime_lowering_commands_for_test(),
@@ -13151,11 +13147,11 @@ fn composition_graph_executor_accepts_only_spine_and_ordered_layer_composition()
     assert!(
         observed.accepts_spine_and_layer_composition_for_all_formats
             && observed.layer_composition_reads_are_exact
-            && observed.rejects_c10_plus_passes_and_payloads
+            && observed.rejects_color_filter_plus_passes_and_payloads
             && observed.rejects_missing_payloads
             && observed.rejects_malformed_graph_facts
             && observed.rejects_unsupported_output_binding
-            && observed.preserves_exact_c09_dispatch,
+            && observed.preserves_exact_composition_dispatch,
         "the composition graph executor has no closed pre-allocation subset"
     );
 }
@@ -13521,8 +13517,8 @@ fn graph_preparation_rejects_unsupported_passes_without_resource_or_cache_mutati
     let resources_before = resources.observation_for_test();
     let pass_cache_before = pass_cache.counts_for_test();
 
-    let preparation = match super::pass::C08PreparableGraph::try_from_lowered(lowered) {
-        Ok(preparable) => super::pass::PreparedGraph::try_prepare_c08(
+    let preparation = match super::pass::BasePreparableGraph::try_from_lowered(lowered) {
+        Ok(preparable) => super::pass::PreparedGraph::try_prepare_base(
             preparable,
             policy,
             &capabilities,
@@ -14024,8 +14020,8 @@ fn composition_shader_composite_command_variants_for_test() -> Vec<command::Rend
 fn composition_composite_requests_for_test(
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> super::pass::C09CompositeCacheRequestsForTest {
-    super::pass::c09_composite_cache_requests_for_test(
+) -> super::pass::LayerCompositeCacheRequestsForTest {
+    super::pass::layer_composite_cache_requests_for_test(
         &composition_shader_composite_command_variants_for_test(),
         composition_frame_context_for_test(),
         capabilities,
@@ -14037,7 +14033,7 @@ fn composition_composite_requests_for_test(
 fn composition_selected_backend_and_requests_for_test() -> (
     Backend,
     DeviceSlotIdentity,
-    super::pass::C09CompositeCacheRequestsForTest,
+    super::pass::LayerCompositeCacheRequestsForTest,
 ) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
@@ -14060,7 +14056,7 @@ fn composition_selected_backend_and_requests_for_test() -> (
 fn composition_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
     let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
     let observed = match pollster::block_on(
-        backend.c09_ordered_graph_encoding_observation_for_test(
+        backend.composition_ordered_graph_encoding_observation_for_test(
             identity,
             composition_commands_for_test(),
             composition_frame_context_for_test(),
@@ -14081,17 +14077,18 @@ fn composition_graph_encodes_clip_mask_opacity_and_blend_in_authored_order() {
 #[test]
 fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
     let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
-    let observed =
-        match pollster::block_on(backend.c09_ordered_graph_encoding_observation_for_test(
+    let observed = match pollster::block_on(
+        backend.composition_ordered_graph_encoding_observation_for_test(
             identity,
             composition_shader_composite_commands_for_test(BlendMode::Normal, true, true),
             composition_frame_context_for_test(),
-        )) {
-            Ok(observed) => observed,
-            Err(error) => panic!(
-                "normal composition must reach its checked one-shot encoding observation: {error:?}"
-            ),
-        };
+        ),
+    ) {
+        Ok(observed) => observed,
+        Err(error) => panic!(
+            "normal composition must reach its checked one-shot encoding observation: {error:?}"
+        ),
+    };
 
     assert!(
         observed.normal_uses_fixed_premultiplied_blend && observed.normal_omits_parent_sample,
@@ -14103,7 +14100,7 @@ fn normal_composition_uses_fixed_premultiplied_blend_without_parent_sampling() {
 fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
     let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
     let observed = match pollster::block_on(
-        backend.c09_ordered_graph_encoding_observation_for_test(
+        backend.composition_ordered_graph_encoding_observation_for_test(
             identity,
             composition_shader_composite_commands_for_test(BlendMode::Multiply, true, true),
             composition_frame_context_for_test(),
@@ -14124,9 +14121,9 @@ fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
 #[test]
 fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
     let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = match pollster::block_on(
-        backend.c09_ordered_graph_encoding_observation_for_test(
+        backend.composition_ordered_graph_encoding_observation_for_test(
             identity,
             composition_commands_for_test(),
             composition_frame_context_for_test(),
@@ -14177,7 +14174,7 @@ fn base_graph_shader_cache_realizes_checked_programs_without_publishing_failed_e
         );
     let commands = graph_shader_commands_for_test();
     let context = graph_shader_frame_context_for_test();
-    let rgba_requests = super::pass::c08_pass_cache_requests_for_test(
+    let rgba_requests = super::pass::core_pass_cache_requests_for_test(
         commands.clone(),
         context,
         capabilities,
@@ -14187,7 +14184,7 @@ fn base_graph_shader_cache_realizes_checked_programs_without_publishing_failed_e
     .unwrap_or_panic_for_test(
         "RGBA shader realization requires exact lowered base-graph pass keys",
     );
-    let bgra_requests = super::pass::c08_pass_cache_requests_for_test(
+    let bgra_requests = super::pass::core_pass_cache_requests_for_test(
         commands,
         context,
         capabilities,
@@ -14197,11 +14194,13 @@ fn base_graph_shader_cache_realizes_checked_programs_without_publishing_failed_e
     .unwrap_or_panic_for_test(
         "BGRA shader realization requires exact lowered base-graph pass keys",
     );
-    let observed = pollster::block_on(backend.c08_shader_cache_realization_observation_for_test(
-        identity,
-        &rgba_requests,
-        &bgra_requests,
-    ))
+    let observed = pollster::block_on(
+        backend.core_pass_shader_cache_realization_observation_for_test(
+            identity,
+            &rgba_requests,
+            &bgra_requests,
+        ),
+    )
     .unwrap_or_panic_for_test(
         "checked base-graph shader realization must reach its transaction observation",
     );
@@ -14223,7 +14222,7 @@ fn base_graph_shader_cache_realizes_checked_programs_without_publishing_failed_e
 fn composite_cache_realizes_exact_normal_and_destination_sampling_programs() {
     let (mut backend, identity, requests) = composition_selected_backend_and_requests_for_test();
     let observed = pollster::block_on(
-        backend.c09_composite_cache_realization_observation_for_test(identity, &requests),
+        backend.layer_composite_cache_realization_observation_for_test(identity, &requests),
     )
     .unwrap();
 
@@ -14247,7 +14246,7 @@ fn composite_layouts_bind_no_dummy_parent_clip_or_mask() {
         DeviceCapabilities::from_test_facts(true, true, 4_096),
         WorkingFormat::HighPrecision,
     );
-    let observed = super::pass::c09_composite_layout_observation_for_test(&requests);
+    let observed = super::pass::layer_composite_layout_observation_for_test(&requests);
 
     assert!(
         observed.realizes_all_eight_entry_interfaces
@@ -14372,13 +14371,13 @@ fn composition_read_gpu_vectors_for_test(
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-async fn c09_submit_and_read_gpu_vectors_for_test(
+async fn composition_submit_and_read_gpu_vectors_for_test(
     backend: &mut Backend,
     identity: DeviceSlotIdentity,
     transaction: super::gpu_transaction::GpuOperationTransaction,
-    prepared: C09PreparedGpuVectorsForTest,
-) -> Result<C09GpuVectorResultsForTest> {
-    let C09PreparedGpuVectorsForTest {
+    prepared: CompositionPreparedGpuVectorsForTest,
+) -> Result<CompositionGpuVectorResultsForTest> {
+    let CompositionPreparedGpuVectorsForTest {
         device,
         queue,
         working_format,
@@ -14435,15 +14434,15 @@ async fn c09_submit_and_read_gpu_vectors_for_test(
     backend.commit_checked_pass_cache_update_for_test(identity, pass_cache_update)?;
     let rgba =
         composition_read_gpu_vectors_for_test(&device, &staging, working_format, outputs.len())?;
-    Ok(C09GpuVectorResultsForTest {
+    Ok(CompositionGpuVectorResultsForTest {
         working_format,
         rgba,
     })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn composition_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorForTest>, Vec<[f32; 4]>)
-{
+fn composition_mask_boundary_vectors_for_test()
+-> (Vec<CompositionMaskSamplingVectorForTest>, Vec<[f32; 4]>) {
     let mut vectors = Vec::new();
     let mut expected = Vec::new();
     let rows = [
@@ -14487,7 +14486,7 @@ fn composition_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorFor
                 (Point::new(2.0, -0.000_1), 0.0),
                 (Point::new(2.0, 1.000_1), 0.0),
             ] {
-                vectors.push(C09MaskSamplingVectorForTest {
+                vectors.push(CompositionMaskSamplingVectorForTest {
                     quality,
                     extend,
                     layer_point: point,
@@ -14498,7 +14497,7 @@ fn composition_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorFor
             }
         }
     }
-    vectors.push(C09MaskSamplingVectorForTest {
+    vectors.push(CompositionMaskSamplingVectorForTest {
         quality: ImageQuality::Medium,
         extend: Extend::Repeat,
         layer_point: Point::new(0.0, 0.5),
@@ -14511,7 +14510,7 @@ fn composition_mask_boundary_vectors_for_test() -> (Vec<C09MaskSamplingVectorFor
 
 #[cfg(not(target_arch = "wasm32"))]
 fn composition_gpu_vectors_match(
-    observed: &C09GpuVectorResultsForTest,
+    observed: &CompositionGpuVectorResultsForTest,
     expected: &[[f32; 4]],
     tolerance: f32,
 ) -> bool {
@@ -14545,10 +14544,10 @@ fn mask_sampling_shader_matches_independent_boundary_vectors() {
             GpuOperationStage::Render,
             RuntimeOperation::EffectRendering,
         )?;
-        let prepared = backend.c09_shader_mask_sampling_preparation_for_test(
+        let prepared = backend.composition_shader_mask_sampling_preparation_for_test(
             identity,
             &requests,
-            &C09MaskSamplingInputForTest {
+            &CompositionMaskSamplingInputForTest {
                 mask_size: PhysicalSize::new(4, 1),
                 mask_rgba: vec![255, 0, 0, 0, 0, 255, 0, 85, 0, 0, 255, 170, 17, 33, 65, 255],
                 mask_bounds: Rect::new(0.0, 0.0, 4.0, 1.0),
@@ -14556,8 +14555,13 @@ fn mask_sampling_shader_matches_independent_boundary_vectors() {
                 vectors,
             },
         )?;
-        c09_submit_and_read_gpu_vectors_for_test(&mut backend, identity, transaction, prepared)
-            .await
+        composition_submit_and_read_gpu_vectors_for_test(
+            &mut backend,
+            identity,
+            transaction,
+            prepared,
+        )
+        .await
     })
     .unwrap();
     let tolerance = match observed.working_format {
@@ -14577,73 +14581,73 @@ fn blend_shaders_match_independent_known_vectors() {
     let source = [0.4, 0.1, 0.3, 0.5];
     let parent = [0.2, 0.6, 0.32, 0.8];
     let vectors = [
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Normal,
             source,
             parent,
             opacity: 1.25,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Multiply,
             source,
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Screen,
             source,
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Overlay,
             source,
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Darken,
             source,
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Lighten,
             source,
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Plus,
             source,
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Plus,
             source: [0.8, 0.2, 0.7, 0.8],
             parent: [0.6, 0.9, 0.4, 0.9],
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Multiply,
             source: [0.0; 4],
             parent,
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Screen,
             source,
             parent: [0.0; 4],
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Overlay,
             source: [0.0; 4],
             parent: [0.0; 4],
             opacity: 1.0,
         },
-        C09BlendVectorForTest {
+        CompositionBlendVectorForTest {
             blend: BlendMode::Normal,
             source,
             parent,
@@ -14671,8 +14675,8 @@ fn blend_shaders_match_independent_known_vectors() {
 fn assert_composition_blend_gpu_vectors(
     mut backend: Backend,
     identity: DeviceSlotIdentity,
-    requests: &super::pass::C09CompositeCacheRequestsForTest,
-    vectors: &[C09BlendVectorForTest],
+    requests: &super::pass::LayerCompositeCacheRequestsForTest,
+    vectors: &[CompositionBlendVectorForTest],
     expected: &[[f32; 4]],
 ) {
     let observed = pollster::block_on(async {
@@ -14682,9 +14686,14 @@ fn assert_composition_blend_gpu_vectors(
             RuntimeOperation::EffectRendering,
         )?;
         let prepared =
-            backend.c09_shader_blend_preparation_for_test(identity, requests, vectors)?;
-        c09_submit_and_read_gpu_vectors_for_test(&mut backend, identity, transaction, prepared)
-            .await
+            backend.composition_shader_blend_preparation_for_test(identity, requests, vectors)?;
+        composition_submit_and_read_gpu_vectors_for_test(
+            &mut backend,
+            identity,
+            transaction,
+            prepared,
+        )
+        .await
     })
     .unwrap();
     let tolerance = match observed.working_format {
@@ -14699,7 +14708,7 @@ fn assert_composition_blend_gpu_vectors(
 
 #[test]
 fn base_graph_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
-    let observed = super::pass::c08_pass_layout_observation_for_test(
+    let observed = super::pass::core_pass_layout_observation_for_test(
         graph_shader_commands_for_test(),
         graph_shader_frame_context_for_test(),
         DeviceCapabilities::from_test_facts(true, true, 4_096),
@@ -14711,7 +14720,7 @@ fn base_graph_layouts_bind_only_sampled_resources_and_exact_spatial_uniforms() {
             && observed.present_binds_final_image_and_spatial_only
             && observed.copy_only_parent_is_not_sampled
             && observed.dummy_parameters_are_not_bound
-            && observed.c09_typed_vocabulary_is_preserved
+            && observed.composition_typed_vocabulary_is_preserved
             && observed.output_specialization_is_exact,
         "the base-graph pass layout contains a copy-only or dummy binding"
     );
@@ -14741,7 +14750,7 @@ fn zero_capture_graph_spine_is_rejected_before_preparation() {
     let resources_before = resources.observation_for_test();
     let pass_cache_before = pass_cache.counts_for_test();
 
-    let lowered = super::pass::c08_zero_capture_spine_lowered_for_test(
+    let lowered = super::pass::zero_capture_spine_lowered_for_test(
         graph_shader_commands_for_test(),
         graph_shader_frame_context_for_test(),
         capabilities,
@@ -14768,14 +14777,14 @@ fn zero_capture_graph_spine_is_rejected_before_preparation() {
     );
 }
 
-fn observe_graph_custom_spine_encoding_for_test() -> C08CustomSpineEncodingObservationForTest {
+fn observe_graph_custom_spine_encoding_for_test() -> CustomSpineEncodingObservationForTest {
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
         .unwrap_or_panic_for_test("custom-spine encoding requires backend selection")
         .unwrap_or_panic_for_test("custom-spine encoding requires a host adapter");
-    let mut observed = pollster::block_on(backend.c08_custom_spine_encoding_observation_for_test(
+    let mut observed = pollster::block_on(backend.custom_spine_encoding_observation_for_test(
         identity,
         graph_shader_commands_for_test(),
         graph_shader_frame_context_for_test(),
@@ -14830,7 +14839,7 @@ fn multiple_vello_captures_share_one_graph_encoder_and_transaction_commit() {
         .unwrap_or_panic_for_test("multiple Vello captures require backend selection")
         .unwrap_or_panic_for_test("multiple Vello captures require a host adapter");
     let observed = pollster::block_on(
-        backend.c08_multiple_vello_capture_encoding_observation_for_test(
+        backend.multiple_vello_capture_encoding_observation_for_test(
             identity,
             graph_shader_commands_for_test(),
             runtime_lowering_commands_for_test(),
@@ -14865,12 +14874,12 @@ fn later_two_capture_encode_failure_aborts_all_leases_and_rejects_retry_without_
     let identity = pollster::block_on(backend.select_device(None))
         .unwrap_or_panic_for_test("later Vello capture failure requires backend selection")
         .unwrap_or_panic_for_test("later Vello capture failure requires a host adapter");
-    let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
+    let observed = pollster::block_on(backend.two_capture_failure_observation_for_test(
         identity,
         graph_shader_commands_for_test(),
         runtime_lowering_commands_for_test(),
         graph_shader_frame_context_for_test(),
-        C08TwoCaptureFailureForTest::LaterCaptureEncoding,
+        TwoCaptureFailureForTest::LaterCaptureEncoding,
     ))
     .unwrap_or_panic_for_test("later Vello capture failure must reach its failure observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
@@ -14902,12 +14911,12 @@ fn shared_two_capture_scope_failure_aborts_all_leases_and_rejects_retry_without_
     let identity = pollster::block_on(backend.select_device(None))
         .unwrap_or_panic_for_test("shared Vello scope failure requires backend selection")
         .unwrap_or_panic_for_test("shared Vello scope failure requires a host adapter");
-    let observed = pollster::block_on(backend.c08_two_capture_failure_observation_for_test(
+    let observed = pollster::block_on(backend.two_capture_failure_observation_for_test(
         identity,
         graph_shader_commands_for_test(),
         runtime_lowering_commands_for_test(),
         graph_shader_frame_context_for_test(),
-        C08TwoCaptureFailureForTest::SharedScopeResolution,
+        TwoCaptureFailureForTest::SharedScopeResolution,
     ))
     .unwrap_or_panic_for_test("shared Vello scope failure must reach its failure observation");
     let no_queue_submission = submission.queue_submission_count_for_test() == 0
@@ -14950,7 +14959,7 @@ fn vello_capture_uses_transparent_base_requested_aa_and_exact_bounded_extent() {
         )
         .unwrap();
         let observed = pollster::block_on(
-            backend.c08_vello_capture_raster_contract_observation_for_test(
+            backend.vello_capture_raster_contract_observation_for_test(
                 identity,
                 commands.clone(),
                 context,
@@ -14979,7 +14988,7 @@ fn capture_failure_aborts_and_rejects_retry_on_new_encoder() {
     let identity = pollster::block_on(backend.select_device(None))
         .unwrap_or_panic_for_test("capture-failure coverage requires backend selection")
         .unwrap_or_panic_for_test("capture-failure coverage requires a host adapter");
-    let observed = pollster::block_on(backend.c08_capture_failure_observation_for_test(
+    let observed = pollster::block_on(backend.vello_capture_failure_observation_for_test(
         identity,
         graph_shader_commands_for_test(),
         graph_shader_frame_context_for_test(),
@@ -23283,7 +23292,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC;
         let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("T4 checked internal Vello target"),
+            label: Some("Surgeist checked internal Vello target"),
             size: wgpu::Extent3d {
                 width: target_extent.width(),
                 height: target_extent.height(),
@@ -23327,7 +23336,7 @@ fn internal_vello_checked_shader_creation_reports_validation_without_unsafe() {
         assert_checked_vello_target_mismatch(&fixture, &area_pass);
 
         let invalid_target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("T4 checked internal Vello invalid storage target"),
+            label: Some("Surgeist checked internal Vello invalid storage target"),
             size: wgpu::Extent3d {
                 width: target_extent.width(),
                 height: target_extent.height(),
@@ -23367,7 +23376,7 @@ fn assert_checked_vello_commit(fixture: &CheckedVelloFixture<'_>, pass: &Prepare
     let mut encoder = fixture
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T4 checked internal Vello committed command encoding"),
+            label: Some("Surgeist checked internal Vello committed command encoding"),
         });
     let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
     let (lease, _logical_pass) = {
@@ -23400,7 +23409,7 @@ fn assert_checked_vello_abort(fixture: &CheckedVelloFixture<'_>, pass: &Prepared
     let mut encoder = fixture
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T4 checked internal Vello aborted command encoding"),
+            label: Some("Surgeist checked internal Vello aborted command encoding"),
         });
     let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
     let outcome = {
@@ -23447,7 +23456,7 @@ fn assert_checked_vello_target_mismatch(
     let mut encoder = fixture
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T4 checked internal Vello mismatched target encoding"),
+            label: Some("Surgeist checked internal Vello mismatched target encoding"),
         });
     let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
     let failure = {
@@ -23488,7 +23497,7 @@ fn assert_checked_vello_invalid_target(
     let mut encoder = fixture
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T4 checked internal Vello invalid target encoding"),
+            label: Some("Surgeist checked internal Vello invalid target encoding"),
         });
     let mut scope = ActiveVelloEncodingScope::begin(fixture.device);
     let (lease, _logical_pass) = {
@@ -23974,7 +23983,7 @@ fn presented_blit_and_present_remain_scoped_until_frame_commit() {
 #[cfg(feature = "render-window")]
 #[test]
 fn render_window_smoke_executes_direct_and_graph_presented_frames() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
@@ -23988,7 +23997,7 @@ fn render_window_smoke_executes_direct_and_graph_presented_frames() {
 
     let direct = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()));
     let after_direct = observation.snapshot_for_test();
-    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let graph = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24055,7 +24064,7 @@ fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
                 .expect("the asymmetric test color must be valid"),
         );
 
-        let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        let graph = pollster::block_on(renderer.render_forced_base_graph_for_test(
             &mut surface,
             &scene,
             Parameters::default(),
@@ -24096,7 +24105,7 @@ fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
@@ -24119,7 +24128,7 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24165,9 +24174,9 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
+    let failure = ScopedGraphPostSubmitControlForTest::failing();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -24180,7 +24189,7 @@ fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24213,9 +24222,9 @@ fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_commits() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let _poison = ScopedC08GraphPostSubmitControlForTest::accounting_fault();
+    let _poison = ScopedGraphPostSubmitControlForTest::accounting_fault();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -24233,7 +24242,7 @@ fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24289,7 +24298,7 @@ fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_
             .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
     );
 
-    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let retry = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24304,9 +24313,9 @@ fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_present_scope_failure_maps_present_error_without_public_commit() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let failure = ScopedC08GraphPostSubmitControlForTest::present_failing();
+    let failure = ScopedGraphPostSubmitControlForTest::present_failing();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -24330,7 +24339,7 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24384,9 +24393,9 @@ fn presented_graph_present_scope_failure_maps_present_error_without_public_commi
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_cancellation_after_submit_discards_without_presentation() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    let pause = ScopedGraphPostSubmitControlForTest::paused();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -24401,7 +24410,7 @@ fn presented_graph_cancellation_after_submit_discards_without_presentation() {
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
     {
-        let future = renderer.render_forced_c08_graph_for_test(
+        let future = renderer.render_forced_base_graph_for_test(
             &mut surface,
             &scene,
             Parameters::default(),
@@ -24442,9 +24451,9 @@ fn presented_graph_cancellation_after_submit_discards_without_presentation() {
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let terminal = ScopedC08GraphPostSubmitControlForTest::terminal_loss();
+    let terminal = ScopedGraphPostSubmitControlForTest::terminal_loss();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -24454,7 +24463,7 @@ fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device(
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -24487,7 +24496,7 @@ fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device(
             reason: DeviceLossReason::Destroyed
         })
     ));
-    let repeated = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let repeated = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -26400,7 +26409,7 @@ fn one_ready_device_owns_one_raster_and_effect_resource_manager() {
 #[test]
 fn encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("T6 transaction coverage requires a real selected WGPU device");
+        .expect("internal Vello transaction coverage requires a real selected WGPU device");
     let target_extent = PhysicalSize::new(64, 48);
     let prepared = VelloScene::prepare_raster_scenario_for_test(
         VelloRasterScenario::Base,
@@ -26412,7 +26421,7 @@ fn encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit(
     assert!(
         renderer
             .default_ready_device_state_borrow_for_test()
-            .expect("T6 transaction coverage requires the owned per-device Vello state")
+            .expect("internal Vello transaction coverage requires the owned per-device Vello state")
             .internal_resources_empty_for_test(),
         "the actual per-device manager must begin empty before the transaction owns the lease"
     );
@@ -26486,8 +26495,9 @@ fn direct_vello_submission_reports_accounting_fault_after_real_submit() {
 
 #[test]
 fn internal_vello_encoding_shares_the_frame_transaction_submission() {
-    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("T6 transaction submission coverage requires a real selected WGPU device");
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).expect(
+        "internal Vello transaction submission coverage requires a real selected WGPU device",
+    );
     let target_extent = PhysicalSize::new(64, 48);
     let prepared = VelloScene::prepare_raster_scenario_for_test(
         VelloRasterScenario::Base,
@@ -26535,7 +26545,7 @@ fn internal_vello_encoding_shares_the_frame_transaction_submission() {
 #[test]
 fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
-        .expect("T6 direct-raster allocation coverage requires a real selected WGPU device");
+        .expect("direct-raster allocation coverage requires a real selected WGPU device");
     let target_extent = PhysicalSize::new(64, 48);
     let prepared = VelloScene::prepare_raster_scenario_for_test(
         VelloRasterScenario::Base,
@@ -26597,7 +26607,7 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
     );
 
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -26643,8 +26653,9 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
         == dispatch_before.boundary_invocations.saturating_add(1)
         && dispatch_after.direct_vello_routes
             == dispatch_before.direct_vello_routes.saturating_add(1)
-        && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
-        && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes
+        && dispatch_after.exact_base_graph_routes == dispatch_before.exact_base_graph_routes
+        && dispatch_after.exact_composition_graph_routes
+            == dispatch_before.exact_composition_graph_routes
         && dispatch_after.unsupported_graph_rejections
             == dispatch_before.unsupported_graph_rejections
         && direct_submission.queue_submission_count_for_test() == 1
@@ -27173,14 +27184,14 @@ fn resource_stats_report_acquisition_source_and_post_trim_retention() {
         .expect("resource-stat coverage requires a headless surface");
     let scene = repeated_graph_scene_for_test();
 
-    let first = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let first = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
         working_format,
     ))
     .expect("the first resource-stat graph must succeed");
-    let second = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let second = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -27212,7 +27223,7 @@ fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
     let mut surface = pollster::block_on(renderer.create_headless(Size::new(6.0, 4.0), 1.0))
         .expect("graph stats failure coverage requires a headless surface");
     let scene = repeated_graph_scene_for_test();
-    let successful = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let successful = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -27223,8 +27234,8 @@ fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
     assert_eq!(successful.route, Some(RenderRoute::GpuGraph));
     assert!(successful.effect_texture_allocations > 0);
 
-    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let failure = ScopedGraphPostSubmitControlForTest::failing();
+    pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -27234,9 +27245,9 @@ fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
     drop(failure);
     assert_eq!(renderer.stats(), successful);
 
-    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    let pause = ScopedGraphPostSubmitControlForTest::paused();
     {
-        let future = renderer.render_forced_c08_graph_for_test(
+        let future = renderer.render_forced_base_graph_for_test(
             &mut surface,
             &scene,
             Parameters::default(),
@@ -28963,10 +28974,10 @@ fn headless_graph_post_submit_failure_leaves_first_frame_unpublished() {
     let mut uninitialized = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
         .expect("first-frame graph failure coverage requires a headless surface");
     let replacement = graph_white_replacement_scene_for_test();
-    let submission_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let failure = ScopedGraphPostSubmitControlForTest::failing();
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut uninitialized,
         &replacement,
         Parameters::default(),
@@ -29026,11 +29037,11 @@ fn headless_accounting_fault_after_submit_suppresses_publication_and_commits() {
     let replacement_parameters = graph_replacement_parameters_for_test();
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let _poison = ScopedC08GraphPostSubmitControlForTest::accounting_fault();
+    let _poison = ScopedGraphPostSubmitControlForTest::accounting_fault();
 
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &replacement,
         replacement_parameters,
@@ -29085,7 +29096,7 @@ fn headless_accounting_fault_after_submit_suppresses_publication_and_commits() {
         baseline_pixels.rgba()
     );
 
-    let retry = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let retry = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &replacement,
         replacement_parameters,
@@ -29230,10 +29241,10 @@ fn post_submit_scope_failure_discards_prepared_resources_with_nonzero_budget() {
     );
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let failure = ScopedC08GraphPostSubmitControlForTest::failing();
-    let error = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let failure = ScopedGraphPostSubmitControlForTest::failing();
+    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &replacement,
         replacement_parameters,
@@ -29327,11 +29338,11 @@ fn canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fres
     );
     let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let generic_submission = generic_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
-    let pause = ScopedC08GraphPostSubmitControlForTest::paused();
+    let pause = ScopedGraphPostSubmitControlForTest::paused();
     {
-        let future = renderer.render_forced_c08_graph_for_test(
+        let future = renderer.render_forced_base_graph_for_test(
             &mut surface,
             &replacement,
             replacement_parameters,
@@ -29411,7 +29422,7 @@ struct GraphAbortedStateContextForTest<'a> {
     renderer: &'a mut Renderer,
     surface: &'a Surface,
     generic_submission: &'a super::gpu_transaction::GpuOperationSubmissionObservationForTest,
-    graph_submission: &'a super::gpu_transaction::C08GraphSubmissionObservationForTest,
+    graph_submission: &'a super::gpu_transaction::GraphSubmissionObservationForTest,
     prepared_identities: &'a [ResourceIdentity],
     baseline_stats: Stats,
     baseline_parameters: Option<Parameters>,
@@ -29556,9 +29567,9 @@ fn assert_graph_retry_after_abort(
 ) {
     let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let retry_generic_submission = retry_generic_scope.observation_for_test();
-    let retry_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let retry_graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let retry_graph_submission = retry_graph_scope.observation_for_test();
-    let retry = pollster::block_on(context.renderer.render_forced_c08_graph_for_test(
+    let retry = pollster::block_on(context.renderer.render_forced_base_graph_for_test(
         context.surface,
         context.replacement,
         context.replacement_parameters,
@@ -29582,7 +29593,7 @@ fn assert_graph_retry_after_abort(
     assert!(retry_graph_submission.headless_draft_released_for_test());
     assert_eq!(
         retry_graph_submission.resource_retention_for_test(),
-        Some(C08GraphResourceRetentionForTest::RetainedReusable)
+        Some(GraphResourceRetentionForTest::RetainedReusable)
     );
     assert!(
         retry_prepared_identities
@@ -30181,7 +30192,7 @@ fn graph_channel_error_for_test(actual: u8, expected: u8) -> u8 {
 
 struct GraphAlphaVectorOutputForTest {
     output: ImageBuffer,
-    graph: super::renderer::C08ForcedGraphRenderResultForTest,
+    graph: super::renderer::ForcedGraphRenderResultForTest,
     used_graph_transaction: bool,
     publication_count: usize,
 }
@@ -30207,7 +30218,7 @@ fn render_graph_alpha_vector_for_test(
 ) -> GraphAlphaVectorOutputForTest {
     let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let graph_submission = graph_submission_scope.observation_for_test();
-    let graph_transaction_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_transaction_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_transaction = graph_transaction_scope.observation_for_test();
     let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_submission_scope.observation_for_test();
@@ -30223,7 +30234,7 @@ fn render_graph_alpha_vector_for_test(
             .expect("alpha-vector graph execution requires a headless surface");
     let publication_before = surface.headless_publication_count_for_test();
     let scene = graph_alpha_extreme_scene_for_test(expected);
-    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let graph = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -30257,7 +30268,7 @@ fn render_graph_alpha_vector_for_test(
 }
 
 fn graph_alpha_vector_has_exact_grid_for_test(
-    graph: &super::renderer::C08ForcedGraphRenderResultForTest,
+    graph: &super::renderer::ForcedGraphRenderResultForTest,
     width: u32,
 ) -> bool {
     graph.output_extent == PhysicalSize::new(width, 1)
@@ -30534,7 +30545,7 @@ fn render_color_filter_fixture_for_test(
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -30972,7 +30983,7 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -31156,7 +31167,7 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -31188,7 +31199,7 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let stable_prepared_identities =
         color_filter_prepared_resource_identities_are_stable_for_test(&prepared_history);
     let stable_retention =
-        retention_history == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3];
+        retention_history == vec![GraphResourceRetentionForTest::RetainedReusable; 3];
     let stable_cache = warmed_cache.has_render_pipelines()
         && cache_observations
             .iter()
@@ -31269,7 +31280,7 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -31300,7 +31311,7 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         && resources.committed_transient_buffer_count_for_test() == 0
         && resources.committed_transient_image_count_for_test() == 0
         && resources.effect_texture_count_for_test() == 0
-        && retention_history == [C08GraphResourceRetentionForTest::ReleasedAllIdle];
+        && retention_history == [GraphResourceRetentionForTest::ReleasedAllIdle];
     let one_submission_without_readback = submission.queue_submission_count_for_test() == 1
         && submission.readback_queue_submission_count_for_test() == 0
         && graph_submission.queue_submission_count_for_test() == 1
@@ -31556,7 +31567,7 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -31726,8 +31737,10 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
             && unsupported_surface.headless_publication_count_for_test() == 0
             && dispatch_after.boundary_invocations
                 == dispatch_before.boundary_invocations.saturating_add(2)
-            && dispatch_after.exact_c09_graph_routes
-                == dispatch_before.exact_c09_graph_routes.saturating_add(1)
+            && dispatch_after.exact_composition_graph_routes
+                == dispatch_before
+                    .exact_composition_graph_routes
+                    .saturating_add(1)
             && dispatch_after.exact_color_filter_fixture_routes
                 == dispatch_before
                     .exact_color_filter_fixture_routes
@@ -31742,7 +31755,7 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
 fn graph_render_submits_one_transaction_and_publishes_once() {
     let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let graph_submission = graph_submission_scope.observation_for_test();
-    let graph_transaction_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_transaction_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_transaction = graph_transaction_scope.observation_for_test();
     let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_submission_scope.observation_for_test();
@@ -31756,7 +31769,7 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
     let publication_before = surface.headless_publication_count_for_test();
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let graph = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -31912,7 +31925,7 @@ fn render_composition_headless_for_test(
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -32177,7 +32190,7 @@ fn resolved_alpha_mask_low_medium_high_and_extend_modes_match_boundary_oracle() 
 
     assert!(
         matches_boundary_oracle,
-        "GPU mask quality or edge sampling exceeds S34"
+        "GPU mask quality or edge sampling exceeds the GPU edge tolerance"
     );
 }
 
@@ -32267,7 +32280,10 @@ fn all_supported_blends_match_oracle_over_transparent_and_opaque_bases() {
                 )
         });
 
-    assert!(blends_match, "GPU blend output exceeds S34");
+    assert!(
+        blends_match,
+        "GPU blend output exceeds the GPU pixel tolerance"
+    );
 }
 
 #[test]
@@ -32442,7 +32458,7 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
         let observation = presented_observation_handle_for_test(&surface);
         let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
         let submission = submission_scope.observation_for_test();
-        let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+        let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
         let graph_submission = graph_scope.observation_for_test();
         let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
         let direct_submission = direct_scope.observation_for_test();
@@ -32535,11 +32551,11 @@ fn presented_masked_blended_present_scope_failure_attempts_present_without_publi
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let failure = ScopedC08GraphPostSubmitControlForTest::present_failing();
+    let failure = ScopedGraphPostSubmitControlForTest::present_failing();
     let error = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
         .expect_err("the injected present-scope failure must abort public publication");
 
@@ -32621,7 +32637,7 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -32642,7 +32658,7 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     assert!(graph_submission.presented_host_effect_applied_for_test());
     assert_eq!(
         graph_submission.resource_retention_for_test(),
-        Some(C08GraphResourceRetentionForTest::RetainedReusable),
+        Some(GraphResourceRetentionForTest::RetainedReusable),
         "the clean transaction must commit its prepared resources and pass-cache entries before terminal cleanup"
     );
     let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
@@ -32671,7 +32687,7 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     let committed_resource = presented_resource_id_for_test(&surface);
     let next_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let next_submission = next_submission_scope.observation_for_test();
-    let next_graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let next_graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let next_graph_submission = next_graph_scope.observation_for_test();
     let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("the operation after an idle terminal signal must fail deterministically");
@@ -32790,7 +32806,7 @@ fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication
         unsupported_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -32868,7 +32884,7 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         unsupported_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -32917,8 +32933,9 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
             && dispatch_after.unsupported_graph_rejections
                 == dispatch_before.unsupported_graph_rejections
             && dispatch_after.direct_vello_routes == dispatch_before.direct_vello_routes
-            && dispatch_after.exact_c08_graph_routes == dispatch_before.exact_c08_graph_routes
-            && dispatch_after.exact_c09_graph_routes == dispatch_before.exact_c09_graph_routes
+            && dispatch_after.exact_base_graph_routes == dispatch_before.exact_base_graph_routes
+            && dispatch_after.exact_composition_graph_routes
+                == dispatch_before.exact_composition_graph_routes
             && renderer.stats() == stats_before
             && surface.headless_publication_count_for_test() == publication_before
             && pixels_after == pixels_before
@@ -33134,7 +33151,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -33168,7 +33185,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
             !first.is_empty() && prepared_history.iter().all(|ids| ids == first)
         });
     let stable_retention =
-        retention_history == vec![C08GraphResourceRetentionForTest::RetainedReusable; 3];
+        retention_history == vec![GraphResourceRetentionForTest::RetainedReusable; 3];
     let stable_cache = warmed_cache.has_render_pipelines()
         && cache_observations
             .iter()
@@ -33258,7 +33275,7 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -33281,7 +33298,7 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
         && resources.effect_texture_count_for_test() == 0
         && resources.resolved_mask_upload_keys_for_test().is_empty()
         && resources.gaussian_kernel_count_for_test() == 0
-        && retention_history == [C08GraphResourceRetentionForTest::ReleasedAllIdle];
+        && retention_history == [GraphResourceRetentionForTest::ReleasedAllIdle];
     let one_submission_without_readback = submission.queue_submission_count_for_test() == 1
         && submission.readback_queue_submission_count_for_test() == 0
         && graph_submission.queue_submission_count_for_test() == 1
@@ -33309,7 +33326,7 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
 
 #[test]
 fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
@@ -33332,7 +33349,7 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
         renderer.create_headless(Size::new(4.0, 4.0), 1.0),
     )
     .unwrap_or_else(|error| panic!("forced-graph dispatch coverage requires a surface: {error}"));
-    let graph = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let graph = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut forced_graph_surface,
         &direct_scene,
         Parameters::default(),
@@ -33407,9 +33424,9 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
             && graph_submission.queue_submission_count_for_test() == 2
             && dispatch.boundary_invocations == 3
             && dispatch.direct_vello_routes == 1
-            && dispatch.exact_c08_graph_routes == 1
-            && dispatch.exact_c09_graph_routes == 1
-            && dispatch.exact_c12_graph_routes == 0
+            && dispatch.exact_base_graph_routes == 1
+            && dispatch.exact_composition_graph_routes == 1
+            && dispatch.exact_backdrop_graph_routes == 0
             && dispatch.unsupported_graph_rejections == 0
             && exact_unsupported_diagnostics
             && no_unsupported_gpu_work
@@ -33476,7 +33493,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
     let scene = repeated_graph_scene_for_test();
 
     for _ in 0..2 {
-        pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        pollster::block_on(renderer.render_forced_base_graph_for_test(
             &mut surface,
             &scene,
             Parameters::default(),
@@ -33497,7 +33514,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
@@ -33505,7 +33522,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
     let mut cache_observations = Vec::new();
     let mut public_stats = Vec::new();
     for _ in 0..3 {
-        let result = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+        let result = pollster::block_on(renderer.render_forced_base_graph_for_test(
             &mut surface,
             &scene,
             Parameters::default(),
@@ -33540,7 +33557,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             && graph_submission.queue_submission_count_for_test() == 3
             && direct_submission.queue_submission_count_for_test() == 0;
     let explicit_retention = graph_submission.resource_retention_for_test()
-        == Some(super::gpu_transaction::C08GraphResourceRetentionForTest::RetainedReusable);
+        == Some(super::gpu_transaction::GraphResourceRetentionForTest::RetainedReusable);
     drop(direct_scope);
     drop(graph_scope);
     drop(submission_scope);
@@ -33619,7 +33636,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
         Color::try_rgba(0.125, 0.5, 0.875, 0.75).unwrap(),
     );
 
-    let first = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let first = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -33635,11 +33652,11 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
 
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let second = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let second = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut surface,
         &scene,
         Parameters::default(),
@@ -33656,7 +33673,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
         && resources.entry_count == 0
         && resources.retained_bytes == 0
         && graph_submission.resource_retention_for_test()
-            == Some(super::gpu_transaction::C08GraphResourceRetentionForTest::ReleasedAllIdle);
+            == Some(super::gpu_transaction::GraphResourceRetentionForTest::ReleasedAllIdle);
     let no_hidden_submission_or_readback = submission.queue_submission_count_for_test() == 1
         && submission.readback_queue_submission_count_for_test() == 0
         && graph_submission.queue_submission_count_for_test() == 1
@@ -33681,7 +33698,7 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
 
 #[test]
 fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
@@ -33701,7 +33718,7 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
 
     let mut exact_surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0))
         .expect("forced-graph dispatch coverage requires a headless surface");
-    let exact = pollster::block_on(renderer.render_forced_c08_graph_for_test(
+    let exact = pollster::block_on(renderer.render_forced_base_graph_for_test(
         &mut exact_surface,
         &direct_scene,
         Parameters::default(),
@@ -33733,8 +33750,8 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
             && later.is_ok()
             && dispatch.boundary_invocations == 3
             && dispatch.direct_vello_routes == 1
-            && dispatch.exact_c08_graph_routes == 1
-            && dispatch.exact_c09_graph_routes == 1
+            && dispatch.exact_base_graph_routes == 1
+            && dispatch.exact_composition_graph_routes == 1
             && dispatch.unsupported_graph_rejections == 0
             && graph_submission.queue_submission_count_for_test() == 2
             && frame_gate.validated_plan_count == 1,
@@ -33910,8 +33927,8 @@ impl GraphCaptureMappingForTest {
             .expect("graph fixture transforms must compose")
     }
 
-    const fn as_frame_mapping(self) -> super::frame::ForcedC08CaptureMappingForTest {
-        super::frame::ForcedC08CaptureMappingForTest::new(
+    const fn as_frame_mapping(self) -> super::frame::ForcedVelloCaptureMappingForTest {
+        super::frame::ForcedVelloCaptureMappingForTest::new(
             self.capture_transform,
             self.parent_to_surface,
         )
@@ -33967,7 +33984,7 @@ struct GraphDirectParityOutputForTest {
 #[derive(Debug)]
 struct GraphParityOutputForTest {
     image: ImageBuffer,
-    result: super::renderer::C08ForcedGraphRenderResultForTest,
+    result: super::renderer::ForcedGraphRenderResultForTest,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -34164,7 +34181,7 @@ fn graph_render_direct_parity_for_test(
         .device_pass_cache_counts_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let effect_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
@@ -34241,13 +34258,13 @@ fn graph_render_graph_parity_for_test(
             )
         })?;
     let publication_before = surface.headless_publication_count_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let result = match request {
         GraphCaptureRequestForTest::Identity => {
-            pollster::block_on(renderer.render_forced_c08_graph_for_test(
+            pollster::block_on(renderer.render_forced_base_graph_for_test(
                 &mut surface,
                 scene,
                 Parameters::default(),
@@ -34255,7 +34272,7 @@ fn graph_render_graph_parity_for_test(
             ))
         }
         GraphCaptureRequestForTest::DistinctMapping => pollster::block_on(
-            renderer.render_forced_c08_graph_with_capture_mapping_for_test(
+            renderer.render_forced_base_graph_with_capture_mapping_for_test(
                 &mut surface,
                 scene,
                 Parameters::default(),
@@ -35072,7 +35089,7 @@ fn direct_and_graph_routes_match_each_fixture_configuration_and_pixel_oracle() {
 #[test]
 fn negative_bounds_and_subpixel_transforms_do_not_shift_capture() {
     let completed = graph_run_transformed_parity_for_test().unwrap_or_else(|failure| {
-        panic!("transformed signed capture placement exceeds S34 tolerance: {failure}")
+        panic!("transformed signed capture placement exceeds GPU pixel tolerance: {failure}")
     });
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
@@ -35082,7 +35099,7 @@ fn negative_bounds_and_subpixel_transforms_do_not_shift_capture() {
     assert_eq!(
         completed.len(),
         expected_count,
-        "transformed signed capture placement exceeds S34 tolerance: completed_count={}, expected_count={expected_count}",
+        "transformed signed capture placement exceeds GPU pixel tolerance: completed_count={}, expected_count={expected_count}",
         completed.len()
     );
 }
@@ -35217,7 +35234,7 @@ fn graph_tile_translation_mismatches(
 #[test]
 fn gpu_mask_render_preserves_single_transaction_generation() {
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("materialized-mask transaction coverage requires a renderer");
@@ -35558,11 +35575,11 @@ fn assert_alpha_support_within(actual: AlphaSupport, expected: AlphaSupport, nam
     }
     assert!(
         (actual.centroid_x_hundredths - expected.centroid_x_hundredths).abs() <= 35,
-        "{name} centroid x exceeds the S34 0.35-device-pixel tolerance"
+        "{name} centroid x exceeds the 0.35-device-pixel GPU centroid tolerance"
     );
     assert!(
         (actual.centroid_y_hundredths - expected.centroid_y_hundredths).abs() <= 35,
-        "{name} centroid y exceeds the S34 0.35-device-pixel tolerance"
+        "{name} centroid y exceeds the 0.35-device-pixel GPU centroid tolerance"
     );
 }
 
@@ -35580,11 +35597,11 @@ fn assert_transformed_placement_within(actual: AlphaSupport, expected: AlphaSupp
     }
     assert!(
         (actual.centroid_x_hundredths - expected.centroid_x_hundredths).abs() <= 35,
-        "transformed rectangle centroid x exceeds the S34 0.35-device-pixel tolerance"
+        "transformed rectangle centroid x exceeds the 0.35-device-pixel GPU centroid tolerance"
     );
     assert!(
         (actual.centroid_y_hundredths - expected.centroid_y_hundredths).abs() <= 35,
-        "transformed rectangle centroid y exceeds the S34 0.35-device-pixel tolerance"
+        "transformed rectangle centroid y exceeds the 0.35-device-pixel GPU centroid tolerance"
     );
 }
 
@@ -35597,7 +35614,7 @@ fn assert_bounded_backdrop_filter_execution_is_public(scene: &Scene, size: Size)
     let publication_before = surface.headless_publication_count_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedC08GraphSubmissionObservationForTest::begin();
+    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();

@@ -680,7 +680,7 @@ impl TexelCenterMapping {
         not(test),
         expect(
             dead_code,
-            reason = "C06 T2 records texel-center mappings for later resolved pass lowering."
+            reason = "Texel-center mappings remain available for resolved pass lowering."
         )
     )]
     pub(super) fn point_for(self, i: u32, j: u32) -> Result<Point> {

@@ -4,7 +4,7 @@ use crate::Result;
 
 use super::{
     cache::{
-        DevicePassCache, ProvisionalC08PassObjects, ProvisionalCompositePassObjects,
+        DevicePassCache, ProvisionalCompositePassObjects, ProvisionalCorePassObjects,
         ProvisionalDevicePassCacheUpdate,
     },
     key::{
@@ -14,17 +14,17 @@ use super::{
     },
     pipeline::{BLUR_WGSL, span_source_over_blend},
     validate::{
-        BlurAxis, BlurInput, BlurPassKeyRefs, C08PassKeyRefs, C08Program, ColorFilterPassKeyRefs,
-        CompositePassKeyRefs, CopyBackdropPassKeyRefs, DropShadowColorizePassKeyRefs,
-        is_blur_program, validate_blur_pass_keys, validate_c08_pass_keys,
-        validate_color_filter_pass_keys, validate_composite_pass_keys,
-        validate_copy_backdrop_pass_keys, validate_drop_shadow_colorize_pass_keys,
+        BlurAxis, BlurInput, BlurPassKeyRefs, ColorFilterPassKeyRefs, CompositePassKeyRefs,
+        CopyBackdropPassKeyRefs, CorePassKeyRefs, CorePassProgram, DropShadowColorizePassKeyRefs,
+        is_blur_program, validate_blur_pass_keys, validate_color_filter_pass_keys,
+        validate_composite_pass_keys, validate_copy_backdrop_pass_keys, validate_core_pass_keys,
+        validate_drop_shadow_colorize_pass_keys,
     },
 };
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum C08ProgramForTest {
+pub(crate) enum CorePassProgramForTest {
     CanonicalizeCapture,
     SpanSourceOver,
     DropShadowMerge,
@@ -49,7 +49,7 @@ impl ProvisionalDevicePassCacheUpdate {
     }
 
     #[cfg(test)]
-    pub(crate) fn realize_c08_pass_with_invalid_fragment_for_test<'a>(
+    pub(crate) fn realize_core_pass_with_invalid_fragment_for_test<'a>(
         &'a mut self,
         device: &wgpu::Device,
         cache: &'a DevicePassCache,
@@ -57,14 +57,19 @@ impl ProvisionalDevicePassCacheUpdate {
         layout: &BindGroupLayoutKey,
         shader: &ShaderModuleKey,
         pipeline: &RenderPipelineKey,
-    ) -> Result<ProvisionalC08PassObjects<'a>> {
-        let keys = C08PassKeyRefs {
+    ) -> Result<ProvisionalCorePassObjects<'a>> {
+        let keys = CorePassKeyRefs {
             samplers,
             layout,
             shader,
             pipeline,
         };
-        self.realize_c08_pass_with_fragment_entry(device, cache, keys, "missing_c08_fragment_main")
+        self.realize_core_pass_with_fragment_entry(
+            device,
+            cache,
+            keys,
+            "missing_core_pass_fragment_main",
+        )
     }
 
     #[cfg(test)]
@@ -86,7 +91,7 @@ impl ProvisionalDevicePassCacheUpdate {
                 shader,
                 pipeline,
             },
-            Some("missing_c09_composite_fragment"),
+            Some("missing_layer_composite_fragment"),
         )
     }
     #[cfg(test)]
@@ -110,7 +115,7 @@ impl ProvisionalDevicePassCacheUpdate {
         .is_ok_and(|objects| objects.require_encoding_ready().is_ok())
     }
     #[cfg(test)]
-    pub(crate) fn contains_c08_pass_for_test(
+    pub(crate) fn contains_core_pass_for_test(
         &self,
         cache: &DevicePassCache,
         samplers: &[SamplerKey],
@@ -120,7 +125,7 @@ impl ProvisionalDevicePassCacheUpdate {
     ) -> bool {
         self.pass_objects(
             cache,
-            C08PassKeyRefs {
+            CorePassKeyRefs {
                 samplers,
                 layout,
                 shader,
@@ -139,7 +144,7 @@ impl ProvisionalDevicePassCacheUpdate {
     }
 }
 
-impl ProvisionalC08PassObjects<'_> {
+impl ProvisionalCorePassObjects<'_> {
     #[cfg(test)]
     fn is_encoding_ready_for_test(&self) -> bool {
         self.require_encoding_ready().is_ok()
@@ -148,8 +153,8 @@ impl ProvisionalC08PassObjects<'_> {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C08PassKeyFactsForTest {
-    pub(crate) program: C08ProgramForTest,
+pub(crate) struct CorePassKeyFactsForTest {
+    pub(crate) program: CorePassProgramForTest,
     pub(crate) source_role: ShaderBindingRoleKey,
     pub(crate) source_format: ShaderTextureFormatKey,
     pub(crate) working_format: ShaderTextureFormatKey,
@@ -160,28 +165,28 @@ pub(crate) struct C08PassKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c08_pass_key_facts_for_test(
+pub(crate) fn core_pass_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<super::C08PassKeyFactsForTest> {
+) -> Option<super::CorePassKeyFactsForTest> {
     let [sampled_texture] = layout.sampled_textures.as_slice() else {
         return None;
     };
-    let description = validate_c08_pass_keys(C08PassKeyRefs {
+    let description = validate_core_pass_keys(CorePassKeyRefs {
         samplers,
         layout,
         shader,
         pipeline,
     })
     .ok()?;
-    Some(C08PassKeyFactsForTest {
+    Some(CorePassKeyFactsForTest {
         program: match description.program {
-            C08Program::CanonicalizeCapture => C08ProgramForTest::CanonicalizeCapture,
-            C08Program::SpanSourceOver => C08ProgramForTest::SpanSourceOver,
-            C08Program::DropShadowMerge => C08ProgramForTest::DropShadowMerge,
-            C08Program::Present => C08ProgramForTest::Present,
+            CorePassProgram::CanonicalizeCapture => CorePassProgramForTest::CanonicalizeCapture,
+            CorePassProgram::SpanSourceOver => CorePassProgramForTest::SpanSourceOver,
+            CorePassProgram::DropShadowMerge => CorePassProgramForTest::DropShadowMerge,
+            CorePassProgram::Present => CorePassProgramForTest::Present,
         },
         source_role: sampled_texture.binding_role,
         source_format: sampled_texture.source_format,
@@ -192,7 +197,7 @@ pub(crate) fn c08_pass_key_facts_for_test(
             == [ShaderDataBindingKey::SpatialUniform],
         has_fixed_source_over_blend: !matches!(
             description.program,
-            C08Program::SpanSourceOver | C08Program::DropShadowMerge
+            CorePassProgram::SpanSourceOver | CorePassProgram::DropShadowMerge
         ) || span_source_over_blend()
             == wgpu::BlendState {
                 color: wgpu::BlendComponent {
@@ -211,7 +216,7 @@ pub(crate) fn c08_pass_key_facts_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct C09CompositePassKeyFactsForTest {
+pub(crate) struct LayerCompositePassKeyFactsForTest {
     pub(crate) path: ShaderCompositePathKey,
     pub(crate) has_clip_coverage: bool,
     pub(crate) has_alpha_mask: bool,
@@ -225,12 +230,12 @@ pub(crate) struct C09CompositePassKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c09_composite_pass_key_facts_for_test(
+pub(crate) fn layer_composite_pass_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<super::C09CompositePassKeyFactsForTest> {
+) -> Option<super::LayerCompositePassKeyFactsForTest> {
     let description = validate_composite_pass_keys(CompositePassKeyRefs {
         samplers,
         layout,
@@ -238,7 +243,7 @@ pub(crate) fn c09_composite_pass_key_facts_for_test(
         pipeline,
     })
     .ok()?;
-    Some(C09CompositePassKeyFactsForTest {
+    Some(LayerCompositePassKeyFactsForTest {
         path: description.path,
         has_clip_coverage: description.has_clip_coverage,
         has_alpha_mask: description.has_alpha_mask,
@@ -271,7 +276,7 @@ pub(crate) fn c09_composite_pass_key_facts_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C10ColorFilterPassKeyFactsForTest {
+pub(crate) struct ColorFilterPassKeyFactsForTest {
     pub(crate) source_role: ShaderBindingRoleKey,
     pub(crate) source_format: ShaderTextureFormatKey,
     pub(crate) working_format: ShaderTextureFormatKey,
@@ -281,12 +286,12 @@ pub(crate) struct C10ColorFilterPassKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c10_color_filter_pass_key_facts_for_test(
+pub(crate) fn color_filter_pass_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<super::C10ColorFilterPassKeyFactsForTest> {
+) -> Option<super::ColorFilterPassKeyFactsForTest> {
     let [sampled_texture] = layout.sampled_textures.as_slice() else {
         return None;
     };
@@ -297,7 +302,7 @@ pub(crate) fn c10_color_filter_pass_key_facts_for_test(
         pipeline,
     })
     .ok()?;
-    Some(C10ColorFilterPassKeyFactsForTest {
+    Some(ColorFilterPassKeyFactsForTest {
         source_role: sampled_texture.binding_role,
         source_format: sampled_texture.source_format,
         working_format: description.working_format,
@@ -322,7 +327,7 @@ pub(crate) fn c10_color_filter_pass_key_facts_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C12CopyBackdropPassKeyFactsForTest {
+pub(crate) struct CopyBackdropPassKeyFactsForTest {
     pub(crate) source_role: ShaderBindingRoleKey,
     pub(crate) source_format: ShaderTextureFormatKey,
     pub(crate) working_format: ShaderTextureFormatKey,
@@ -332,12 +337,12 @@ pub(crate) struct C12CopyBackdropPassKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c12_copy_backdrop_pass_key_facts_for_test(
+pub(crate) fn copy_backdrop_pass_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<C12CopyBackdropPassKeyFactsForTest> {
+) -> Option<CopyBackdropPassKeyFactsForTest> {
     let [sampled_texture] = layout.sampled_textures.as_slice() else {
         return None;
     };
@@ -348,7 +353,7 @@ pub(crate) fn c12_copy_backdrop_pass_key_facts_for_test(
         pipeline,
     })
     .ok()?;
-    Some(C12CopyBackdropPassKeyFactsForTest {
+    Some(CopyBackdropPassKeyFactsForTest {
         source_role: sampled_texture.binding_role,
         source_format: sampled_texture.source_format,
         working_format: description.working_format,
@@ -370,7 +375,7 @@ pub(crate) fn c12_copy_backdrop_pass_key_facts_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C11BlurPassKeyFactsForTest {
+pub(crate) struct BlurPassKeyFactsForTest {
     pub(crate) horizontal: bool,
     pub(crate) source_alpha: bool,
     pub(crate) source_role: ShaderBindingRoleKey,
@@ -382,12 +387,12 @@ pub(crate) struct C11BlurPassKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c11_blur_pass_key_facts_for_test(
+pub(crate) fn blur_pass_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<super::C11BlurPassKeyFactsForTest> {
+) -> Option<super::BlurPassKeyFactsForTest> {
     let [sampled_texture] = layout.sampled_textures.as_slice() else {
         return None;
     };
@@ -398,7 +403,7 @@ pub(crate) fn c11_blur_pass_key_facts_for_test(
         pipeline,
     })
     .ok()?;
-    Some(C11BlurPassKeyFactsForTest {
+    Some(BlurPassKeyFactsForTest {
         horizontal: description.axis == BlurAxis::Horizontal,
         source_alpha: description.input == BlurInput::SourceAlpha,
         source_role: sampled_texture.binding_role,
@@ -425,7 +430,7 @@ pub(crate) fn c11_blur_pass_key_facts_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C12BackdropBlurPassKeyFactsForTest {
+pub(crate) struct BackdropBlurPassKeyFactsForTest {
     pub(crate) horizontal: bool,
     pub(crate) source_alpha: bool,
     pub(crate) source_role: ShaderBindingRoleKey,
@@ -437,12 +442,12 @@ pub(crate) struct C12BackdropBlurPassKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c12_backdrop_blur_pass_key_facts_for_test(
+pub(crate) fn backdrop_blur_pass_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<super::C12BackdropBlurPassKeyFactsForTest> {
+) -> Option<super::BackdropBlurPassKeyFactsForTest> {
     let [sampled_texture] = layout.sampled_textures.as_slice() else {
         return None;
     };
@@ -453,7 +458,7 @@ pub(crate) fn c12_backdrop_blur_pass_key_facts_for_test(
         pipeline,
     })
     .ok()?;
-    Some(C12BackdropBlurPassKeyFactsForTest {
+    Some(BackdropBlurPassKeyFactsForTest {
         horizontal: description.axis == BlurAxis::Horizontal,
         source_alpha: description.input == BlurInput::SourceAlpha,
         source_role: sampled_texture.binding_role,
@@ -480,7 +485,8 @@ pub(crate) fn c12_backdrop_blur_pass_key_facts_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c12_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test() -> bool {
+pub(crate) fn backdrop_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test() -> bool
+{
     BLUR_WGSL.contains("let logical_sample = destination_point(destination_position)")
         && BLUR_WGSL.contains("+ axis * offset / spatial.source_origin_scale.z;")
         && BLUR_WGSL.contains("let mirrored_sample = mirror_logical_point(logical_sample);")
@@ -497,7 +503,7 @@ pub(crate) fn c12_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C11DropShadowColorizeKeyFactsForTest {
+pub(crate) struct DropShadowColorizeKeyFactsForTest {
     pub(crate) source_role: ShaderBindingRoleKey,
     pub(crate) source_format: ShaderTextureFormatKey,
     pub(crate) working_format: ShaderTextureFormatKey,
@@ -507,12 +513,12 @@ pub(crate) struct C11DropShadowColorizeKeyFactsForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c11_drop_shadow_colorize_key_facts_for_test(
+pub(crate) fn drop_shadow_colorize_key_facts_for_test(
     samplers: &[SamplerKey],
     layout: &BindGroupLayoutKey,
     shader: &ShaderModuleKey,
     pipeline: &RenderPipelineKey,
-) -> Option<super::C11DropShadowColorizeKeyFactsForTest> {
+) -> Option<super::DropShadowColorizeKeyFactsForTest> {
     let [sampled_texture] = layout.sampled_textures.as_slice() else {
         return None;
     };
@@ -523,7 +529,7 @@ pub(crate) fn c11_drop_shadow_colorize_key_facts_for_test(
         pipeline,
     })
     .ok()?;
-    Some(C11DropShadowColorizeKeyFactsForTest {
+    Some(DropShadowColorizeKeyFactsForTest {
         source_role: sampled_texture.binding_role,
         source_format: sampled_texture.source_format,
         working_format: description.working_format,
@@ -638,7 +644,7 @@ impl DevicePassCache {
     }
 
     #[cfg(test)]
-    pub(crate) fn contains_c08_pass_for_test(
+    pub(crate) fn contains_core_pass_for_test(
         &self,
         samplers: &[SamplerKey],
         layout: &BindGroupLayoutKey,

@@ -3,13 +3,13 @@ use super::gpu_transaction::{
     AfterInternalVelloSubmitCheckpointForTest, InternalVelloSubmissionObservationForTest,
 };
 use super::pass::{
-    C08ExternalOutputView, C08PreparableGraph, C09PreparableGraph, EncodedGpuGraphActivity,
-    LoweredGraphPlan, PreparedGraph,
+    BasePreparableGraph, CompositionPreparableGraph, EncodedGpuGraphActivity,
+    GraphExternalOutputView, LoweredGraphPlan, PreparedGraph,
 };
 #[cfg(test)]
-use super::pass::{C08PassCacheRequestsForTest, C09CompositeCacheRequestsForTest};
+use super::pass::{ColorFilterPreparableGraph, SpatialFilterPreparableGraph};
 #[cfg(test)]
-use super::pass::{C10PreparableGraph, C11PreparableGraph};
+use super::pass::{CorePassCacheRequestsForTest, LayerCompositeCacheRequestsForTest};
 use super::resource::{FrameCleanup, ResourceManager, WorkingFormat};
 #[cfg(test)]
 use super::resource::{
@@ -46,8 +46,8 @@ use super::*;
 use super::{command::OffscreenBounds, geometry::physical_size, texture::EffectTextureDescriptor};
 use super::{
     gpu_transaction::{
-        C08GraphOutputCommit, C08GraphSubmissionPayload, GpuOperationStage,
-        GpuOperationTransaction, InternalVelloPayload,
+        GpuOperationStage, GpuOperationTransaction, GraphOutputCommit, GraphSubmissionPayload,
+        InternalVelloPayload,
     },
     shader::{DevicePassCache, ProvisionalDevicePassCacheUpdate},
     texture::{TextureDescriptor, headless_texture_descriptor},
@@ -221,56 +221,56 @@ pub(crate) struct Backend {
 /// One validated exact graph selected for atomic surface execution.
 #[must_use = "an exact surface graph must enter its GPU transaction"]
 pub(crate) enum ExactSurfaceGraph {
-    C08(C08PreparableGraph),
-    C09(C09PreparableGraph),
+    Base(BasePreparableGraph),
+    Composition(CompositionPreparableGraph),
     #[cfg(test)]
-    C10(C10PreparableGraph),
+    ColorFilter(ColorFilterPreparableGraph),
     #[cfg(test)]
-    C11(C11PreparableGraph),
-    C12(super::pass::C12PreparableGraph),
+    SpatialFilter(SpatialFilterPreparableGraph),
+    Backdrop(super::pass::BackdropPreparableGraph),
 }
 
 impl ExactSurfaceGraph {
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         match self {
-            Self::C08(preparable) => preparable.working_format(),
-            Self::C09(preparable) => preparable.working_format(),
+            Self::Base(preparable) => preparable.working_format(),
+            Self::Composition(preparable) => preparable.working_format(),
             #[cfg(test)]
-            Self::C10(preparable) => preparable.working_format(),
+            Self::ColorFilter(preparable) => preparable.working_format(),
             #[cfg(test)]
-            Self::C11(preparable) => preparable.working_format(),
-            Self::C12(preparable) => preparable.working_format(),
+            Self::SpatialFilter(preparable) => preparable.working_format(),
+            Self::Backdrop(preparable) => preparable.working_format(),
         }
     }
 
     pub(crate) const fn output_format(&self) -> Format {
         match self {
-            Self::C08(preparable) => preparable.output_format(),
-            Self::C09(preparable) => preparable.output_format(),
+            Self::Base(preparable) => preparable.output_format(),
+            Self::Composition(preparable) => preparable.output_format(),
             #[cfg(test)]
-            Self::C10(preparable) => preparable.output_format(),
+            Self::ColorFilter(preparable) => preparable.output_format(),
             #[cfg(test)]
-            Self::C11(preparable) => preparable.output_format(),
-            Self::C12(preparable) => preparable.output_format(),
+            Self::SpatialFilter(preparable) => preparable.output_format(),
+            Self::Backdrop(preparable) => preparable.output_format(),
         }
     }
 
     fn known_output_extent(&self) -> Result<Option<PhysicalSize>> {
         match self {
-            Self::C08(preparable) => preparable.output_extent().map(Some),
-            Self::C09(_) => Ok(None),
+            Self::Base(preparable) => preparable.output_extent().map(Some),
+            Self::Composition(_) => Ok(None),
             #[cfg(test)]
-            Self::C10(_) => Ok(None),
+            Self::ColorFilter(_) => Ok(None),
             #[cfg(test)]
-            Self::C11(_) => Ok(None),
-            Self::C12(preparable) => preparable.output_extent().map(Some),
+            Self::SpatialFilter(_) => Ok(None),
+            Self::Backdrop(preparable) => preparable.output_extent().map(Some),
         }
     }
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08ShaderCacheRealizationObservationForTest {
+pub(crate) struct CorePassShaderCacheRealizationObservationForTest {
     pub(crate) realizes_all_checked_programs: bool,
     pub(crate) provisional_handles_are_encoding_ready: bool,
     pub(crate) commits_only_after_clean_transaction: bool,
@@ -283,7 +283,7 @@ pub(crate) struct C08ShaderCacheRealizationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C09CompositeCacheRealizationObservationForTest {
+pub(crate) struct LayerCompositeCacheRealizationObservationForTest {
     pub(crate) realizes_normal_and_destination_programs: bool,
     pub(crate) realizes_all_optional_binding_combinations: bool,
     pub(crate) normal_uses_fixed_premultiplied_source_over: bool,
@@ -297,7 +297,7 @@ pub(crate) struct C09CompositeCacheRealizationObservationForTest {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct C09MaskSamplingVectorForTest {
+pub(crate) struct CompositionMaskSamplingVectorForTest {
     pub(crate) quality: ImageQuality,
     pub(crate) extend: Extend,
     pub(crate) layer_point: Point,
@@ -307,17 +307,17 @@ pub(crate) struct C09MaskSamplingVectorForTest {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct C09MaskSamplingInputForTest {
+pub(crate) struct CompositionMaskSamplingInputForTest {
     pub(crate) mask_size: PhysicalSize,
     pub(crate) mask_rgba: Vec<u8>,
     pub(crate) mask_bounds: Rect,
     pub(crate) source: [f32; 4],
-    pub(crate) vectors: Vec<C09MaskSamplingVectorForTest>,
+    pub(crate) vectors: Vec<CompositionMaskSamplingVectorForTest>,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct C09BlendVectorForTest {
+pub(crate) struct CompositionBlendVectorForTest {
     pub(crate) blend: BlendMode,
     pub(crate) source: [f32; 4],
     pub(crate) parent: [f32; 4],
@@ -326,14 +326,14 @@ pub(crate) struct C09BlendVectorForTest {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct C09GpuVectorResultsForTest {
+pub(crate) struct CompositionGpuVectorResultsForTest {
     pub(crate) working_format: WorkingFormat,
     pub(crate) rgba: Vec<[f32; 4]>,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08CustomSpineEncodingObservationForTest {
+pub(crate) struct CustomSpineEncodingObservationForTest {
     pub(crate) encodes_custom_passes_in_order: bool,
     pub(crate) clears_full_root_once: bool,
     pub(crate) uses_exact_prepared_spatial_mapping: bool,
@@ -351,7 +351,7 @@ pub(crate) struct C08CustomSpineEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C09OrderedGraphEncodingObservationForTest {
+pub(crate) struct CompositionOrderedGraphEncodingObservationForTest {
     pub(crate) encodes_clip_mask_opacity_and_blend_in_authored_order: bool,
     pub(crate) normal_uses_fixed_premultiplied_blend: bool,
     pub(crate) normal_omits_parent_sample: bool,
@@ -364,7 +364,7 @@ pub(crate) struct C09OrderedGraphEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C10OrderedColorGraphEncodingObservationForTest {
+pub(crate) struct OrderedColorFilterGraphEncodingObservationForTest {
     pub(crate) fused_runs_preserve_authored_order: bool,
     pub(crate) color_pass_count: usize,
     pub(crate) binds_exact_source_spatial_and_operations: bool,
@@ -377,7 +377,7 @@ pub(crate) struct C10OrderedColorGraphEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C10OversizedBufferPreservationObservationForTest {
+pub(crate) struct ColorFilterOversizedBufferPreservationObservationForTest {
     pub(crate) returns_exact_limit_error: bool,
     pub(crate) resources_are_unchanged: bool,
     pub(crate) cache_is_unchanged: bool,
@@ -386,8 +386,8 @@ pub(crate) struct C10OversizedBufferPreservationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11SpatialFilterGraphEncodingObservationForTest {
-    pub(crate) pass_order: Vec<super::pass::C11FilterPassTagForTest>,
+pub(crate) struct SpatialFilterGraphEncodingObservationForTest {
+    pub(crate) pass_order: Vec<super::pass::SpatialFilterPassTagForTest>,
     pub(crate) blur_pass_count: usize,
     pub(crate) drop_shadow_colorize_count: usize,
     pub(crate) drop_shadow_merge_count: usize,
@@ -405,7 +405,7 @@ pub(crate) struct C11SpatialFilterGraphEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11FailurePreservationObservationForTest {
+pub(crate) struct SpatialFilterFailurePreservationObservationForTest {
     pub(crate) encode_failure_is_reported: bool,
     pub(crate) scope_failure_is_reported: bool,
     pub(crate) resources_are_unchanged: bool,
@@ -416,7 +416,7 @@ pub(crate) struct C11FailurePreservationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12BackdropGraphEncodingObservationForTest {
+pub(crate) struct BackdropGraphEncodingObservationForTest {
     pub(crate) encodes_copy_filter_clip_foreground_and_group_in_order: bool,
     pub(crate) parent_is_copied_once: bool,
     pub(crate) copy_filter_foreground_and_group_are_distinct: bool,
@@ -428,7 +428,7 @@ pub(crate) struct C12BackdropGraphEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12FailurePreservationObservationForTest {
+pub(crate) struct BackdropFailurePreservationObservationForTest {
     pub(crate) encode_failure_is_reported: bool,
     pub(crate) resources_are_unchanged: bool,
     pub(crate) cache_is_unchanged: bool,
@@ -438,14 +438,14 @@ pub(crate) struct C12FailurePreservationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-enum C11InjectedFailureForTest {
+enum SpatialFilterInjectedFailureForTest {
     Encode,
     Scope,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08CaptureFailureObservationForTest {
+pub(crate) struct VelloCaptureFailureObservationForTest {
     pub(crate) capture_failure_is_reported: bool,
     pub(crate) complete_pass_is_rejected: bool,
     pub(crate) retry_on_new_encoder_is_rejected: bool,
@@ -453,7 +453,7 @@ pub(crate) struct C08CaptureFailureObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08MultipleVelloCaptureEncodingObservationForTest {
+pub(crate) struct MultipleVelloCaptureEncodingObservationForTest {
     pub(crate) exact_capture_count: bool,
     pub(crate) one_graph_command_encoder: bool,
     pub(crate) one_gpu_transaction: bool,
@@ -465,14 +465,14 @@ pub(crate) struct C08MultipleVelloCaptureEncodingObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum C08TwoCaptureFailureForTest {
+pub(crate) enum TwoCaptureFailureForTest {
     LaterCaptureEncoding,
     SharedScopeResolution,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct C08TwoCaptureFailureObservationForTest {
+pub(crate) struct TwoCaptureFailureObservationForTest {
     pub(crate) acquired_capture_lease_count: usize,
     pub(crate) failure_is_reported: bool,
     pub(crate) produces_no_pending_commit: bool,
@@ -486,7 +486,7 @@ pub(crate) struct C08TwoCaptureFailureObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08VelloCaptureRasterContractObservationForTest {
+pub(crate) struct VelloCaptureRasterContractObservationForTest {
     pub(crate) lowers_with_exact_initial_transform: bool,
     pub(crate) uses_transparent_base: bool,
     pub(crate) uses_requested_antialiasing: bool,
@@ -635,9 +635,9 @@ impl ReadyDeviceState {
 }
 
 #[cfg(test)]
-fn provision_c08_requests_for_test(
+fn provision_core_pass_requests_for_test(
     ready: &ReadyDeviceState,
-    requests: &C08PassCacheRequestsForTest,
+    requests: &CorePassCacheRequestsForTest,
     invalidate_last_pipeline: bool,
 ) -> Result<(ProvisionalDevicePassCacheUpdate, bool)> {
     let mut update = ready.pass_cache.provisional_update();
@@ -645,7 +645,7 @@ fn provision_c08_requests_for_test(
     let mut encoding_ready = !requests.passes().is_empty();
     for (index, keys) in requests.passes().iter().enumerate() {
         let objects = if invalidate_last_pipeline && index == last {
-            update.realize_c08_pass_with_invalid_fragment_for_test(
+            update.realize_core_pass_with_invalid_fragment_for_test(
                 &ready.device,
                 &ready.pass_cache,
                 keys.samplers(),
@@ -654,7 +654,7 @@ fn provision_c08_requests_for_test(
                 keys.pipeline(),
             )?
         } else {
-            update.realize_c08_pass(
+            update.realize_core_pass(
                 &ready.device,
                 &ready.pass_cache,
                 keys.samplers(),
@@ -664,7 +664,7 @@ fn provision_c08_requests_for_test(
             )?
         };
         drop(objects);
-        encoding_ready &= update.contains_c08_pass_for_test(
+        encoding_ready &= update.contains_core_pass_for_test(
             &ready.pass_cache,
             keys.samplers(),
             keys.layout(),
@@ -676,13 +676,13 @@ fn provision_c08_requests_for_test(
 }
 
 #[cfg(test)]
-fn c08_requests_are_cached_for_test(
+fn core_pass_requests_are_cached_for_test(
     cache: &DevicePassCache,
-    requests: &C08PassCacheRequestsForTest,
+    requests: &CorePassCacheRequestsForTest,
 ) -> bool {
     !requests.passes().is_empty()
         && requests.passes().iter().all(|keys| {
-            cache.contains_c08_pass_for_test(
+            cache.contains_core_pass_for_test(
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
@@ -693,7 +693,7 @@ fn c08_requests_are_cached_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-struct C09CompositeProvisionObservationForTest {
+struct LayerCompositeProvisionObservationForTest {
     encoding_ready: bool,
     has_normal: bool,
     has_destination: bool,
@@ -703,13 +703,13 @@ struct C09CompositeProvisionObservationForTest {
 }
 
 #[cfg(test)]
-fn provision_c09_composite_requests_for_test(
+fn provision_layer_composite_requests_for_test(
     ready: &ReadyDeviceState,
-    requests: &C09CompositeCacheRequestsForTest,
+    requests: &LayerCompositeCacheRequestsForTest,
     invalidate_last_pipeline: bool,
 ) -> Result<(
     ProvisionalDevicePassCacheUpdate,
-    C09CompositeProvisionObservationForTest,
+    LayerCompositeProvisionObservationForTest,
 )> {
     let mut update = ready.pass_cache.provisional_update();
     let last = requests.passes().len().saturating_sub(1);
@@ -765,7 +765,7 @@ fn provision_c09_composite_requests_for_test(
     }
     Ok((
         update,
-        C09CompositeProvisionObservationForTest {
+        LayerCompositeProvisionObservationForTest {
             encoding_ready,
             has_normal,
             has_destination,
@@ -777,9 +777,9 @@ fn provision_c09_composite_requests_for_test(
 }
 
 #[cfg(test)]
-fn c09_composite_requests_are_cached_for_test(
+fn layer_composite_requests_are_cached_for_test(
     cache: &DevicePassCache,
-    requests: &C09CompositeCacheRequestsForTest,
+    requests: &LayerCompositeCacheRequestsForTest,
 ) -> bool {
     !requests.passes().is_empty()
         && requests.passes().iter().all(|keys| {
@@ -794,7 +794,7 @@ fn c09_composite_requests_are_cached_for_test(
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct C09GpuVectorDrawForTest {
+struct CompositionGpuVectorDrawForTest {
     path: super::shader::ShaderCompositePathKey,
     has_clip_coverage: bool,
     has_alpha_mask: bool,
@@ -809,14 +809,14 @@ struct C09GpuVectorDrawForTest {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-struct C09GpuMaskTextureForTest<'a> {
+struct CompositionGpuMaskTextureForTest<'a> {
     size: PhysicalSize,
     rgba: &'a [u8],
     bounds: Rect,
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) struct C09PreparedGpuVectorsForTest {
+pub(crate) struct CompositionPreparedGpuVectorsForTest {
     pub(crate) device: wgpu::Device,
     pub(crate) queue: wgpu::Queue,
     pub(crate) working_format: WorkingFormat,
@@ -826,7 +826,7 @@ pub(crate) struct C09PreparedGpuVectorsForTest {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_vector_texture(
+fn composition_vector_texture(
     device: &wgpu::Device,
     size: PhysicalSize,
     format: wgpu::TextureFormat,
@@ -850,7 +850,7 @@ fn c09_vector_texture(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_clear_vector_texture(
+fn composition_clear_vector_texture(
     encoder: &mut wgpu::CommandEncoder,
     view: &wgpu::TextureView,
     color: [f32; 4],
@@ -880,7 +880,7 @@ fn c09_clear_vector_texture(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_vector_uniform_buffer(
+fn composition_vector_uniform_buffer(
     device: &wgpu::Device,
     queue: &wgpu::Queue,
     bytes: &[u8],
@@ -897,9 +897,9 @@ fn c09_vector_uniform_buffer(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_upload_vector_mask(
+fn composition_upload_vector_mask(
     ready: &ReadyDeviceState,
-    mask: Option<&C09GpuMaskTextureForTest<'_>>,
+    mask: Option<&CompositionGpuMaskTextureForTest<'_>>,
 ) -> Result<Option<wgpu::Texture>> {
     let Some(mask) = mask else {
         return Ok(None);
@@ -915,21 +915,21 @@ fn c09_upload_vector_mask(
         .ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C09 GPU mask vector byte length overflowed",
+                "composition GPU mask vector byte length overflowed",
             )
         })?;
     if mask.rgba.len() != expected_len || mask.size.width() == 0 || mask.size.height() == 0 {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            "C09 GPU mask vector bytes do not match a positive RGBA8 extent",
+            "composition GPU mask vector bytes do not match a positive RGBA8 extent",
         ));
     }
-    let texture = c09_vector_texture(
+    let texture = composition_vector_texture(
         &ready.device,
         mask.size,
         wgpu::TextureFormat::Rgba8Unorm,
         wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::COPY_DST),
-        "Surgeist C09 GPU vector mask",
+        "Surgeist composition GPU vector mask",
     );
     ready.queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -954,7 +954,7 @@ fn c09_upload_vector_mask(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-struct C09VectorDrawTextures {
+struct CompositionVectorDrawTextures {
     source: wgpu::TextureView,
     parent: Option<wgpu::TextureView>,
     clip: Option<wgpu::TextureView>,
@@ -963,77 +963,77 @@ struct C09VectorDrawTextures {
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-struct C09VectorDrawEncodingContext<'a> {
+struct CompositionVectorDrawEncodingContext<'a> {
     ready: &'a ReadyDeviceState,
-    requests: &'a C09CompositeCacheRequestsForTest,
+    requests: &'a LayerCompositeCacheRequestsForTest,
     mask_view: Option<&'a wgpu::TextureView>,
-    mask: Option<&'a C09GpuMaskTextureForTest<'a>>,
+    mask: Option<&'a CompositionGpuMaskTextureForTest<'a>>,
     spatial_bytes: &'a [u8],
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_prepare_vector_draw_textures(
+fn composition_prepare_vector_draw_textures(
     ready: &ReadyDeviceState,
     encoder: &mut wgpu::CommandEncoder,
     working_format: WorkingFormat,
     source_size: PhysicalSize,
-    draw: C09GpuVectorDrawForTest,
-) -> C09VectorDrawTextures {
-    let source = c09_vector_texture(
+    draw: CompositionGpuVectorDrawForTest,
+) -> CompositionVectorDrawTextures {
+    let source = composition_vector_texture(
         &ready.device,
         source_size,
         working_format.texture_format(),
         wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
-        "Surgeist C09 GPU vector source",
+        "Surgeist composition GPU vector source",
     );
     let source = source.create_view(&wgpu::TextureViewDescriptor::default());
-    c09_clear_vector_texture(
+    composition_clear_vector_texture(
         encoder,
         &source,
         draw.source,
-        "Surgeist C09 GPU vector source clear",
+        "Surgeist composition GPU vector source clear",
     );
     let parent =
         (draw.path == super::shader::ShaderCompositePathKey::DestinationSampling).then(|| {
-            let texture = c09_vector_texture(
+            let texture = composition_vector_texture(
                 &ready.device,
                 PhysicalSize::new(1, 1),
                 working_format.texture_format(),
                 wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
-                "Surgeist C09 GPU vector parent",
+                "Surgeist composition GPU vector parent",
             );
             let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-            c09_clear_vector_texture(
+            composition_clear_vector_texture(
                 encoder,
                 &view,
                 draw.parent,
-                "Surgeist C09 GPU vector parent clear",
+                "Surgeist composition GPU vector parent clear",
             );
             view
         });
     let clip = draw.has_clip_coverage.then(|| {
-        let texture = c09_vector_texture(
+        let texture = composition_vector_texture(
             &ready.device,
             PhysicalSize::new(1, 1),
             wgpu::TextureFormat::Rgba8Unorm,
             wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::TEXTURE_BINDING),
-            "Surgeist C09 GPU vector clip coverage",
+            "Surgeist composition GPU vector clip coverage",
         );
         let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
-        c09_clear_vector_texture(
+        composition_clear_vector_texture(
             encoder,
             &view,
             [1.0, 0.25, 0.75, draw.clip_alpha],
-            "Surgeist C09 GPU vector clip clear",
+            "Surgeist composition GPU vector clip clear",
         );
         view
     });
-    let output = c09_vector_texture(
+    let output = composition_vector_texture(
         &ready.device,
         PhysicalSize::new(1, 1),
         working_format.texture_format(),
         wgpu::TextureUsages::RENDER_ATTACHMENT.union(wgpu::TextureUsages::COPY_SRC),
-        "Surgeist C09 GPU vector output",
+        "Surgeist composition GPU vector output",
     );
     let output_view = output.create_view(&wgpu::TextureViewDescriptor::default());
     let base = if draw.path == super::shader::ShaderCompositePathKey::Normal {
@@ -1041,13 +1041,13 @@ fn c09_prepare_vector_draw_textures(
     } else {
         [0.125, 0.25, 0.375, 0.5]
     };
-    c09_clear_vector_texture(
+    composition_clear_vector_texture(
         encoder,
         &output_view,
         base,
-        "Surgeist C09 GPU vector output clear",
+        "Surgeist composition GPU vector output clear",
     );
-    C09VectorDrawTextures {
+    CompositionVectorDrawTextures {
         source,
         parent,
         clip,
@@ -1057,9 +1057,9 @@ fn c09_prepare_vector_draw_textures(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_vector_parameter_bytes(
-    mask: Option<&C09GpuMaskTextureForTest<'_>>,
-    draw: C09GpuVectorDrawForTest,
+fn composition_vector_parameter_bytes(
+    mask: Option<&CompositionGpuMaskTextureForTest<'_>>,
+    draw: CompositionGpuVectorDrawForTest,
 ) -> Result<[u8; 112]> {
     let mask_bounds = mask.map_or([0.0, 0.0, 1.0, 1.0], |mask| {
         [
@@ -1086,12 +1086,12 @@ fn c09_vector_parameter_bytes(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn c09_encode_vector_draw(
-    context: &C09VectorDrawEncodingContext<'_>,
+fn composition_encode_vector_draw(
+    context: &CompositionVectorDrawEncodingContext<'_>,
     update: &mut ProvisionalDevicePassCacheUpdate,
     encoder: &mut wgpu::CommandEncoder,
-    textures: &C09VectorDrawTextures,
-    draw: C09GpuVectorDrawForTest,
+    textures: &CompositionVectorDrawTextures,
+    draw: CompositionGpuVectorDrawForTest,
 ) -> Result<()> {
     let keys = context
         .requests
@@ -1099,21 +1099,21 @@ fn c09_encode_vector_draw(
         .ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C09 GPU vector draw has no exact composite pipeline keys",
+                "composition GPU vector draw has no exact composite pipeline keys",
             )
         })?;
-    let spatial = c09_vector_uniform_buffer(
+    let spatial = composition_vector_uniform_buffer(
         &context.ready.device,
         &context.ready.queue,
         context.spatial_bytes,
-        "Surgeist C09 GPU vector spatial uniform",
+        "Surgeist composition GPU vector spatial uniform",
     );
-    let parameters = c09_vector_parameter_bytes(context.mask, draw)?;
-    let parameters = c09_vector_uniform_buffer(
+    let parameters = composition_vector_parameter_bytes(context.mask, draw)?;
+    let parameters = composition_vector_uniform_buffer(
         &context.ready.device,
         &context.ready.queue,
         &parameters,
-        "Surgeist C09 GPU vector composite parameters",
+        "Surgeist composition GPU vector composite parameters",
     );
     let objects = update.realize_composite_pass(
         &context.ready.device,
@@ -1148,7 +1148,7 @@ fn c09_encode_vector_draw(
             resource: wgpu::BindingResource::TextureView(context.mask_view.ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "C09 GPU mask draw has no uploaded mask texture",
+                    "composition GPU mask draw has no uploaded mask texture",
                 )
             })?),
         });
@@ -1167,12 +1167,12 @@ fn c09_encode_vector_draw(
         .ready
         .device
         .create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("Surgeist C09 GPU vector bindings"),
+            label: Some("Surgeist composition GPU vector bindings"),
             layout: objects.bind_group_layout(),
             entries: &entries,
         });
     let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-        label: Some("Surgeist C09 GPU vector composite"),
+        label: Some("Surgeist composition GPU vector composite"),
         color_attachments: &[Some(wgpu::RenderPassColorAttachment {
             view: &textures.output_view,
             resolve_target: None,
@@ -1194,20 +1194,20 @@ fn c09_encode_vector_draw(
 }
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-fn encode_c09_gpu_vectors_for_test(
+fn encode_composition_gpu_vectors_for_test(
     ready: &ReadyDeviceState,
-    requests: &C09CompositeCacheRequestsForTest,
+    requests: &LayerCompositeCacheRequestsForTest,
     working_format: WorkingFormat,
-    mask: Option<C09GpuMaskTextureForTest<'_>>,
-    draws: &[C09GpuVectorDrawForTest],
-) -> Result<C09PreparedGpuVectorsForTest> {
+    mask: Option<CompositionGpuMaskTextureForTest<'_>>,
+    draws: &[CompositionGpuVectorDrawForTest],
+) -> Result<CompositionPreparedGpuVectorsForTest> {
     if draws.is_empty() {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            "C09 GPU vector execution requires at least one draw",
+            "composition GPU vector execution requires at least one draw",
         ));
     }
-    let mask_texture = c09_upload_vector_mask(ready, mask.as_ref())?;
+    let mask_texture = composition_upload_vector_mask(ready, mask.as_ref())?;
     let mask_view = mask_texture
         .as_ref()
         .map(|texture| texture.create_view(&wgpu::TextureViewDescriptor::default()));
@@ -1224,11 +1224,11 @@ fn encode_c09_gpu_vectors_for_test(
     let mut encoder = ready
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C09 GPU vector encoder"),
+            label: Some("Surgeist composition GPU vector encoder"),
         });
     let mut outputs = Vec::with_capacity(draws.len());
     let mut pass_cache_update = ready.pass_cache.provisional_update();
-    let context = C09VectorDrawEncodingContext {
+    let context = CompositionVectorDrawEncodingContext {
         ready,
         requests,
         mask_view: mask_view.as_ref(),
@@ -1236,14 +1236,14 @@ fn encode_c09_gpu_vectors_for_test(
         spatial_bytes: &spatial_bytes,
     };
     for draw in draws.iter().copied() {
-        let draw_textures = c09_prepare_vector_draw_textures(
+        let draw_textures = composition_prepare_vector_draw_textures(
             ready,
             &mut encoder,
             working_format,
             vector_source_size,
             draw,
         );
-        c09_encode_vector_draw(
+        composition_encode_vector_draw(
             &context,
             &mut pass_cache_update,
             &mut encoder,
@@ -1252,7 +1252,7 @@ fn encode_c09_gpu_vectors_for_test(
         )?;
         outputs.push(draw_textures.output);
     }
-    Ok(C09PreparedGpuVectorsForTest {
+    Ok(CompositionPreparedGpuVectorsForTest {
         device: ready.device.clone(),
         queue: ready.queue.clone(),
         working_format,
@@ -1263,7 +1263,7 @@ fn encode_c09_gpu_vectors_for_test(
 }
 
 #[cfg(test)]
-fn c10_limit_error_is_exact(rejection: Option<Error>) -> bool {
+fn color_filter_limit_error_is_exact(rejection: Option<Error>) -> bool {
     rejection.is_some_and(|error| {
         error.code() == ErrorCode::InvalidInput
             && error.invalid_value_diagnostic().is_some_and(|invalid| {
@@ -1273,10 +1273,10 @@ fn c10_limit_error_is_exact(rejection: Option<Error>) -> bool {
 }
 
 #[cfg(test)]
-fn c09_ordered_encoding_observation(
-    summary: &super::pass::C08CustomSpineEncodingSummary,
-) -> C09OrderedGraphEncodingObservationForTest {
-    C09OrderedGraphEncodingObservationForTest {
+fn composition_ordered_encoding_observation(
+    summary: &super::pass::CustomSpineEncodingSummary,
+) -> CompositionOrderedGraphEncodingObservationForTest {
+    CompositionOrderedGraphEncodingObservationForTest {
         encodes_clip_mask_opacity_and_blend_in_authored_order: summary
             .encodes_custom_passes_in_order
             && summary.layer_composites_bind_exact_resources_and_parameters
@@ -1297,22 +1297,24 @@ fn c09_ordered_encoding_observation(
 }
 
 #[cfg(test)]
-fn c11_spatial_encoding_observation(
-    summary: &super::pass::C08CustomSpineEncodingSummary,
-) -> C11SpatialFilterGraphEncodingObservationForTest {
-    C11SpatialFilterGraphEncodingObservationForTest {
-        pass_order: summary.c11_pass_order.clone(),
+fn spatial_filter_spatial_encoding_observation(
+    summary: &super::pass::CustomSpineEncodingSummary,
+) -> SpatialFilterGraphEncodingObservationForTest {
+    SpatialFilterGraphEncodingObservationForTest {
+        pass_order: summary.spatial_filter_pass_order.clone(),
         blur_pass_count: summary.blur_pass_count,
         drop_shadow_colorize_count: summary.drop_shadow_colorize_count,
         drop_shadow_merge_count: summary.drop_shadow_merge_count,
         each_pass_advances_once: summary.advances_every_pass_once
             && summary.encodes_custom_passes_in_order,
-        binds_exact_prepared_resources: summary.c11_binds_exact_prepared_resources,
-        uses_signed_viewport_and_scissor: summary.c11_uses_signed_viewport_and_scissor,
+        binds_exact_prepared_resources: summary.spatial_filter_binds_exact_prepared_resources,
+        uses_signed_viewport_and_scissor: summary.spatial_filter_uses_signed_viewport_and_scissor,
         blur_sources_intermediates_and_results_are_distinct: summary
             .blur_sources_intermediates_and_results_are_distinct,
-        kernels_release_at_validated_last_use: summary.c11_kernels_release_at_validated_last_use,
-        textures_release_at_validated_last_use: summary.c11_textures_release_at_validated_last_use,
+        kernels_release_at_validated_last_use: summary
+            .spatial_filter_kernels_release_at_validated_last_use,
+        textures_release_at_validated_last_use: summary
+            .spatial_filter_textures_release_at_validated_last_use,
         drop_shadow_reads_original_source_twice: summary.drop_shadow_reads_original_source_twice,
         original_source_releases_after_merge: summary.original_source_releases_after_merge,
         one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
@@ -1321,10 +1323,10 @@ fn c11_spatial_encoding_observation(
 }
 
 #[cfg(test)]
-fn c12_backdrop_encoding_observation(
-    summary: &super::pass::C08CustomSpineEncodingSummary,
-) -> C12BackdropGraphEncodingObservationForTest {
-    C12BackdropGraphEncodingObservationForTest {
+fn backdrop_encoding_observation(
+    summary: &super::pass::CustomSpineEncodingSummary,
+) -> BackdropGraphEncodingObservationForTest {
+    BackdropGraphEncodingObservationForTest {
         encodes_copy_filter_clip_foreground_and_group_in_order: summary
             .encodes_custom_passes_in_order
             && summary.copy_backdrop_count == 1
@@ -1333,7 +1335,7 @@ fn c12_backdrop_encoding_observation(
             && summary.drop_shadow_colorize_count > 0
             && summary.drop_shadow_merge_count > 0
             && summary.layer_composite_count >= 2
-            && summary.c12_group_order_is_exact
+            && summary.backdrop_group_order_is_exact
             && summary.advances_every_pass_once,
         parent_is_copied_once: summary.copy_backdrop_count == 1
             && summary.copy_backdrop_binds_exact_prepared_resources
@@ -1343,19 +1345,19 @@ fn c12_backdrop_encoding_observation(
             && summary.color_filter_sources_and_results_are_distinct
             && summary.blur_sources_intermediates_and_results_are_distinct
             && summary.parent_and_result_are_distinct
-            && summary.c12_group_resources_are_distinct,
-        later_sibling_reads_completed_group: summary.c12_later_sibling_transition_is_exact,
+            && summary.backdrop_group_resources_are_distinct,
+        later_sibling_reads_completed_group: summary.backdrop_later_sibling_transition_is_exact,
         releases_at_validated_last_use: summary.advances_every_pass_once
             && summary.color_filter_operation_buffers_released
-            && summary.c11_kernels_release_at_validated_last_use
-            && summary.c11_textures_release_at_validated_last_use,
+            && summary.spatial_filter_kernels_release_at_validated_last_use
+            && summary.spatial_filter_textures_release_at_validated_last_use,
         one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
         transaction_committed: false,
     }
 }
 
 #[cfg(test)]
-fn c11_resources_preserved(
+fn spatial_filter_resources_preserved(
     before: &ResourceManagerObservationForTest,
     after: &ResourceManagerObservationForTest,
 ) -> bool {
@@ -1370,7 +1372,7 @@ fn c11_resources_preserved(
 }
 
 #[cfg(test)]
-fn c11_failure_publication_for_test(
+fn spatial_filter_failure_publication_for_test(
     device: &wgpu::Device,
     identity: DeviceSlotIdentity,
 ) -> Result<Surface> {
@@ -1392,14 +1394,14 @@ fn c11_failure_publication_for_test(
 }
 
 #[cfg(test)]
-fn c08_custom_spine_observation(
-    summary: super::pass::C08CustomSpineEncodingSummary,
+fn custom_spine_observation(
+    summary: super::pass::CustomSpineEncodingSummary,
     capture_count: usize,
     captures_are_exact: bool,
     cache_before: DevicePassCacheCountsForTest,
     cache_after: DevicePassCacheCountsForTest,
-) -> C08CustomSpineEncodingObservationForTest {
-    C08CustomSpineEncodingObservationForTest {
+) -> CustomSpineEncodingObservationForTest {
+    CustomSpineEncodingObservationForTest {
         encodes_custom_passes_in_order: summary.encodes_custom_passes_in_order,
         clears_full_root_once: summary.clears_full_root_once,
         uses_exact_prepared_spatial_mapping: summary.uses_exact_prepared_spatial_mapping,
@@ -1422,28 +1424,28 @@ fn c08_custom_spine_observation(
 }
 
 #[cfg(test)]
-async fn observe_c08_two_capture_encoding_failure(
+async fn observe_two_capture_encoding_failure(
     prepared: &mut PreparedGraph<'_>,
     device: &wgpu::Device,
     output: &wgpu::TextureView,
     extent: PhysicalSize,
-    failure: C08TwoCaptureFailureForTest,
+    failure: TwoCaptureFailureForTest,
 ) -> Result<(usize, bool, bool, bool)> {
     match failure {
-        C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
+        TwoCaptureFailureForTest::LaterCaptureEncoding => {
             prepared.fail_capture_encoding_after_for_test(1);
         }
-        C08TwoCaptureFailureForTest::SharedScopeResolution => {
+        TwoCaptureFailureForTest::SharedScopeResolution => {
             prepared.fail_scope_resolution_for_test();
         }
     }
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist C08 two-capture failure encoder"),
+        label: Some("Surgeist base graph two-capture failure encoder"),
     });
     let result = prepared
-        .encode_c08_custom_spine(
+        .encode_custom_spine(
             &mut encoder,
-            C08ExternalOutputView::try_new(output, Format::Rgba8, extent)?,
+            GraphExternalOutputView::try_new(output, Format::Rgba8, extent)?,
         )
         .await;
     let acquired = prepared.acquired_capture_lease_count_for_test();
@@ -1454,10 +1456,10 @@ async fn observe_c08_two_capture_encoding_failure(
         }
         Err(error) => (
             match failure {
-                C08TwoCaptureFailureForTest::LaterCaptureEncoding => {
+                TwoCaptureFailureForTest::LaterCaptureEncoding => {
                     error.message() == "prepared runtime resource binding is missing"
                 }
-                C08TwoCaptureFailureForTest::SharedScopeResolution => {
+                TwoCaptureFailureForTest::SharedScopeResolution => {
                     error.message() == "checked internal Vello resource or command encoding failed"
                 }
             },
@@ -1465,17 +1467,17 @@ async fn observe_c08_two_capture_encoding_failure(
         ),
     };
     let mut retry = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-        label: Some("Surgeist C08 forbidden two-capture retry encoder"),
+        label: Some("Surgeist base graph forbidden two-capture retry encoder"),
     });
     let retry_rejected = prepared
-        .encode_c08_custom_spine(
+        .encode_custom_spine(
             &mut retry,
-            C08ExternalOutputView::try_new(output, Format::Rgba8, extent)?,
+            GraphExternalOutputView::try_new(output, Format::Rgba8, extent)?,
         )
         .await
         .is_err_and(|error| {
             error.message()
-                == "the C08 custom encoding is one-shot; discard this prepared graph and its encoder"
+                == "the custom-spine encoding is one-shot; discard this prepared graph and its encoder"
         });
     drop(retry.finish());
     drop(encoder.finish());
@@ -1483,7 +1485,7 @@ async fn observe_c08_two_capture_encoding_failure(
 }
 
 #[cfg(test)]
-fn c08_test_output_texture(
+fn graph_test_output_texture(
     device: &wgpu::Device,
     output_extent: PhysicalSize,
     output_format: Format,
@@ -2470,7 +2472,7 @@ impl Backend {
             identity,
             operation,
             BackendErrorCode::RenderFailed,
-            "checked C08 pass objects lost their persistent device cache",
+            "checked core pass objects lost their persistent device cache",
         )?;
         update.commit(&mut ready.pass_cache)
     }
@@ -2635,7 +2637,7 @@ impl Backend {
             | wgpu::TextureUsages::TEXTURE_BINDING
             | wgpu::TextureUsages::COPY_SRC;
         let target = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("T6 transaction-owned internal Vello target"),
+            label: Some("Surgeist transaction-owned internal Vello target"),
             size: wgpu::Extent3d {
                 width: target_extent.width(),
                 height: target_extent.height(),
@@ -2650,7 +2652,7 @@ impl Backend {
         });
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T6 transaction-owned internal Vello encoder"),
+            label: Some("Surgeist transaction-owned internal Vello encoder"),
         });
         let mut scope = ActiveVelloEncodingScope::begin(device);
         let encoded: EncodedVelloPass = {
@@ -2736,11 +2738,11 @@ impl Backend {
             device,
             target_extent,
             target_usage,
-            "T6 cancellation-owned internal Vello target",
+            "Surgeist cancellation-owned internal Vello target",
         );
         let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
         let mut command_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("T6 cancellation-owned internal Vello encoder"),
+            label: Some("Surgeist cancellation-owned internal Vello encoder"),
         });
         let mut scope = ActiveVelloEncodingScope::begin(device);
         let encoded: EncodedVelloPass = {
@@ -2872,7 +2874,7 @@ impl Backend {
         not(test),
         expect(
             dead_code,
-            reason = "C08 calls the validated C07 graph preparation handoff before execution"
+            reason = "base graph calls the validated prepared-graph handoff before execution"
         )
     )]
     pub(crate) fn prepare_graph_resources(
@@ -2924,7 +2926,7 @@ impl Backend {
     }
 
     #[cfg(test)]
-    fn prepare_c10_graph_resources_with_operation_limits_for_test(
+    fn prepare_color_filter_graph_resources_with_operation_limits_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         lowered: LoweredGraphPlan,
@@ -2934,13 +2936,13 @@ impl Backend {
         let state = self.device_states.get_mut(identity.slot()).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "GPU device slot is unavailable for C10 limit preparation",
+                "GPU device slot is unavailable for color-filter limit preparation",
             )
         })?;
         if state.generation != identity.generation {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "GPU device generation changed before C10 limit preparation",
+                "GPU device generation changed before color-filter limit preparation",
             ));
         }
         if let Some(terminal) = state.terminal() {
@@ -2949,17 +2951,17 @@ impl Backend {
         if !state.signal.has_active_operation() {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "C10 limit preparation requires one active GPU transaction",
+                "color-filter limit preparation requires one active GPU transaction",
             ));
         }
         let capabilities = state.capabilities;
         let ready = state.ready().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "ready GPU resources disappeared before C10 limit preparation",
+                "ready GPU resources disappeared before color-filter limit preparation",
             )
         })?;
-        PreparedGraph::try_prepare_c10_with_operation_limits_for_test(
+        PreparedGraph::try_prepare_color_filter_with_operation_limits_for_test(
             lowered,
             policy,
             &capabilities,
@@ -3008,8 +3010,8 @@ impl Backend {
             )
         })?;
         let prepared = match graph {
-            ExactSurfaceGraph::C08(preparable) => {
-                PreparedGraph::try_prepare_c08_with_working_format(
+            ExactSurfaceGraph::Base(preparable) => {
+                PreparedGraph::try_prepare_base_with_working_format(
                     preparable,
                     selected_working_format,
                     &capabilities,
@@ -3019,7 +3021,7 @@ impl Backend {
                     (&ready.pass_cache, true),
                 )
             }
-            ExactSurfaceGraph::C09(preparable) => PreparedGraph::try_prepare_c09(
+            ExactSurfaceGraph::Composition(preparable) => PreparedGraph::try_prepare_composition(
                 preparable,
                 &capabilities,
                 &ready.device,
@@ -3028,7 +3030,7 @@ impl Backend {
                 (&ready.pass_cache, true),
             ),
             #[cfg(test)]
-            ExactSurfaceGraph::C10(preparable) => PreparedGraph::try_prepare_c10(
+            ExactSurfaceGraph::ColorFilter(preparable) => PreparedGraph::try_prepare_color_filter(
                 preparable,
                 &capabilities,
                 &ready.device,
@@ -3037,15 +3039,17 @@ impl Backend {
                 (&ready.pass_cache, true),
             ),
             #[cfg(test)]
-            ExactSurfaceGraph::C11(preparable) => PreparedGraph::try_prepare_c11(
-                preparable,
-                &capabilities,
-                &ready.device,
-                &ready.queue,
-                &ready.resources,
-                (&ready.pass_cache, true),
-            ),
-            ExactSurfaceGraph::C12(preparable) => PreparedGraph::try_prepare_c12(
+            ExactSurfaceGraph::SpatialFilter(preparable) => {
+                PreparedGraph::try_prepare_spatial_filter(
+                    preparable,
+                    &capabilities,
+                    &ready.device,
+                    &ready.queue,
+                    &ready.resources,
+                    (&ready.pass_cache, true),
+                )
+            }
+            ExactSurfaceGraph::Backdrop(preparable) => PreparedGraph::try_prepare_backdrop(
                 preparable,
                 selected_working_format,
                 &capabilities,
@@ -3192,17 +3196,17 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c09_composite_cache_realization_observation_for_test(
+    pub(crate) async fn layer_composite_cache_realization_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        requests: &C09CompositeCacheRequestsForTest,
-    ) -> Result<C09CompositeCacheRealizationObservationForTest> {
+        requests: &LayerCompositeCacheRequestsForTest,
+    ) -> Result<LayerCompositeCacheRealizationObservationForTest> {
         let initial_counts = self
             .ready_state_mut(
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 composite realization requires a ready device",
+                "composition composite realization requires a ready device",
             )?
             .pass_cache
             .counts_for_test();
@@ -3216,16 +3220,16 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 composite realization lost its ready device",
+                "composition composite realization lost its ready device",
             )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
+            provision_layer_composite_requests_for_test(ready, requests, false)?
         };
         let counts_before_commit = self
             .ready_state_mut(
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 composite realization lost its persistent cache",
+                "composition composite realization lost its persistent cache",
             )?
             .pass_cache
             .counts_for_test();
@@ -3242,7 +3246,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 committed compositor cache disappeared",
+                "composition committed compositor cache disappeared",
             )?
             .pass_cache
             .counts_for_test();
@@ -3252,30 +3256,30 @@ impl Backend {
             && provision.encoding_ready
             && provision.has_normal
             && provision.has_destination
-            && c09_composite_requests_are_cached_for_test(
+            && layer_composite_requests_are_cached_for_test(
                 &self
                     .ready_state_mut(
                         identity,
                         RuntimeOperation::EffectRendering,
                         BackendErrorCode::RenderFailed,
-                        "C09 committed compositor programs disappeared",
+                        "composition committed compositor programs disappeared",
                     )?
                     .pass_cache,
                 requests,
             );
 
         let reuses_exact_committed_entries = self
-            .c09_reuses_committed_entries_for_test(identity, requests, committed_counts)
+            .composition_reuses_committed_entries_for_test(identity, requests, committed_counts)
             .await?;
 
         let failed_validation_publishes_none = self
-            .c09_validation_publishes_none_for_test(requests)
+            .composition_validation_publishes_none_for_test(requests)
             .await?;
         let (cancellation_publishes_none, device_transition_publishes_none) = self
-            .c09_cancellation_publishes_none_for_test(requests)
+            .composition_cancellation_publishes_none_for_test(requests)
             .await?;
 
-        Ok(C09CompositeCacheRealizationObservationForTest {
+        Ok(LayerCompositeCacheRealizationObservationForTest {
             realizes_normal_and_destination_programs,
             realizes_all_optional_binding_combinations: provision.all_optional_combinations,
             normal_uses_fixed_premultiplied_source_over: provision.normal_uses_fixed_blend,
@@ -3290,10 +3294,10 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn c09_reuses_committed_entries_for_test(
+    async fn composition_reuses_committed_entries_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        requests: &C09CompositeCacheRequestsForTest,
+        requests: &LayerCompositeCacheRequestsForTest,
         committed: DevicePassCacheCountsForTest,
     ) -> Result<bool> {
         let transaction = self.begin_gpu_operation(
@@ -3306,9 +3310,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 compositor cache reuse lost its ready device",
+                "composition compositor cache reuse lost its ready device",
             )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
+            provision_layer_composite_requests_for_test(ready, requests, false)?
         };
         let reused_existing = update.is_empty_for_test();
         transaction
@@ -3324,7 +3328,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 reused compositor cache disappeared",
+                "composition reused compositor cache disappeared",
             )?
             .pass_cache
             .counts_for_test();
@@ -3332,9 +3336,9 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn c09_validation_publishes_none_for_test(
+    async fn composition_validation_publishes_none_for_test(
         &mut self,
-        requests: &C09CompositeCacheRequestsForTest,
+        requests: &LayerCompositeCacheRequestsForTest,
     ) -> Result<bool> {
         let identity = self.add_device_slot_for_test().await?;
         let transaction = self.begin_gpu_operation(
@@ -3347,9 +3351,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 validation probe lost its ready device",
+                "composition validation probe lost its ready device",
             )?;
-            provision_c09_composite_requests_for_test(ready, requests, true)?.0
+            provision_layer_composite_requests_for_test(ready, requests, true)?.0
         };
         let error = transaction.finish(RuntimeOperation::EffectRendering).await;
         drop(update);
@@ -3365,9 +3369,9 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn c09_cancellation_publishes_none_for_test(
+    async fn composition_cancellation_publishes_none_for_test(
         &mut self,
-        requests: &C09CompositeCacheRequestsForTest,
+        requests: &LayerCompositeCacheRequestsForTest,
     ) -> Result<(bool, bool)> {
         let identity = self.add_device_slot_for_test().await?;
         let transaction = self.begin_gpu_operation(
@@ -3380,9 +3384,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 cancellation probe lost its ready device",
+                "composition cancellation probe lost its ready device",
             )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
+            provision_layer_composite_requests_for_test(ready, requests, false)?
         };
         let cache_empty = self
             .device_states
@@ -3414,9 +3418,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 transition probe lost its ready device",
+                "composition transition probe lost its ready device",
             )?;
-            provision_c09_composite_requests_for_test(ready, requests, false)?
+            provision_layer_composite_requests_for_test(ready, requests, false)?
         };
         self.signal_loss_for_test(identity, DeviceLossReason::Destroyed);
         let error = transaction.finish(RuntimeOperation::EffectRendering).await;
@@ -3427,25 +3431,25 @@ impl Backend {
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn c09_shader_mask_sampling_preparation_for_test(
+    pub(crate) fn composition_shader_mask_sampling_preparation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        requests: &C09CompositeCacheRequestsForTest,
-        input: &C09MaskSamplingInputForTest,
-    ) -> Result<C09PreparedGpuVectorsForTest> {
+        requests: &LayerCompositeCacheRequestsForTest,
+        input: &CompositionMaskSamplingInputForTest,
+    ) -> Result<CompositionPreparedGpuVectorsForTest> {
         let working_format = self
             .device_capabilities(identity)
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "C09 mask vectors require immutable device capabilities",
+                    "composition mask vectors require immutable device capabilities",
                 )
             })?
             .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)?;
         let draws = input
             .vectors
             .iter()
-            .map(|vector| C09GpuVectorDrawForTest {
+            .map(|vector| CompositionGpuVectorDrawForTest {
                 path: super::shader::ShaderCompositePathKey::Normal,
                 has_clip_coverage: vector.clip_alpha.is_some(),
                 has_alpha_mask: true,
@@ -3463,13 +3467,13 @@ impl Backend {
             identity,
             RuntimeOperation::EffectRendering,
             BackendErrorCode::RenderFailed,
-            "C09 mask vectors lost their ready device",
+            "composition mask vectors lost their ready device",
         )?;
-        encode_c09_gpu_vectors_for_test(
+        encode_composition_gpu_vectors_for_test(
             ready,
             requests,
             working_format,
-            Some(C09GpuMaskTextureForTest {
+            Some(CompositionGpuMaskTextureForTest {
                 size: input.mask_size,
                 rgba: &input.mask_rgba,
                 bounds: input.mask_bounds,
@@ -3479,24 +3483,24 @@ impl Backend {
     }
 
     #[cfg(all(test, not(target_arch = "wasm32")))]
-    pub(crate) fn c09_shader_blend_preparation_for_test(
+    pub(crate) fn composition_shader_blend_preparation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        requests: &C09CompositeCacheRequestsForTest,
-        vectors: &[C09BlendVectorForTest],
-    ) -> Result<C09PreparedGpuVectorsForTest> {
+        requests: &LayerCompositeCacheRequestsForTest,
+        vectors: &[CompositionBlendVectorForTest],
+    ) -> Result<CompositionPreparedGpuVectorsForTest> {
         let working_format = self
             .device_capabilities(identity)
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "C09 blend vectors require immutable device capabilities",
+                    "composition blend vectors require immutable device capabilities",
                 )
             })?
             .resolve_effect_working_format(EffectQualityPolicy::AllowReducedPrecision)?;
         let draws = vectors
             .iter()
-            .map(|vector| C09GpuVectorDrawForTest {
+            .map(|vector| CompositionGpuVectorDrawForTest {
                 path: if vector.blend == BlendMode::Normal {
                     super::shader::ShaderCompositePathKey::Normal
                 } else {
@@ -3518,24 +3522,24 @@ impl Backend {
             identity,
             RuntimeOperation::EffectRendering,
             BackendErrorCode::RenderFailed,
-            "C09 blend vectors lost their ready device",
+            "composition blend vectors lost their ready device",
         )?;
-        encode_c09_gpu_vectors_for_test(ready, requests, working_format, None, &draws)
+        encode_composition_gpu_vectors_for_test(ready, requests, working_format, None, &draws)
     }
 
     #[cfg(test)]
-    pub(crate) async fn c08_shader_cache_realization_observation_for_test(
+    pub(crate) async fn core_pass_shader_cache_realization_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        rgba_requests: &C08PassCacheRequestsForTest,
-        bgra_requests: &C08PassCacheRequestsForTest,
-    ) -> Result<C08ShaderCacheRealizationObservationForTest> {
+        rgba_requests: &CorePassCacheRequestsForTest,
+        bgra_requests: &CorePassCacheRequestsForTest,
+    ) -> Result<CorePassShaderCacheRealizationObservationForTest> {
         let initial_counts = self
             .ready_state_mut(
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 shader-cache observation requires a ready device",
+                "core-pass shader-cache observation requires a ready device",
             )?
             .pass_cache
             .counts_for_test();
@@ -3549,16 +3553,16 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 shader realization lost its ready device",
+                "core-pass shader realization lost its ready device",
             )?;
-            provision_c08_requests_for_test(ready, rgba_requests, false)?
+            provision_core_pass_requests_for_test(ready, rgba_requests, false)?
         };
         let counts_before_commit = self
             .ready_state_mut(
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 shader realization lost its persistent cache",
+                "core-pass shader realization lost its persistent cache",
             )?
             .pass_cache
             .counts_for_test();
@@ -3575,31 +3579,31 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 committed cache disappeared",
+                "base graph committed cache disappeared",
             )?
             .pass_cache
             .counts_for_test();
         let realizes_all_checked_programs = initial_counts.is_empty()
             && counts_before_commit == initial_counts
             && rgba_counts != initial_counts
-            && c08_requests_are_cached_for_test(
+            && core_pass_requests_are_cached_for_test(
                 &self
                     .ready_state_mut(
                         identity,
                         RuntimeOperation::EffectRendering,
                         BackendErrorCode::RenderFailed,
-                        "C08 committed programs disappeared",
+                        "base graph committed programs disappeared",
                     )?
                     .pass_cache,
                 rgba_requests,
             );
 
         let reuses_exact_committed_entries = self
-            .c08_reuses_committed_entries_for_test(identity, rgba_requests, rgba_counts)
+            .core_pass_reuses_committed_entries_for_test(identity, rgba_requests, rgba_counts)
             .await?;
 
         let (failed_validation_publishes_none, specializes_rgba_and_bgra_outputs) = self
-            .c08_validation_and_specialization_for_test(
+            .core_pass_validation_and_specialization_for_test(
                 identity,
                 rgba_requests,
                 bgra_requests,
@@ -3607,10 +3611,10 @@ impl Backend {
             )
             .await?;
         let (cancellation_publishes_none, device_transition_publishes_none) = self
-            .c08_cancellation_publishes_none_for_test(rgba_requests)
+            .graph_cancellation_publishes_none_for_test(rgba_requests)
             .await?;
 
-        Ok(C08ShaderCacheRealizationObservationForTest {
+        Ok(CorePassShaderCacheRealizationObservationForTest {
             realizes_all_checked_programs,
             provisional_handles_are_encoding_ready,
             commits_only_after_clean_transaction: counts_before_commit == initial_counts
@@ -3624,10 +3628,10 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn c08_reuses_committed_entries_for_test(
+    async fn core_pass_reuses_committed_entries_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        requests: &C08PassCacheRequestsForTest,
+        requests: &CorePassCacheRequestsForTest,
         committed: DevicePassCacheCountsForTest,
     ) -> Result<bool> {
         let transaction = self.begin_gpu_operation(
@@ -3640,9 +3644,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 cache reuse lost its ready device",
+                "core-pass cache reuse lost its ready device",
             )?;
-            provision_c08_requests_for_test(ready, requests, false)?
+            provision_core_pass_requests_for_test(ready, requests, false)?
         };
         let exact_existing = update.is_empty_for_test() && handles_ready;
         transaction
@@ -3658,7 +3662,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 reused cache disappeared",
+                "base graph reused cache disappeared",
             )?
             .pass_cache
             .counts_for_test();
@@ -3666,11 +3670,11 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn c08_validation_and_specialization_for_test(
+    async fn core_pass_validation_and_specialization_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
-        rgba: &C08PassCacheRequestsForTest,
-        bgra: &C08PassCacheRequestsForTest,
+        rgba: &CorePassCacheRequestsForTest,
+        bgra: &CorePassCacheRequestsForTest,
         rgba_counts: DevicePassCacheCountsForTest,
     ) -> Result<(bool, bool)> {
         let validation = self.begin_gpu_operation(
@@ -3683,9 +3687,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 validation probe lost its ready device",
+                "base graph validation probe lost its ready device",
             )?;
-            provision_c08_requests_for_test(ready, bgra, true)?.0
+            provision_core_pass_requests_for_test(ready, bgra, true)?.0
         };
         let error = validation.finish(RuntimeOperation::EffectRendering).await;
         drop(update);
@@ -3694,7 +3698,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 validation probe lost its persistent cache",
+                "base graph validation probe lost its persistent cache",
             )?
             .pass_cache
             .counts_for_test();
@@ -3712,9 +3716,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 BGRA specialization lost its ready device",
+                "base graph BGRA specialization lost its ready device",
             )?;
-            provision_c08_requests_for_test(ready, bgra, false)?
+            provision_core_pass_requests_for_test(ready, bgra, false)?
         };
         transaction
             .finish(RuntimeOperation::EffectRendering)
@@ -3728,20 +3732,20 @@ impl Backend {
             identity,
             RuntimeOperation::EffectRendering,
             BackendErrorCode::RenderFailed,
-            "C08 specialized programs disappeared",
+            "base graph specialized programs disappeared",
         )?;
         let counts = ready.pass_cache.counts_for_test();
         let specialized = handles_ready
             && counts != rgba_counts
-            && c08_requests_are_cached_for_test(&ready.pass_cache, rgba)
-            && c08_requests_are_cached_for_test(&ready.pass_cache, bgra);
+            && core_pass_requests_are_cached_for_test(&ready.pass_cache, rgba)
+            && core_pass_requests_are_cached_for_test(&ready.pass_cache, bgra);
         Ok((failed, specialized))
     }
 
     #[cfg(test)]
-    async fn c08_cancellation_publishes_none_for_test(
+    async fn graph_cancellation_publishes_none_for_test(
         &mut self,
-        requests: &C08PassCacheRequestsForTest,
+        requests: &CorePassCacheRequestsForTest,
     ) -> Result<(bool, bool)> {
         let identity = self.add_device_slot_for_test().await?;
         let transaction = self.begin_gpu_operation(
@@ -3754,9 +3758,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 cancellation probe lost its ready device",
+                "base graph cancellation probe lost its ready device",
             )?;
-            provision_c08_requests_for_test(ready, requests, false)?
+            provision_core_pass_requests_for_test(ready, requests, false)?
         };
         let cache_empty = self
             .device_states
@@ -3788,9 +3792,9 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 transition probe lost its ready device",
+                "base graph transition probe lost its ready device",
             )?;
-            provision_c08_requests_for_test(ready, requests, false)?
+            provision_core_pass_requests_for_test(ready, requests, false)?
         };
         self.signal_loss_for_test(identity, DeviceLossReason::Destroyed);
         let cache_empty = self
@@ -3809,22 +3813,22 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c08_custom_spine_encoding_observation_for_test(
+    pub(crate) async fn custom_spine_encoding_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
         output_format: Format,
-    ) -> Result<C08CustomSpineEncodingObservationForTest> {
+    ) -> Result<CustomSpineEncodingObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C08 custom-spine observation requires immutable device capabilities",
+                "custom-spine observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+        let graph = super::frame::forced_base_graph_for_test(commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
@@ -3836,7 +3840,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 custom-spine observation requires a ready pass cache",
+                "custom-spine observation requires a ready pass cache",
             )?
             .pass_cache
             .counts_for_test();
@@ -3850,26 +3854,24 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 custom-spine observation lost its ready device",
+                "custom-spine observation lost its ready device",
             )?
             .device
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         let output_extent = prepared.output_extent()?;
-        let output_texture = c08_test_output_texture(
+        let output_texture = graph_test_output_texture(
             &device,
             output_extent,
             output_format,
-            "Surgeist C08 external output observation",
+            "Surgeist graph external output observation",
         );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let output = C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?;
+        let output = GraphExternalOutputView::try_new(&output_view, output_format, output_extent)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 caller-owned custom-spine observation encoder"),
+            label: Some("Surgeist base graph caller-owned custom-spine observation encoder"),
         });
-        let encoded = prepared
-            .encode_c08_custom_spine(&mut encoder, output)
-            .await?;
+        let encoded = prepared.encode_custom_spine(&mut encoder, output).await?;
         let (summary, capture_resources) = encoded.into_summary_and_resources();
         let capture_handoff_count = summary.capture_count;
         let capture_handoffs_are_exact = summary.capture_observations.iter().all(|capture| {
@@ -3893,12 +3895,12 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 custom-spine observation lost its provisional cache boundary",
+                "custom-spine observation lost its provisional cache boundary",
             )?
             .pass_cache
             .counts_for_test();
 
-        Ok(c08_custom_spine_observation(
+        Ok(custom_spine_observation(
             summary,
             capture_handoff_count,
             capture_handoffs_are_exact,
@@ -3908,17 +3910,17 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c10_ordered_color_graph_encoding_observation_for_test(
+    pub(crate) async fn ordered_color_filter_graph_encoding_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         filters: Vec<FilterList>,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C10OrderedColorGraphEncodingObservationForTest> {
+    ) -> Result<OrderedColorFilterGraphEncodingObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C10 graph encoding observation requires immutable device capabilities",
+                "color-filter graph encoding observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -3940,7 +3942,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C10 graph encoding observation lost its ready device",
+                "color-filter graph encoding observation lost its ready device",
             )?;
             (ready.device.clone(), ready.queue.clone())
         };
@@ -3949,12 +3951,12 @@ impl Backend {
         let (output_texture, output_view) =
             create_headless_texture(&device, output_extent, Format::Rgba8)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C10 caller-owned graph observation encoder"),
+            label: Some("Surgeist color-filter caller-owned graph observation encoder"),
         });
         let pending = match prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
             )
             .await
         {
@@ -3969,7 +3971,7 @@ impl Backend {
             }
         };
         let summary = pending.summary_for_test();
-        let mut observed = C10OrderedColorGraphEncodingObservationForTest {
+        let mut observed = OrderedColorFilterGraphEncodingObservationForTest {
             fused_runs_preserve_authored_order: summary.color_filters_preserve_authored_order
                 && summary.encodes_custom_passes_in_order,
             color_pass_count: summary.color_filter_count,
@@ -3984,9 +3986,9 @@ impl Backend {
             one_graph_command_encoder: summary.graph_work_shares_one_command_encoder,
             transaction_committed: false,
         };
-        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        let prepared_submission = prepared.finish_graph_submission(pending)?;
         drop(output_view);
-        let payload = C08GraphSubmissionPayload::new(
+        let payload = GraphSubmissionPayload::new(
             encoder.finish(),
             prepared_submission,
             HeadlessPublication::new(output_texture),
@@ -3996,10 +3998,10 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C10 graph encoding observation lost its pass cache before commit",
+                "color-filter graph encoding observation lost its pass cache before commit",
             )?;
             transaction
-                .submit_c08_graph(
+                .submit_base_graph(
                     &device,
                     &queue,
                     &mut ready.pass_cache,
@@ -4014,17 +4016,17 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c11_spatial_filter_graph_encoding_observation_for_test(
+    pub(crate) async fn spatial_filter_graph_encoding_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         filters: Vec<FilterList>,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C11SpatialFilterGraphEncodingObservationForTest> {
+    ) -> Result<SpatialFilterGraphEncodingObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C11 encoding observation requires immutable device capabilities",
+                "spatial-filter encoding observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -4046,7 +4048,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C11 encoding observation lost its ready device",
+                "spatial-filter encoding observation lost its ready device",
             )?;
             (ready.device.clone(), ready.queue.clone())
         };
@@ -4055,19 +4057,19 @@ impl Backend {
         let (output_texture, output_view) =
             create_headless_texture(&device, output_extent, Format::Rgba8)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C11 caller-owned graph observation encoder"),
+            label: Some("Surgeist spatial-filter caller-owned graph observation encoder"),
         });
         let pending = prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
             )
             .await?;
         let summary = pending.summary_for_test();
-        let mut observed = c11_spatial_encoding_observation(summary);
-        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        let mut observed = spatial_filter_spatial_encoding_observation(summary);
+        let prepared_submission = prepared.finish_graph_submission(pending)?;
         drop(output_view);
-        let payload = C08GraphSubmissionPayload::new(
+        let payload = GraphSubmissionPayload::new(
             encoder.finish(),
             prepared_submission,
             HeadlessPublication::new(output_texture),
@@ -4077,10 +4079,10 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C11 encoding observation lost its pass cache before commit",
+                "spatial-filter encoding observation lost its pass cache before commit",
             )?;
             transaction
-                .submit_c08_graph(
+                .submit_base_graph(
                     &device,
                     &queue,
                     &mut ready.pass_cache,
@@ -4095,16 +4097,16 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c12_backdrop_graph_encoding_observation_for_test(
+    pub(crate) async fn backdrop_graph_encoding_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C12BackdropGraphEncodingObservationForTest> {
+    ) -> Result<BackdropGraphEncodingObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C12 encoding observation requires immutable device capabilities",
+                "backdrop encoding observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -4112,7 +4114,7 @@ impl Backend {
         let super::frame::FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "C12 encoding observation requires a validated GPU graph",
+                "backdrop encoding observation requires a validated GPU graph",
             ));
         };
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -4131,7 +4133,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C12 encoding observation lost its ready device",
+                "backdrop encoding observation lost its ready device",
             )?;
             (ready.device.clone(), ready.queue.clone())
         };
@@ -4140,18 +4142,18 @@ impl Backend {
         let (output_texture, output_view) =
             create_headless_texture(&device, output_extent, Format::Rgba8)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C12 caller-owned graph observation encoder"),
+            label: Some("Surgeist backdrop caller-owned graph observation encoder"),
         });
         let pending = prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
             )
             .await?;
-        let mut observed = c12_backdrop_encoding_observation(pending.summary_for_test());
-        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        let mut observed = backdrop_encoding_observation(pending.summary_for_test());
+        let prepared_submission = prepared.finish_graph_submission(pending)?;
         drop(output_view);
-        let payload = C08GraphSubmissionPayload::new(
+        let payload = GraphSubmissionPayload::new(
             encoder.finish(),
             prepared_submission,
             HeadlessPublication::new(output_texture),
@@ -4161,10 +4163,10 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C12 encoding observation lost its pass cache before commit",
+                "backdrop encoding observation lost its pass cache before commit",
             )?;
             transaction
-                .submit_c08_graph(
+                .submit_base_graph(
                     &device,
                     &queue,
                     &mut ready.pass_cache,
@@ -4179,16 +4181,16 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c12_failure_preservation_observation_for_test(
+    pub(crate) async fn backdrop_failure_preservation_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C12FailurePreservationObservationForTest> {
+    ) -> Result<BackdropFailurePreservationObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C12 failure observation requires immutable device capabilities",
+                "backdrop failure observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -4196,7 +4198,7 @@ impl Backend {
         let super::frame::FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "C12 failure observation requires a validated GPU graph",
+                "backdrop failure observation requires a validated GPU graph",
             ));
         };
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -4210,29 +4212,29 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C12 failure observation lost its publication device",
+                "backdrop failure observation lost its publication device",
             )?
             .device
             .clone();
-        let published_surface = c11_failure_publication_for_test(&device, identity)?;
+        let published_surface = spatial_filter_failure_publication_for_test(&device, identity)?;
         let publication_count_before = published_surface.headless_publication_count_for_test();
         let publication_state_before = published_surface.resource_state();
-        let (resources_before, cache_before) = self.c11_resource_and_cache_state(identity)?;
+        let (resources_before, cache_before) =
+            self.spatial_filter_resource_and_cache_state(identity)?;
         let submission_scope =
             super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
         let submission = submission_scope.observation_for_test();
-        let graph_scope =
-            super::gpu_transaction::ScopedC08GraphSubmissionObservationForTest::begin();
+        let graph_scope = super::gpu_transaction::ScopedGraphSubmissionObservationForTest::begin();
         let graph_submission = graph_scope.observation_for_test();
         let direct_scope =
             super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
         let direct_submission = direct_scope.observation_for_test();
         let encode_error = self
-            .run_c11_failed_encoding_attempt(
+            .run_spatial_filter_failed_encoding_attempt(
                 identity,
                 lowered,
                 policy,
-                C11InjectedFailureForTest::Encode,
+                SpatialFilterInjectedFailureForTest::Encode,
             )
             .await?;
         let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
@@ -4241,12 +4243,16 @@ impl Backend {
         drop(direct_scope);
         drop(graph_scope);
         drop(submission_scope);
-        let (resources_after, cache_after) = self.c11_resource_and_cache_state(identity)?;
-        Ok(C12FailurePreservationObservationForTest {
+        let (resources_after, cache_after) =
+            self.spatial_filter_resource_and_cache_state(identity)?;
+        Ok(BackdropFailurePreservationObservationForTest {
             encode_failure_is_reported: encode_error
                 .message()
                 .contains("injected color-filter shader failure"),
-            resources_are_unchanged: c11_resources_preserved(&resources_before, &resources_after),
+            resources_are_unchanged: spatial_filter_resources_preserved(
+                &resources_before,
+                &resources_after,
+            ),
             cache_is_unchanged: cache_after == cache_before,
             publication_is_unchanged: published_surface.headless_publication_count_for_test()
                 == publication_count_before
@@ -4256,17 +4262,17 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c11_failure_preservation_observation_for_test(
+    pub(crate) async fn spatial_filter_failure_preservation_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         filters: Vec<FilterList>,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C11FailurePreservationObservationForTest> {
+    ) -> Result<SpatialFilterFailurePreservationObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C11 failure observation requires immutable device capabilities",
+                "spatial-filter failure observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -4283,37 +4289,37 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C11 failure observation lost its publication device",
+                "spatial-filter failure observation lost its publication device",
             )?
             .device
             .clone();
-        let published_surface = c11_failure_publication_for_test(&device, identity)?;
+        let published_surface = spatial_filter_failure_publication_for_test(&device, identity)?;
         let publication_count_before = published_surface.headless_publication_count_for_test();
         let publication_state_before = published_surface.resource_state();
-        let (resources_before, cache_before) = self.c11_resource_and_cache_state(identity)?;
+        let (resources_before, cache_before) =
+            self.spatial_filter_resource_and_cache_state(identity)?;
         let submission_scope =
             super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
         let submission = submission_scope.observation_for_test();
-        let graph_scope =
-            super::gpu_transaction::ScopedC08GraphSubmissionObservationForTest::begin();
+        let graph_scope = super::gpu_transaction::ScopedGraphSubmissionObservationForTest::begin();
         let graph_submission = graph_scope.observation_for_test();
         let direct_scope =
             super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
         let direct_submission = direct_scope.observation_for_test();
         let encode_error = self
-            .run_c11_failed_encoding_attempt(
+            .run_spatial_filter_failed_encoding_attempt(
                 identity,
                 lowered.clone(),
                 policy,
-                C11InjectedFailureForTest::Encode,
+                SpatialFilterInjectedFailureForTest::Encode,
             )
             .await?;
         let scope_error = self
-            .run_c11_failed_encoding_attempt(
+            .run_spatial_filter_failed_encoding_attempt(
                 identity,
                 lowered,
                 policy,
-                C11InjectedFailureForTest::Scope,
+                SpatialFilterInjectedFailureForTest::Scope,
             )
             .await?;
         let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
@@ -4322,14 +4328,18 @@ impl Backend {
         drop(direct_scope);
         drop(graph_scope);
         drop(submission_scope);
-        let (resources_after, cache_after) = self.c11_resource_and_cache_state(identity)?;
-        Ok(C11FailurePreservationObservationForTest {
+        let (resources_after, cache_after) =
+            self.spatial_filter_resource_and_cache_state(identity)?;
+        Ok(SpatialFilterFailurePreservationObservationForTest {
             encode_failure_is_reported: encode_error
                 .message()
                 .contains("injected color-filter shader failure"),
             scope_failure_is_reported: scope_error.message()
                 == "checked internal Vello resource or command encoding failed",
-            resources_are_unchanged: c11_resources_preserved(&resources_before, &resources_after),
+            resources_are_unchanged: spatial_filter_resources_preserved(
+                &resources_before,
+                &resources_after,
+            ),
             cache_is_unchanged: cache_after == cache_before,
             publication_is_unchanged: published_surface.headless_publication_count_for_test()
                 == publication_count_before
@@ -4339,7 +4349,7 @@ impl Backend {
     }
 
     #[cfg(test)]
-    fn c11_resource_and_cache_state(
+    fn spatial_filter_resource_and_cache_state(
         &mut self,
         identity: DeviceSlotIdentity,
     ) -> Result<(
@@ -4350,7 +4360,7 @@ impl Backend {
             identity,
             RuntimeOperation::EffectRendering,
             BackendErrorCode::RenderFailed,
-            "C11 failure observation lost its ready state",
+            "spatial-filter failure observation lost its ready state",
         )?;
         Ok((
             ready.resources.observation_for_test(),
@@ -4359,12 +4369,12 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn run_c11_failed_encoding_attempt(
+    async fn run_spatial_filter_failed_encoding_attempt(
         &mut self,
         identity: DeviceSlotIdentity,
         lowered: LoweredGraphPlan,
         policy: EffectQualityPolicy,
-        failure: C11InjectedFailureForTest,
+        failure: SpatialFilterInjectedFailureForTest,
     ) -> Result<Error> {
         let transaction = self.begin_gpu_operation(
             identity,
@@ -4376,26 +4386,26 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C11 failure attempt lost its ready device",
+                "spatial-filter failure attempt lost its ready device",
             )?
             .device
             .clone();
-        let _encode_failure = matches!(failure, C11InjectedFailureForTest::Encode)
+        let _encode_failure = matches!(failure, SpatialFilterInjectedFailureForTest::Encode)
             .then(super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization);
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
-        if matches!(failure, C11InjectedFailureForTest::Scope) {
+        if matches!(failure, SpatialFilterInjectedFailureForTest::Scope) {
             prepared.fail_scope_resolution_for_test();
         }
         let extent = prepared.output_extent()?;
         let (output_texture, output_view) =
             create_headless_texture(&device, extent, Format::Rgba8)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C11 injected-failure graph encoder"),
+            label: Some("Surgeist spatial-filter injected-failure graph encoder"),
         });
         let result = prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, extent)?,
             )
             .await;
         let result = result.map_err(super::pass::normalize_color_filter_shader_failure_for_test);
@@ -4405,16 +4415,16 @@ impl Backend {
         drop(prepared);
         let scope_result = transaction.finish(RuntimeOperation::EffectRendering).await;
         match failure {
-            C11InjectedFailureForTest::Encode => {
+            SpatialFilterInjectedFailureForTest::Encode => {
                 scope_result?;
                 result.err().ok_or_else(|| {
                     Error::new(
                         BackendErrorCode::RenderFailed,
-                        "the injected C11 encoding failure unexpectedly succeeded",
+                        "the injected spatial-filter encoding failure unexpectedly succeeded",
                     )
                 })
             }
-            C11InjectedFailureForTest::Scope => {
+            SpatialFilterInjectedFailureForTest::Scope => {
                 let encoding_failed = result.is_err();
                 drop(result);
                 scope_result
@@ -4424,7 +4434,7 @@ impl Backend {
                     .ok_or_else(|| {
                         Error::new(
                             BackendErrorCode::RenderFailed,
-                            "the injected C11 scope failure unexpectedly succeeded",
+                            "the injected spatial-filter scope failure unexpectedly succeeded",
                         )
                     })
             }
@@ -4432,17 +4442,17 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c10_oversized_buffer_preservation_observation_for_test(
+    pub(crate) async fn color_filter_oversized_buffer_preservation_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         filters: Vec<FilterList>,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C10OversizedBufferPreservationObservationForTest> {
+    ) -> Result<ColorFilterOversizedBufferPreservationObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C10 limit observation requires immutable device capabilities",
+                "color-filter limit observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -4459,7 +4469,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C10 limit observation lost its ready device",
+                "color-filter limit observation lost its ready device",
             )?
             .device
             .clone();
@@ -4485,7 +4495,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C10 limit observation lost its preflight state",
+                "color-filter limit observation lost its preflight state",
             )?;
             (
                 ready.resources.observation_for_test(),
@@ -4499,12 +4509,13 @@ impl Backend {
             RuntimeOperation::EffectRendering,
         )?;
         let first_run_byte_len = 16_u64 + 3 * 32;
-        let rejection = match self.prepare_c10_graph_resources_with_operation_limits_for_test(
-            identity,
-            lowered,
-            policy,
-            ColorFilterOperationBufferLimits::for_test(first_run_byte_len - 1, u64::MAX),
-        ) {
+        let rejection = match self
+            .prepare_color_filter_graph_resources_with_operation_limits_for_test(
+                identity,
+                lowered,
+                policy,
+                ColorFilterOperationBufferLimits::for_test(first_run_byte_len - 1, u64::MAX),
+            ) {
             Ok(prepared) => {
                 drop(prepared);
                 None
@@ -4520,15 +4531,15 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C10 limit observation lost its post-rejection state",
+                "color-filter limit observation lost its post-rejection state",
             )?;
             (
                 ready.resources.observation_for_test(),
                 ready.pass_cache.counts_for_test(),
             )
         };
-        let returns_exact_limit_error = c10_limit_error_is_exact(rejection);
-        Ok(C10OversizedBufferPreservationObservationForTest {
+        let returns_exact_limit_error = color_filter_limit_error_is_exact(rejection);
+        Ok(ColorFilterOversizedBufferPreservationObservationForTest {
             returns_exact_limit_error,
             resources_are_unchanged: resources_after == resources_before,
             cache_is_unchanged: cache_after == cache_before,
@@ -4539,16 +4550,16 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c09_ordered_graph_encoding_observation_for_test(
+    pub(crate) async fn composition_ordered_graph_encoding_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C09OrderedGraphEncodingObservationForTest> {
+    ) -> Result<CompositionOrderedGraphEncodingObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C09 graph encoding observation requires immutable device capabilities",
+                "composition graph encoding observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
@@ -4556,7 +4567,7 @@ impl Backend {
         let super::frame::FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "C09 graph encoding observation requires a validated GPU graph",
+                "composition graph encoding observation requires a validated GPU graph",
             ));
         };
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -4575,7 +4586,7 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 graph encoding observation lost its ready device",
+                "composition graph encoding observation lost its ready device",
             )?;
             (ready.device.clone(), ready.queue.clone())
         };
@@ -4584,12 +4595,12 @@ impl Backend {
         let (output_texture, output_view) =
             create_headless_texture(&device, output_extent, Format::Rgba8)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C09 caller-owned graph observation encoder"),
+            label: Some("Surgeist composition caller-owned graph observation encoder"),
         });
         let pending = match prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
             )
             .await
         {
@@ -4600,14 +4611,14 @@ impl Backend {
                 transaction
                     .finish(RuntimeOperation::EffectRendering)
                     .await?;
-                return Ok(C09OrderedGraphEncodingObservationForTest::default());
+                return Ok(CompositionOrderedGraphEncodingObservationForTest::default());
             }
         };
         let summary = pending.summary_for_test();
-        let mut observed = c09_ordered_encoding_observation(summary);
-        let prepared_submission = prepared.finish_c08_submission(pending)?;
+        let mut observed = composition_ordered_encoding_observation(summary);
+        let prepared_submission = prepared.finish_graph_submission(pending)?;
         drop(output_view);
-        let payload = C08GraphSubmissionPayload::new(
+        let payload = GraphSubmissionPayload::new(
             encoder.finish(),
             prepared_submission,
             HeadlessPublication::new(output_texture),
@@ -4617,10 +4628,10 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C09 graph encoding observation lost its pass cache before commit",
+                "composition graph encoding observation lost its pass cache before commit",
             )?;
             transaction
-                .submit_c08_graph(
+                .submit_base_graph(
                     &device,
                     &queue,
                     &mut ready.pass_cache,
@@ -4635,21 +4646,21 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c08_multiple_vello_capture_encoding_observation_for_test(
+    pub(crate) async fn multiple_vello_capture_encoding_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         donor_commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-    ) -> Result<C08MultipleVelloCaptureEncodingObservationForTest> {
+    ) -> Result<MultipleVelloCaptureEncodingObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "multiple C08 capture coverage requires immutable device capabilities",
+                "multiple Vello capture coverage requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
-        let lowered = super::pass::c08_two_capture_spine_lowered_for_test(
+        let lowered = super::pass::two_capture_spine_lowered_for_test(
             commands,
             donor_commands,
             context,
@@ -4667,26 +4678,26 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "multiple C08 capture coverage lost its ready device",
+                "multiple Vello capture coverage lost its ready device",
             )?
             .device
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered.clone(), policy)?;
         let output_extent = prepared.output_extent()?;
-        let output_texture = c08_test_output_texture(
+        let output_texture = graph_test_output_texture(
             &device,
             output_extent,
             Format::Rgba8,
-            "Surgeist C08 multiple-capture output",
+            "Surgeist base graph multiple-capture output",
         );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 multiple-capture graph encoder"),
+            label: Some("Surgeist base graph multiple-capture graph encoder"),
         });
         let encoded = prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
             )
             .await?;
         let (summary, capture_resources) = encoded.into_summary_and_resources();
@@ -4706,13 +4717,13 @@ impl Backend {
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "multiple C08 capture commit lost its resource manager",
+                    "multiple Vello capture commit lost its resource manager",
                 )
             })?
             .internal_resource_manager_observation_for_test();
 
         let (aborted_lease_count, after_abort) = self
-            .c08_multiple_capture_abort_for_test(
+            .multiple_capture_abort_for_test(
                 identity,
                 lowered,
                 policy,
@@ -4722,7 +4733,7 @@ impl Backend {
             )
             .await?;
 
-        Ok(C08MultipleVelloCaptureEncodingObservationForTest {
+        Ok(MultipleVelloCaptureEncodingObservationForTest {
             exact_capture_count: summary.capture_count == 2
                 && summary.exposes_bounded_capture_handoff,
             one_graph_command_encoder: summary.captures_share_one_command_encoder,
@@ -4739,7 +4750,7 @@ impl Backend {
     }
 
     #[cfg(test)]
-    async fn c08_multiple_capture_abort_for_test(
+    async fn multiple_capture_abort_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         lowered: LoweredGraphPlan,
@@ -4755,12 +4766,12 @@ impl Backend {
         )?;
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 multiple-capture aggregate-abort encoder"),
+            label: Some("Surgeist base graph multiple-capture aggregate-abort encoder"),
         });
         let encoded = prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(output, Format::Rgba8, extent)?,
+                GraphExternalOutputView::try_new(output, Format::Rgba8, extent)?,
             )
             .await?;
         let (_, resources) = encoded.into_summary_and_resources();
@@ -4776,7 +4787,7 @@ impl Backend {
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "multiple C08 capture abort lost its resource manager",
+                    "multiple Vello capture abort lost its resource manager",
                 )
             })?
             .internal_resource_manager_observation_for_test();
@@ -4784,14 +4795,14 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c08_two_capture_failure_observation_for_test(
+    pub(crate) async fn two_capture_failure_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         donor_commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
-        failure: C08TwoCaptureFailureForTest,
-    ) -> Result<C08TwoCaptureFailureObservationForTest> {
+        failure: TwoCaptureFailureForTest,
+    ) -> Result<TwoCaptureFailureObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
@@ -4799,7 +4810,7 @@ impl Backend {
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
-        let lowered = super::pass::c08_two_capture_spine_lowered_for_test(
+        let lowered = super::pass::two_capture_spine_lowered_for_test(
             commands,
             donor_commands,
             context,
@@ -4831,11 +4842,11 @@ impl Backend {
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         let output_extent = prepared.output_extent()?;
-        let output_texture = c08_test_output_texture(
+        let output_texture = graph_test_output_texture(
             &device,
             output_extent,
             Format::Rgba8,
-            "Surgeist C08 two-capture failure output",
+            "Surgeist base graph two-capture failure output",
         );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let (
@@ -4843,7 +4854,7 @@ impl Backend {
             mut failure_is_reported,
             produces_no_pending_commit,
             retry_is_rejected,
-        ) = observe_c08_two_capture_encoding_failure(
+        ) = observe_two_capture_encoding_failure(
             &mut prepared,
             &device,
             &output_view,
@@ -4853,7 +4864,7 @@ impl Backend {
         .await?;
         drop(prepared);
         let scope_result = transaction.finish(RuntimeOperation::EffectRendering).await;
-        if matches!(failure, C08TwoCaptureFailureForTest::SharedScopeResolution) {
+        if matches!(failure, TwoCaptureFailureForTest::SharedScopeResolution) {
             failure_is_reported &= scope_result
                 .err()
                 .map(super::pass::normalize_scope_resolution_failure_for_test)
@@ -4876,7 +4887,7 @@ impl Backend {
             })?
             .internal_resource_manager_observation_for_test();
 
-        Ok(C08TwoCaptureFailureObservationForTest {
+        Ok(TwoCaptureFailureObservationForTest {
             acquired_capture_lease_count,
             failure_is_reported,
             produces_no_pending_commit,
@@ -4891,22 +4902,22 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c08_vello_capture_raster_contract_observation_for_test(
+    pub(crate) async fn vello_capture_raster_contract_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
         requested_antialiasing: Antialiasing,
-    ) -> Result<C08VelloCaptureRasterContractObservationForTest> {
+    ) -> Result<VelloCaptureRasterContractObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C08 capture raster coverage requires immutable device capabilities",
+                "Vello capture raster coverage requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+        let graph = super::frame::forced_base_graph_for_test(commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
@@ -4923,14 +4934,14 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 capture raster coverage lost its ready device",
+                "Vello capture raster coverage lost its ready device",
             )?
             .device
             .clone();
         let mut prepared = self.prepare_graph_resources(identity, lowered, policy)?;
         let output_extent = prepared.output_extent()?;
         let output_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("Surgeist C08 raster-contract output"),
+            label: Some("Surgeist base graph raster-contract output"),
             size: wgpu::Extent3d {
                 width: output_extent.width(),
                 height: output_extent.height(),
@@ -4945,22 +4956,22 @@ impl Backend {
         });
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 raster-contract graph encoder"),
+            label: Some("Surgeist base graph raster-contract graph encoder"),
         });
         let encoded = prepared
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut encoder,
-                C08ExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, Format::Rgba8, output_extent)?,
             )
             .await?;
         let (summary, capture_resources) = encoded.into_summary_and_resources();
         let capture = summary.capture_observations.first().ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C08 capture raster coverage produced no encoded capture proof",
+                "Vello capture raster coverage produced no encoded capture proof",
             )
         })?;
-        let observed = C08VelloCaptureRasterContractObservationForTest {
+        let observed = VelloCaptureRasterContractObservationForTest {
             lowers_with_exact_initial_transform: capture.lowers_with_exact_initial_transform,
             uses_transparent_base: capture.uses_transparent_base,
             uses_requested_antialiasing: capture.antialiasing == requested_antialiasing,
@@ -4982,22 +4993,22 @@ impl Backend {
     }
 
     #[cfg(test)]
-    pub(crate) async fn c08_capture_failure_observation_for_test(
+    pub(crate) async fn vello_capture_failure_observation_for_test(
         &mut self,
         identity: DeviceSlotIdentity,
         commands: super::command::RenderCommands,
         context: super::frame::FrameContext,
         output_format: Format,
-    ) -> Result<C08CaptureFailureObservationForTest> {
+    ) -> Result<VelloCaptureFailureObservationForTest> {
         let capabilities = self.device_capabilities(identity).ok_or_else(|| {
             Error::new(
                 BackendErrorCode::RenderFailed,
-                "C08 capture-failure observation requires immutable device capabilities",
+                "Vello capture-failure observation requires immutable device capabilities",
             )
         })?;
         let policy = EffectQualityPolicy::AllowReducedPrecision;
         let working_format = capabilities.resolve_effect_working_format(policy)?;
-        let graph = super::frame::forced_c08_graph_for_test(commands, context)?;
+        let graph = super::frame::forced_base_graph_for_test(commands, context)?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             working_format,
@@ -5014,32 +5025,32 @@ impl Backend {
                 identity,
                 RuntimeOperation::EffectRendering,
                 BackendErrorCode::RenderFailed,
-                "C08 capture-failure observation lost its ready device",
+                "Vello capture-failure observation lost its ready device",
             )?
             .device
             .clone();
 
         let mut first = self.prepare_graph_resources(identity, lowered.clone(), policy)?;
         let output_extent = first.output_extent()?;
-        let output_texture = c08_test_output_texture(
+        let output_texture = graph_test_output_texture(
             &device,
             output_extent,
             output_format,
-            "Surgeist C08 capture-failure external output observation",
+            "Surgeist Vello capture-failure external output observation",
         );
         let output_view = output_texture.create_view(&wgpu::TextureViewDescriptor::default());
         let mut first_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 failed-capture first encoder observation"),
+            label: Some("Surgeist base graph failed-capture first encoder observation"),
         });
         let failed_pass = first
-            .c08_execution_facts()
+            .base_execution_facts()
             .and_then(|facts| facts.captures().first())
             .map(super::pass::ExecutableVelloCaptureFacts::pass);
         first.fail_capture_encoding_for_test();
         let capture_failure_is_reported = first
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut first_encoder,
-                C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, output_format, output_extent)?,
             )
             .await
             .is_err_and(|error| error.message() == "prepared runtime resource binding is missing")
@@ -5051,25 +5062,25 @@ impl Backend {
 
         let mut retried = self.prepare_graph_resources(identity, lowered, policy)?;
         let mut failed_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 failed-capture retry source encoder observation"),
+            label: Some("Surgeist base graph failed-capture retry source encoder observation"),
         });
         retried.fail_capture_encoding_for_test();
         let initial_failure = retried
-            .encode_c08_custom_spine(
+            .encode_custom_spine(
                 &mut failed_encoder,
-                C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
+                GraphExternalOutputView::try_new(&output_view, output_format, output_extent)?,
             )
             .await
             .is_err_and(|error| error.message() == "prepared runtime resource binding is missing");
         drop(failed_encoder.finish());
         let mut retry_encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Surgeist C08 forbidden new retry encoder observation"),
+            label: Some("Surgeist base graph forbidden new retry encoder observation"),
         });
         let retry_on_new_encoder_is_rejected = initial_failure
             && retried
-                .encode_c08_custom_spine(
+                .encode_custom_spine(
                     &mut retry_encoder,
-                    C08ExternalOutputView::try_new(&output_view, output_format, output_extent)?,
+                    GraphExternalOutputView::try_new(&output_view, output_format, output_extent)?,
                 )
                 .await
                 .is_err();
@@ -5079,7 +5090,7 @@ impl Backend {
             .finish(RuntimeOperation::EffectRendering)
             .await?;
 
-        Ok(C08CaptureFailureObservationForTest {
+        Ok(VelloCaptureFailureObservationForTest {
             capture_failure_is_reported,
             complete_pass_is_rejected,
             retry_on_new_encoder_is_rejected,
@@ -5584,17 +5595,17 @@ pub(crate) async fn render_exact_headless_graph_surface(
         label: Some("Surgeist exact headless graph encoder"),
     });
     let pending_encoding = prepared
-        .encode_c08_custom_spine(
+        .encode_custom_spine(
             &mut encoder,
-            C08ExternalOutputView::try_new(&draft_view, surface.options.format, physical_size)?,
+            GraphExternalOutputView::try_new(&draft_view, surface.options.format, physical_size)?,
         )
         .await;
     #[cfg(test)]
     let pending_encoding =
         pending_encoding.map_err(super::pass::normalize_color_filter_shader_failure_for_test);
     let pending_encoding = pending_encoding?;
-    let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
-    let payload = C08GraphSubmissionPayload::new(
+    let prepared_submission = prepared.finish_graph_submission(pending_encoding)?;
+    let payload = GraphSubmissionPayload::new(
         encoder.finish(),
         prepared_submission,
         HeadlessPublication::new(draft_texture),
@@ -5607,7 +5618,7 @@ pub(crate) async fn render_exact_headless_graph_surface(
             "the exact graph executor lost its ready device before submission",
         )?;
         transaction
-            .submit_c08_graph(
+            .submit_base_graph(
                 &device,
                 &queue,
                 &mut ready.pass_cache,
@@ -5621,14 +5632,14 @@ pub(crate) async fn render_exact_headless_graph_surface(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     )))]
-    let C08GraphOutputCommit::Headless(publication) = output;
+    let GraphOutputCommit::Headless(publication) = output;
     #[cfg(any(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
     ))]
     let publication = match output {
-        C08GraphOutputCommit::Headless(publication) => publication,
-        C08GraphOutputCommit::Presented => {
+        GraphOutputCommit::Headless(publication) => publication,
+        GraphOutputCommit::Presented => {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
                 "the headless exact graph transaction returned a presented host effect",
@@ -5748,19 +5759,19 @@ pub(crate) async fn render_exact_presented_graph_surface(
         label: Some("Surgeist exact presented graph encoder"),
     });
     let pending_encoding = prepared
-        .encode_c08_custom_spine(
+        .encode_custom_spine(
             &mut encoder,
-            C08ExternalOutputView::try_new(&output_view, output_format, physical_size)?,
+            GraphExternalOutputView::try_new(&output_view, output_format, physical_size)?,
         )
         .await;
     #[cfg(test)]
     let pending_encoding =
         pending_encoding.map_err(super::pass::normalize_color_filter_shader_failure_for_test);
     let pending_encoding = pending_encoding?;
-    let prepared_submission = prepared.finish_c08_submission(pending_encoding)?;
+    let prepared_submission = prepared.finish_graph_submission(pending_encoding)?;
     drop(output_view);
     let payload =
-        C08GraphSubmissionPayload::presented(encoder.finish(), prepared_submission, acquired);
+        GraphSubmissionPayload::presented(encoder.finish(), prepared_submission, acquired);
     let clean = {
         let ready = backend.ready_state_mut(
             device_identity,
@@ -5769,7 +5780,7 @@ pub(crate) async fn render_exact_presented_graph_surface(
             "the presented exact graph lost its ready device before submission",
         )?;
         transaction
-            .submit_c08_graph(
+            .submit_base_graph(
                 &device,
                 &queue,
                 &mut ready.pass_cache,
@@ -5779,7 +5790,7 @@ pub(crate) async fn render_exact_presented_graph_surface(
             .await?
     };
     let (output, frame_cleanup, graph_activity) = clean.into_parts();
-    if !matches!(output, C08GraphOutputCommit::Presented) {
+    if !matches!(output, GraphOutputCommit::Presented) {
         return Err(Error::new(
             BackendErrorCode::PresentFailed,
             "the presented exact graph transaction returned a headless publication",

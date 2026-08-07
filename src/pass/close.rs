@@ -421,13 +421,13 @@ fn executable_filter_step_order(plan: &LoweredGraphPlan) -> Option<Vec<Executabl
     Some(steps)
 }
 #[must_use]
-pub(crate) struct C08ExecutionFacts {
+pub(crate) struct BaseExecutionFacts {
     pub(super) working_format: WorkingFormat,
     pub(super) output_format: Format,
     pub(super) captures: Vec<ExecutableVelloCaptureFacts>,
 }
 
-impl C08ExecutionFacts {
+impl BaseExecutionFacts {
     #[must_use]
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         self.working_format
@@ -487,12 +487,12 @@ impl C08ExecutionFacts {
 }
 
 #[must_use]
-pub(crate) struct C08PreparableGraph {
+pub(crate) struct BasePreparableGraph {
     pub(super) lowered: LoweredGraphPlan,
-    pub(super) execution: C08ExecutionFacts,
+    pub(super) execution: BaseExecutionFacts,
 }
 
-impl C08PreparableGraph {
+impl BasePreparableGraph {
     pub(super) fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
@@ -509,7 +509,7 @@ impl C08PreparableGraph {
         {
             return Err(Box::new(closed));
         }
-        let execution = C08ExecutionFacts {
+        let execution = BaseExecutionFacts {
             working_format: closed.facts.working_format,
             output_format: closed.facts.output_format,
             captures: closed.facts.captures.clone(),
@@ -523,7 +523,7 @@ impl C08PreparableGraph {
         })
     }
 
-    pub(super) fn into_parts(self) -> (LoweredGraphPlan, C08ExecutionFacts) {
+    pub(super) fn into_parts(self) -> (LoweredGraphPlan, BaseExecutionFacts) {
         (self.lowered, self.execution)
     }
 
@@ -541,16 +541,16 @@ impl C08PreparableGraph {
             .iter()
             .find(|resource| resource.id == self.lowered.root_working_image)
             .map(|resource| resource.spatial.device_extent)
-            .ok_or_else(|| preparation_error("the C08 root output resource is missing"))
+            .ok_or_else(|| preparation_error("the base-graph root output resource is missing"))
     }
 }
 
 #[must_use]
-pub(crate) struct C09PreparableGraph {
+pub(crate) struct CompositionPreparableGraph {
     closed: ClosedExecutableGraph,
 }
 
-impl C09PreparableGraph {
+impl CompositionPreparableGraph {
     pub(super) fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
@@ -578,11 +578,11 @@ impl C09PreparableGraph {
 }
 
 #[must_use]
-pub(crate) struct C10PreparableGraph {
+pub(crate) struct ColorFilterPreparableGraph {
     pub(super) closed: ClosedExecutableGraph,
 }
 
-impl C10PreparableGraph {
+impl ColorFilterPreparableGraph {
     pub(super) fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
@@ -606,11 +606,11 @@ impl C10PreparableGraph {
 }
 
 #[must_use]
-pub(crate) struct C11PreparableGraph {
+pub(crate) struct SpatialFilterPreparableGraph {
     pub(super) closed: ClosedExecutableGraph,
 }
 
-impl C11PreparableGraph {
+impl SpatialFilterPreparableGraph {
     fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
@@ -634,11 +634,11 @@ impl C11PreparableGraph {
 }
 
 #[must_use]
-pub(crate) struct C12PreparableGraph {
+pub(crate) struct BackdropPreparableGraph {
     pub(super) closed: ClosedExecutableGraph,
 }
 
-impl C12PreparableGraph {
+impl BackdropPreparableGraph {
     fn try_from_closed(
         closed: ClosedExecutableGraph,
     ) -> std::result::Result<Self, Box<ClosedExecutableGraph>> {
@@ -678,7 +678,7 @@ impl C12PreparableGraph {
             .iter()
             .find(|resource| resource.id == self.closed.lowered.root_working_image)
             .map(|resource| resource.spatial.device_extent)
-            .ok_or_else(|| preparation_error("the C12 root output resource is missing"))
+            .ok_or_else(|| preparation_error("the backdrop root output resource is missing"))
     }
 
     pub(super) fn into_closed(self) -> ClosedExecutableGraph {
@@ -947,7 +947,7 @@ fn closed_graph_root<'plan>(
         return None;
     }
     let root = resources.get(&plan.root_working_image).copied()?;
-    c08_resource_has_fixed_facts(
+    base_graph_resource_has_fixed_facts(
         root,
         RuntimeResourceRole::RootWorkingImage,
         RuntimeResourceFormat::Working(plan.working_format),
@@ -1098,7 +1098,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             return None;
         };
         let request = self.resources.get(&resource).copied()?;
-        if !c08_resource_has_fixed_facts(
+        if !base_graph_resource_has_fixed_facts(
             request,
             RuntimeResourceRole::IsolationWorkingImage,
             RuntimeResourceFormat::Working(self.plan.working_format),
@@ -1199,7 +1199,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             return None;
         }
         let resource = self.resources.get(&capture_target).copied()?;
-        c08_resource_has_fixed_facts(
+        base_graph_resource_has_fixed_facts(
             resource,
             RuntimeResourceRole::CaptureWorkingImage,
             RuntimeResourceFormat::VelloCaptureRgba8Unorm,
@@ -1236,7 +1236,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             return None;
         };
         let resource = self.resources.get(&canonical_target).copied()?;
-        c08_resource_has_fixed_facts(
+        base_graph_resource_has_fixed_facts(
             resource,
             RuntimeResourceRole::FilterIntermediate,
             RuntimeResourceFormat::Working(self.plan.working_format),
@@ -1469,7 +1469,7 @@ impl<'plan> ClosedGraphTraversal<'plan> {
             return None;
         };
         let resource = self.resources.get(&copied).copied()?;
-        if !c08_resource_has_fixed_facts(
+        if !base_graph_resource_has_fixed_facts(
             resource,
             RuntimeResourceRole::BackdropCopy,
             RuntimeResourceFormat::Working(self.plan.working_format),
@@ -1807,7 +1807,7 @@ fn validate_closed_clip_coverage_capture(
         return None;
     }
     let resource = resources.get(&target).copied()?;
-    if !c08_resource_has_fixed_facts(
+    if !base_graph_resource_has_fixed_facts(
         resource,
         RuntimeResourceRole::ClipCoverage,
         RuntimeResourceFormat::ClipCoverageRgba8Unorm,
@@ -1917,7 +1917,7 @@ fn validate_closed_color_filter(
         return None;
     }
     let result_resource = resources.get(&result).copied()?;
-    if !c08_resource_has_fixed_facts(
+    if !base_graph_resource_has_fixed_facts(
         result_resource,
         RuntimeResourceRole::FilterIntermediate,
         RuntimeResourceFormat::Working(working_format),
@@ -2300,7 +2300,7 @@ fn closed_filter_result<'plan>(
         return None;
     };
     let resource = resources.get(&result).copied()?;
-    c08_resource_has_fixed_facts(
+    base_graph_resource_has_fixed_facts(
         resource,
         role,
         RuntimeResourceFormat::Working(working_format),
@@ -2531,7 +2531,7 @@ fn validate_closed_composite_base(
         return None;
     };
     let result_resource = resources.get(&result).copied()?;
-    c08_resource_has_fixed_facts(
+    base_graph_resource_has_fixed_facts(
         result_resource,
         RuntimeResourceRole::CompositeResult,
         RuntimeResourceFormat::Working(working_format),
@@ -2687,7 +2687,7 @@ fn validate_closed_alpha_mask(
         .then_some(())
 }
 
-pub(super) fn c08_resource_has_fixed_facts(
+pub(super) fn base_graph_resource_has_fixed_facts(
     resource: &RuntimeResourceRequest,
     role: RuntimeResourceRole,
     format: RuntimeResourceFormat,
@@ -2800,11 +2800,11 @@ impl GraphPreparationIneligibility {
 }
 
 pub(super) enum PrePreparationGraphClassification {
-    ExactC08(C08PreparableGraph),
-    ExactC09(ClosedExecutableGraph),
-    ExactC10(C10PreparableGraph),
-    ExactC11(C11PreparableGraph),
-    ExactC12(C12PreparableGraph),
+    ExactBase(BasePreparableGraph),
+    ExactComposition(ClosedExecutableGraph),
+    ExactColorFilter(ColorFilterPreparableGraph),
+    ExactSpatialFilter(SpatialFilterPreparableGraph),
+    ExactBackdrop(BackdropPreparableGraph),
     FuturePasses,
     Ineligible(GraphPreparationIneligibility),
 }
@@ -2834,16 +2834,16 @@ impl PrePreparationGraphClassification {
                 };
             }
         };
-        match C08PreparableGraph::try_from_closed(closed) {
-            Ok(preparable) => Self::ExactC08(preparable),
-            Err(closed) => match C12PreparableGraph::try_from_closed(*closed) {
-                Ok(preparable) => Self::ExactC12(preparable),
-                Err(closed) => match C11PreparableGraph::try_from_closed(*closed) {
-                    Ok(preparable) => Self::ExactC11(preparable),
-                    Err(closed) => match C10PreparableGraph::try_from_closed(*closed) {
-                        Ok(preparable) => Self::ExactC10(preparable),
-                        Err(closed) => match C09PreparableGraph::try_from_closed(*closed) {
-                            Ok(preparable) => Self::ExactC09(preparable.into_closed()),
+        match BasePreparableGraph::try_from_closed(closed) {
+            Ok(preparable) => Self::ExactBase(preparable),
+            Err(closed) => match BackdropPreparableGraph::try_from_closed(*closed) {
+                Ok(preparable) => Self::ExactBackdrop(preparable),
+                Err(closed) => match SpatialFilterPreparableGraph::try_from_closed(*closed) {
+                    Ok(preparable) => Self::ExactSpatialFilter(preparable),
+                    Err(closed) => match ColorFilterPreparableGraph::try_from_closed(*closed) {
+                        Ok(preparable) => Self::ExactColorFilter(preparable),
+                        Err(closed) => match CompositionPreparableGraph::try_from_closed(*closed) {
+                            Ok(preparable) => Self::ExactComposition(preparable.into_closed()),
                             Err(_) => Self::Ineligible(
                                 GraphPreparationIneligibility::OutsideClosedExecutableGraph,
                             ),

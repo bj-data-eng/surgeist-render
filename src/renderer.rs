@@ -84,11 +84,11 @@ pub(crate) struct PreexecutionFrameGateObservationForTest {
 pub(crate) struct RendererDispatchObservationForTest {
     pub(crate) boundary_invocations: usize,
     pub(crate) direct_vello_routes: usize,
-    pub(crate) exact_c08_graph_routes: usize,
-    pub(crate) exact_c09_graph_routes: usize,
+    pub(crate) exact_base_graph_routes: usize,
+    pub(crate) exact_composition_graph_routes: usize,
     pub(crate) exact_color_filter_fixture_routes: usize,
     pub(crate) exact_spatial_filter_fixture_routes: usize,
-    pub(crate) exact_c12_graph_routes: usize,
+    pub(crate) exact_backdrop_graph_routes: usize,
     pub(crate) exact_bounded_backdrop_fixture_routes: usize,
     pub(crate) unsupported_graph_rejections: usize,
 }
@@ -108,16 +108,16 @@ pub(crate) struct ResourcePreparationObservationForTest {
 
 #[cfg(test)]
 #[derive(Debug)]
-pub(crate) struct C08ForcedGraphRenderResultForTest {
+pub(crate) struct ForcedGraphRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
-    pub(crate) captures: Vec<C08ForcedGraphCaptureForTest>,
+    pub(crate) captures: Vec<ForcedGraphCaptureForTest>,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct C08ForcedGraphCaptureForTest {
+pub(crate) struct ForcedGraphCaptureForTest {
     pub(crate) antialiasing: Antialiasing,
     pub(crate) capture_transform: Transform,
     pub(crate) parent_to_surface: Transform,
@@ -128,8 +128,8 @@ pub(crate) struct C08ForcedGraphCaptureForTest {
 }
 
 #[cfg(test)]
-impl From<super::frame::ForcedC08GraphCaptureObservationForTest> for C08ForcedGraphCaptureForTest {
-    fn from(capture: super::frame::ForcedC08GraphCaptureObservationForTest) -> Self {
+impl From<super::frame::ForcedGraphCaptureObservationForTest> for ForcedGraphCaptureForTest {
+    fn from(capture: super::frame::ForcedGraphCaptureObservationForTest) -> Self {
         Self {
             antialiasing: capture.antialiasing,
             capture_transform: capture.capture_transform,
@@ -143,12 +143,12 @@ impl From<super::frame::ForcedC08GraphCaptureObservationForTest> for C08ForcedGr
 }
 
 #[cfg(test)]
-struct ForcedC08PreparationForTest {
+struct ForcedGraphPreparationForTest {
     device_identity: DeviceSlotIdentity,
     normalized: RenderCommands,
-    preparable: super::pass::C08PreparableGraph,
+    preparable: super::pass::BasePreparableGraph,
     output_extent: PhysicalSize,
-    captures: Vec<C08ForcedGraphCaptureForTest>,
+    captures: Vec<ForcedGraphCaptureForTest>,
 }
 
 #[cfg(test)]
@@ -271,8 +271,8 @@ pub(crate) struct SpatialFilterRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
-    pub(crate) source_spatial: super::pass::C10ColorSpatialObservationForTest,
-    pub(crate) result_spatial: super::pass::C10ColorSpatialObservationForTest,
+    pub(crate) source_spatial: super::pass::ColorFilterSpatialObservationForTest,
+    pub(crate) result_spatial: super::pass::ColorFilterSpatialObservationForTest,
 }
 
 #[cfg(test)]
@@ -281,8 +281,8 @@ pub(crate) struct BoundedBackdropRenderResultForTest {
     pub(crate) stats: Stats,
     pub(crate) working_format: WorkingFormat,
     pub(crate) output_extent: PhysicalSize,
-    pub(crate) parent_spatial: super::pass::C10ColorSpatialObservationForTest,
-    pub(crate) capture_spatial: super::pass::C10ColorSpatialObservationForTest,
+    pub(crate) parent_spatial: super::pass::ColorFilterSpatialObservationForTest,
+    pub(crate) capture_spatial: super::pass::ColorFilterSpatialObservationForTest,
 }
 
 #[cfg(test)]
@@ -293,7 +293,7 @@ struct ColorFilterFixturePreparationForTest {
     normalized: RenderCommands,
     graph: ExactSurfaceGraph,
     output_extent: PhysicalSize,
-    source_spatial: super::pass::C10ColorSpatialObservationForTest,
+    source_spatial: super::pass::ColorFilterSpatialObservationForTest,
 }
 
 #[cfg(test)]
@@ -304,8 +304,8 @@ struct SpatialFilterFixturePreparationForTest {
     normalized: RenderCommands,
     graph: ExactSurfaceGraph,
     output_extent: PhysicalSize,
-    source_spatial: super::pass::C10ColorSpatialObservationForTest,
-    result_spatial: super::pass::C10ColorSpatialObservationForTest,
+    source_spatial: super::pass::ColorFilterSpatialObservationForTest,
+    result_spatial: super::pass::ColorFilterSpatialObservationForTest,
 }
 
 #[cfg(test)]
@@ -316,8 +316,8 @@ struct BoundedBackdropFixturePreparationForTest {
     normalized: RenderCommands,
     graph: ExactSurfaceGraph,
     output_extent: PhysicalSize,
-    parent_spatial: super::pass::C10ColorSpatialObservationForTest,
-    capture_spatial: super::pass::C10ColorSpatialObservationForTest,
+    parent_spatial: super::pass::ColorFilterSpatialObservationForTest,
+    capture_spatial: super::pass::ColorFilterSpatialObservationForTest,
 }
 
 struct RenderPublication {
@@ -896,40 +896,40 @@ impl Renderer {
                 working_format,
                 capabilities,
             )? {
-                ExecutableGraphDispatchEligibility::ExactC08(preparable) => {
+                ExecutableGraphDispatchEligibility::ExactBase(preparable) => {
                     #[cfg(test)]
                     {
-                        self.dispatch_observation.exact_c08_graph_routes = self
+                        self.dispatch_observation.exact_base_graph_routes = self
                             .dispatch_observation
-                            .exact_c08_graph_routes
+                            .exact_base_graph_routes
                             .saturating_add(1);
                     }
                     Ok(RendererFrameDispatch::ExactGraph(Box::new(
-                        ExactSurfaceGraph::C08(preparable),
+                        ExactSurfaceGraph::Base(preparable),
                     )))
                 }
-                ExecutableGraphDispatchEligibility::ExactC09(preparable) => {
+                ExecutableGraphDispatchEligibility::ExactComposition(preparable) => {
                     #[cfg(test)]
                     {
-                        self.dispatch_observation.exact_c09_graph_routes = self
+                        self.dispatch_observation.exact_composition_graph_routes = self
                             .dispatch_observation
-                            .exact_c09_graph_routes
+                            .exact_composition_graph_routes
                             .saturating_add(1);
                     }
                     Ok(RendererFrameDispatch::ExactGraph(Box::new(
-                        ExactSurfaceGraph::C09(preparable),
+                        ExactSurfaceGraph::Composition(preparable),
                     )))
                 }
-                ExecutableGraphDispatchEligibility::ExactC12(preparable) => {
+                ExecutableGraphDispatchEligibility::ExactBackdrop(preparable) => {
                     #[cfg(test)]
                     {
-                        self.dispatch_observation.exact_c12_graph_routes = self
+                        self.dispatch_observation.exact_backdrop_graph_routes = self
                             .dispatch_observation
-                            .exact_c12_graph_routes
+                            .exact_backdrop_graph_routes
                             .saturating_add(1);
                     }
                     Ok(RendererFrameDispatch::ExactGraph(Box::new(
-                        ExactSurfaceGraph::C12(preparable),
+                        ExactSurfaceGraph::Backdrop(preparable),
                     )))
                 }
                 ExecutableGraphDispatchEligibility::FuturePasses => {
@@ -962,7 +962,7 @@ impl Renderer {
             .dispatch_observation
             .boundary_invocations
             .saturating_add(1);
-        let preparable = super::pass::c10_preparable_graph_for_test(
+        let preparable = super::pass::color_filter_preparable_graph_for_test(
             graph,
             output_format,
             working_format,
@@ -973,7 +973,7 @@ impl Renderer {
             .exact_color_filter_fixture_routes
             .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
-            ExactSurfaceGraph::C10(preparable),
+            ExactSurfaceGraph::ColorFilter(preparable),
         )))
     }
 
@@ -989,7 +989,7 @@ impl Renderer {
             .dispatch_observation
             .boundary_invocations
             .saturating_add(1);
-        let preparable = super::pass::c11_preparable_graph_from_graph_for_test(
+        let preparable = super::pass::spatial_filter_preparable_graph_from_graph_for_test(
             graph,
             output_format,
             working_format,
@@ -1001,7 +1001,7 @@ impl Renderer {
             .exact_spatial_filter_fixture_routes
             .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
-            ExactSurfaceGraph::C11(preparable),
+            ExactSurfaceGraph::SpatialFilter(preparable),
         )))
     }
 
@@ -1017,7 +1017,7 @@ impl Renderer {
             .dispatch_observation
             .boundary_invocations
             .saturating_add(1);
-        let preparable = super::pass::c12_preparable_graph_from_graph_for_test(
+        let preparable = super::pass::backdrop_preparable_graph_from_graph_for_test(
             graph,
             output_format,
             working_format,
@@ -1029,7 +1029,7 @@ impl Renderer {
             .exact_bounded_backdrop_fixture_routes
             .saturating_add(1);
         Ok(RendererFrameDispatch::ExactGraph(Box::new(
-            ExactSurfaceGraph::C12(preparable),
+            ExactSurfaceGraph::Backdrop(preparable),
         )))
     }
 
@@ -1287,19 +1287,19 @@ impl Renderer {
     /// Test-only entry for forcing ordinary commands through the exact
     /// production graph executor without adding a public route or option.
     #[cfg(test)]
-    pub(crate) async fn render_forced_c08_graph_for_test(
+    pub(crate) async fn render_forced_base_graph_for_test(
         &mut self,
         surface: &mut Surface,
         scene: &Scene,
         parameters: Parameters,
         working_format: WorkingFormat,
-    ) -> Result<C08ForcedGraphRenderResultForTest> {
-        self.render_forced_c08_graph_with_capture_mapping_for_test(
+    ) -> Result<ForcedGraphRenderResultForTest> {
+        self.render_forced_base_graph_with_capture_mapping_for_test(
             surface,
             scene,
             parameters,
             working_format,
-            super::frame::ForcedC08CaptureMappingForTest::identity(),
+            super::frame::ForcedVelloCaptureMappingForTest::identity(),
         )
         .await
     }
@@ -1307,23 +1307,23 @@ impl Renderer {
     /// Test-only entry that keeps capture and parent mappings distinct while
     /// executing the same production graph path.
     #[cfg(test)]
-    pub(crate) async fn render_forced_c08_graph_with_capture_mapping_for_test(
+    pub(crate) async fn render_forced_base_graph_with_capture_mapping_for_test(
         &mut self,
         surface: &mut Surface,
         scene: &Scene,
         parameters: Parameters,
         working_format: WorkingFormat,
-        capture_mapping: super::frame::ForcedC08CaptureMappingForTest,
-    ) -> Result<C08ForcedGraphRenderResultForTest> {
+        capture_mapping: super::frame::ForcedVelloCaptureMappingForTest,
+    ) -> Result<ForcedGraphRenderResultForTest> {
         let frame_start = Instant::now();
         let encode_start = Instant::now();
-        let ForcedC08PreparationForTest {
+        let ForcedGraphPreparationForTest {
             device_identity,
             normalized,
             preparable,
             output_extent,
             captures,
-        } = self.prepare_forced_c08_graph_for_test(
+        } = self.prepare_forced_base_graph_for_test(
             surface,
             scene,
             parameters,
@@ -1333,12 +1333,12 @@ impl Renderer {
         self.configure_presented_surface_if_needed(surface, RuntimeOperation::SurfaceRendering)
             .await?;
         let (stats, uploaded_images) =
-            self.forced_c08_stats_for_test(&normalized, parameters, encode_start);
+            self.forced_graph_stats_for_test(&normalized, parameters, encode_start);
         let frame = {
             let backend = self
                 .backend
                 .as_mut()
-                .expect("forced C08 preflight confirmed the renderer backend is available");
+                .expect("forced base graph preflight confirmed the renderer backend is available");
             #[cfg(any(
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
@@ -1348,14 +1348,14 @@ impl Renderer {
                     render_exact_presented_graph_surface(
                         backend,
                         surface,
-                        ExactSurfaceGraph::C08(preparable),
+                        ExactSurfaceGraph::Base(preparable),
                     )
                     .await
                 } else {
                     render_exact_headless_graph_surface(
                         backend,
                         surface,
-                        ExactSurfaceGraph::C08(preparable),
+                        ExactSurfaceGraph::Base(preparable),
                     )
                     .await
                 }
@@ -1368,7 +1368,7 @@ impl Renderer {
                 render_exact_headless_graph_surface(
                     backend,
                     surface,
-                    ExactSurfaceGraph::C08(preparable),
+                    ExactSurfaceGraph::Base(preparable),
                 )
                 .await
             }
@@ -1401,7 +1401,7 @@ impl Renderer {
             },
             frame_start,
         )?;
-        Ok(C08ForcedGraphRenderResultForTest {
+        Ok(ForcedGraphRenderResultForTest {
             stats,
             working_format,
             output_extent,
@@ -1410,7 +1410,7 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn forced_c08_stats_for_test(
+    fn forced_graph_stats_for_test(
         &self,
         normalized: &RenderCommands,
         parameters: Parameters,
@@ -1431,15 +1431,15 @@ impl Renderer {
     }
 
     #[cfg(test)]
-    fn prepare_forced_c08_graph_for_test(
+    fn prepare_forced_base_graph_for_test(
         &mut self,
         surface: &Surface,
         scene: &Scene,
         parameters: Parameters,
         working_format: WorkingFormat,
-        capture_mapping: super::frame::ForcedC08CaptureMappingForTest,
-    ) -> Result<ForcedC08PreparationForTest> {
-        let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
+        capture_mapping: super::frame::ForcedVelloCaptureMappingForTest,
+    ) -> Result<ForcedGraphPreparationForTest> {
+        let device_identity = self.validate_forced_graph_surface_for_test(surface)?;
         let normalized = scene.normalize(self.capabilities())?;
         let context = FrameContext::try_new(
             surface.size(),
@@ -1447,7 +1447,7 @@ impl Renderer {
             self.options.antialiasing(),
             parameters.base_color,
         )?;
-        let graph = super::frame::forced_c08_graph_with_capture_mapping_for_test(
+        let graph = super::frame::forced_base_graph_with_capture_mapping_for_test(
             normalized.clone(),
             context,
             capture_mapping,
@@ -1460,7 +1460,7 @@ impl Renderer {
             .ok_or_else(|| {
                 Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private C08 forced route lost immutable device capabilities",
+                    "the private base graph forced route lost immutable device capabilities",
                 )
             })?;
         let preparable = match self.classify_frame_dispatch(
@@ -1470,21 +1470,21 @@ impl Renderer {
             &capabilities,
         )? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
-                ExactSurfaceGraph::C08(preparable) => preparable,
-                ExactSurfaceGraph::C09(_)
-                | ExactSurfaceGraph::C10(_)
-                | ExactSurfaceGraph::C11(_)
-                | ExactSurfaceGraph::C12(_) => {
+                ExactSurfaceGraph::Base(preparable) => preparable,
+                ExactSurfaceGraph::Composition(_)
+                | ExactSurfaceGraph::ColorFilter(_)
+                | ExactSurfaceGraph::SpatialFilter(_)
+                | ExactSurfaceGraph::Backdrop(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
-                        "the private forced graph is outside the exact executable C08 subset",
+                        "the private forced graph is outside the exact executable base graph subset",
                     ));
                 }
             },
             _ => {
                 return Err(Error::new(
                     BackendErrorCode::RenderFailed,
-                    "the private forced graph is outside the exact executable C08 subset",
+                    "the private forced graph is outside the exact executable base graph subset",
                 ));
             }
         };
@@ -1502,23 +1502,23 @@ impl Renderer {
         {
             return Err(Error::new(
                 BackendErrorCode::RenderFailed,
-                "the prepared C08 capture grid differs from the validated semantic graph",
+                "the prepared Vello capture grid differs from the validated semantic graph",
             ));
         }
-        Ok(ForcedC08PreparationForTest {
+        Ok(ForcedGraphPreparationForTest {
             device_identity,
             normalized,
             preparable,
             output_extent,
             captures: captures
                 .into_iter()
-                .map(C08ForcedGraphCaptureForTest::from)
+                .map(ForcedGraphCaptureForTest::from)
                 .collect(),
         })
     }
 
     #[cfg(test)]
-    fn validate_forced_c08_surface_for_test(
+    fn validate_forced_graph_surface_for_test(
         &mut self,
         surface: &Surface,
     ) -> Result<DeviceSlotIdentity> {
@@ -1532,7 +1532,7 @@ impl Renderer {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "the private C08 forced route requires a device-backed surface",
+                "the private base graph forced route requires a device-backed surface",
             )
         })
     }
@@ -1690,11 +1690,11 @@ impl Renderer {
             &capabilities,
         )? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
-                ExactSurfaceGraph::C10(preparable) => preparable,
-                ExactSurfaceGraph::C08(_)
-                | ExactSurfaceGraph::C09(_)
-                | ExactSurfaceGraph::C11(_)
-                | ExactSurfaceGraph::C12(_) => {
+                ExactSurfaceGraph::ColorFilter(preparable) => preparable,
+                ExactSurfaceGraph::Base(_)
+                | ExactSurfaceGraph::Composition(_)
+                | ExactSurfaceGraph::SpatialFilter(_)
+                | ExactSurfaceGraph::Backdrop(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private color-filter fixture left its exact renderer dispatch route",
@@ -1720,7 +1720,7 @@ impl Renderer {
             frame_start,
             encode_start,
             normalized,
-            graph: ExactSurfaceGraph::C10(preparable),
+            graph: ExactSurfaceGraph::ColorFilter(preparable),
             output_extent,
             source_spatial,
         })
@@ -1815,7 +1815,7 @@ impl Renderer {
         parameters: Parameters,
         working_format: WorkingFormat,
     ) -> Result<SpatialFilterFixturePreparationForTest> {
-        let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
+        let device_identity = self.validate_forced_graph_surface_for_test(surface)?;
         let frame_start = Instant::now();
         let encode_start = Instant::now();
         let normalized = scene.normalize(self.capabilities())?;
@@ -1844,11 +1844,11 @@ impl Renderer {
             &capabilities,
         )? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
-                ExactSurfaceGraph::C11(preparable) => preparable,
-                ExactSurfaceGraph::C08(_)
-                | ExactSurfaceGraph::C09(_)
-                | ExactSurfaceGraph::C10(_)
-                | ExactSurfaceGraph::C12(_) => {
+                ExactSurfaceGraph::SpatialFilter(preparable) => preparable,
+                ExactSurfaceGraph::Base(_)
+                | ExactSurfaceGraph::Composition(_)
+                | ExactSurfaceGraph::ColorFilter(_)
+                | ExactSurfaceGraph::Backdrop(_) => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
                         "the private spatial-filter fixture left its exact renderer dispatch route",
@@ -1875,7 +1875,7 @@ impl Renderer {
             frame_start,
             encode_start,
             normalized,
-            graph: ExactSurfaceGraph::C11(preparable),
+            graph: ExactSurfaceGraph::SpatialFilter(preparable),
             output_extent,
             source_spatial,
             result_spatial,
@@ -1951,7 +1951,7 @@ impl Renderer {
         parameters: Parameters,
         working_format: WorkingFormat,
     ) -> Result<BoundedBackdropFixturePreparationForTest> {
-        let device_identity = self.validate_forced_c08_surface_for_test(surface)?;
+        let device_identity = self.validate_forced_graph_surface_for_test(surface)?;
         let frame_start = Instant::now();
         let encode_start = Instant::now();
         let normalized = scene.normalize(self.capabilities())?;
@@ -1984,7 +1984,7 @@ impl Renderer {
             &capabilities,
         )? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
-                ExactSurfaceGraph::C12(preparable) => preparable,
+                ExactSurfaceGraph::Backdrop(preparable) => preparable,
                 _ => {
                     return Err(Error::new(
                         BackendErrorCode::RenderFailed,
@@ -2012,7 +2012,7 @@ impl Renderer {
             frame_start,
             encode_start,
             normalized,
-            graph: ExactSurfaceGraph::C12(preparable),
+            graph: ExactSurfaceGraph::Backdrop(preparable),
             output_extent,
             parent_spatial,
             capture_spatial,
@@ -2731,14 +2731,14 @@ impl Renderer {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "T6 transaction coverage requires a ready default device",
+                "internal Vello transaction coverage requires a ready default device",
             )
         })?;
         let backend = self.backend.as_mut().ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "T6 transaction coverage requires a renderer backend",
+                "internal Vello transaction coverage requires a renderer backend",
             )
         })?;
         backend
@@ -2756,14 +2756,14 @@ impl Renderer {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "T6 cancellation coverage requires a ready default device",
+                "internal Vello cancellation coverage requires a ready default device",
             )
         })?;
         let backend = self.backend.as_mut().ok_or_else(|| {
             Error::runtime_unavailable(
                 RuntimeOperation::SurfaceRendering,
                 RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "T6 cancellation coverage requires a renderer backend",
+                "internal Vello cancellation coverage requires a renderer backend",
             )
         })?;
         backend
@@ -3080,9 +3080,9 @@ pub(crate) fn unsupported_graph_diagnostic_for_test(
                 .expect_err("an unsupported graph diagnostic probe must reject before execution");
             Ok(error.unsupported_primitive())
         }
-        ExecutableGraphDispatchEligibility::ExactC08(_)
-        | ExecutableGraphDispatchEligibility::ExactC09(_) => Ok(None),
-        ExecutableGraphDispatchEligibility::ExactC12(_) => Ok(None),
+        ExecutableGraphDispatchEligibility::ExactBase(_)
+        | ExecutableGraphDispatchEligibility::ExactComposition(_) => Ok(None),
+        ExecutableGraphDispatchEligibility::ExactBackdrop(_) => Ok(None),
     }
 }
 

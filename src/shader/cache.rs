@@ -7,23 +7,24 @@ use super::key::{
 };
 use super::pipeline::{
     create_blur_bind_group_layout, create_blur_render_pipeline, create_blur_shader_module,
-    create_c08_bind_group_layout, create_c08_render_pipeline, create_c08_shader_module,
     create_color_filter_bind_group_layout, create_color_filter_render_pipeline,
     create_color_filter_shader_module, create_composite_bind_group_layout,
     create_composite_render_pipeline, create_composite_shader_module,
     create_copy_backdrop_bind_group_layout, create_copy_backdrop_pipeline,
-    create_copy_backdrop_shader_module, create_drop_shadow_colorize_bind_group_layout,
-    create_drop_shadow_colorize_render_pipeline, create_drop_shadow_colorize_shader_module,
-    create_sampler,
+    create_copy_backdrop_shader_module, create_core_pass_bind_group_layout,
+    create_core_pass_render_pipeline, create_core_pass_shader_module,
+    create_drop_shadow_colorize_bind_group_layout, create_drop_shadow_colorize_render_pipeline,
+    create_drop_shadow_colorize_shader_module, create_sampler,
 };
 use super::validate::{
-    BlurPassDescription, BlurPassKeyRefs, C08PassKeyRefs, C08Program, ColorFilterPassDescription,
-    ColorFilterPassKeyRefs, CompositePassDescription, CompositePassKeyRefs,
-    CopyBackdropPassDescription, CopyBackdropPassKeyRefs, DropShadowColorizePassDescription,
-    DropShadowColorizePassKeyRefs, blur_cache_error, c08_cache_error, color_filter_cache_error,
-    copy_backdrop_cache_error, drop_shadow_cache_error, validate_blur_pass_keys,
-    validate_c08_pass_keys, validate_color_filter_pass_keys, validate_composite_pass_keys,
-    validate_copy_backdrop_pass_keys, validate_drop_shadow_colorize_pass_keys,
+    BlurPassDescription, BlurPassKeyRefs, ColorFilterPassDescription, ColorFilterPassKeyRefs,
+    CompositePassDescription, CompositePassKeyRefs, CopyBackdropPassDescription,
+    CopyBackdropPassKeyRefs, CorePassKeyRefs, CorePassProgram, DropShadowColorizePassDescription,
+    DropShadowColorizePassKeyRefs, blur_cache_error, color_filter_cache_error,
+    copy_backdrop_cache_error, core_pass_cache_error, drop_shadow_cache_error,
+    validate_blur_pass_keys, validate_color_filter_pass_keys, validate_composite_pass_keys,
+    validate_copy_backdrop_pass_keys, validate_core_pass_keys,
+    validate_drop_shadow_colorize_pass_keys,
 };
 
 /// Non-clone handles created inside one checked GPU-operation scope. New entries
@@ -38,10 +39,10 @@ pub(crate) struct ProvisionalDevicePassCacheUpdate {
     pub(super) pipelines: HashMap<RenderPipelineKey, wgpu::RenderPipeline>,
 }
 
-/// Borrowed C08 objects that are ready for later bind-group creation and pass
+/// Borrowed base graph objects that are ready for later bind-group creation and pass
 /// encoding even while newly created handles remain provisional.
-pub(crate) struct ProvisionalC08PassObjects<'a> {
-    program: C08Program,
+pub(crate) struct ProvisionalCorePassObjects<'a> {
+    program: CorePassProgram,
     samplers: Vec<&'a wgpu::Sampler>,
     layout: &'a wgpu::BindGroupLayout,
     shader: &'a wgpu::ShaderModule,
@@ -58,7 +59,7 @@ pub(crate) struct ProvisionalCompositePassObjects<'a> {
     pipeline: &'a wgpu::RenderPipeline,
 }
 
-/// Borrowed C10 color-filter objects that remain provisional until the owning
+/// Borrowed ColorFilter color-filter objects that remain provisional until the owning
 /// checked GPU operation resolves successfully.
 pub(crate) struct ProvisionalColorFilterPassObjects<'a> {
     description: ColorFilterPassDescription,
@@ -68,7 +69,7 @@ pub(crate) struct ProvisionalColorFilterPassObjects<'a> {
     pipeline: &'a wgpu::RenderPipeline,
 }
 
-/// Borrowed C12 backdrop-copy objects selected entirely by checked cache facts.
+/// Borrowed Backdrop backdrop-copy objects selected entirely by checked cache facts.
 pub(crate) struct ProvisionalCopyBackdropPassObjects<'a> {
     description: CopyBackdropPassDescription,
     parent_sampler: &'a wgpu::Sampler,
@@ -77,7 +78,7 @@ pub(crate) struct ProvisionalCopyBackdropPassObjects<'a> {
     pipeline: &'a wgpu::RenderPipeline,
 }
 
-/// Borrowed C11 blur objects selected entirely by checked cache-key facts.
+/// Borrowed SpatialFilter blur objects selected entirely by checked cache-key facts.
 pub(crate) struct ProvisionalBlurPassObjects<'a> {
     description: BlurPassDescription,
     source_sampler: &'a wgpu::Sampler,
@@ -86,7 +87,7 @@ pub(crate) struct ProvisionalBlurPassObjects<'a> {
     pipeline: &'a wgpu::RenderPipeline,
 }
 
-/// Borrowed C11 drop-shadow colorize objects selected by checked key facts.
+/// Borrowed SpatialFilter drop-shadow colorize objects selected by checked key facts.
 pub(crate) struct ProvisionalDropShadowColorizePassObjects<'a> {
     description: DropShadowColorizePassDescription,
     source_sampler: &'a wgpu::Sampler,
@@ -135,7 +136,7 @@ impl DevicePassCache {
 }
 
 impl ProvisionalDevicePassCacheUpdate {
-    pub(crate) fn realize_c08_pass<'a>(
+    pub(crate) fn realize_core_pass<'a>(
         &'a mut self,
         device: &wgpu::Device,
         cache: &'a DevicePassCache,
@@ -143,29 +144,29 @@ impl ProvisionalDevicePassCacheUpdate {
         layout: &BindGroupLayoutKey,
         shader: &ShaderModuleKey,
         pipeline: &RenderPipelineKey,
-    ) -> Result<ProvisionalC08PassObjects<'a>> {
-        let keys = C08PassKeyRefs {
+    ) -> Result<ProvisionalCorePassObjects<'a>> {
+        let keys = CorePassKeyRefs {
             samplers,
             layout,
             shader,
             pipeline,
         };
-        self.realize_c08_pass_with_fragment_entry(device, cache, keys, "fragment_main")
+        self.realize_core_pass_with_fragment_entry(device, cache, keys, "fragment_main")
     }
 
-    pub(super) fn realize_c08_pass_with_fragment_entry<'a>(
+    pub(super) fn realize_core_pass_with_fragment_entry<'a>(
         &'a mut self,
         device: &wgpu::Device,
         cache: &'a DevicePassCache,
-        keys: C08PassKeyRefs<'_>,
+        keys: CorePassKeyRefs<'_>,
         fragment_entry: &'static str,
-    ) -> Result<ProvisionalC08PassObjects<'a>> {
+    ) -> Result<ProvisionalCorePassObjects<'a>> {
         if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
-            return Err(c08_cache_error(
-                "provisional C08 pass objects belong to another device cache",
+            return Err(core_pass_cache_error(
+                "provisional core pass objects belong to another device cache",
             ));
         }
-        let description = validate_c08_pass_keys(keys)?;
+        let description = validate_core_pass_keys(keys)?;
 
         for sampler_key in keys.samplers {
             if !cache.samplers.contains_key(sampler_key) && !self.samplers.contains_key(sampler_key)
@@ -177,13 +178,13 @@ impl ProvisionalDevicePassCacheUpdate {
         if !cache.layouts.contains_key(keys.layout) && !self.layouts.contains_key(keys.layout) {
             self.layouts.insert(
                 keys.layout.clone(),
-                create_c08_bind_group_layout(device, description),
+                create_core_pass_bind_group_layout(device, description),
             );
         }
         if !cache.shaders.contains_key(keys.shader) && !self.shaders.contains_key(keys.shader) {
             self.shaders.insert(
                 keys.shader.clone(),
-                create_c08_shader_module(device, description),
+                create_core_pass_shader_module(device, description),
             );
         }
         if !cache.pipelines.contains_key(keys.pipeline)
@@ -193,13 +194,17 @@ impl ProvisionalDevicePassCacheUpdate {
                 .layouts
                 .get(keys.layout)
                 .or_else(|| cache.layouts.get(keys.layout))
-                .ok_or_else(|| c08_cache_error("C08 bind-group layout realization was lost"))?;
+                .ok_or_else(|| {
+                    core_pass_cache_error("core-pass bind-group layout realization was lost")
+                })?;
             let shader_handle = self
                 .shaders
                 .get(keys.shader)
                 .or_else(|| cache.shaders.get(keys.shader))
-                .ok_or_else(|| c08_cache_error("C08 shader-module realization was lost"))?;
-            let created = create_c08_render_pipeline(
+                .ok_or_else(|| {
+                    core_pass_cache_error("core-pass shader-module realization was lost")
+                })?;
+            let created = create_core_pass_render_pipeline(
                 device,
                 description,
                 layout_handle,
@@ -215,8 +220,8 @@ impl ProvisionalDevicePassCacheUpdate {
     pub(super) fn pass_objects<'a>(
         &'a self,
         cache: &'a DevicePassCache,
-        keys: C08PassKeyRefs<'_>,
-    ) -> Result<ProvisionalC08PassObjects<'a>> {
+        keys: CorePassKeyRefs<'_>,
+    ) -> Result<ProvisionalCorePassObjects<'a>> {
         let samplers = keys
             .samplers
             .iter()
@@ -224,26 +229,28 @@ impl ProvisionalDevicePassCacheUpdate {
                 self.samplers
                     .get(key)
                     .or_else(|| cache.samplers.get(key))
-                    .ok_or_else(|| c08_cache_error("C08 sampler realization was lost"))
+                    .ok_or_else(|| core_pass_cache_error("base graph sampler realization was lost"))
             })
             .collect::<Result<Vec<_>>>()?;
         let layout = self
             .layouts
             .get(keys.layout)
             .or_else(|| cache.layouts.get(keys.layout))
-            .ok_or_else(|| c08_cache_error("C08 bind-group layout realization was lost"))?;
+            .ok_or_else(|| {
+                core_pass_cache_error("core-pass bind-group layout realization was lost")
+            })?;
         let shader = self
             .shaders
             .get(keys.shader)
             .or_else(|| cache.shaders.get(keys.shader))
-            .ok_or_else(|| c08_cache_error("C08 shader-module realization was lost"))?;
+            .ok_or_else(|| core_pass_cache_error("core-pass shader-module realization was lost"))?;
         let pipeline = self
             .pipelines
             .get(keys.pipeline)
             .or_else(|| cache.pipelines.get(keys.pipeline))
-            .ok_or_else(|| c08_cache_error("C08 render-pipeline realization was lost"))?;
-        Ok(ProvisionalC08PassObjects {
-            program: validate_c08_pass_keys(keys)?.program,
+            .ok_or_else(|| core_pass_cache_error("graph render-pipeline realization was lost"))?;
+        Ok(ProvisionalCorePassObjects {
+            program: validate_core_pass_keys(keys)?.program,
             samplers,
             layout,
             shader,
@@ -258,10 +265,10 @@ impl ProvisionalDevicePassCacheUpdate {
         layout: &BindGroupLayoutKey,
         shader: &ShaderModuleKey,
         pipeline: &RenderPipelineKey,
-    ) -> Result<ProvisionalC08PassObjects<'a>> {
+    ) -> Result<ProvisionalCorePassObjects<'a>> {
         self.pass_objects(
             cache,
-            C08PassKeyRefs {
+            CorePassKeyRefs {
                 samplers,
                 layout,
                 shader,
@@ -763,7 +770,7 @@ impl ProvisionalDevicePassCacheUpdate {
         fragment_entry_override: Option<&'static str>,
     ) -> Result<ProvisionalCompositePassObjects<'a>> {
         if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
-            return Err(c08_cache_error(
+            return Err(core_pass_cache_error(
                 "provisional composite pass objects belong to another device cache",
             ));
         }
@@ -793,13 +800,15 @@ impl ProvisionalDevicePassCacheUpdate {
                 .get(keys.layout)
                 .or_else(|| cache.layouts.get(keys.layout))
                 .ok_or_else(|| {
-                    c08_cache_error("composite bind-group layout realization was lost")
+                    core_pass_cache_error("composite bind-group layout realization was lost")
                 })?;
             let shader_handle = self
                 .shaders
                 .get(keys.shader)
                 .or_else(|| cache.shaders.get(keys.shader))
-                .ok_or_else(|| c08_cache_error("composite shader-module realization was lost"))?;
+                .ok_or_else(|| {
+                    core_pass_cache_error("composite shader-module realization was lost")
+                })?;
             let created = create_composite_render_pipeline(
                 device,
                 description,
@@ -818,7 +827,7 @@ impl ProvisionalDevicePassCacheUpdate {
         keys: CompositePassKeyRefs<'_>,
     ) -> Result<ProvisionalCompositePassObjects<'a>> {
         let [source_sampler_key] = keys.samplers else {
-            return Err(c08_cache_error(
+            return Err(core_pass_cache_error(
                 "composite pass realization requires one source sampler",
             ));
         };
@@ -826,22 +835,28 @@ impl ProvisionalDevicePassCacheUpdate {
             .samplers
             .get(source_sampler_key)
             .or_else(|| cache.samplers.get(source_sampler_key))
-            .ok_or_else(|| c08_cache_error("composite source sampler realization was lost"))?;
+            .ok_or_else(|| {
+                core_pass_cache_error("composite source sampler realization was lost")
+            })?;
         let layout = self
             .layouts
             .get(keys.layout)
             .or_else(|| cache.layouts.get(keys.layout))
-            .ok_or_else(|| c08_cache_error("composite bind-group layout realization was lost"))?;
+            .ok_or_else(|| {
+                core_pass_cache_error("composite bind-group layout realization was lost")
+            })?;
         let shader = self
             .shaders
             .get(keys.shader)
             .or_else(|| cache.shaders.get(keys.shader))
-            .ok_or_else(|| c08_cache_error("composite shader-module realization was lost"))?;
+            .ok_or_else(|| core_pass_cache_error("composite shader-module realization was lost"))?;
         let pipeline = self
             .pipelines
             .get(keys.pipeline)
             .or_else(|| cache.pipelines.get(keys.pipeline))
-            .ok_or_else(|| c08_cache_error("composite render-pipeline realization was lost"))?;
+            .ok_or_else(|| {
+                core_pass_cache_error("composite render-pipeline realization was lost")
+            })?;
         Ok(ProvisionalCompositePassObjects {
             description: validate_composite_pass_keys(keys)?,
             source_sampler,
@@ -872,7 +887,7 @@ impl ProvisionalDevicePassCacheUpdate {
 
     pub(crate) fn ensure_commit_ready(&self, cache: &DevicePassCache) -> Result<()> {
         if !Arc::ptr_eq(&self.cache_identity, &cache.identity) {
-            return Err(c08_cache_error(
+            return Err(core_pass_cache_error(
                 "provisional pass objects cannot enter another device cache",
             ));
         }
@@ -893,7 +908,7 @@ impl ProvisionalDevicePassCacheUpdate {
                 .keys()
                 .any(|key| cache.pipelines.contains_key(key))
         {
-            return Err(c08_cache_error(
+            return Err(core_pass_cache_error(
                 "persistent pass cache changed during provisional realization",
             ));
         }
@@ -910,12 +925,12 @@ impl ProvisionalDevicePassCacheUpdate {
     }
 }
 
-impl ProvisionalC08PassObjects<'_> {
+impl ProvisionalCorePassObjects<'_> {
     pub(crate) fn require_encoding_ready(&self) -> Result<()> {
         let _ = (self.layout, self.shader, self.pipeline);
         if self.samplers.len() != 1 {
-            return Err(c08_cache_error(
-                "C08 pass realization did not retain its exact encoding handles",
+            return Err(core_pass_cache_error(
+                "core pass realization did not retain its exact encoding handles",
             ));
         }
         Ok(())
@@ -923,8 +938,8 @@ impl ProvisionalC08PassObjects<'_> {
 
     pub(crate) fn sampler(&self) -> Result<&wgpu::Sampler> {
         let [sampler] = self.samplers.as_slice() else {
-            return Err(c08_cache_error(
-                "C08 pass encoding requires one exact sampled-image sampler",
+            return Err(core_pass_cache_error(
+                "core pass encoding requires one exact sampled-image sampler",
             ));
         };
         Ok(sampler)
@@ -941,7 +956,7 @@ impl ProvisionalC08PassObjects<'_> {
     pub(crate) const fn uses_fixed_source_over_blend(&self) -> bool {
         matches!(
             self.program,
-            C08Program::SpanSourceOver | C08Program::DropShadowMerge
+            CorePassProgram::SpanSourceOver | CorePassProgram::DropShadowMerge
         )
     }
 }

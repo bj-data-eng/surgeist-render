@@ -45,15 +45,15 @@ pub(crate) use lower::{
 )]
 pub(crate) use test_support::{
     BackdropDependencyObservation, FinalPresentDeclarationObservation,
-    FinalPresentSchedulingObservation, ForcedC08CaptureMappingForTest,
-    ForcedC08GraphCaptureObservationForTest, FramePlanObservation, FramePlanResultObservation,
+    FinalPresentSchedulingObservation, ForcedGraphCaptureObservationForTest,
+    ForcedVelloCaptureMappingForTest, FramePlanObservation, FramePlanResultObservation,
     FramePlanRouteObservation, FrameSelectionRequirementObservation,
     GraphBaseInitializationObservation, GraphEdgeLifetimeObservation, GraphFailureObservation,
     GraphLoweringFaultForTest, GraphOwnerCallObservation, InvalidSemanticGraphStateForTest,
     SemanticGraphProbeError, VelloCommandObservation, VelloSpanObservation,
     VelloSpanScopeObservation, authored_filter_graph_for_test,
     final_present_declaration_observation_for_test, final_present_scheduling_observation_for_test,
-    forced_c08_graph_for_test, forced_c08_graph_with_capture_mapping_for_test,
+    forced_base_graph_for_test, forced_base_graph_with_capture_mapping_for_test,
     frame_plan_result_observation_for_test, invalid_semantic_graph_state_for_test,
     semantic_graph_base_initialization_observation_for_test,
     semantic_graph_edge_lifetime_observation_for_test,

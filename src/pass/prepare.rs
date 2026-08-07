@@ -26,13 +26,13 @@ use super::super::{
     vello_engine::VelloEngineState,
 };
 use super::{
-    C08CustomSpineEncodingState, C08ExecutionFacts, C08PreparableGraph, C09PreparableGraph,
-    C10PreparableGraph, C11PreparableGraph, C12PreparableGraph,
-    ExecutableGraphWorkingFormatRequest, LoweredGraphPlan, RuntimeBlur, RuntimeComposite,
-    RuntimeCompositeKind, RuntimeGraphGeneration, RuntimePass, RuntimePassCacheKeys, RuntimePassId,
-    RuntimePassKind, RuntimeReadBinding, RuntimeResourceFormat, RuntimeResourceId,
-    RuntimeResourceImport, RuntimeResourceProducer, RuntimeResourceRequest, RuntimeResourceRole,
-    RuntimeResultBinding,
+    BackdropPreparableGraph, BaseExecutionFacts, BasePreparableGraph, ColorFilterPreparableGraph,
+    CompositionPreparableGraph, CustomSpineEncodingState, ExecutableGraphWorkingFormatRequest,
+    LoweredGraphPlan, RuntimeBlur, RuntimeComposite, RuntimeCompositeKind, RuntimeGraphGeneration,
+    RuntimePass, RuntimePassCacheKeys, RuntimePassId, RuntimePassKind, RuntimeReadBinding,
+    RuntimeResourceFormat, RuntimeResourceId, RuntimeResourceImport, RuntimeResourceProducer,
+    RuntimeResourceRequest, RuntimeResourceRole, RuntimeResultBinding,
+    SpatialFilterPreparableGraph,
     close::{
         ClosedExecutableGraph, ClosedExecutableGraphFacts, PrePreparationGraphClassification,
         preparation_error,
@@ -676,7 +676,7 @@ pub(super) struct PreparedColorFilterOperationBinding {
     pub(super) buffer: Option<wgpu::Buffer>,
 }
 
-pub(super) enum PreparedC11PassObjects {
+pub(super) enum PreparedSpatialFilterPassObjects {
     CopyBackdrop {
         parent_sampler: wgpu::Sampler,
         layout: wgpu::BindGroupLayout,
@@ -696,28 +696,28 @@ pub(super) enum PreparedC11PassObjects {
 
 struct PreparedPassRealization {
     update: Option<ProvisionalDevicePassCacheUpdate>,
-    c11_objects: BTreeMap<RuntimePassId, PreparedC11PassObjects>,
+    spatial_filter_objects: BTreeMap<RuntimePassId, PreparedSpatialFilterPassObjects>,
 }
 
 #[must_use = "the closed graph dispatch result must select exactly one renderer route"]
 pub(crate) enum ExecutableGraphDispatchEligibility {
-    ExactC08(C08PreparableGraph),
-    ExactC09(C09PreparableGraph),
-    ExactC12(C12PreparableGraph),
+    ExactBase(BasePreparableGraph),
+    ExactComposition(CompositionPreparableGraph),
+    ExactBackdrop(BackdropPreparableGraph),
     FuturePasses,
 }
 
 impl ExecutableGraphDispatchEligibility {
-    fn try_classify_c12(
+    fn try_classify_backdrop(
         graph: &GpuRenderGraph,
         output_format: Format,
         working_format: ExecutableGraphWorkingFormatRequest,
         capabilities: &DeviceCapabilities,
-        preparable: C12PreparableGraph,
+        preparable: BackdropPreparableGraph,
     ) -> Result<Self> {
         if !preparable.proves_closed_backdrop_facts() {
             return Err(preparation_error(
-                "C12 classification lost its closed pre-allocation facts",
+                "backdrop classification lost its closed pre-allocation facts",
             ));
         }
         let working_format = working_format.resolve(capabilities)?;
@@ -728,19 +728,19 @@ impl ExecutableGraphDispatchEligibility {
             capabilities,
         )?;
         match PrePreparationGraphClassification::classify(lowered) {
-            PrePreparationGraphClassification::ExactC12(preparable)
+            PrePreparationGraphClassification::ExactBackdrop(preparable)
                 if preparable.proves_closed_backdrop_facts() =>
             {
-                Ok(Self::ExactC12(preparable))
+                Ok(Self::ExactBackdrop(preparable))
             }
-            PrePreparationGraphClassification::ExactC08(_)
-            | PrePreparationGraphClassification::ExactC09(_)
-            | PrePreparationGraphClassification::ExactC10(_)
-            | PrePreparationGraphClassification::ExactC11(_)
-            | PrePreparationGraphClassification::ExactC12(_)
+            PrePreparationGraphClassification::ExactBase(_)
+            | PrePreparationGraphClassification::ExactComposition(_)
+            | PrePreparationGraphClassification::ExactColorFilter(_)
+            | PrePreparationGraphClassification::ExactSpatialFilter(_)
+            | PrePreparationGraphClassification::ExactBackdrop(_)
             | PrePreparationGraphClassification::FuturePasses
             | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
-                "checked C12 dispatch lowering changed its closed eligibility result",
+                "checked backdrop dispatch lowering changed its closed eligibility result",
             )),
         }
     }
@@ -759,30 +759,32 @@ impl ExecutableGraphDispatchEligibility {
             )?,
         );
         match classification {
-            PrePreparationGraphClassification::ExactC12(preparable) => Self::try_classify_c12(
-                graph,
-                output_format,
-                working_format,
-                capabilities,
-                preparable,
-            ),
-            PrePreparationGraphClassification::ExactC11(preparable) => {
+            PrePreparationGraphClassification::ExactBackdrop(preparable) => {
+                Self::try_classify_backdrop(
+                    graph,
+                    output_format,
+                    working_format,
+                    capabilities,
+                    preparable,
+                )
+            }
+            PrePreparationGraphClassification::ExactSpatialFilter(preparable) => {
                 if !preparable.proves_closed_filter_facts() {
                     return Err(preparation_error(
-                        "C11 classification lost its closed pre-allocation facts",
+                        "spatial-filter classification lost its closed pre-allocation facts",
                     ));
                 }
                 Ok(Self::FuturePasses)
             }
-            PrePreparationGraphClassification::ExactC10(preparable) => {
+            PrePreparationGraphClassification::ExactColorFilter(preparable) => {
                 if !preparable.proves_closed_color_facts() {
                     return Err(preparation_error(
-                        "C10 classification lost its closed pre-allocation facts",
+                        "color-filter classification lost its closed pre-allocation facts",
                     ));
                 }
                 Ok(Self::FuturePasses)
             }
-            PrePreparationGraphClassification::ExactC09(_) => {
+            PrePreparationGraphClassification::ExactComposition(_) => {
                 let working_format = working_format.resolve(capabilities)?;
                 let lowered = LoweredGraphPlan::try_lower_validated_graph(
                     graph,
@@ -791,22 +793,22 @@ impl ExecutableGraphDispatchEligibility {
                     capabilities,
                 )?;
                 match PrePreparationGraphClassification::classify(lowered) {
-                    PrePreparationGraphClassification::ExactC09(closed) => {
-                        C09PreparableGraph::try_from_closed(closed)
-                            .map(Self::ExactC09)
+                    PrePreparationGraphClassification::ExactComposition(closed) => {
+                        CompositionPreparableGraph::try_from_closed(closed)
+                            .map(Self::ExactComposition)
                             .map_err(|_| {
                                 preparation_error(
-                                    "checked C09 dispatch lowering lost its C09-only facts",
+                                    "checked composition dispatch lowering lost its composition-only facts",
                                 )
                             })
                     }
-                    PrePreparationGraphClassification::ExactC08(_)
-                    | PrePreparationGraphClassification::ExactC10(_)
-                    | PrePreparationGraphClassification::ExactC11(_)
-                    | PrePreparationGraphClassification::ExactC12(_)
+                    PrePreparationGraphClassification::ExactBase(_)
+                    | PrePreparationGraphClassification::ExactColorFilter(_)
+                    | PrePreparationGraphClassification::ExactSpatialFilter(_)
+                    | PrePreparationGraphClassification::ExactBackdrop(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
-                        "checked C09 dispatch lowering changed its closed eligibility result",
+                        "checked composition dispatch lowering changed its closed eligibility result",
                     )),
                 }
             }
@@ -814,7 +816,7 @@ impl ExecutableGraphDispatchEligibility {
             PrePreparationGraphClassification::Ineligible(ineligibility) => {
                 Err(ineligibility.into_error())
             }
-            PrePreparationGraphClassification::ExactC08(_) => {
+            PrePreparationGraphClassification::ExactBase(_) => {
                 let working_format = working_format.resolve(capabilities)?;
                 let lowered = LoweredGraphPlan::try_lower_validated_graph(
                     graph,
@@ -823,16 +825,16 @@ impl ExecutableGraphDispatchEligibility {
                     capabilities,
                 )?;
                 match PrePreparationGraphClassification::classify(lowered) {
-                    PrePreparationGraphClassification::ExactC08(preparable) => {
-                        Ok(Self::ExactC08(preparable))
+                    PrePreparationGraphClassification::ExactBase(preparable) => {
+                        Ok(Self::ExactBase(preparable))
                     }
-                    PrePreparationGraphClassification::ExactC09(_)
-                    | PrePreparationGraphClassification::ExactC10(_)
-                    | PrePreparationGraphClassification::ExactC11(_)
-                    | PrePreparationGraphClassification::ExactC12(_)
+                    PrePreparationGraphClassification::ExactComposition(_)
+                    | PrePreparationGraphClassification::ExactColorFilter(_)
+                    | PrePreparationGraphClassification::ExactSpatialFilter(_)
+                    | PrePreparationGraphClassification::ExactBackdrop(_)
                     | PrePreparationGraphClassification::FuturePasses
                     | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
-                        "checked C08 dispatch lowering changed its closed eligibility result",
+                        "checked base-graph dispatch lowering changed its closed eligibility result",
                     )),
                 }
             }
@@ -841,19 +843,19 @@ impl ExecutableGraphDispatchEligibility {
 }
 
 pub(super) enum GraphPreparationSource {
-    C08(C08PreparableGraph),
-    C09(ClosedExecutableGraph),
-    C10 {
-        preparable: C10PreparableGraph,
+    Base(BasePreparableGraph),
+    Composition(ClosedExecutableGraph),
+    ColorFilter {
+        preparable: ColorFilterPreparableGraph,
         operation_limits: Option<ColorFilterOperationBufferLimits>,
     },
-    C11(C11PreparableGraph),
-    C12(C12PreparableGraph),
+    SpatialFilter(SpatialFilterPreparableGraph),
+    Backdrop(BackdropPreparableGraph),
 }
 
 type GraphPreparationParts = (
     LoweredGraphPlan,
-    Option<C08ExecutionFacts>,
+    Option<BaseExecutionFacts>,
     Option<ClosedExecutableGraphFacts>,
     Option<ClosedExecutableGraphFacts>,
     Option<ClosedExecutableGraphFacts>,
@@ -863,29 +865,33 @@ type GraphPreparationParts = (
 impl GraphPreparationSource {
     const fn color_filter_operation_limits(&self) -> Option<ColorFilterOperationBufferLimits> {
         match self {
-            Self::C10 {
+            Self::ColorFilter {
                 operation_limits, ..
             } => *operation_limits,
-            Self::C08(_) | Self::C09(_) | Self::C11(_) | Self::C12(_) => None,
+            Self::Base(_) | Self::Composition(_) | Self::SpatialFilter(_) | Self::Backdrop(_) => {
+                None
+            }
         }
     }
 
     fn into_parts(self) -> GraphPreparationParts {
         match self {
-            Self::C08(preparable) => {
+            Self::Base(preparable) => {
                 let (lowered, execution) = preparable.into_parts();
                 (lowered, Some(execution), None, None, None, None)
             }
-            Self::C09(closed) => (closed.lowered, None, Some(closed.facts), None, None, None),
-            Self::C10 { preparable, .. } => {
+            Self::Composition(closed) => {
+                (closed.lowered, None, Some(closed.facts), None, None, None)
+            }
+            Self::ColorFilter { preparable, .. } => {
                 let closed = preparable.into_closed();
                 (closed.lowered, None, None, Some(closed.facts), None, None)
             }
-            Self::C11(preparable) => {
+            Self::SpatialFilter(preparable) => {
                 let closed = preparable.into_closed();
                 (closed.lowered, None, None, None, Some(closed.facts), None)
             }
-            Self::C12(preparable) => {
+            Self::Backdrop(preparable) => {
                 let closed = preparable.into_closed();
                 (closed.lowered, None, None, None, None, Some(closed.facts))
             }
@@ -895,21 +901,22 @@ impl GraphPreparationSource {
 
 pub(crate) struct PreparedGraph<'device> {
     pub(super) plan: RuntimeGraphPreparationPlan,
-    pub(super) c08_execution: Option<C08ExecutionFacts>,
-    pub(super) c09_execution: Option<ClosedExecutableGraphFacts>,
-    pub(super) c10_execution: Option<ClosedExecutableGraphFacts>,
-    pub(super) c11_execution: Option<ClosedExecutableGraphFacts>,
-    pub(super) c12_execution: Option<ClosedExecutableGraphFacts>,
+    pub(super) base_execution: Option<BaseExecutionFacts>,
+    pub(super) composition_execution: Option<ClosedExecutableGraphFacts>,
+    pub(super) color_filter_execution: Option<ClosedExecutableGraphFacts>,
+    pub(super) spatial_filter_execution: Option<ClosedExecutableGraphFacts>,
+    pub(super) backdrop_execution: Option<ClosedExecutableGraphFacts>,
     pub(super) resource_bindings: BTreeMap<RuntimeResourceId, PreparedResourceBinding>,
     pub(super) kernel_bindings: BTreeMap<GaussianKernelKey, PreparedKernelBinding>,
     pub(super) color_filter_operation_bindings:
         BTreeMap<RuntimePassId, PreparedColorFilterOperationBinding>,
-    pub(super) c11_pass_objects: BTreeMap<RuntimePassId, PreparedC11PassObjects>,
+    pub(super) spatial_filter_pass_objects:
+        BTreeMap<RuntimePassId, PreparedSpatialFilterPassObjects>,
     pub(super) pass_cache_update: Option<ProvisionalDevicePassCacheUpdate>,
     pub(super) frame_scope: Option<FrameResourceScope>,
     pub(super) next_pass: usize,
-    pub(super) c08_encoding_state: Option<C08CustomSpineEncodingState>,
-    pub(super) c08_completed_session: Option<Arc<()>>,
+    pub(super) custom_spine_encoding_state: Option<CustomSpineEncodingState>,
+    pub(super) custom_spine_completed_session: Option<Arc<()>>,
     #[cfg(test)]
     pub(super) acquired_capture_lease_count_raw_fact: usize,
     pub(super) device: &'device wgpu::Device,
@@ -991,7 +998,7 @@ fn create_color_filter_operation_bindings(
             preparation_error("prepared color-filter buffer length does not fit u64")
         })?;
         let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("Surgeist C10 ordered color-filter operations"),
+            label: Some("Surgeist color-filter ordered color-filter operations"),
             size,
             usage: wgpu::BufferUsages::STORAGE.union(wgpu::BufferUsages::COPY_DST),
             mapped_at_creation: false,
@@ -1024,29 +1031,31 @@ fn realize_prepared_graph_passes(
     if !enabled {
         return Ok(PreparedPassRealization {
             update: None,
-            c11_objects: BTreeMap::new(),
+            spatial_filter_objects: BTreeMap::new(),
         });
     }
     let mut update = pass_cache.provisional_update();
     let mut realized_pass = false;
-    let mut c11_objects = BTreeMap::new();
+    let mut spatial_filter_objects = BTreeMap::new();
     for request in &plan.passes {
         let Some(keys) = request.cache_keys.as_ref() else {
             continue;
         };
         let objects = realize_prepared_graph_pass(&mut update, device, pass_cache, request, keys)?;
         if let Some(objects) = objects
-            && c11_objects.insert(request.runtime.id, objects).is_some()
+            && spatial_filter_objects
+                .insert(request.runtime.id, objects)
+                .is_some()
         {
             return Err(preparation_error(
-                "one C11 pass retained more than one prepared object set",
+                "one spatial-filter pass retained more than one prepared object set",
             ));
         }
         realized_pass = true;
     }
     Ok(PreparedPassRealization {
         update: realized_pass.then_some(update),
-        c11_objects,
+        spatial_filter_objects,
     })
 }
 
@@ -1056,11 +1065,11 @@ fn realize_prepared_graph_pass(
     pass_cache: &DevicePassCache,
     request: &RuntimePassPreparationRequest,
     keys: &RuntimePassCacheKeys,
-) -> Result<Option<PreparedC11PassObjects>> {
+) -> Result<Option<PreparedSpatialFilterPassObjects>> {
     match &request.runtime.kind {
         RuntimePassKind::CopyBackdrop => {
             let objects = realize_copy_backdrop_for_preparation(update, device, pass_cache, keys)?;
-            Ok(Some(PreparedC11PassObjects::CopyBackdrop {
+            Ok(Some(PreparedSpatialFilterPassObjects::CopyBackdrop {
                 parent_sampler: objects.parent_sampler().clone(),
                 layout: objects.bind_group_layout().clone(),
                 pipeline: objects.render_pipeline().clone(),
@@ -1089,7 +1098,7 @@ fn realize_prepared_graph_pass(
                 keys.pipeline(),
             )?;
             objects.require_encoding_ready()?;
-            Ok(Some(PreparedC11PassObjects::Blur {
+            Ok(Some(PreparedSpatialFilterPassObjects::Blur {
                 source_sampler: objects.source_sampler().clone(),
                 layout: objects.bind_group_layout().clone(),
                 pipeline: objects.render_pipeline().clone(),
@@ -1105,7 +1114,7 @@ fn realize_prepared_graph_pass(
                 keys.pipeline(),
             )?;
             objects.require_encoding_ready()?;
-            Ok(Some(PreparedC11PassObjects::DropShadowColorize {
+            Ok(Some(PreparedSpatialFilterPassObjects::DropShadowColorize {
                 source_sampler: objects.source_sampler().clone(),
                 layout: objects.bind_group_layout().clone(),
                 pipeline: objects.render_pipeline().clone(),
@@ -1134,7 +1143,7 @@ fn realize_prepared_graph_pass(
         }))
         | RuntimePassKind::Present => {
             update
-                .realize_c08_pass(
+                .realize_core_pass(
                     device,
                     pass_cache,
                     keys.samplers(),
@@ -1176,8 +1185,8 @@ fn realize_copy_backdrop_for_preparation<'a>(
 }
 
 impl<'device> PreparedGraph<'device> {
-    pub(crate) fn try_prepare_c08(
-        preparable: C08PreparableGraph,
+    pub(crate) fn try_prepare_base(
+        preparable: BasePreparableGraph,
         policy: EffectQualityPolicy,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
@@ -1186,7 +1195,7 @@ impl<'device> PreparedGraph<'device> {
         pass_cache: &'device DevicePassCache,
     ) -> Result<Self> {
         let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
-        Self::try_prepare_c08_with_working_format(
+        Self::try_prepare_base_with_working_format(
             preparable,
             selected_working_format,
             capabilities,
@@ -1197,8 +1206,8 @@ impl<'device> PreparedGraph<'device> {
         )
     }
 
-    pub(crate) fn try_prepare_c08_with_working_format(
-        preparable: C08PreparableGraph,
+    pub(crate) fn try_prepare_base_with_working_format(
+        preparable: BasePreparableGraph,
         selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
@@ -1207,7 +1216,7 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C08(preparable),
+            GraphPreparationSource::Base(preparable),
             selected_working_format,
             capabilities,
             device,
@@ -1215,16 +1224,16 @@ impl<'device> PreparedGraph<'device> {
             resources,
             pass_cache_phase,
         )?;
-        if prepared.c08_execution_facts().is_none() {
+        if prepared.base_execution_facts().is_none() {
             return Err(preparation_error(
-                "C08 preparation lost its validated execution facts",
+                "base-graph preparation lost its validated execution facts",
             ));
         }
         Ok(prepared)
     }
 
-    pub(crate) fn try_prepare_c09(
-        preparable: C09PreparableGraph,
+    pub(crate) fn try_prepare_composition(
+        preparable: CompositionPreparableGraph,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
@@ -1233,7 +1242,7 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         let selected_working_format = preparable.working_format();
         let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C09(preparable.into_closed()),
+            GraphPreparationSource::Composition(preparable.into_closed()),
             selected_working_format,
             capabilities,
             device,
@@ -1241,16 +1250,16 @@ impl<'device> PreparedGraph<'device> {
             resources,
             pass_cache_phase,
         )?;
-        if prepared.c09_execution.is_none() {
+        if prepared.composition_execution.is_none() {
             return Err(preparation_error(
-                "C09 preparation lost its validated closed execution facts",
+                "composition preparation lost its validated closed execution facts",
             ));
         }
         Ok(prepared)
     }
 
-    pub(crate) fn try_prepare_c12(
-        preparable: C12PreparableGraph,
+    pub(crate) fn try_prepare_backdrop(
+        preparable: BackdropPreparableGraph,
         selected_working_format: WorkingFormat,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
@@ -1259,7 +1268,7 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C12(preparable),
+            GraphPreparationSource::Backdrop(preparable),
             selected_working_format,
             capabilities,
             device,
@@ -1267,9 +1276,9 @@ impl<'device> PreparedGraph<'device> {
             resources,
             pass_cache_phase,
         )?;
-        if prepared.c12_execution.is_none() {
+        if prepared.backdrop_execution.is_none() {
             return Err(preparation_error(
-                "C12 preparation lost its validated closed backdrop facts",
+                "backdrop preparation lost its validated closed backdrop facts",
             ));
         }
         Ok(prepared)
@@ -1285,10 +1294,10 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_phase: (&'device DevicePassCache, bool),
     ) -> Result<Self> {
         match PrePreparationGraphClassification::classify(lowered) {
-            PrePreparationGraphClassification::ExactC08(preparable) if pass_cache_phase.1 => {
+            PrePreparationGraphClassification::ExactBase(preparable) if pass_cache_phase.1 => {
                 let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 let prepared = Self::try_prepare_inner(
-                    GraphPreparationSource::C08(preparable),
+                    GraphPreparationSource::Base(preparable),
                     selected_working_format,
                     capabilities,
                     device,
@@ -1296,14 +1305,14 @@ impl<'device> PreparedGraph<'device> {
                     resources,
                     pass_cache_phase,
                 )?;
-                if prepared.c08_execution_facts().is_none() {
+                if prepared.base_execution_facts().is_none() {
                     return Err(preparation_error(
-                        "C08 preparation lost its validated execution facts",
+                        "base-graph preparation lost its validated execution facts",
                     ));
                 }
                 Ok(prepared)
             }
-            PrePreparationGraphClassification::ExactC08(preparable) => Self::try_prepare_c08(
+            PrePreparationGraphClassification::ExactBase(preparable) => Self::try_prepare_base(
                 preparable,
                 policy,
                 capabilities,
@@ -1312,10 +1321,10 @@ impl<'device> PreparedGraph<'device> {
                 resources,
                 pass_cache_phase.0,
             ),
-            PrePreparationGraphClassification::ExactC09(closed) => {
+            PrePreparationGraphClassification::ExactComposition(closed) => {
                 let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 Self::try_prepare_inner(
-                    GraphPreparationSource::C09(closed),
+                    GraphPreparationSource::Composition(closed),
                     selected_working_format,
                     capabilities,
                     device,
@@ -1324,10 +1333,10 @@ impl<'device> PreparedGraph<'device> {
                     pass_cache_phase,
                 )
             }
-            PrePreparationGraphClassification::ExactC10(preparable) => {
+            PrePreparationGraphClassification::ExactColorFilter(preparable) => {
                 let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 let prepared = Self::try_prepare_inner(
-                    GraphPreparationSource::C10 {
+                    GraphPreparationSource::ColorFilter {
                         preparable,
                         operation_limits: None,
                     },
@@ -1338,17 +1347,17 @@ impl<'device> PreparedGraph<'device> {
                     resources,
                     pass_cache_phase,
                 )?;
-                if prepared.c10_execution.is_none() {
+                if prepared.color_filter_execution.is_none() {
                     return Err(preparation_error(
-                        "C10 preparation lost its validated closed execution facts",
+                        "color-filter preparation lost its validated closed execution facts",
                     ));
                 }
                 Ok(prepared)
             }
-            PrePreparationGraphClassification::ExactC11(preparable) => {
+            PrePreparationGraphClassification::ExactSpatialFilter(preparable) => {
                 let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
                 let prepared = Self::try_prepare_inner(
-                    GraphPreparationSource::C11(preparable),
+                    GraphPreparationSource::SpatialFilter(preparable),
                     selected_working_format,
                     capabilities,
                     device,
@@ -1356,16 +1365,16 @@ impl<'device> PreparedGraph<'device> {
                     resources,
                     pass_cache_phase,
                 )?;
-                if prepared.c11_execution.is_none() {
+                if prepared.spatial_filter_execution.is_none() {
                     return Err(preparation_error(
-                        "C11 preparation lost its validated closed execution facts",
+                        "spatial-filter preparation lost its validated closed execution facts",
                     ));
                 }
                 Ok(prepared)
             }
-            PrePreparationGraphClassification::ExactC12(preparable) => {
+            PrePreparationGraphClassification::ExactBackdrop(preparable) => {
                 let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
-                Self::try_prepare_c12(
+                Self::try_prepare_backdrop(
                     preparable,
                     selected_working_format,
                     capabilities,
@@ -1376,7 +1385,7 @@ impl<'device> PreparedGraph<'device> {
                 )
             }
             PrePreparationGraphClassification::FuturePasses => Err(preparation_error(
-                "a future GPU pass cannot enter C09 resource preparation",
+                "a future GPU pass cannot enter composition resource preparation",
             )),
             PrePreparationGraphClassification::Ineligible(ineligibility) => {
                 Err(ineligibility.into_error())
@@ -1395,8 +1404,14 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         let (pass_cache, realize_checked_passes) = pass_cache_phase;
         let color_filter_operation_limits = source.color_filter_operation_limits();
-        let (lowered, c08_execution, c09_execution, c10_execution, c11_execution, c12_execution) =
-            source.into_parts();
+        let (
+            lowered,
+            base_execution,
+            composition_execution,
+            color_filter_execution,
+            spatial_filter_execution,
+            backdrop_execution,
+        ) = source.into_parts();
         let plan = match color_filter_operation_limits {
             Some(limits) => RuntimeGraphPreparationPlan::try_derive_with_color_filter_limits(
                 lowered,
@@ -1416,11 +1431,11 @@ impl<'device> PreparedGraph<'device> {
 
         let mut frame_scope = resources.begin_frame()?;
         frame_scope.abort_provisional_on_drop();
-        if c08_execution.is_some()
-            || c09_execution.is_some()
-            || c10_execution.is_some()
-            || c11_execution.is_some()
-            || c12_execution.is_some()
+        if base_execution.is_some()
+            || composition_execution.is_some()
+            || color_filter_execution.is_some()
+            || spatial_filter_execution.is_some()
+            || backdrop_execution.is_some()
         {
             frame_scope.discard_on_drop();
         }
@@ -1430,29 +1445,29 @@ impl<'device> PreparedGraph<'device> {
             create_color_filter_operation_bindings(&plan, device, queue)?;
         let pass_realization =
             realize_prepared_graph_passes(&plan, device, pass_cache, realize_checked_passes)?;
-        let c08_encoding_state = (c08_execution.is_some()
-            || c09_execution.is_some()
-            || c10_execution.is_some()
-            || c11_execution.is_some()
-            || c12_execution.is_some())
-        .then_some(C08CustomSpineEncodingState::Ready);
+        let custom_spine_encoding_state = (base_execution.is_some()
+            || composition_execution.is_some()
+            || color_filter_execution.is_some()
+            || spatial_filter_execution.is_some()
+            || backdrop_execution.is_some())
+        .then_some(CustomSpineEncodingState::Ready);
 
         Ok(Self {
             plan,
-            c08_execution,
-            c09_execution,
-            c10_execution,
-            c11_execution,
-            c12_execution,
+            base_execution,
+            composition_execution,
+            color_filter_execution,
+            spatial_filter_execution,
+            backdrop_execution,
             resource_bindings: acquired_resources.runtime_bindings,
             kernel_bindings: acquired_resources.gaussian_kernel_bindings,
             color_filter_operation_bindings,
-            c11_pass_objects: pass_realization.c11_objects,
+            spatial_filter_pass_objects: pass_realization.spatial_filter_objects,
             pass_cache_update: pass_realization.update,
             frame_scope: Some(frame_scope),
             next_pass: 0,
-            c08_encoding_state,
-            c08_completed_session: None,
+            custom_spine_encoding_state,
+            custom_spine_completed_session: None,
             #[cfg(test)]
             acquired_capture_lease_count_raw_fact: 0,
             device,
@@ -1464,15 +1479,15 @@ impl<'device> PreparedGraph<'device> {
         })
     }
 
-    pub(crate) const fn c08_execution_facts(&self) -> Option<&C08ExecutionFacts> {
-        self.c08_execution.as_ref()
+    pub(crate) const fn base_execution_facts(&self) -> Option<&BaseExecutionFacts> {
+        self.base_execution.as_ref()
     }
 
     #[cfg_attr(
         not(test),
         expect(
             dead_code,
-            reason = "C08 consumes the typed prepared graph generation for stale-binding checks"
+            reason = "graph encoding consumes the typed prepared graph generation for stale-binding checks"
         )
     )]
     pub(crate) const fn generation(&self) -> RuntimeGraphGeneration {
@@ -1491,7 +1506,7 @@ impl<'device> PreparedGraph<'device> {
         not(test),
         expect(
             dead_code,
-            reason = "C08 consumes the typed prepared root and terminal identities"
+            reason = "graph encoding consumes the typed prepared root and terminal identities"
         )
     )]
     pub(crate) const fn root_and_final(&self) -> (RuntimeResourceId, RuntimePassId) {
@@ -1514,7 +1529,7 @@ impl PreparedGraph<'_> {
             .iter()
             .find(|request| request.runtime.id == resource)
             .map(|request| &request.runtime)
-            .ok_or_else(|| preparation_error("the prepared C08 resource request is missing"))
+            .ok_or_else(|| preparation_error("the prepared graph resource request is missing"))
     }
 }
 
@@ -1523,7 +1538,7 @@ impl PreparedGraph<'_> {
         not(test),
         expect(
             dead_code,
-            reason = "C08 consumes prepared pass requests through this narrow iterator"
+            reason = "graph encoding consumes prepared pass requests through this narrow iterator"
         )
     )]
     pub(crate) fn current_pass(&self) -> Option<super::PreparedPassView<'_>> {
@@ -1623,7 +1638,7 @@ impl PreparedGraph<'_> {
     not(test),
     expect(
         dead_code,
-        reason = "C08 consumes this immutable view of the current prepared runtime pass"
+        reason = "graph encoding consumes this immutable view of the current prepared runtime pass"
     )
 )]
 pub(crate) struct PreparedPassView<'prepared> {
@@ -1634,7 +1649,7 @@ pub(crate) struct PreparedPassView<'prepared> {
     not(test),
     expect(
         dead_code,
-        reason = "C08 consumes these narrow immutable prepared-pass facts"
+        reason = "graph encoding consumes these narrow immutable prepared-pass facts"
     )
 )]
 impl PreparedPassView<'_> {
@@ -1714,7 +1729,7 @@ pub(crate) struct PreparedGaussianKernelBinding<'prepared> {
     not(test),
     expect(
         dead_code,
-        reason = "C08 reads these exact typed Gaussian binding facts during blur encoding"
+        reason = "graph encoding reads these exact typed Gaussian binding facts during blur encoding"
     )
 )]
 impl<'prepared> PreparedGaussianKernelBinding<'prepared> {

@@ -1,14 +1,14 @@
 use super::ExecutableGraphWorkingFormatRequest;
 use super::close::{
-    C08ExecutionFacts, C08PreparableGraph, C10PreparableGraph, C11PreparableGraph,
-    C12PreparableGraph, ClosedExecutableGraph, ClosedExecutableGraphFacts,
-    ExecutableColorFilterFacts, ExecutableLayerCompositionFacts, ExecutableVelloCaptureFacts,
-    PrePreparationGraphClassification, c08_resource_has_fixed_facts,
-    executable_vello_capture_facts,
+    BackdropPreparableGraph, BaseExecutionFacts, BasePreparableGraph, ClosedExecutableGraph,
+    ClosedExecutableGraphFacts, ColorFilterPreparableGraph, ExecutableColorFilterFacts,
+    ExecutableLayerCompositionFacts, ExecutableVelloCaptureFacts,
+    PrePreparationGraphClassification, SpatialFilterPreparableGraph,
+    base_graph_resource_has_fixed_facts, executable_vello_capture_facts,
 };
 use super::close::{ExecutableFilterStepFacts, preparation_error};
 use super::encode::{
-    C08CustomSpineEncodingSummary, C08PendingGraphEncoding, PendingC08PreparedFrameCommit,
+    CustomSpineEncodingSummary, PendingGraphEncoding, PendingPreparedFrameCommit,
     backdrop_filter_passes, vello_capture_raster_parameters,
 };
 use super::lower::{
@@ -98,7 +98,7 @@ impl Drop for ScopedColorFilterShaderFailureForTest {
 
 pub(crate) fn normalize_color_filter_shader_failure_for_test(mut error: Error) -> Error {
     let active = COLOR_FILTER_SHADER_FAILURE_FOR_TEST.with(Cell::get);
-    if active && error.message() == "the C10 operation buffer binding is missing" {
+    if active && error.message() == "the color-filter operation buffer binding is missing" {
         error.replace_message("injected color-filter shader failure after checked realization");
     }
     error
@@ -111,7 +111,7 @@ pub(crate) fn normalize_scope_resolution_failure_for_test(mut error: Error) -> E
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08ExecutableSubsetObservationForTest {
+pub(crate) struct BaseGraphExecutableSubsetObservationForTest {
     pub(crate) accepts_exact_rgba_and_bgra: bool,
     pub(crate) rejects_every_other_pass_kind_and_composite_payload: bool,
     pub(crate) rejects_missing_or_reordered_spine_passes: bool,
@@ -122,14 +122,14 @@ pub(crate) struct C08ExecutableSubsetObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C09ExecutableGraphObservationForTest {
+pub(crate) struct CompositionExecutableGraphObservationForTest {
     pub(crate) accepts_spine_and_layer_composition_for_all_formats: bool,
     pub(crate) layer_composition_reads_are_exact: bool,
-    pub(crate) rejects_c10_plus_passes_and_payloads: bool,
+    pub(crate) rejects_color_filter_plus_passes_and_payloads: bool,
     pub(crate) rejects_missing_payloads: bool,
     pub(crate) rejects_malformed_graph_facts: bool,
     pub(crate) rejects_unsupported_output_binding: bool,
-    pub(crate) preserves_exact_c09_dispatch: bool,
+    pub(crate) preserves_exact_composition_dispatch: bool,
 }
 
 #[cfg(test)]
@@ -208,7 +208,7 @@ pub(crate) struct ColorFilterOperationBufferLimitObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C10ColorFilterCacheRealizationObservationForTest {
+pub(crate) struct ColorFilterCacheRealizationObservationForTest {
     pub(crate) realizes_high_precision: bool,
     pub(crate) realizes_reduced_precision: bool,
     pub(crate) checked_scope_is_clean: bool,
@@ -217,7 +217,7 @@ pub(crate) struct C10ColorFilterCacheRealizationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C10ColorFilterLayoutObservationForTest {
+pub(crate) struct ColorFilterLayoutObservationForTest {
     pub(crate) realizes_both_working_formats: bool,
     pub(crate) binds_exact_filter_source: bool,
     pub(crate) binds_exact_nearest_sampler: bool,
@@ -228,7 +228,7 @@ pub(crate) struct C10ColorFilterLayoutObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11BlurLayoutObservationForTest {
+pub(crate) struct BlurLayoutObservationForTest {
     pub(crate) realizes_all_axis_input_and_precision_keys: bool,
     pub(crate) binds_exact_working_source: bool,
     pub(crate) binds_only_one_linear_sampler: bool,
@@ -239,7 +239,7 @@ pub(crate) struct C11BlurLayoutObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11BlurCacheRealizationObservationForTest {
+pub(crate) struct BlurCacheRealizationObservationForTest {
     pub(crate) realizes_all_eight_programs: bool,
     pub(crate) checked_scope_is_clean: bool,
     pub(crate) publishes_only_blur_entries: bool,
@@ -247,7 +247,7 @@ pub(crate) struct C11BlurCacheRealizationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11DropShadowLayoutObservationForTest {
+pub(crate) struct DropShadowLayoutObservationForTest {
     pub(crate) realizes_both_working_formats: bool,
     pub(crate) binds_exact_blurred_source_alpha: bool,
     pub(crate) binds_only_one_linear_transparent_sampler: bool,
@@ -258,7 +258,7 @@ pub(crate) struct C11DropShadowLayoutObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11DropShadowCacheRealizationObservationForTest {
+pub(crate) struct DropShadowCacheRealizationObservationForTest {
     pub(crate) realizes_checked_colorize_and_merge_programs: bool,
     pub(crate) checked_scope_is_clean: bool,
     pub(crate) merge_uses_fixed_premultiplied_source_over: bool,
@@ -268,18 +268,18 @@ pub(crate) struct C11DropShadowCacheRealizationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C10ExecutableGraphObservationForTest {
+pub(crate) struct ColorFilterExecutableGraphObservationForTest {
     pub(crate) accepts_spine_composition_and_color_for_all_formats: bool,
     pub(crate) accepts_multiple_ordered_color_runs: bool,
     pub(crate) rejects_empty_missing_and_malformed_color_facts: bool,
     pub(crate) rejects_copy_blur_shadow_and_drop_shadow_composite: bool,
     pub(crate) rejects_unsupported_output: bool,
-    pub(crate) preserves_public_c09_dispatch_boundary: bool,
+    pub(crate) preserves_public_composition_dispatch_boundary: bool,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct C10ColorSpatialObservationForTest {
+pub(crate) struct ColorFilterSpatialObservationForTest {
     pub(crate) logical_bounds: [f64; 4],
     pub(crate) device_origin: (i32, i32),
     pub(crate) device_extent: PhysicalSize,
@@ -291,7 +291,7 @@ pub(crate) struct C10ColorSpatialObservationForTest {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ColorFilterGraphObservationForTest {
     pub(crate) operation_tags_by_run: Vec<Vec<RuntimeColorOperationTagForTest>>,
-    pub(crate) first_source_spatial: Option<C10ColorSpatialObservationForTest>,
+    pub(crate) first_source_spatial: Option<ColorFilterSpatialObservationForTest>,
     pub(crate) every_run_has_one_source_and_distinct_result: bool,
     pub(crate) every_run_preserves_exact_spatial_descriptor: bool,
     pub(crate) every_operation_retains_one_clamp: bool,
@@ -305,24 +305,24 @@ pub(crate) struct ColorFilterGraphObservationForTest {
 pub(crate) struct MixedColorUnsupportedDiagnosticObservationForTest {
     pub(crate) pure_color_retains_gpu_color_diagnostic: bool,
     pub(crate) color_then_blur_reports_gpu_blur_diagnostic: bool,
-    pub(crate) mixed_graph_stays_outside_c10_preparation: bool,
+    pub(crate) mixed_graph_stays_outside_color_filter_preparation: bool,
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11ExecutableGraphObservationForTest {
+pub(crate) struct SpatialFilterExecutableGraphObservationForTest {
     pub(crate) accepts_color_blur_and_drop_shadow_for_all_formats: bool,
     pub(crate) preserves_ordered_nonzero_filter_steps: bool,
     pub(crate) rejects_empty_missing_and_malformed_spatial_facts: bool,
     pub(crate) rejects_wrong_axes_inputs_edges_and_aliases: bool,
-    pub(crate) rejects_copy_backdrop_stale_forward_and_c12_plus: bool,
+    pub(crate) rejects_copy_backdrop_stale_forward_and_backdrop_plus: bool,
     pub(crate) rejects_before_resource_acquisition: bool,
 }
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C11FilterGraphObservationForTest {
-    pub(crate) pass_order: Vec<C11FilterPassTagForTest>,
+pub(crate) struct SpatialFilterGraphObservationForTest {
+    pub(crate) pass_order: Vec<SpatialFilterPassTagForTest>,
     pub(crate) ordinary_blur_uses_transparent_black: bool,
     pub(crate) drop_shadow_uses_source_alpha_and_continuous_offset: bool,
     pub(crate) spatial_mappings_are_exact: bool,
@@ -334,7 +334,7 @@ pub(crate) struct C11FilterGraphObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12ExecutableGraphObservationForTest {
+pub(crate) struct BackdropExecutableGraphObservationForTest {
     pub(crate) accepts_bounded_top_level_backdrop: bool,
     pub(crate) rejects_outside_bounded_subset: bool,
     pub(crate) rejects_before_resource_acquisition: bool,
@@ -342,7 +342,7 @@ pub(crate) struct C12ExecutableGraphObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12BackdropGraphObservationForTest {
+pub(crate) struct BackdropGraphObservationForTest {
     pub(crate) closed_subset_receipt: bool,
     pub(crate) reads_completed_parent_once: bool,
     pub(crate) copy_precedes_authored_filters: bool,
@@ -353,7 +353,7 @@ pub(crate) struct C12BackdropGraphObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12CopyBackdropLayoutObservationForTest {
+pub(crate) struct CopyBackdropLayoutObservationForTest {
     pub(crate) realizes_both_working_formats: bool,
     pub(crate) binds_exact_completed_parent: bool,
     pub(crate) binds_only_one_nearest_transparent_sampler: bool,
@@ -364,7 +364,7 @@ pub(crate) struct C12CopyBackdropLayoutObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12CopyBackdropCacheRealizationObservationForTest {
+pub(crate) struct CopyBackdropCacheRealizationObservationForTest {
     pub(crate) realizes_high_precision: bool,
     pub(crate) realizes_reduced_precision: bool,
     pub(crate) checked_scope_is_clean: bool,
@@ -374,7 +374,7 @@ pub(crate) struct C12CopyBackdropCacheRealizationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12BlurCacheRealizationObservationForTest {
+pub(crate) struct BackdropBlurCacheRealizationObservationForTest {
     pub(crate) realizes_all_transparent_and_mirrored_programs: bool,
     pub(crate) checked_scope_is_clean: bool,
     pub(crate) publishes_exact_edge_programs: bool,
@@ -383,7 +383,7 @@ pub(crate) struct C12BlurCacheRealizationObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12BackdropBlurLayoutObservationForTest {
+pub(crate) struct BackdropBlurLayoutObservationForTest {
     pub(crate) realizes_all_axis_input_precision_and_edge_keys: bool,
     pub(crate) binds_exact_working_source: bool,
     pub(crate) binds_only_one_linear_mirror_sampler: bool,
@@ -395,8 +395,8 @@ pub(crate) struct C12BackdropBlurLayoutObservationForTest {
 
 #[cfg(test)]
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C12BackdropFilterChainObservationForTest {
-    pub(crate) pass_order: Vec<C11FilterPassTagForTest>,
+pub(crate) struct BackdropFilterChainObservationForTest {
+    pub(crate) pass_order: Vec<SpatialFilterPassTagForTest>,
     pub(crate) every_backdrop_blur_uses_mirror: bool,
     pub(crate) source_alpha_blur_uses_mirror: bool,
     pub(crate) every_color_operation_retains_one_clamp: bool,
@@ -404,7 +404,7 @@ pub(crate) struct C12BackdropFilterChainObservationForTest {
     pub(crate) every_mirrored_stage_is_realizable: bool,
 }
 
-pub(crate) use super::encode::ScheduledFilterRawFact as C11FilterPassTagForTest;
+pub(crate) use super::encode::ScheduledFilterRawFact as SpatialFilterPassTagForTest;
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -485,17 +485,17 @@ pub(crate) struct CompositionGraphObservationForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c09_executable_graph_observation_for_test(
-    c08_commands: RenderCommands,
-    c09_commands: RenderCommands,
-    c10_commands: RenderCommands,
+pub(crate) fn composition_executable_graph_observation_for_test(
+    base_graph_commands: RenderCommands,
+    composition_commands: RenderCommands,
+    color_filter_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C09ExecutableGraphObservationForTest {
-    c09_executable_graph_observation(
-        c08_commands,
-        c09_commands,
-        c10_commands,
+) -> CompositionExecutableGraphObservationForTest {
+    composition_executable_graph_observation(
+        base_graph_commands,
+        composition_commands,
+        color_filter_commands,
         context,
         capabilities,
     )
@@ -503,15 +503,15 @@ pub(crate) fn c09_executable_graph_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c10_executable_graph_observation_for_test(
+pub(crate) fn color_filter_executable_graph_observation_for_test(
     color_filters: Vec<super::super::FilterList>,
     blur_filters: Vec<super::super::FilterList>,
     shadow_filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C10ExecutableGraphObservationForTest {
-    c10_executable_graph_observation(
+) -> ColorFilterExecutableGraphObservationForTest {
+    color_filter_executable_graph_observation(
         color_filters,
         blur_filters,
         shadow_filters,
@@ -551,68 +551,69 @@ pub(crate) fn mixed_color_unsupported_diagnostic_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c11_executable_graph_observation_for_test(
+pub(crate) fn spatial_filter_executable_graph_observation_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C11ExecutableGraphObservationForTest {
-    c11_executable_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
+) -> SpatialFilterExecutableGraphObservationForTest {
+    spatial_filter_executable_graph_observation(filters, commands, context, capabilities)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c11_filter_graph_observation_for_test(
+pub(crate) fn spatial_filter_graph_observation_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C11FilterGraphObservationForTest {
-    c11_filter_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
+) -> SpatialFilterGraphObservationForTest {
+    spatial_filter_graph_observation(filters, commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c12_executable_graph_observation_for_test(
+pub(crate) fn backdrop_executable_graph_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C12ExecutableGraphObservationForTest {
-    c12_executable_graph_observation(commands, context, capabilities).unwrap_or_default()
+) -> BackdropExecutableGraphObservationForTest {
+    backdrop_executable_graph_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c12_backdrop_graph_observation_for_test(
+pub(crate) fn backdrop_graph_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C12BackdropGraphObservationForTest {
-    c12_backdrop_graph_observation(commands, context, capabilities).unwrap_or_default()
+) -> BackdropGraphObservationForTest {
+    backdrop_graph_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c12_copy_backdrop_layout_observation_for_test(
+pub(crate) fn copy_backdrop_layout_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C12CopyBackdropLayoutObservationForTest {
-    c12_copy_backdrop_layout_observation(commands, context, capabilities).unwrap_or_default()
+) -> CopyBackdropLayoutObservationForTest {
+    copy_backdrop_layout_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) async fn c12_copy_backdrop_cache_realization_observation_for_test(
+pub(crate) async fn copy_backdrop_cache_realization_observation_for_test(
     device: &wgpu::Device,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C12CopyBackdropCacheRealizationObservationForTest> {
+) -> Result<CopyBackdropCacheRealizationObservationForTest> {
     capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
     capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
-    let high = c12_copy_backdrop_cache_request_for_test(
+    let high = copy_backdrop_cache_request_for_test(
         commands.clone(),
         context,
         capabilities,
         WorkingFormat::HighPrecision,
     )?;
-    let reduced = c12_copy_backdrop_cache_request_for_test(
+    let reduced = copy_backdrop_cache_request_for_test(
         commands.clone(),
         context,
         capabilities,
@@ -620,7 +621,7 @@ pub(crate) async fn c12_copy_backdrop_cache_realization_observation_for_test(
     )?;
     let rejected_cache = DevicePassCache::new();
     let unsupported = DeviceCapabilities::from_test_facts(false, false, 4_096);
-    let rejects_unsupported_format_before_publication = c12_copy_backdrop_cache_request_for_test(
+    let rejects_unsupported_format_before_publication = copy_backdrop_cache_request_for_test(
         commands,
         context,
         unsupported,
@@ -628,7 +629,7 @@ pub(crate) async fn c12_copy_backdrop_cache_realization_observation_for_test(
     )
     .is_err()
         && rejected_cache.counts_for_test().is_empty();
-    realize_c12_copy_backdrop_requests(
+    realize_copy_backdrop_requests(
         device,
         [high, reduced],
         rejects_unsupported_format_before_publication,
@@ -644,7 +645,7 @@ pub(crate) fn color_filter_operation_bytes_observation_for_test(
 ) -> Result<ColorFilterOperationBytesObservationForTest> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
         return Err(lowering_error(
-            "the C10 operation-byte fixture did not produce a GPU graph",
+            "the color-filter operation-byte fixture did not produce a GPU graph",
         ));
     };
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -663,7 +664,7 @@ pub(crate) fn color_filter_operation_bytes_observation_for_test(
         .collect::<Vec<_>>();
     let [filter] = filters.as_slice() else {
         return Err(lowering_error(
-            "the C10 operation-byte fixture must contain one color-filter run",
+            "the color-filter operation-byte fixture must contain one color-filter run",
         ));
     };
     let limits = ColorFilterOperationBufferLimits::for_test(u64::MAX, u64::MAX);
@@ -739,21 +740,21 @@ pub(crate) fn color_filter_operation_buffer_limit_observation_for_test()
 }
 
 #[cfg(test)]
-pub(crate) async fn c10_color_filter_cache_realization_observation_for_test(
+pub(crate) async fn color_filter_cache_realization_observation_for_test(
     device: &wgpu::Device,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C10ColorFilterCacheRealizationObservationForTest> {
+) -> Result<ColorFilterCacheRealizationObservationForTest> {
     capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
     capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
-    let high = c10_color_filter_cache_requests_for_test(
+    let high = color_filter_cache_requests_for_test(
         commands.clone(),
         context,
         capabilities,
         WorkingFormat::HighPrecision,
     )?;
-    let reduced = c10_color_filter_cache_requests_for_test(
+    let reduced = color_filter_cache_requests_for_test(
         commands,
         context,
         capabilities,
@@ -796,7 +797,7 @@ pub(crate) async fn c10_color_filter_cache_realization_observation_for_test(
     if let Some(error) = scope_error {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            format!("C10 checked shader realization failed validation: {error}"),
+            format!("color-filter checked shader realization failed validation: {error}"),
         ));
     }
     update.commit(&mut cache)?;
@@ -808,7 +809,7 @@ pub(crate) async fn c10_color_filter_cache_realization_observation_for_test(
             keys.pipeline(),
         )
     });
-    Ok(C10ColorFilterCacheRealizationObservationForTest {
+    Ok(ColorFilterCacheRealizationObservationForTest {
         realizes_high_precision,
         realizes_reduced_precision,
         checked_scope_is_clean: true,
@@ -818,11 +819,11 @@ pub(crate) async fn c10_color_filter_cache_realization_observation_for_test(
 }
 
 #[cfg(test)]
-async fn realize_c12_copy_backdrop_requests(
+async fn realize_copy_backdrop_requests(
     device: &wgpu::Device,
-    requests: [C12CopyBackdropCacheRequestForTest; 2],
+    requests: [CopyBackdropCacheRequestForTest; 2],
     rejects_unsupported_format_before_publication: bool,
-) -> Result<C12CopyBackdropCacheRealizationObservationForTest> {
+) -> Result<CopyBackdropCacheRealizationObservationForTest> {
     let mut cache = DevicePassCache::new();
     let mut update = cache.provisional_update();
     let error_scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -848,7 +849,7 @@ async fn realize_c12_copy_backdrop_requests(
     if let Some(error) = scope_error {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            format!("C12 checked backdrop-copy realization failed validation: {error}"),
+            format!("backdrop checked backdrop-copy realization failed validation: {error}"),
         ));
     }
     update.commit(&mut cache)?;
@@ -860,7 +861,7 @@ async fn realize_c12_copy_backdrop_requests(
             request.keys.pipeline(),
         )
     });
-    Ok(C12CopyBackdropCacheRealizationObservationForTest {
+    Ok(CopyBackdropCacheRealizationObservationForTest {
         realizes_high_precision,
         realizes_reduced_precision,
         checked_scope_is_clean: true,
@@ -871,42 +872,42 @@ async fn realize_c12_copy_backdrop_requests(
 }
 
 #[cfg(test)]
-pub(crate) fn c10_color_filter_layout_observation_for_test(
+pub(crate) fn color_filter_layout_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C10ColorFilterLayoutObservationForTest {
-    c10_color_filter_layout_observation(commands, context, capabilities).unwrap_or_default()
+) -> ColorFilterLayoutObservationForTest {
+    color_filter_layout_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c11_blur_layout_observation_for_test(
+pub(crate) fn blur_layout_observation_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C11BlurLayoutObservationForTest {
-    c11_blur_layout_observation(filters, commands, context, capabilities).unwrap_or_default()
+) -> BlurLayoutObservationForTest {
+    blur_layout_observation(filters, commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) async fn c11_blur_cache_realization_observation_for_test(
+pub(crate) async fn blur_cache_realization_observation_for_test(
     device: &wgpu::Device,
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C11BlurCacheRealizationObservationForTest> {
+) -> Result<BlurCacheRealizationObservationForTest> {
     capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
     capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
-    let high = c11_blur_cache_requests_for_test(
+    let high = blur_cache_requests_for_test(
         filters.clone(),
         commands.clone(),
         context,
         capabilities,
         WorkingFormat::HighPrecision,
     )?;
-    let reduced = c11_blur_cache_requests_for_test(
+    let reduced = blur_cache_requests_for_test(
         filters,
         commands,
         context,
@@ -938,7 +939,7 @@ pub(crate) async fn c11_blur_cache_realization_observation_for_test(
     if let Some(error) = scope_error {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            format!("C11 checked blur realization failed validation: {error}"),
+            format!("spatial-filter checked blur realization failed validation: {error}"),
         ));
     }
     update.commit(&mut cache)?;
@@ -950,7 +951,7 @@ pub(crate) async fn c11_blur_cache_realization_observation_for_test(
             keys.pipeline(),
         )
     });
-    Ok(C11BlurCacheRealizationObservationForTest {
+    Ok(BlurCacheRealizationObservationForTest {
         realizes_all_eight_programs: realized_count == 8,
         checked_scope_is_clean: true,
         publishes_only_blur_entries: all_requests_are_cached
@@ -959,14 +960,14 @@ pub(crate) async fn c11_blur_cache_realization_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) async fn c12_blur_cache_realization_observation_for_test(
+pub(crate) async fn backdrop_blur_cache_realization_observation_for_test(
     device: &wgpu::Device,
     ordinary_filters: Vec<super::super::FilterList>,
     ordinary_commands: RenderCommands,
     backdrop_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C12BlurCacheRealizationObservationForTest> {
+) -> Result<BackdropBlurCacheRealizationObservationForTest> {
     capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
     capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
     let mut transparent = Vec::with_capacity(8);
@@ -975,7 +976,7 @@ pub(crate) async fn c12_blur_cache_realization_observation_for_test(
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        transparent.extend(c11_blur_cache_requests_for_test(
+        transparent.extend(blur_cache_requests_for_test(
             ordinary_filters.clone(),
             ordinary_commands.clone(),
             context,
@@ -983,7 +984,7 @@ pub(crate) async fn c12_blur_cache_realization_observation_for_test(
             working_format,
         )?);
         mirrored.extend(
-            c12_backdrop_blur_cache_requests_for_test(
+            backdrop_blur_cache_requests_for_test(
                 backdrop_commands.clone(),
                 context,
                 capabilities,
@@ -1023,7 +1024,7 @@ pub(crate) async fn c12_blur_cache_realization_observation_for_test(
     if let Some(error) = scope_error {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            format!("C12 checked edge-aware blur realization failed validation: {error}"),
+            format!("backdrop checked edge-aware blur realization failed validation: {error}"),
         ));
     }
     update.commit(&mut cache)?;
@@ -1035,7 +1036,7 @@ pub(crate) async fn c12_blur_cache_realization_observation_for_test(
             keys.pipeline(),
         )
     });
-    Ok(C12BlurCacheRealizationObservationForTest {
+    Ok(BackdropBlurCacheRealizationObservationForTest {
         realizes_all_transparent_and_mirrored_programs: realized_count == 16,
         checked_scope_is_clean: true,
         publishes_exact_edge_programs: all_requests_are_cached
@@ -1045,51 +1046,51 @@ pub(crate) async fn c12_blur_cache_realization_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c12_backdrop_blur_layout_observation_for_test(
+pub(crate) fn backdrop_blur_layout_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C12BackdropBlurLayoutObservationForTest {
-    c12_backdrop_blur_layout_observation(commands, context, capabilities).unwrap_or_default()
+) -> BackdropBlurLayoutObservationForTest {
+    backdrop_blur_layout_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c12_backdrop_filter_chain_observation_for_test(
+pub(crate) fn backdrop_filter_chain_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C12BackdropFilterChainObservationForTest {
-    c12_backdrop_filter_chain_observation(commands, context, capabilities).unwrap_or_default()
+) -> BackdropFilterChainObservationForTest {
+    backdrop_filter_chain_observation(commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c11_drop_shadow_layout_observation_for_test(
+pub(crate) fn drop_shadow_layout_observation_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C11DropShadowLayoutObservationForTest {
-    c11_drop_shadow_layout_observation(filters, commands, context, capabilities).unwrap_or_default()
+) -> DropShadowLayoutObservationForTest {
+    drop_shadow_layout_observation(filters, commands, context, capabilities).unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
+pub(crate) async fn drop_shadow_cache_realization_observation_for_test(
     device: &wgpu::Device,
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C11DropShadowCacheRealizationObservationForTest> {
+) -> Result<DropShadowCacheRealizationObservationForTest> {
     capabilities.validate_supported_working_format(WorkingFormat::HighPrecision)?;
     capabilities.validate_supported_working_format(WorkingFormat::ReducedPrecision)?;
-    let high = c11_drop_shadow_cache_requests_for_test(
+    let high = drop_shadow_cache_requests_for_test(
         filters.clone(),
         commands.clone(),
         context,
         capabilities,
         WorkingFormat::HighPrecision,
     )?;
-    let reduced = c11_drop_shadow_cache_requests_for_test(
+    let reduced = drop_shadow_cache_requests_for_test(
         filters,
         commands,
         context,
@@ -1113,7 +1114,7 @@ pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
                 )?
                 .require_encoding_ready()?;
             update
-                .realize_c08_pass(
+                .realize_core_pass(
                     device,
                     &cache,
                     requests.merge.samplers(),
@@ -1131,7 +1132,7 @@ pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
     if let Some(error) = scope_error {
         return Err(Error::new(
             BackendErrorCode::RenderFailed,
-            format!("C11 checked drop-shadow realization failed validation: {error}"),
+            format!("spatial-filter checked drop-shadow realization failed validation: {error}"),
         ));
     }
     update.commit(&mut cache)?;
@@ -1141,7 +1142,7 @@ pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
             requests.colorize.layout(),
             requests.colorize.shader(),
             requests.colorize.pipeline(),
-        ) && cache.contains_c08_pass_for_test(
+        ) && cache.contains_core_pass_for_test(
             requests.merge.samplers(),
             requests.merge.layout(),
             requests.merge.shader(),
@@ -1151,7 +1152,7 @@ pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
     let merge_facts = [&high, &reduced]
         .into_iter()
         .filter_map(|requests| {
-            super::super::shader::c08_pass_key_facts_for_test(
+            super::super::shader::core_pass_key_facts_for_test(
                 requests.merge.samplers(),
                 requests.merge.layout(),
                 requests.merge.shader(),
@@ -1159,11 +1160,11 @@ pub(crate) async fn c11_drop_shadow_cache_realization_observation_for_test(
             )
         })
         .collect::<Vec<_>>();
-    Ok(C11DropShadowCacheRealizationObservationForTest {
+    Ok(DropShadowCacheRealizationObservationForTest {
         realizes_checked_colorize_and_merge_programs: realized_count == 4,
         checked_scope_is_clean: true,
         merge_uses_fixed_premultiplied_source_over: merge_facts.iter().all(|facts| {
-            facts.program == super::super::shader::C08ProgramForTest::DropShadowMerge
+            facts.program == super::super::shader::CorePassProgramForTest::DropShadowMerge
                 && facts.has_fixed_source_over_blend
         }),
         merge_omits_destination_sample: merge_facts.iter().all(|facts| {
@@ -1301,35 +1302,35 @@ pub(crate) fn graph_clip_coverage_observation_for_test(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C08PassLayoutObservationForTest {
+pub(crate) struct CorePassLayoutObservationForTest {
     pub(crate) canonicalize_binds_capture_and_spatial_only: bool,
     pub(crate) span_source_over_binds_source_and_spatial_only: bool,
     pub(crate) present_binds_final_image_and_spatial_only: bool,
     pub(crate) copy_only_parent_is_not_sampled: bool,
     pub(crate) dummy_parameters_are_not_bound: bool,
-    pub(crate) c09_typed_vocabulary_is_preserved: bool,
+    pub(crate) composition_typed_vocabulary_is_preserved: bool,
     pub(crate) output_specialization_is_exact: bool,
 }
 
 #[cfg(test)]
-pub(crate) struct C08PassCacheRequestsForTest {
+pub(crate) struct CorePassCacheRequestsForTest {
     passes: Vec<RuntimePassCacheKeys>,
 }
 
 #[cfg(test)]
-impl C08PassCacheRequestsForTest {
+impl CorePassCacheRequestsForTest {
     pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
         &self.passes
     }
 }
 
 #[cfg(test)]
-pub(crate) struct C09CompositeCacheRequestsForTest {
+pub(crate) struct LayerCompositeCacheRequestsForTest {
     passes: Vec<RuntimePassCacheKeys>,
 }
 
 #[cfg(test)]
-impl C09CompositeCacheRequestsForTest {
+impl LayerCompositeCacheRequestsForTest {
     pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
         &self.passes
     }
@@ -1342,7 +1343,7 @@ impl C09CompositeCacheRequestsForTest {
         has_alpha_mask: bool,
     ) -> Option<&RuntimePassCacheKeys> {
         self.passes.iter().find(|keys| {
-            super::super::shader::c09_composite_pass_key_facts_for_test(
+            super::super::shader::layer_composite_pass_key_facts_for_test(
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
@@ -1358,29 +1359,29 @@ impl C09CompositeCacheRequestsForTest {
 }
 
 #[cfg(test)]
-pub(crate) struct C10ColorFilterCacheRequestsForTest {
+pub(crate) struct ColorFilterCacheRequestsForTest {
     passes: Vec<RuntimePassCacheKeys>,
 }
 
 #[cfg(test)]
-impl C10ColorFilterCacheRequestsForTest {
+impl ColorFilterCacheRequestsForTest {
     pub(crate) fn passes(&self) -> &[RuntimePassCacheKeys] {
         &self.passes
     }
 }
 
 #[cfg(test)]
-pub(crate) fn c09_composite_cache_requests_for_test(
+pub(crate) fn layer_composite_cache_requests_for_test(
     command_sets: &[RenderCommands],
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> Result<C09CompositeCacheRequestsForTest> {
+) -> Result<LayerCompositeCacheRequestsForTest> {
     let mut passes = Vec::with_capacity(command_sets.len());
     for commands in command_sets {
         let FramePlan::GpuGraph(graph) = commands.clone().plan_for(context)? else {
             return Err(lowering_error(
-                "the C09 composite cache fixture did not produce a GPU graph",
+                "the composition composite cache fixture did not produce a GPU graph",
             ));
         };
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -1414,7 +1415,7 @@ pub(crate) fn c09_composite_cache_requests_for_test(
         }
         if !found_layer {
             return Err(lowering_error(
-                "the C09 composite cache fixture has no layer-composite keys",
+                "the composition composite cache fixture has no layer-composite keys",
             ));
         }
         for pass in &lowered.passes {
@@ -1434,7 +1435,7 @@ pub(crate) fn c09_composite_cache_requests_for_test(
                 ..
             })) = &mut normal_kind
             else {
-                unreachable!("the cloned C09 layer-composite kind must remain a layer")
+                unreachable!("the cloned composition layer-composite kind must remain a layer")
             };
             parameters.blend = BlendMode::Normal;
             let Some(keys) = runtime_pass_cache_keys(
@@ -1447,7 +1448,7 @@ pub(crate) fn c09_composite_cache_requests_for_test(
             )?
             else {
                 return Err(lowering_error(
-                    "the C09 normal-path cache fixture lost its exact keys",
+                    "the composition normal-path cache fixture lost its exact keys",
                 ));
             };
             if !passes.contains(&keys) {
@@ -1457,22 +1458,22 @@ pub(crate) fn c09_composite_cache_requests_for_test(
     }
     if passes.is_empty() {
         return Err(lowering_error(
-            "the C09 composite cache fixture contains no composite variants",
+            "the composition composite cache fixture contains no composite variants",
         ));
     }
-    Ok(C09CompositeCacheRequestsForTest { passes })
+    Ok(LayerCompositeCacheRequestsForTest { passes })
 }
 
 #[cfg(test)]
-fn c10_color_filter_cache_requests_for_test(
+fn color_filter_cache_requests_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> Result<C10ColorFilterCacheRequestsForTest> {
+) -> Result<ColorFilterCacheRequestsForTest> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
         return Err(lowering_error(
-            "the C10 color-filter cache fixture did not produce a GPU graph",
+            "the color-filter cache fixture did not produce a GPU graph",
         ));
     };
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -1493,28 +1494,28 @@ fn c10_color_filter_cache_requests_for_test(
         .collect::<Vec<_>>();
     if passes.len() != 1 {
         return Err(lowering_error(
-            "the C10 color-filter cache fixture must contain one checked program request",
+            "the color-filter cache fixture must contain one checked program request",
         ));
     }
-    Ok(C10ColorFilterCacheRequestsForTest { passes })
+    Ok(ColorFilterCacheRequestsForTest { passes })
 }
 
 #[cfg(test)]
-struct C12CopyBackdropCacheRequestForTest {
+struct CopyBackdropCacheRequestForTest {
     keys: RuntimePassCacheKeys,
     source_and_result_are_distinct: bool,
 }
 
 #[cfg(test)]
-fn c12_copy_backdrop_cache_request_for_test(
+fn copy_backdrop_cache_request_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> Result<C12CopyBackdropCacheRequestForTest> {
+) -> Result<CopyBackdropCacheRequestForTest> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
         return Err(lowering_error(
-            "the C12 backdrop-copy cache fixture did not produce a GPU graph",
+            "the backdrop-copy cache fixture did not produce a GPU graph",
         ));
     };
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -1523,11 +1524,11 @@ fn c12_copy_backdrop_cache_request_for_test(
         Format::Rgba8,
         &capabilities,
     )?;
-    let PrePreparationGraphClassification::ExactC12(preparable) =
+    let PrePreparationGraphClassification::ExactBackdrop(preparable) =
         PrePreparationGraphClassification::classify(lowered)
     else {
         return Err(lowering_error(
-            "the C12 backdrop-copy fixture is outside the exact bounded graph",
+            "the backdrop-copy fixture is outside the exact bounded graph",
         ));
     };
     let copies = preparable
@@ -1539,40 +1540,40 @@ fn c12_copy_backdrop_cache_request_for_test(
         .collect::<Vec<_>>();
     let [copy] = copies.as_slice() else {
         return Err(lowering_error(
-            "the C12 backdrop-copy fixture must contain one checked copy request",
+            "the backdrop-copy fixture must contain one checked copy request",
         ));
     };
     let [parent] = copy.reads.as_slice() else {
         return Err(lowering_error(
-            "the C12 backdrop-copy fixture must read one completed parent",
+            "the backdrop-copy fixture must read one completed parent",
         ));
     };
     let RuntimeResultBinding::Resource(result) = copy.result else {
         return Err(lowering_error(
-            "the C12 backdrop-copy fixture must write one working resource",
+            "the backdrop-copy fixture must write one working resource",
         ));
     };
-    Ok(C12CopyBackdropCacheRequestForTest {
+    Ok(CopyBackdropCacheRequestForTest {
         keys: copy
             .cache_keys
             .clone()
-            .ok_or_else(|| lowering_error("the C12 backdrop-copy cache keys are missing"))?,
+            .ok_or_else(|| lowering_error("the backdrop-copy cache keys are missing"))?,
         source_and_result_are_distinct: parent.resource != result,
     })
 }
 
 #[cfg(test)]
-fn c12_copy_backdrop_layout_observation(
+fn copy_backdrop_layout_observation(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C12CopyBackdropLayoutObservationForTest> {
+) -> Result<CopyBackdropLayoutObservationForTest> {
     let mut requests = Vec::with_capacity(2);
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        requests.push(c12_copy_backdrop_cache_request_for_test(
+        requests.push(copy_backdrop_cache_request_for_test(
             commands.clone(),
             context,
             capabilities,
@@ -1582,7 +1583,7 @@ fn c12_copy_backdrop_layout_observation(
     let facts = requests
         .iter()
         .filter_map(|request| {
-            super::super::shader::c12_copy_backdrop_pass_key_facts_for_test(
+            super::super::shader::copy_backdrop_pass_key_facts_for_test(
                 request.keys.samplers(),
                 request.keys.layout(),
                 request.keys.shader(),
@@ -1590,14 +1591,14 @@ fn c12_copy_backdrop_layout_observation(
             )
         })
         .collect::<Vec<_>>();
-    Ok(c12_copy_backdrop_layout_facts(&requests, &facts))
+    Ok(copy_backdrop_layout_facts(&requests, &facts))
 }
 
 #[cfg(test)]
-fn c12_copy_backdrop_layout_facts(
-    requests: &[C12CopyBackdropCacheRequestForTest],
-    facts: &[super::super::shader::C12CopyBackdropPassKeyFactsForTest],
-) -> C12CopyBackdropLayoutObservationForTest {
+fn copy_backdrop_layout_facts(
+    requests: &[CopyBackdropCacheRequestForTest],
+    facts: &[super::super::shader::CopyBackdropPassKeyFactsForTest],
+) -> CopyBackdropLayoutObservationForTest {
     let realizes_both_working_formats = facts.len() == 2
         && [
             ShaderTextureFormatKey::working(WorkingFormat::HighPrecision),
@@ -1611,7 +1612,7 @@ fn c12_copy_backdrop_layout_facts(
                 .count()
                 == 1
         });
-    C12CopyBackdropLayoutObservationForTest {
+    CopyBackdropLayoutObservationForTest {
         realizes_both_working_formats,
         binds_exact_completed_parent: facts.iter().all(|facts| {
             facts.source_role == ShaderBindingRoleKey::CompletedParent
@@ -1631,14 +1632,14 @@ fn c12_copy_backdrop_layout_facts(
 }
 
 #[cfg(test)]
-fn c11_blur_cache_requests_for_test(
+fn blur_cache_requests_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
 ) -> Result<Vec<RuntimePassCacheKeys>> {
-    let (_, lowered) = lower_authored_c10_graph_for_test(
+    let (_, lowered) = lower_authored_color_filter_graph_for_test(
         filters,
         commands,
         context,
@@ -1646,8 +1647,10 @@ fn c11_blur_cache_requests_for_test(
         Format::Rgba8,
         &capabilities,
     )
-    .ok_or_else(|| lowering_error("the C11 blur cache fixture did not produce a GPU graph"))?;
-    let preparable = c11_preparable_graph_for_test(lowered)?;
+    .ok_or_else(|| {
+        lowering_error("the spatial-filter blur cache fixture did not produce a GPU graph")
+    })?;
+    let preparable = spatial_filter_preparable_graph_for_test(lowered)?;
     let passes = preparable
         .closed
         .lowered
@@ -1664,14 +1667,14 @@ fn c11_blur_cache_requests_for_test(
         .collect::<Vec<_>>();
     if passes.len() != 4 {
         return Err(lowering_error(
-            "the C11 blur cache fixture must contain four axis/input program requests",
+            "the spatial-filter blur cache fixture must contain four axis/input program requests",
         ));
     }
     Ok(passes)
 }
 
 #[cfg(test)]
-struct C12BackdropBlurCacheRequestForTest {
+struct BackdropBlurCacheRequestForTest {
     keys: RuntimePassCacheKeys,
     horizontal: bool,
     source_alpha: bool,
@@ -1681,15 +1684,15 @@ struct C12BackdropBlurCacheRequestForTest {
 }
 
 #[cfg(test)]
-fn c12_backdrop_blur_cache_requests_for_test(
+fn backdrop_blur_cache_requests_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> Result<Vec<C12BackdropBlurCacheRequestForTest>> {
+) -> Result<Vec<BackdropBlurCacheRequestForTest>> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context)? else {
         return Err(lowering_error(
-            "the C12 backdrop blur cache fixture did not produce a GPU graph",
+            "the backdrop blur cache fixture did not produce a GPU graph",
         ));
     };
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
@@ -1698,11 +1701,11 @@ fn c12_backdrop_blur_cache_requests_for_test(
         Format::Rgba8,
         &capabilities,
     )?;
-    let PrePreparationGraphClassification::ExactC12(preparable) =
+    let PrePreparationGraphClassification::ExactBackdrop(preparable) =
         PrePreparationGraphClassification::classify(lowered)
     else {
         return Err(lowering_error(
-            "the C12 backdrop blur fixture is outside the exact bounded graph",
+            "the backdrop blur fixture is outside the exact bounded graph",
         ));
     };
     let mut requests = Vec::with_capacity(4);
@@ -1717,14 +1720,13 @@ fn c12_backdrop_blur_cache_requests_for_test(
         };
         let [read] = pass.reads.as_slice() else {
             return Err(lowering_error(
-                "a C12 mirrored blur must read one filter source",
+                "a backdrop mirrored blur must read one filter source",
             ));
         };
-        requests.push(C12BackdropBlurCacheRequestForTest {
-            keys: pass
-                .cache_keys
-                .clone()
-                .ok_or_else(|| lowering_error("a C12 mirrored blur has no checked cache keys"))?,
+        requests.push(BackdropBlurCacheRequestForTest {
+            keys: pass.cache_keys.clone().ok_or_else(|| {
+                lowering_error("a backdrop mirrored blur has no checked cache keys")
+            })?,
             horizontal: blur.axis == RuntimeBlurAxis::Horizontal,
             source_alpha: blur.input == RuntimeBlurInput::SourceAlpha,
             semantic_bounds: bounds,
@@ -1734,37 +1736,37 @@ fn c12_backdrop_blur_cache_requests_for_test(
     }
     if requests.len() != 4 {
         return Err(lowering_error(
-            "the C12 backdrop blur fixture must contain four mirrored axis/input requests",
+            "the backdrop blur fixture must contain four mirrored axis/input requests",
         ));
     }
     Ok(requests)
 }
 
 #[cfg(test)]
-fn c12_backdrop_blur_layout_observation(
+fn backdrop_blur_layout_observation(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C12BackdropBlurLayoutObservationForTest> {
+) -> Result<BackdropBlurLayoutObservationForTest> {
     let mut requests = Vec::with_capacity(8);
     let mut facts = Vec::with_capacity(8);
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        for request in c12_backdrop_blur_cache_requests_for_test(
+        for request in backdrop_blur_cache_requests_for_test(
             commands.clone(),
             context,
             capabilities,
             working_format,
         )? {
-            let Some(observed) = super::super::shader::c12_backdrop_blur_pass_key_facts_for_test(
+            let Some(observed) = super::super::shader::backdrop_blur_pass_key_facts_for_test(
                 request.keys.samplers(),
                 request.keys.layout(),
                 request.keys.shader(),
                 request.keys.pipeline(),
             ) else {
-                return Ok(C12BackdropBlurLayoutObservationForTest::default());
+                return Ok(BackdropBlurLayoutObservationForTest::default());
             };
             requests.push(request);
             facts.push(observed);
@@ -1799,7 +1801,7 @@ fn c12_backdrop_blur_layout_observation(
             && BlurEdgeParameterBytes::try_from_semantic_bounds(request.semantic_bounds)
                 .is_ok_and(|expected| request.edge_parameters == expected)
     });
-    Ok(C12BackdropBlurLayoutObservationForTest {
+    Ok(BackdropBlurLayoutObservationForTest {
         realizes_all_axis_input_precision_and_edge_keys,
         binds_exact_working_source: facts.iter().all(|facts| {
             facts.source_role == ShaderBindingRoleKey::FilterSource
@@ -1816,23 +1818,23 @@ fn c12_backdrop_blur_layout_observation(
             .all(|facts| facts.target_format == facts.working_format),
         semantic_bounds_match_every_mirrored_read,
         shader_mirrors_logical_bounds_before_texture_mapping:
-            super::super::shader::c12_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test(),
+            super::super::shader::backdrop_blur_shader_mirrors_semantic_bounds_before_texture_mapping_for_test(),
     })
 }
 
 #[cfg(test)]
-fn c11_blur_layout_observation(
+fn blur_layout_observation(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C11BlurLayoutObservationForTest> {
+) -> Result<BlurLayoutObservationForTest> {
     let mut facts = Vec::with_capacity(8);
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let requests = c11_blur_cache_requests_for_test(
+        let requests = blur_cache_requests_for_test(
             filters.clone(),
             commands.clone(),
             context,
@@ -1840,13 +1842,13 @@ fn c11_blur_layout_observation(
             working_format,
         )?;
         for keys in &requests {
-            let Some(observed) = super::super::shader::c11_blur_pass_key_facts_for_test(
+            let Some(observed) = super::super::shader::blur_pass_key_facts_for_test(
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
                 keys.pipeline(),
             ) else {
-                return Ok(C11BlurLayoutObservationForTest::default());
+                return Ok(BlurLayoutObservationForTest::default());
             };
             facts.push(observed);
         }
@@ -1884,7 +1886,7 @@ fn c11_blur_layout_observation(
     let targets_only_the_working_format = facts
         .iter()
         .all(|facts| facts.target_format == facts.working_format);
-    Ok(C11BlurLayoutObservationForTest {
+    Ok(BlurLayoutObservationForTest {
         realizes_all_axis_input_and_precision_keys,
         binds_exact_working_source,
         binds_only_one_linear_sampler,
@@ -1898,20 +1900,20 @@ fn c11_blur_layout_observation(
 }
 
 #[cfg(test)]
-struct C11DropShadowCacheRequestsForTest {
+struct DropShadowCacheRequestsForTest {
     colorize: RuntimePassCacheKeys,
     merge: RuntimePassCacheKeys,
 }
 
 #[cfg(test)]
-fn c11_drop_shadow_cache_requests_for_test(
+fn drop_shadow_cache_requests_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> Result<C11DropShadowCacheRequestsForTest> {
-    let (_, lowered) = lower_authored_c10_graph_for_test(
+) -> Result<DropShadowCacheRequestsForTest> {
+    let (_, lowered) = lower_authored_color_filter_graph_for_test(
         filters,
         commands,
         context,
@@ -1919,8 +1921,10 @@ fn c11_drop_shadow_cache_requests_for_test(
         Format::Rgba8,
         &capabilities,
     )
-    .ok_or_else(|| lowering_error("the C11 drop-shadow fixture did not produce a GPU graph"))?;
-    let preparable = c11_preparable_graph_for_test(lowered)?;
+    .ok_or_else(|| {
+        lowering_error("the spatial-filter drop-shadow fixture did not produce a GPU graph")
+    })?;
+    let preparable = spatial_filter_preparable_graph_for_test(lowered)?;
     let mut colorize = None;
     let mut merge = None;
     for pass in &preparable.closed.lowered.passes {
@@ -1929,7 +1933,7 @@ fn c11_drop_shadow_cache_requests_for_test(
                 set_unique_drop_shadow_cache_keys(
                     &mut colorize,
                     pass.cache_keys.clone(),
-                    "the C11 fixture contains more than one drop-shadow colorize request",
+                    "the spatial-filter fixture contains more than one drop-shadow colorize request",
                 )?;
             }
             RuntimePassKind::Composite(Some(RuntimeComposite {
@@ -1939,19 +1943,19 @@ fn c11_drop_shadow_cache_requests_for_test(
                 set_unique_drop_shadow_cache_keys(
                     &mut merge,
                     pass.cache_keys.clone(),
-                    "the C11 fixture contains more than one drop-shadow merge request",
+                    "the spatial-filter fixture contains more than one drop-shadow merge request",
                 )?;
             }
             _ => {}
         }
     }
-    let colorize = colorize
-        .flatten()
-        .ok_or_else(|| lowering_error("the C11 fixture lost its drop-shadow colorize keys"))?;
-    let merge = merge
-        .flatten()
-        .ok_or_else(|| lowering_error("the C11 fixture lost its drop-shadow merge keys"))?;
-    Ok(C11DropShadowCacheRequestsForTest { colorize, merge })
+    let colorize = colorize.flatten().ok_or_else(|| {
+        lowering_error("the spatial-filter fixture lost its drop-shadow colorize keys")
+    })?;
+    let merge = merge.flatten().ok_or_else(|| {
+        lowering_error("the spatial-filter fixture lost its drop-shadow merge keys")
+    })?;
+    Ok(DropShadowCacheRequestsForTest { colorize, merge })
 }
 
 #[cfg(test)]
@@ -1967,31 +1971,31 @@ fn set_unique_drop_shadow_cache_keys(
 }
 
 #[cfg(test)]
-fn c11_drop_shadow_layout_observation(
+fn drop_shadow_layout_observation(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C11DropShadowLayoutObservationForTest> {
+) -> Result<DropShadowLayoutObservationForTest> {
     let mut facts = Vec::with_capacity(2);
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let requests = c11_drop_shadow_cache_requests_for_test(
+        let requests = drop_shadow_cache_requests_for_test(
             filters.clone(),
             commands.clone(),
             context,
             capabilities,
             working_format,
         )?;
-        let Some(observed) = super::super::shader::c11_drop_shadow_colorize_key_facts_for_test(
+        let Some(observed) = super::super::shader::drop_shadow_colorize_key_facts_for_test(
             requests.colorize.samplers(),
             requests.colorize.layout(),
             requests.colorize.shader(),
             requests.colorize.pipeline(),
         ) else {
-            return Ok(C11DropShadowLayoutObservationForTest::default());
+            return Ok(DropShadowLayoutObservationForTest::default());
         };
         facts.push(observed);
     }
@@ -2018,7 +2022,7 @@ fn c11_drop_shadow_layout_observation(
     let targets_only_the_working_format = facts
         .iter()
         .all(|facts| facts.target_format == facts.working_format);
-    Ok(C11DropShadowLayoutObservationForTest {
+    Ok(DropShadowLayoutObservationForTest {
         realizes_both_working_formats,
         binds_exact_blurred_source_alpha,
         binds_only_one_linear_transparent_sampler,
@@ -2032,30 +2036,30 @@ fn c11_drop_shadow_layout_observation(
 }
 
 #[cfg(test)]
-fn c10_color_filter_layout_observation(
+fn color_filter_layout_observation(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Result<C10ColorFilterLayoutObservationForTest> {
+) -> Result<ColorFilterLayoutObservationForTest> {
     let mut facts = Vec::with_capacity(2);
     for working_format in [
         WorkingFormat::HighPrecision,
         WorkingFormat::ReducedPrecision,
     ] {
-        let requests = c10_color_filter_cache_requests_for_test(
+        let requests = color_filter_cache_requests_for_test(
             commands.clone(),
             context,
             capabilities,
             working_format,
         )?;
         for keys in requests.passes() {
-            let Some(observed) = super::super::shader::c10_color_filter_pass_key_facts_for_test(
+            let Some(observed) = super::super::shader::color_filter_pass_key_facts_for_test(
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
                 keys.pipeline(),
             ) else {
-                return Ok(C10ColorFilterLayoutObservationForTest::default());
+                return Ok(ColorFilterLayoutObservationForTest::default());
             };
             facts.push(observed);
         }
@@ -2085,7 +2089,7 @@ fn c10_color_filter_layout_observation(
     let targets_only_the_working_format = facts
         .iter()
         .all(|facts| facts.target_format == facts.working_format);
-    Ok(C10ColorFilterLayoutObservationForTest {
+    Ok(ColorFilterLayoutObservationForTest {
         realizes_both_working_formats,
         binds_exact_filter_source,
         binds_exact_nearest_sampler,
@@ -2100,7 +2104,7 @@ fn c10_color_filter_layout_observation(
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub(crate) struct C09CompositeLayoutObservationForTest {
+pub(crate) struct LayerCompositeLayoutObservationForTest {
     pub(crate) realizes_all_eight_entry_interfaces: bool,
     pub(crate) normal_omits_parent: bool,
     pub(crate) destination_binds_parent: bool,
@@ -2111,16 +2115,16 @@ pub(crate) struct C09CompositeLayoutObservationForTest {
 }
 
 #[cfg(test)]
-pub(crate) fn c09_composite_layout_observation_for_test(
-    requests: &C09CompositeCacheRequestsForTest,
-) -> C09CompositeLayoutObservationForTest {
-    use super::super::shader::c09_composite_pass_key_facts_for_test;
+pub(crate) fn layer_composite_layout_observation_for_test(
+    requests: &LayerCompositeCacheRequestsForTest,
+) -> LayerCompositeLayoutObservationForTest {
+    use super::super::shader::layer_composite_pass_key_facts_for_test;
 
     let facts = requests
         .passes()
         .iter()
         .filter_map(|keys| {
-            c09_composite_pass_key_facts_for_test(
+            layer_composite_pass_key_facts_for_test(
                 keys.samplers(),
                 keys.layout(),
                 keys.shader(),
@@ -2202,7 +2206,7 @@ pub(crate) fn c09_composite_layout_observation_for_test(
                     + usize::from(facts.has_clip_coverage)
                     + usize::from(facts.has_alpha_mask)
     });
-    C09CompositeLayoutObservationForTest {
+    LayerCompositeLayoutObservationForTest {
         realizes_all_eight_entry_interfaces,
         normal_omits_parent,
         destination_binds_parent,
@@ -2214,22 +2218,22 @@ pub(crate) fn c09_composite_layout_observation_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c08_pass_cache_requests_for_test(
+pub(crate) fn core_pass_cache_requests_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
     output_format: Format,
-) -> Result<C08PassCacheRequestsForTest> {
-    let graph = super::super::frame::forced_c08_graph_for_test(commands, context)?;
+) -> Result<CorePassCacheRequestsForTest> {
+    let graph = super::super::frame::forced_base_graph_for_test(commands, context)?;
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
         &graph,
         working_format,
         output_format,
         &capabilities,
     )?;
-    let preparable = C08PreparableGraph::try_from_lowered(lowered).map_err(|_| {
-        lowering_error("the checked C08 cache fixture did not retain exact executable keys")
+    let preparable = BasePreparableGraph::try_from_lowered(lowered).map_err(|_| {
+        lowering_error("the checked core-pass cache fixture did not retain exact executable keys")
     })?;
     let passes = preparable
         .lowered
@@ -2239,19 +2243,19 @@ pub(crate) fn c08_pass_cache_requests_for_test(
         .collect::<Vec<_>>();
     if passes.is_empty() {
         return Err(lowering_error(
-            "the checked C08 cache fixture contains no custom pass keys",
+            "the checked core-pass cache fixture contains no custom pass keys",
         ));
     }
-    Ok(C08PassCacheRequestsForTest { passes })
+    Ok(CorePassCacheRequestsForTest { passes })
 }
 
 #[cfg(test)]
-pub(crate) fn c08_pass_layout_observation_for_test(
+pub(crate) fn core_pass_layout_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C08PassLayoutObservationForTest {
-    use super::super::shader::{C08ProgramForTest, c08_pass_key_facts_for_test};
+) -> CorePassLayoutObservationForTest {
+    use super::super::shader::{CorePassProgramForTest, core_pass_key_facts_for_test};
 
     let mut canonicalize_binds_capture_and_spatial_only = true;
     let mut span_source_over_binds_source_and_spatial_only = true;
@@ -2264,20 +2268,20 @@ pub(crate) fn c08_pass_layout_observation_for_test(
         WorkingFormat::ReducedPrecision,
     ] {
         for output_format in [Format::Rgba8, Format::Bgra8] {
-            let Ok(requests) = c08_pass_cache_requests_for_test(
+            let Ok(requests) = core_pass_cache_requests_for_test(
                 commands.clone(),
                 context,
                 capabilities,
                 working_format,
                 output_format,
             ) else {
-                return C08PassLayoutObservationForTest::default();
+                return CorePassLayoutObservationForTest::default();
             };
             let facts = requests
                 .passes()
                 .iter()
                 .filter_map(|keys| {
-                    c08_pass_key_facts_for_test(
+                    core_pass_key_facts_for_test(
                         keys.samplers(),
                         keys.layout(),
                         keys.shader(),
@@ -2286,17 +2290,17 @@ pub(crate) fn c08_pass_layout_observation_for_test(
                 })
                 .collect::<Vec<_>>();
             if facts.len() != requests.passes().len() {
-                return C08PassLayoutObservationForTest::default();
+                return CorePassLayoutObservationForTest::default();
             }
             let canonicalize = facts
                 .iter()
-                .find(|facts| facts.program == C08ProgramForTest::CanonicalizeCapture);
+                .find(|facts| facts.program == CorePassProgramForTest::CanonicalizeCapture);
             let source_over = facts
                 .iter()
-                .find(|facts| facts.program == C08ProgramForTest::SpanSourceOver);
+                .find(|facts| facts.program == CorePassProgramForTest::SpanSourceOver);
             let present = facts
                 .iter()
-                .find(|facts| facts.program == C08ProgramForTest::Present);
+                .find(|facts| facts.program == CorePassProgramForTest::Present);
             canonicalize_binds_capture_and_spatial_only &= canonicalize.is_some_and(|facts| {
                 facts.source_role == ShaderBindingRoleKey::CaptureSource
                     && facts.source_format == ShaderTextureFormatKey::VelloCaptureRgba8Unorm
@@ -2333,22 +2337,23 @@ pub(crate) fn c08_pass_layout_observation_for_test(
         }
     }
     let output_specialization_is_exact =
-        c08_output_specializations_are_exact(&output_specializations);
-    let c09_typed_vocabulary_is_preserved = c09_typed_vocabulary_is_preserved_for_test();
+        graph_output_specializations_are_exact(&output_specializations);
+    let composition_typed_vocabulary_is_preserved =
+        composition_typed_vocabulary_is_preserved_for_test();
 
-    C08PassLayoutObservationForTest {
+    CorePassLayoutObservationForTest {
         canonicalize_binds_capture_and_spatial_only,
         span_source_over_binds_source_and_spatial_only,
         present_binds_final_image_and_spatial_only,
         copy_only_parent_is_not_sampled,
         dummy_parameters_are_not_bound,
-        c09_typed_vocabulary_is_preserved,
+        composition_typed_vocabulary_is_preserved,
         output_specialization_is_exact,
     }
 }
 
 #[cfg(test)]
-fn c08_output_specializations_are_exact(
+fn graph_output_specializations_are_exact(
     output_specializations: &[(ShaderTextureFormatKey, Option<ShaderTextureFormatKey>)],
 ) -> bool {
     output_specializations.len() == 4
@@ -2362,7 +2367,7 @@ fn c08_output_specializations_are_exact(
 }
 
 #[cfg(test)]
-fn c09_typed_vocabulary_is_preserved_for_test() -> bool {
+fn composition_typed_vocabulary_is_preserved_for_test() -> bool {
     matches!(
         ShaderBindingRoleKey::CompositeParent,
         ShaderBindingRoleKey::CompositeParent
@@ -2376,24 +2381,29 @@ fn c09_typed_vocabulary_is_preserved_for_test() -> bool {
 }
 
 #[cfg(test)]
-pub(crate) fn c08_executable_subset_observation_for_test(
-    c08_commands: RenderCommands,
+pub(crate) fn base_graph_executable_subset_observation_for_test(
+    base_graph_commands: RenderCommands,
     expanded_graph_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> C08ExecutableSubsetObservationForTest {
-    c08_executable_subset_observation(c08_commands, expanded_graph_commands, context, capabilities)
-        .unwrap_or_default()
+) -> BaseGraphExecutableSubsetObservationForTest {
+    base_graph_executable_subset_observation(
+        base_graph_commands,
+        expanded_graph_commands,
+        context,
+        capabilities,
+    )
+    .unwrap_or_default()
 }
 
 #[cfg(test)]
-pub(crate) fn c08_zero_capture_spine_lowered_for_test(
+pub(crate) fn zero_capture_spine_lowered_for_test(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
     policy: EffectQualityPolicy,
 ) -> Result<LoweredGraphPlan> {
-    let graph = super::super::frame::forced_c08_graph_for_test(commands, context)?;
+    let graph = super::super::frame::forced_base_graph_for_test(commands, context)?;
     let working_format = capabilities.resolve_effect_working_format(policy)?;
     let mut lowered = LoweredGraphPlan::try_lower_validated_graph(
         &graph,
@@ -2401,21 +2411,21 @@ pub(crate) fn c08_zero_capture_spine_lowered_for_test(
         Format::Rgba8,
         &capabilities,
     )?;
-    let clear = lowered
-        .passes
-        .first()
-        .cloned()
-        .ok_or_else(|| lowering_error("the C08 zero-capture fixture has no root clear"))?;
-    let mut present =
-        lowered.passes.last().cloned().ok_or_else(|| {
-            lowering_error("the C08 zero-capture fixture has no terminal present")
+    let clear =
+        lowered.passes.first().cloned().ok_or_else(|| {
+            lowering_error("the base graph zero-capture fixture has no root clear")
         })?;
+    let mut present = lowered.passes.last().cloned().ok_or_else(|| {
+        lowering_error("the base graph zero-capture fixture has no terminal present")
+    })?;
     let mut root = lowered
         .resources
         .iter()
         .find(|resource| resource.id == lowered.root_working_image)
         .cloned()
-        .ok_or_else(|| lowering_error("the C08 zero-capture fixture has no root resource"))?;
+        .ok_or_else(|| {
+            lowering_error("the base graph zero-capture fixture has no root resource")
+        })?;
 
     root.expected_reads = 1;
     root.last_use = present.id;
@@ -2423,7 +2433,7 @@ pub(crate) fn c08_zero_capture_spine_lowered_for_test(
     let final_read = present
         .reads
         .first_mut()
-        .ok_or_else(|| lowering_error("the C08 zero-capture fixture has no final read"))?;
+        .ok_or_else(|| lowering_error("the base graph zero-capture fixture has no final read"))?;
     final_read.resource = root.id;
     present.releases = vec![root.id];
     lowered.resources = vec![root];
@@ -2433,7 +2443,7 @@ pub(crate) fn c08_zero_capture_spine_lowered_for_test(
 }
 
 #[cfg(test)]
-pub(crate) fn c08_two_capture_spine_lowered_for_test(
+pub(crate) fn two_capture_spine_lowered_for_test(
     commands: RenderCommands,
     donor_commands: RenderCommands,
     context: FrameContext,
@@ -2441,7 +2451,7 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
     policy: EffectQualityPolicy,
 ) -> Result<LoweredGraphPlan> {
     let working_format = capabilities.resolve_effect_working_format(policy)?;
-    let graph = super::super::frame::forced_c08_graph_for_test(commands, context)?;
+    let graph = super::super::frame::forced_base_graph_for_test(commands, context)?;
     let mut lowered = LoweredGraphPlan::try_lower_validated_graph(
         &graph,
         working_format,
@@ -2450,7 +2460,7 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
     )?;
     let FramePlan::GpuGraph(donor_graph) = donor_commands.plan_for(context)? else {
         return Err(lowering_error(
-            "the two-capture C08 fixture requires a graph-shaped identity donor",
+            "the two-capture base graph fixture requires a graph-shaped identity donor",
         ));
     };
     let donor = LoweredGraphPlan::try_lower_validated_graph(
@@ -2460,51 +2470,50 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
         &capabilities,
     )?;
 
-    let C08DonorIdentitiesForTest {
+    let GraphDonorIdentitiesForTest {
         second_capture_pass,
         second_canonicalize_pass,
         second_composite_pass,
         second_capture_target,
         second_canonical_target,
         second_composite_target,
-    } = c08_donor_identities_for_test(&lowered, &donor)?;
+    } = graph_donor_identities_for_test(&lowered, &donor)?;
 
     if lowered.passes.len() != 5 || lowered.resources.len() != 4 {
         return Err(lowering_error(
-            "the two-capture C08 fixture source is not the exact one-capture spine",
+            "the two-capture base graph fixture source is not the exact one-capture spine",
         ));
     }
     let first_capture = lowered.passes[1].clone();
     let first_canonicalize = lowered.passes[2].clone();
     let first_composite = lowered.passes[3].clone();
-    let mut present = lowered
-        .passes
-        .pop()
-        .ok_or_else(|| lowering_error("the two-capture C08 fixture has no terminal present"))?;
+    let mut present = lowered.passes.pop().ok_or_else(|| {
+        lowering_error("the two-capture base graph fixture has no terminal present")
+    })?;
     let RuntimeResultBinding::Resource(first_capture_target) = first_capture.result else {
         return Err(lowering_error(
-            "the two-capture C08 fixture source has no capture target",
+            "the two-capture base graph fixture source has no capture target",
         ));
     };
     let RuntimeResultBinding::Resource(first_canonical_target) = first_canonicalize.result else {
         return Err(lowering_error(
-            "the two-capture C08 fixture source has no canonical target",
+            "the two-capture base graph fixture source has no canonical target",
         ));
     };
     let RuntimeResultBinding::Resource(first_composite_target) = first_composite.result else {
         return Err(lowering_error(
-            "the two-capture C08 fixture source has no composite target",
+            "the two-capture base graph fixture source has no composite target",
         ));
     };
 
-    let second_resources = c08_second_capture_resources_for_test(
+    let second_resources = second_capture_resources_for_test(
         &mut lowered,
         [
             first_capture_target,
             first_canonical_target,
             first_composite_target,
         ],
-        &C08DonorIdentitiesForTest {
+        &GraphDonorIdentitiesForTest {
             second_capture_pass,
             second_canonicalize_pass,
             second_composite_pass,
@@ -2550,16 +2559,16 @@ pub(crate) fn c08_two_capture_spine_lowered_for_test(
 
 #[cfg(test)]
 fn validate_two_capture_fixture(lowered: LoweredGraphPlan) -> Result<LoweredGraphPlan> {
-    if lowered.c08_execution_facts().is_none() {
+    if lowered.base_execution_facts().is_none() {
         return Err(lowering_error(
-            "the two-capture C08 fixture did not preserve the validated executable subset",
+            "the two-capture base graph fixture did not preserve the validated executable subset",
         ));
     }
     Ok(lowered)
 }
 
 #[cfg(test)]
-struct C08DonorIdentitiesForTest {
+struct GraphDonorIdentitiesForTest {
     second_capture_pass: RuntimePassId,
     second_canonicalize_pass: RuntimePassId,
     second_composite_pass: RuntimePassId,
@@ -2569,10 +2578,10 @@ struct C08DonorIdentitiesForTest {
 }
 
 #[cfg(test)]
-fn c08_second_capture_resources_for_test(
+fn second_capture_resources_for_test(
     lowered: &mut LoweredGraphPlan,
     first_targets: [RuntimeResourceId; 3],
-    second: &C08DonorIdentitiesForTest,
+    second: &GraphDonorIdentitiesForTest,
     present: RuntimePassId,
 ) -> Result<[RuntimeResourceRequest; 3]> {
     let clone_resource = |id, missing| {
@@ -2585,21 +2594,21 @@ fn c08_second_capture_resources_for_test(
     };
     let mut capture = clone_resource(
         first_targets[0],
-        "the two-capture C08 fixture lost its capture resource",
+        "the two-capture base graph fixture lost its capture resource",
     )?;
     capture.id = second.second_capture_target;
     capture.producer = RuntimeResourceProducer::Pass(second.second_capture_pass);
     capture.last_use = second.second_canonicalize_pass;
     let mut canonical = clone_resource(
         first_targets[1],
-        "the two-capture C08 fixture lost its canonical resource",
+        "the two-capture base graph fixture lost its canonical resource",
     )?;
     canonical.id = second.second_canonical_target;
     canonical.producer = RuntimeResourceProducer::Pass(second.second_canonicalize_pass);
     canonical.last_use = second.second_composite_pass;
     let mut composite = clone_resource(
         first_targets[2],
-        "the two-capture C08 fixture lost its composite resource",
+        "the two-capture base graph fixture lost its composite resource",
     )?;
     composite.id = second.second_composite_target;
     composite.producer = RuntimeResourceProducer::Pass(second.second_composite_pass);
@@ -2608,16 +2617,16 @@ fn c08_second_capture_resources_for_test(
         .resources
         .iter_mut()
         .find(|resource| resource.id == first_targets[2])
-        .ok_or_else(|| lowering_error("the two-capture C08 fixture lost its first result"))?
+        .ok_or_else(|| lowering_error("the two-capture base graph fixture lost its first result"))?
         .last_use = second.second_composite_pass;
     Ok([capture, canonical, composite])
 }
 
 #[cfg(test)]
-fn c08_donor_identities_for_test(
+fn graph_donor_identities_for_test(
     lowered: &LoweredGraphPlan,
     donor: &LoweredGraphPlan,
-) -> Result<C08DonorIdentitiesForTest> {
+) -> Result<GraphDonorIdentitiesForTest> {
     let existing_passes = lowered
         .passes
         .iter()
@@ -2629,13 +2638,13 @@ fn c08_donor_identities_for_test(
         .map(|pass| pass.id)
         .filter(|pass| !existing_passes.contains(pass));
     let second_capture_pass = donor_passes.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare capture pass identity")
+        lowering_error("the two-capture base graph fixture has no spare capture pass identity")
     })?;
     let second_canonicalize_pass = donor_passes.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare canonical pass identity")
+        lowering_error("the two-capture base graph fixture has no spare canonical pass identity")
     })?;
     let second_composite_pass = donor_passes.next().ok_or_else(|| {
-        lowering_error("the two-capture C08 fixture has no spare composite pass identity")
+        lowering_error("the two-capture base graph fixture has no spare composite pass identity")
     })?;
     let existing_resources = lowered
         .resources
@@ -2647,18 +2656,24 @@ fn c08_donor_identities_for_test(
         .iter()
         .map(|resource| resource.id)
         .filter(|resource| !existing_resources.contains(resource));
-    Ok(C08DonorIdentitiesForTest {
+    Ok(GraphDonorIdentitiesForTest {
         second_capture_pass,
         second_canonicalize_pass,
         second_composite_pass,
         second_capture_target: donor_resources.next().ok_or_else(|| {
-            lowering_error("the two-capture C08 fixture has no spare capture resource identity")
+            lowering_error(
+                "the two-capture base graph fixture has no spare capture resource identity",
+            )
         })?,
         second_canonical_target: donor_resources.next().ok_or_else(|| {
-            lowering_error("the two-capture C08 fixture has no spare canonical resource identity")
+            lowering_error(
+                "the two-capture base graph fixture has no spare canonical resource identity",
+            )
         })?,
         second_composite_target: donor_resources.next().ok_or_else(|| {
-            lowering_error("the two-capture C08 fixture has no spare composite resource identity")
+            lowering_error(
+                "the two-capture base graph fixture has no spare composite resource identity",
+            )
         })?,
     })
 }
@@ -2731,7 +2746,7 @@ pub(crate) fn mask_upload_allocation_observation_for_test(
     commands: RenderCommands,
     context: FrameContext,
 ) -> MaskUploadAllocationObservationForTest {
-    let Some(lowered) = lowered_c09_mask_plan_for_test(commands, context) else {
+    let Some(lowered) = lowered_composition_mask_plan_for_test(commands, context) else {
         return MaskUploadAllocationObservationForTest::default();
     };
     let allocation_extents = lowered
@@ -2756,7 +2771,7 @@ pub(crate) fn composite_parameter_bytes_for_test(
     commands: RenderCommands,
     context: FrameContext,
 ) -> Option<[u8; 112]> {
-    let plan = lowered_c09_mask_plan_for_test(commands, context)?;
+    let plan = lowered_composition_mask_plan_for_test(commands, context)?;
     plan.passes.iter().find_map(|pass| {
         let RuntimePassKind::Composite(Some(RuntimeComposite {
             kind: RuntimeCompositeKind::Layer { parameters, .. },
@@ -2788,17 +2803,17 @@ pub(crate) fn mask_pipeline_keys_exclude_image_identity_for_test(
         })
     }
 
-    let Some(first) = lowered_c09_mask_plan_for_test(first, context) else {
+    let Some(first) = lowered_composition_mask_plan_for_test(first, context) else {
         return false;
     };
-    let Some(second) = lowered_c09_mask_plan_for_test(second, context) else {
+    let Some(second) = lowered_composition_mask_plan_for_test(second, context) else {
         return false;
     };
     first_mask_keys(&first) == first_mask_keys(&second)
 }
 
 #[cfg(test)]
-fn lowered_c09_mask_plan_for_test(
+fn lowered_composition_mask_plan_for_test(
     commands: RenderCommands,
     context: FrameContext,
 ) -> Option<LoweredGraphPlan> {
@@ -2821,7 +2836,7 @@ impl ClosedExecutableGraph {
 }
 
 #[cfg(test)]
-impl C08PreparableGraph {
+impl BasePreparableGraph {
     pub(crate) fn try_from_lowered(
         lowered: LoweredGraphPlan,
     ) -> std::result::Result<Self, LoweredGraphPlan> {
@@ -2829,11 +2844,11 @@ impl C08PreparableGraph {
         Self::try_from_closed(closed).map_err(|closed| (*closed).into_lowered())
     }
 
-    pub(crate) fn capture_grids_for_test(&self) -> Vec<C08CaptureGridForTest> {
+    pub(crate) fn capture_grids_for_test(&self) -> Vec<VelloCaptureGridForTest> {
         self.execution
             .captures()
             .iter()
-            .map(|capture| C08CaptureGridForTest {
+            .map(|capture| VelloCaptureGridForTest {
                 texel_origin: capture.texel_origin(),
                 extent: capture.target_extent(),
                 raster_scale: capture.raster_scale(),
@@ -2843,7 +2858,7 @@ impl C08PreparableGraph {
 }
 
 #[cfg(test)]
-impl C10PreparableGraph {
+impl ColorFilterPreparableGraph {
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         self.closed.facts.working_format
     }
@@ -2859,15 +2874,17 @@ impl C10PreparableGraph {
             .iter()
             .find(|resource| resource.id == self.closed.lowered.root_working_image)
             .map(|resource| resource.spatial.device_extent)
-            .ok_or_else(|| preparation_error("the C10 root output resource is missing"))
+            .ok_or_else(|| preparation_error("the color-filter root output resource is missing"))
     }
 
-    pub(crate) fn first_color_spatial_for_test(&self) -> Option<C10ColorSpatialObservationForTest> {
+    pub(crate) fn first_color_spatial_for_test(
+        &self,
+    ) -> Option<ColorFilterSpatialObservationForTest> {
         self.closed
             .facts
             .color_filters
             .first()
-            .map(|filter| c10_spatial_observation(filter.filter.spatial.source))
+            .map(|filter| color_filter_spatial_observation(filter.filter.spatial.source))
     }
 
     fn color_filters(&self) -> &[ExecutableColorFilterFacts] {
@@ -2876,7 +2893,7 @@ impl C10PreparableGraph {
 }
 
 #[cfg(test)]
-impl C11PreparableGraph {
+impl SpatialFilterPreparableGraph {
     pub(crate) const fn working_format(&self) -> WorkingFormat {
         self.closed.facts.working_format
     }
@@ -2892,14 +2909,14 @@ impl C11PreparableGraph {
             .iter()
             .find(|resource| resource.id == self.closed.lowered.root_working_image)
             .map(|resource| resource.spatial.device_extent)
-            .ok_or_else(|| preparation_error("the C11 root output resource is missing"))
+            .ok_or_else(|| preparation_error("the spatial-filter root output resource is missing"))
     }
 
     pub(crate) fn first_filter_spatial_for_test(
         &self,
     ) -> Option<(
-        C10ColorSpatialObservationForTest,
-        C10ColorSpatialObservationForTest,
+        ColorFilterSpatialObservationForTest,
+        ColorFilterSpatialObservationForTest,
     )> {
         self.closed
             .facts
@@ -2907,15 +2924,15 @@ impl C11PreparableGraph {
             .first()
             .map(|blur| {
                 (
-                    c10_spatial_observation(blur.blur.spatial.source),
-                    c10_spatial_observation(blur.blur.spatial.result),
+                    color_filter_spatial_observation(blur.blur.spatial.source),
+                    color_filter_spatial_observation(blur.blur.spatial.result),
                 )
             })
             .or_else(|| {
                 self.closed.facts.drop_shadows.first().map(|shadow| {
                     (
-                        c10_spatial_observation(shadow.blur.spatial.source),
-                        c10_spatial_observation(shadow.parameters.spatial.result),
+                        color_filter_spatial_observation(shadow.blur.spatial.source),
+                        color_filter_spatial_observation(shadow.parameters.spatial.result),
                     )
                 })
             })
@@ -2923,12 +2940,12 @@ impl C11PreparableGraph {
 }
 
 #[cfg(test)]
-impl C12PreparableGraph {
+impl BackdropPreparableGraph {
     pub(crate) fn backdrop_spatial_for_test(
         &self,
     ) -> Option<(
-        C10ColorSpatialObservationForTest,
-        C10ColorSpatialObservationForTest,
+        ColorFilterSpatialObservationForTest,
+        ColorFilterSpatialObservationForTest,
     )> {
         let [backdrop] = self.closed.facts.backdrops.as_slice() else {
             return None;
@@ -2939,7 +2956,7 @@ impl C12PreparableGraph {
                 .resources
                 .iter()
                 .find(|resource| resource.id == id)
-                .map(|resource| c10_spatial_observation(resource.spatial))
+                .map(|resource| color_filter_spatial_observation(resource.spatial))
         };
         Some((
             spatial(backdrop.completed_parent)?,
@@ -2957,7 +2974,7 @@ impl ExecutableVelloCaptureFacts {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct C08CaptureGridForTest {
+pub(crate) struct VelloCaptureGridForTest {
     pub(crate) texel_origin: Point,
     pub(crate) extent: PhysicalSize,
     pub(crate) raster_scale: f64,
@@ -2965,7 +2982,7 @@ pub(crate) struct C08CaptureGridForTest {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum C08PassClass {
+enum CorePassClass {
     ClearRoot,
     VelloCapture,
     CanonicalizeCapture,
@@ -2974,19 +2991,19 @@ enum C08PassClass {
 }
 
 #[cfg(test)]
-fn c08_pass_class(kind: &RuntimePassKind) -> Option<C08PassClass> {
+fn core_pass_class(kind: &RuntimePassKind) -> Option<CorePassClass> {
     match kind {
         RuntimePassKind::ClearRoot {
             initialization: RuntimeInitialization::SurfaceBaseColor,
             ..
-        } => Some(C08PassClass::ClearRoot),
+        } => Some(CorePassClass::ClearRoot),
         RuntimePassKind::ClearRoot {
             initialization: RuntimeInitialization::Transparent,
             ..
         } => None,
-        RuntimePassKind::VelloCapture(Some(_)) => Some(C08PassClass::VelloCapture),
+        RuntimePassKind::VelloCapture(Some(_)) => Some(CorePassClass::VelloCapture),
         RuntimePassKind::VelloCapture(None) => None,
-        RuntimePassKind::CanonicalizeCapture => Some(C08PassClass::CanonicalizeCapture),
+        RuntimePassKind::CanonicalizeCapture => Some(CorePassClass::CanonicalizeCapture),
         RuntimePassKind::CopyBackdrop
         | RuntimePassKind::ColorFilter(_)
         | RuntimePassKind::BlurHorizontal(_)
@@ -2996,20 +3013,20 @@ fn c08_pass_class(kind: &RuntimePassKind) -> Option<C08PassClass> {
             RuntimeCompositeKind::SpanSourceOver
                 if composite.source_captured_before_outer_semantics =>
             {
-                Some(C08PassClass::SpanSourceOver)
+                Some(CorePassClass::SpanSourceOver)
             }
             RuntimeCompositeKind::SpanSourceOver
             | RuntimeCompositeKind::Layer { .. }
             | RuntimeCompositeKind::DropShadow => None,
         },
         RuntimePassKind::Composite(None) => None,
-        RuntimePassKind::Present => Some(C08PassClass::Present),
+        RuntimePassKind::Present => Some(CorePassClass::Present),
     }
 }
 
 impl LoweredGraphPlan {
     #[cfg(test)]
-    fn c08_execution_facts(&self) -> Option<C08ExecutionFacts> {
+    fn base_execution_facts(&self) -> Option<BaseExecutionFacts> {
         if ![Format::Rgba8, Format::Bgra8].contains(&self.output_format) {
             return None;
         }
@@ -3037,12 +3054,12 @@ impl LoweredGraphPlan {
 
         let clear = self.passes.first()?;
         let root = resource_by_id.get(&self.root_working_image).copied()?;
-        if !c08_root_is_exact(self, clear, root) {
+        if !base_graph_root_is_exact(self, clear, root) {
             return None;
         }
-        let sequence = c08_capture_sequence(self, &resource_by_id, root, clear.id)?;
+        let sequence = vello_capture_sequence(self, &resource_by_id, root, clear.id)?;
         let present = self.passes.get(sequence.cursor)?;
-        if !c08_present_is_exact(self, present, &sequence) {
+        if !base_graph_present_is_exact(self, present, &sequence) {
             return None;
         }
         if sequence.expected_resources.len() != self.resources.len()
@@ -3050,12 +3067,12 @@ impl LoweredGraphPlan {
                 .expected_resources
                 .iter()
                 .any(|resource| !resource_by_id.contains_key(resource))
-            || !c08_cache_keys_are_exact(self, &resource_formats)
+            || !core_pass_cache_keys_are_exact(self, &resource_formats)
         {
             return None;
         }
 
-        let execution = C08ExecutionFacts {
+        let execution = BaseExecutionFacts {
             working_format: self.working_format,
             output_format: self.output_format,
             captures: sequence.captures,
@@ -3076,7 +3093,7 @@ impl LoweredGraphPlan {
 }
 
 #[cfg(test)]
-struct C08CaptureSequenceFacts<'resource> {
+struct VelloCaptureSequenceFacts<'resource> {
     cursor: usize,
     parent: &'resource RuntimeResourceRequest,
     parent_producer: RuntimePassId,
@@ -3085,7 +3102,7 @@ struct C08CaptureSequenceFacts<'resource> {
 }
 
 #[cfg(test)]
-struct C08CapturePairFacts {
+struct VelloCapturePairFacts {
     capture_target: RuntimeResourceId,
     canonical_target: RuntimeResourceId,
     canonical_pass: RuntimePassId,
@@ -3093,18 +3110,18 @@ struct C08CapturePairFacts {
 }
 
 #[cfg(test)]
-fn c08_root_is_exact(
+fn base_graph_root_is_exact(
     plan: &LoweredGraphPlan,
     clear: &RuntimePass,
     root: &RuntimeResourceRequest,
 ) -> bool {
-    c08_pass_class(&clear.kind) == Some(C08PassClass::ClearRoot)
+    core_pass_class(&clear.kind) == Some(CorePassClass::ClearRoot)
         && clear.dependencies.is_empty()
         && clear.reads.is_empty()
         && clear.releases.is_empty()
         && clear.cache_keys.is_none()
         && clear.result == RuntimeResultBinding::Resource(plan.root_working_image)
-        && c08_resource_has_fixed_facts(
+        && base_graph_resource_has_fixed_facts(
             root,
             RuntimeResourceRole::RootWorkingImage,
             RuntimeResourceFormat::Working(plan.working_format),
@@ -3113,11 +3130,11 @@ fn c08_root_is_exact(
 }
 
 #[cfg(test)]
-fn c08_capture_pair(
+fn vello_capture_pair(
     plan: &LoweredGraphPlan,
     resources: &BTreeMap<RuntimeResourceId, &RuntimeResourceRequest>,
     cursor: usize,
-) -> Option<C08CapturePairFacts> {
+) -> Option<VelloCapturePairFacts> {
     let capture = plan.passes.get(cursor)?;
     let canonicalize = plan.passes.get(cursor.checked_add(1)?)?;
     let RuntimePassKind::VelloCapture(Some(work @ RuntimeVelloCapture::Span(_))) = &capture.kind
@@ -3135,17 +3152,17 @@ fn c08_capture_pair(
         return None;
     }
     let capture_resource = resources.get(&capture_target).copied()?;
-    if !c08_resource_has_fixed_facts(
+    if !base_graph_resource_has_fixed_facts(
         capture_resource,
         RuntimeResourceRole::CaptureWorkingImage,
         RuntimeResourceFormat::VelloCaptureRgba8Unorm,
         RuntimeResourceProducer::Pass(capture.id),
     ) || capture_resource.expected_reads != 1
         || capture_resource.last_use != canonicalize.id
-        || c08_pass_class(&canonicalize.kind) != Some(C08PassClass::CanonicalizeCapture)
+        || core_pass_class(&canonicalize.kind) != Some(CorePassClass::CanonicalizeCapture)
         || canonicalize.dependencies.as_slice() != [capture.id]
         || canonicalize.reads.len() != 1
-        || !c08_read_is_exact(
+        || !core_pass_read_is_exact(
             &canonicalize.reads[0],
             RuntimeReadRole::CaptureSource,
             capture_target,
@@ -3162,7 +3179,7 @@ fn c08_capture_pair(
     };
     let canonical_resource = resources.get(&canonical_target).copied()?;
     let composite = plan.passes.get(cursor.checked_add(2)?)?;
-    if !c08_resource_has_fixed_facts(
+    if !base_graph_resource_has_fixed_facts(
         canonical_resource,
         RuntimeResourceRole::FilterIntermediate,
         RuntimeResourceFormat::Working(plan.working_format),
@@ -3173,7 +3190,7 @@ fn c08_capture_pair(
     {
         return None;
     }
-    Some(C08CapturePairFacts {
+    Some(VelloCapturePairFacts {
         capture_target,
         canonical_target,
         canonical_pass: canonicalize.id,
@@ -3187,21 +3204,21 @@ fn c08_capture_pair(
 }
 
 #[cfg(test)]
-fn c08_composite_after_capture<'resource>(
+fn custom_spine_composite_after_capture<'resource>(
     plan: &LoweredGraphPlan,
     resources: &BTreeMap<RuntimeResourceId, &'resource RuntimeResourceRequest>,
     cursor: usize,
     parent: &RuntimeResourceRequest,
     parent_producer: RuntimePassId,
-    pair: &C08CapturePairFacts,
+    pair: &VelloCapturePairFacts,
     root_spatial: RuntimeSpatialDescriptor,
 ) -> Option<&'resource RuntimeResourceRequest> {
     let composite = plan.passes.get(cursor.checked_add(2)?)?;
     let canonical = resources.get(&pair.canonical_target).copied()?;
-    if c08_pass_class(&composite.kind) != Some(C08PassClass::SpanSourceOver)
+    if core_pass_class(&composite.kind) != Some(CorePassClass::SpanSourceOver)
         || composite.dependencies.as_slice() != [parent_producer, pair.canonical_pass]
         || composite.reads.len() != 2
-        || !c08_read_is_exact(
+        || !core_pass_read_is_exact(
             &composite.reads[0],
             RuntimeReadRole::CompositeParent,
             parent.id,
@@ -3209,7 +3226,7 @@ fn c08_composite_after_capture<'resource>(
             RuntimeSamplingEdge::ClampToExtent,
             parent.format,
         )
-        || !c08_read_is_exact(
+        || !core_pass_read_is_exact(
             &composite.reads[1],
             RuntimeReadRole::CompositeSource,
             pair.canonical_target,
@@ -3227,7 +3244,7 @@ fn c08_composite_after_capture<'resource>(
         return None;
     };
     let result = resources.get(&target).copied()?;
-    (c08_resource_has_fixed_facts(
+    (base_graph_resource_has_fixed_facts(
         result,
         RuntimeResourceRole::CompositeResult,
         RuntimeResourceFormat::Working(plan.working_format),
@@ -3237,13 +3254,13 @@ fn c08_composite_after_capture<'resource>(
 }
 
 #[cfg(test)]
-fn c08_capture_sequence<'resource>(
+fn vello_capture_sequence<'resource>(
     plan: &LoweredGraphPlan,
     resources: &BTreeMap<RuntimeResourceId, &'resource RuntimeResourceRequest>,
     root: &'resource RuntimeResourceRequest,
     clear: RuntimePassId,
-) -> Option<C08CaptureSequenceFacts<'resource>> {
-    let mut facts = C08CaptureSequenceFacts {
+) -> Option<VelloCaptureSequenceFacts<'resource>> {
+    let mut facts = VelloCaptureSequenceFacts {
         cursor: 1,
         parent: root,
         parent_producer: clear,
@@ -3253,10 +3270,10 @@ fn c08_capture_sequence<'resource>(
     while plan
         .passes
         .get(facts.cursor)
-        .is_some_and(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::VelloCapture))
+        .is_some_and(|pass| core_pass_class(&pass.kind) == Some(CorePassClass::VelloCapture))
     {
-        let pair = c08_capture_pair(plan, resources, facts.cursor)?;
-        let result = c08_composite_after_capture(
+        let pair = vello_capture_pair(plan, resources, facts.cursor)?;
+        let result = custom_spine_composite_after_capture(
             plan,
             resources,
             facts.cursor,
@@ -3277,17 +3294,17 @@ fn c08_capture_sequence<'resource>(
 }
 
 #[cfg(test)]
-fn c08_present_is_exact(
+fn base_graph_present_is_exact(
     plan: &LoweredGraphPlan,
     present: &RuntimePass,
-    sequence: &C08CaptureSequenceFacts<'_>,
+    sequence: &VelloCaptureSequenceFacts<'_>,
 ) -> bool {
     sequence.cursor.checked_add(1) == Some(plan.passes.len())
         && present.id == plan.final_present
-        && c08_pass_class(&present.kind) == Some(C08PassClass::Present)
+        && core_pass_class(&present.kind) == Some(CorePassClass::Present)
         && present.dependencies.as_slice() == [sequence.parent_producer]
         && present.reads.len() == 1
-        && c08_read_is_exact(
+        && core_pass_read_is_exact(
             &present.reads[0],
             RuntimeReadRole::FinalWorkingImage,
             sequence.parent.id,
@@ -3302,7 +3319,7 @@ fn c08_present_is_exact(
 }
 
 #[cfg(test)]
-fn c08_cache_keys_are_exact(
+fn core_pass_cache_keys_are_exact(
     plan: &LoweredGraphPlan,
     resource_formats: &BTreeMap<RuntimeResourceId, RuntimeResourceFormat>,
 ) -> bool {
@@ -3321,7 +3338,7 @@ fn c08_cache_keys_are_exact(
 }
 
 #[cfg(test)]
-fn c08_read_is_exact(
+fn core_pass_read_is_exact(
     read: &RuntimeReadBinding,
     role: RuntimeReadRole,
     resource: RuntimeResourceId,
@@ -3347,14 +3364,14 @@ fn c08_read_is_exact(
 }
 
 #[cfg(test)]
-fn c08_executable_subset_observation(
-    c08_commands: RenderCommands,
+fn base_graph_executable_subset_observation(
+    base_graph_commands: RenderCommands,
     expanded_graph_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C08ExecutableSubsetObservationForTest> {
+) -> Option<BaseGraphExecutableSubsetObservationForTest> {
     let direct_route = matches!(
-        c08_commands.clone().plan_for(context),
+        base_graph_commands.clone().plan_for(context),
         Ok(FramePlan::DirectVello(_))
     );
     let expanded_graph_plan = expanded_graph_commands.clone().plan_for(context).ok()?;
@@ -3362,16 +3379,17 @@ fn c08_executable_subset_observation(
     let FramePlan::GpuGraph(expanded_graph) = expanded_graph_plan else {
         return None;
     };
-    let c08_graph = super::super::frame::forced_c08_graph_for_test(c08_commands, context).ok()?;
+    let base_graph =
+        super::super::frame::forced_base_graph_for_test(base_graph_commands, context).ok()?;
     let rgba = LoweredGraphPlan::try_lower_validated_graph(
-        &c08_graph,
+        &base_graph,
         WorkingFormat::HighPrecision,
         Format::Rgba8,
         &capabilities,
     )
     .ok()?;
     let bgra = LoweredGraphPlan::try_lower_validated_graph(
-        &c08_graph,
+        &base_graph,
         WorkingFormat::HighPrecision,
         Format::Bgra8,
         &capabilities,
@@ -3384,8 +3402,8 @@ fn c08_executable_subset_observation(
         &capabilities,
     )
     .ok()?;
-    let rgba_preparable = C08PreparableGraph::try_from_lowered(rgba.clone()).ok()?;
-    let bgra_preparable = C08PreparableGraph::try_from_lowered(bgra).ok()?;
+    let rgba_preparable = BasePreparableGraph::try_from_lowered(rgba.clone()).ok()?;
+    let bgra_preparable = BasePreparableGraph::try_from_lowered(bgra).ok()?;
     let rgba_subset = &rgba_preparable.execution;
     let bgra_subset = &bgra_preparable.execution;
     let accepts_exact_rgba_and_bgra = rgba_subset.working_format() == WorkingFormat::HighPrecision
@@ -3401,61 +3419,63 @@ fn c08_executable_subset_observation(
                 && capture.raster_scale() > 0.0
         });
 
-    Some(C08ExecutableSubsetObservationForTest {
+    Some(BaseGraphExecutableSubsetObservationForTest {
         accepts_exact_rgba_and_bgra,
         rejects_every_other_pass_kind_and_composite_payload:
-            c08_rejects_every_other_pass_kind_and_composite_payload(&rgba),
-        rejects_missing_or_reordered_spine_passes: c08_rejects_missing_or_reordered_spine_passes(
-            &rgba,
-        ),
-        rejects_malformed_dependencies_reads_results_and_releases: c08_rejects_malformed_bindings(
-            &rgba,
-        ),
-        rejects_graph_outside_base_subset: C08PreparableGraph::try_from_lowered(expanded_graph)
+            base_graph_rejects_every_other_pass_kind_and_composite_payload(&rgba),
+        rejects_missing_or_reordered_spine_passes:
+            base_graph_rejects_missing_or_reordered_spine_passes(&rgba),
+        rejects_malformed_dependencies_reads_results_and_releases:
+            base_graph_rejects_malformed_bindings(&rgba),
+        rejects_graph_outside_base_subset: BasePreparableGraph::try_from_lowered(expanded_graph)
             .is_err(),
         preserves_direct_and_graph_planner_routes: direct_route && graph_route,
     })
 }
 
 #[cfg(test)]
-fn c09_executable_graph_observation(
-    c08_commands: RenderCommands,
-    c09_commands: RenderCommands,
-    c10_commands: RenderCommands,
+fn composition_executable_graph_observation(
+    base_graph_commands: RenderCommands,
+    composition_commands: RenderCommands,
+    color_filter_commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C09ExecutableGraphObservationForTest> {
-    let c08_graph = super::super::frame::forced_c08_graph_for_test(c08_commands, context).ok()?;
-    let FramePlan::GpuGraph(c09_graph) = c09_commands.plan_for(context).ok()? else {
+) -> Option<CompositionExecutableGraphObservationForTest> {
+    let base_graph =
+        super::super::frame::forced_base_graph_for_test(base_graph_commands, context).ok()?;
+    let FramePlan::GpuGraph(composition_graph) = composition_commands.plan_for(context).ok()?
+    else {
         return None;
     };
-    let FramePlan::GpuGraph(c10_graph) = c10_commands.plan_for(context).ok()? else {
+    let FramePlan::GpuGraph(color_filter_graph) = color_filter_commands.plan_for(context).ok()?
+    else {
         return None;
     };
 
     let accepts_spine_and_layer_composition_for_all_formats =
-        c09_accepts_all_working_and_output_formats(&c08_graph, &c09_graph);
+        composition_accepts_all_working_and_output_formats(&base_graph, &composition_graph);
 
-    let c09_lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
-        &c09_graph,
+    let composition_lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
+        &composition_graph,
         WorkingFormat::HighPrecision,
         Format::Rgba8,
     )
     .ok()?;
-    let c09_closed = ClosedExecutableGraph::try_from_lowered(c09_lowered.clone()).ok()?;
-    let layer_composition_reads_are_exact = c09_layer_composition_reads_are_exact(&c09_closed);
+    let composition_closed =
+        ClosedExecutableGraph::try_from_lowered(composition_lowered.clone()).ok()?;
+    let layer_composition_reads_are_exact = layer_composition_reads_are_exact(&composition_closed);
 
-    let c10_lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
-        &c10_graph,
+    let color_filter_lowered = LoweredGraphPlan::try_lower_for_dispatch_classification(
+        &color_filter_graph,
         WorkingFormat::HighPrecision,
         Format::Rgba8,
     )
     .ok()?;
-    let rejects_actual_c10 = !matches!(
-        PrePreparationGraphClassification::classify(c10_lowered),
-        PrePreparationGraphClassification::ExactC09(_)
+    let rejects_actual_color_filter = !matches!(
+        PrePreparationGraphClassification::classify(color_filter_lowered),
+        PrePreparationGraphClassification::ExactComposition(_)
     );
-    let layer_index = c09_lowered.passes.iter().position(|pass| {
+    let layer_index = composition_lowered.passes.iter().position(|pass| {
         matches!(
             pass.kind,
             RuntimePassKind::Composite(Some(RuntimeComposite {
@@ -3464,71 +3484,71 @@ fn c09_executable_graph_observation(
             }))
         )
     })?;
-    let capture_index = c09_lowered
+    let capture_index = composition_lowered
         .passes
         .iter()
         .position(|pass| matches!(pass.kind, RuntimePassKind::VelloCapture(Some(_))))?;
-    let canonicalize_index = c09_lowered
+    let canonicalize_index = composition_lowered
         .passes
         .iter()
         .position(|pass| matches!(pass.kind, RuntimePassKind::CanonicalizeCapture))?;
-    let present_index = c09_lowered
+    let present_index = composition_lowered
         .passes
         .iter()
         .position(|pass| matches!(pass.kind, RuntimePassKind::Present))?;
     let rejects = |invalid| ClosedExecutableGraph::try_from_lowered(invalid).is_err();
 
-    let mut invalid_copy = c09_lowered.clone();
+    let mut invalid_copy = composition_lowered.clone();
     invalid_copy.passes[layer_index].kind = RuntimePassKind::CopyBackdrop;
-    let mut invalid_payload = c09_lowered.clone();
+    let mut invalid_payload = composition_lowered.clone();
     invalid_payload.passes[layer_index].kind = RuntimePassKind::Composite(Some(RuntimeComposite {
         kind: RuntimeCompositeKind::DropShadow,
         source_captured_before_outer_semantics: true,
     }));
-    let rejects_c10_plus_passes_and_payloads =
-        rejects_actual_c10 && rejects(invalid_copy) && rejects(invalid_payload);
+    let rejects_color_filter_plus_passes_and_payloads =
+        rejects_actual_color_filter && rejects(invalid_copy) && rejects(invalid_payload);
 
-    let mut missing_capture = c09_lowered.clone();
+    let mut missing_capture = composition_lowered.clone();
     missing_capture.passes[capture_index].kind = RuntimePassKind::VelloCapture(None);
-    let mut missing_composite = c09_lowered.clone();
+    let mut missing_composite = composition_lowered.clone();
     missing_composite.passes[layer_index].kind = RuntimePassKind::Composite(None);
     let rejects_missing_payloads = rejects(missing_capture) && rejects(missing_composite);
 
-    let rejects_malformed_graph_facts = c09_rejects_malformed_graph_facts(
-        &c09_lowered,
+    let rejects_malformed_graph_facts = composition_rejects_malformed_graph_facts(
+        &composition_lowered,
         capture_index,
         canonicalize_index,
         layer_index,
     );
 
-    let mut unsupported_output = c09_lowered;
+    let mut unsupported_output = composition_lowered;
     unsupported_output.passes[present_index].result = RuntimeResultBinding::Output(Format::Bgra8);
     let rejects_unsupported_output_binding = rejects(unsupported_output);
-    let preserves_exact_c09_dispatch = matches!(
+    let preserves_exact_composition_dispatch = matches!(
         ExecutableGraphDispatchEligibility::try_classify(
-            &c09_graph,
+            &composition_graph,
             Format::Rgba8,
             ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
             &capabilities,
         ),
-        Ok(ExecutableGraphDispatchEligibility::ExactC09(_))
+        Ok(ExecutableGraphDispatchEligibility::ExactComposition(_))
     );
 
-    Some(C09ExecutableGraphObservationForTest {
+    Some(CompositionExecutableGraphObservationForTest {
         accepts_spine_and_layer_composition_for_all_formats,
         layer_composition_reads_are_exact,
-        rejects_c10_plus_passes_and_payloads,
+        rejects_color_filter_plus_passes_and_payloads,
         rejects_missing_payloads,
         rejects_malformed_graph_facts,
         rejects_unsupported_output_binding,
-        preserves_exact_c09_dispatch,
+        preserves_exact_composition_dispatch,
     })
 }
 
 #[cfg(test)]
-fn c09_accepts_all_working_and_output_formats(
-    c08_graph: &GpuRenderGraph,
-    c09_graph: &GpuRenderGraph,
+fn composition_accepts_all_working_and_output_formats(
+    base_graph: &GpuRenderGraph,
+    composition_graph: &GpuRenderGraph,
 ) -> bool {
     [
         WorkingFormat::HighPrecision,
@@ -3548,14 +3568,14 @@ fn c09_accepts_all_working_and_output_formats(
                     .ok()
                     .and_then(|lowered| ClosedExecutableGraph::try_from_lowered(lowered).ok())
                 };
-                lower(c08_graph).is_some_and(|closed| !closed.has_layer_composition())
-                    && lower(c09_graph).is_some_and(|closed| closed.has_layer_composition())
+                lower(base_graph).is_some_and(|closed| !closed.has_layer_composition())
+                    && lower(composition_graph).is_some_and(|closed| closed.has_layer_composition())
             })
     })
 }
 
 #[cfg(test)]
-fn c09_layer_composition_reads_are_exact(closed: &ClosedExecutableGraph) -> bool {
+fn layer_composition_reads_are_exact(closed: &ClosedExecutableGraph) -> bool {
     !closed.facts.layer_compositions.is_empty()
         && closed.facts.layer_compositions.iter().all(|layer| {
             closed
@@ -3583,7 +3603,7 @@ fn c09_layer_composition_reads_are_exact(closed: &ClosedExecutableGraph) -> bool
 }
 
 #[cfg(test)]
-fn c09_rejects_malformed_graph_facts(
+fn composition_rejects_malformed_graph_facts(
     lowered: &LoweredGraphPlan,
     capture: usize,
     canonicalize: usize,
@@ -3618,7 +3638,7 @@ fn c09_rejects_malformed_graph_facts(
 }
 
 #[cfg(test)]
-fn lower_authored_c10_graph_for_test(
+fn lower_authored_color_filter_graph_for_test(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
@@ -3639,15 +3659,15 @@ fn lower_authored_c10_graph_for_test(
 }
 
 #[cfg(test)]
-fn c10_executable_graph_observation(
+fn color_filter_executable_graph_observation(
     color_filters: Vec<super::super::FilterList>,
     blur_filters: Vec<super::super::FilterList>,
     shadow_filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C10ExecutableGraphObservationForTest> {
-    let (color_graph, color_lowered) = lower_authored_c10_graph_for_test(
+) -> Option<ColorFilterExecutableGraphObservationForTest> {
+    let (color_graph, color_lowered) = lower_authored_color_filter_graph_for_test(
         color_filters.clone(),
         commands.clone(),
         context,
@@ -3655,7 +3675,7 @@ fn c10_executable_graph_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let (_, blur_lowered) = lower_authored_c10_graph_for_test(
+    let (_, blur_lowered) = lower_authored_color_filter_graph_for_test(
         blur_filters,
         commands.clone(),
         context,
@@ -3663,7 +3683,7 @@ fn c10_executable_graph_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let (_, shadow_lowered) = lower_authored_c10_graph_for_test(
+    let (_, shadow_lowered) = lower_authored_color_filter_graph_for_test(
         shadow_filters,
         commands.clone(),
         context,
@@ -3677,7 +3697,7 @@ fn c10_executable_graph_observation(
         WorkingFormat::ReducedPrecision,
     ] {
         for output_format in [Format::Rgba8, Format::Bgra8] {
-            let (_, lowered) = lower_authored_c10_graph_for_test(
+            let (_, lowered) = lower_authored_color_filter_graph_for_test(
                 color_filters.clone(),
                 commands.clone(),
                 context,
@@ -3685,7 +3705,8 @@ fn c10_executable_graph_observation(
                 output_format,
                 &capabilities,
             )?;
-            accepts_spine_composition_and_color_for_all_formats &= c10_plan_is_closed(lowered);
+            accepts_spine_composition_and_color_for_all_formats &=
+                color_filter_plan_is_closed(lowered);
         }
     }
 
@@ -3699,21 +3720,21 @@ fn c10_executable_graph_observation(
         .collect::<Vec<_>>();
     let accepts_multiple_ordered_color_runs = color_pass_indices.len() == color_filters.len()
         && color_pass_indices.len() > 1
-        && c10_plan_is_closed(color_lowered.clone());
+        && color_filter_plan_is_closed(color_lowered.clone());
     let first_color = *color_pass_indices.first()?;
     let rejects_empty_missing_and_malformed_color_facts =
-        c10_rejects_malformed_color_facts(&color_lowered, &color_pass_indices)?;
+        color_filter_rejects_malformed_color_facts(&color_lowered, &color_pass_indices)?;
 
     let mut copy = color_lowered.clone();
     copy.passes[first_color].kind = RuntimePassKind::CopyBackdrop;
-    let rejects_copy_blur_shadow_and_drop_shadow_composite = !c10_plan_is_closed(copy)
-        && !c10_plan_is_closed(blur_lowered)
-        && !c10_plan_is_closed(shadow_lowered);
+    let rejects_copy_blur_shadow_and_drop_shadow_composite = !color_filter_plan_is_closed(copy)
+        && !color_filter_plan_is_closed(blur_lowered)
+        && !color_filter_plan_is_closed(shadow_lowered);
 
     let mut unsupported_output = color_lowered;
     unsupported_output.output_format = Format::Bgra8;
-    let rejects_unsupported_output = !c10_plan_is_closed(unsupported_output);
-    let preserves_public_c09_dispatch_boundary = matches!(
+    let rejects_unsupported_output = !color_filter_plan_is_closed(unsupported_output);
+    let preserves_public_composition_dispatch_boundary = matches!(
         ExecutableGraphDispatchEligibility::try_classify(
             &color_graph,
             Format::Rgba8,
@@ -3723,25 +3744,25 @@ fn c10_executable_graph_observation(
         Ok(ExecutableGraphDispatchEligibility::FuturePasses)
     );
 
-    Some(C10ExecutableGraphObservationForTest {
+    Some(ColorFilterExecutableGraphObservationForTest {
         accepts_spine_composition_and_color_for_all_formats,
         accepts_multiple_ordered_color_runs,
         rejects_empty_missing_and_malformed_color_facts,
         rejects_copy_blur_shadow_and_drop_shadow_composite,
         rejects_unsupported_output,
-        preserves_public_c09_dispatch_boundary,
+        preserves_public_composition_dispatch_boundary,
     })
 }
 
 #[cfg(test)]
-fn c10_plan_is_closed(lowered: LoweredGraphPlan) -> bool {
+fn color_filter_plan_is_closed(lowered: LoweredGraphPlan) -> bool {
     ClosedExecutableGraph::try_from_lowered(lowered)
         .ok()
-        .is_some_and(|closed| C10PreparableGraph::try_from_closed(closed).is_ok())
+        .is_some_and(|closed| ColorFilterPreparableGraph::try_from_closed(closed).is_ok())
 }
 
 #[cfg(test)]
-fn c10_rejects_malformed_color_facts(
+fn color_filter_rejects_malformed_color_facts(
     lowered: &LoweredGraphPlan,
     color_passes: &[usize],
 ) -> Option<bool> {
@@ -3788,12 +3809,18 @@ fn c10_rejects_malformed_color_facts(
         invalid.passes.swap(color_passes[0], color_passes[1]);
         malformed.push(invalid);
     }
-    Some(malformed.into_iter().all(|plan| !c10_plan_is_closed(plan)))
+    Some(
+        malformed
+            .into_iter()
+            .all(|plan| !color_filter_plan_is_closed(plan)),
+    )
 }
 
 #[cfg(test)]
-fn c10_spatial_observation(spatial: RuntimeSpatialDescriptor) -> C10ColorSpatialObservationForTest {
-    C10ColorSpatialObservationForTest {
+fn color_filter_spatial_observation(
+    spatial: RuntimeSpatialDescriptor,
+) -> ColorFilterSpatialObservationForTest {
+    ColorFilterSpatialObservationForTest {
         logical_bounds: [
             spatial.logical_bounds.x(),
             spatial.logical_bounds.y(),
@@ -3814,7 +3841,7 @@ fn color_filter_graph_observation(
     context: FrameContext,
     capabilities: DeviceCapabilities,
 ) -> Option<ColorFilterGraphObservationForTest> {
-    let (_, lowered) = lower_authored_c10_graph_for_test(
+    let (_, lowered) = lower_authored_color_filter_graph_for_test(
         filters,
         commands,
         context,
@@ -3822,9 +3849,10 @@ fn color_filter_graph_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let preparable =
-        C10PreparableGraph::try_from_closed(ClosedExecutableGraph::try_from_lowered(lowered).ok()?)
-            .ok()?;
+    let preparable = ColorFilterPreparableGraph::try_from_closed(
+        ClosedExecutableGraph::try_from_lowered(lowered).ok()?,
+    )
+    .ok()?;
     let closed = &preparable.closed;
     let resources = closed
         .lowered
@@ -3857,7 +3885,8 @@ fn color_filter_graph_observation(
         };
         let source = resources.get(&read.resource).copied()?;
         let result_resource = resources.get(&result).copied()?;
-        first_source_spatial.get_or_insert_with(|| c10_spatial_observation(source.spatial));
+        first_source_spatial
+            .get_or_insert_with(|| color_filter_spatial_observation(source.spatial));
         every_run_has_one_source_and_distinct_result &= pass.reads.len() == 1
             && read.resource != result
             && read.role == RuntimeReadRole::FilterSource
@@ -3914,7 +3943,7 @@ fn mixed_color_unsupported_diagnostic_observation(
     context: FrameContext,
     capabilities: DeviceCapabilities,
 ) -> Option<MixedColorUnsupportedDiagnosticObservationForTest> {
-    let (color_graph, _) = lower_authored_c10_graph_for_test(
+    let (color_graph, _) = lower_authored_color_filter_graph_for_test(
         color_filters,
         commands.clone(),
         context,
@@ -3922,7 +3951,7 @@ fn mixed_color_unsupported_diagnostic_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let (mixed_graph, mixed_lowered) = lower_authored_c10_graph_for_test(
+    let (mixed_graph, mixed_lowered) = lower_authored_color_filter_graph_for_test(
         mixed_filters,
         commands,
         context,
@@ -3953,22 +3982,21 @@ fn mixed_color_unsupported_diagnostic_observation(
                 super::super::PrimitiveFamily::Filters,
                 super::super::PrimitiveOperation::GpuBlurFilterExecution,
             ),
-        mixed_graph_stays_outside_c10_preparation: ClosedExecutableGraph::try_from_lowered(
-            mixed_lowered,
-        )
-        .ok()
-        .is_none_or(|closed| C10PreparableGraph::try_from_closed(closed).is_err()),
+        mixed_graph_stays_outside_color_filter_preparation:
+            ClosedExecutableGraph::try_from_lowered(mixed_lowered)
+                .ok()
+                .is_none_or(|closed| ColorFilterPreparableGraph::try_from_closed(closed).is_err()),
     })
 }
 
 #[cfg(test)]
-fn c11_executable_graph_observation(
+fn spatial_filter_executable_graph_observation(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C11ExecutableGraphObservationForTest> {
-    let (_, lowered) = lower_authored_c10_graph_for_test(
+) -> Option<SpatialFilterExecutableGraphObservationForTest> {
+    let (_, lowered) = lower_authored_color_filter_graph_for_test(
         filters.clone(),
         commands.clone(),
         context,
@@ -3976,36 +4004,37 @@ fn c11_executable_graph_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let preparable = c11_preparable_graph_for_test(lowered.clone()).ok()?;
+    let preparable = spatial_filter_preparable_graph_for_test(lowered.clone()).ok()?;
     let accepts_color_blur_and_drop_shadow_for_all_formats =
-        c11_accepts_all_formats(&filters, &commands, context, &capabilities)?;
+        spatial_filter_accepts_all_formats(&filters, &commands, context, &capabilities)?;
     let preserves_ordered_nonzero_filter_steps =
-        c11_filter_step_shape_is_exact(&preparable.closed.facts);
+        spatial_filter_step_shape_is_exact(&preparable.closed.facts);
     let stale_dependency = RuntimePassId(
         lowered
             .passes
-            .get(C11PassIndices::try_new(&lowered)?.color)?
+            .get(SpatialFilterPassIndices::try_new(&lowered)?.color)?
             .id
             .0
             .stale_generation_for_test()?,
     );
-    let malformed = c11_malformed_plan_observation(&lowered, stale_dependency)?;
+    let malformed = spatial_filter_malformed_plan_observation(&lowered, stale_dependency)?;
     let resources = ResourceManager::new(super::super::ResourceCacheBudget::DISABLED);
     let cache = DevicePassCache::new();
     let resources_before = resources.observation_for_test();
     let cache_before = cache.counts_for_test();
-    let valid_classification = c11_preparable_graph_for_test(lowered.clone()).is_ok();
+    let valid_classification = spatial_filter_preparable_graph_for_test(lowered.clone()).is_ok();
     let invalid_classification = malformed
         .all_invalid
         .iter()
         .cloned()
-        .all(|plan| c11_preparable_graph_for_test(plan).is_err());
-    Some(C11ExecutableGraphObservationForTest {
+        .all(|plan| spatial_filter_preparable_graph_for_test(plan).is_err());
+    Some(SpatialFilterExecutableGraphObservationForTest {
         accepts_color_blur_and_drop_shadow_for_all_formats,
         preserves_ordered_nonzero_filter_steps,
         rejects_empty_missing_and_malformed_spatial_facts: malformed.empty_missing_spatial,
         rejects_wrong_axes_inputs_edges_and_aliases: malformed.axes_inputs_edges_aliases,
-        rejects_copy_backdrop_stale_forward_and_c12_plus: malformed.copy_stale_forward_c12,
+        rejects_copy_backdrop_stale_forward_and_backdrop_plus: malformed
+            .copy_stale_forward_backdrop,
         rejects_before_resource_acquisition: valid_classification
             && invalid_classification
             && resources.observation_for_test() == resources_before
@@ -4014,7 +4043,7 @@ fn c11_executable_graph_observation(
 }
 
 #[cfg(test)]
-fn c11_accepts_all_formats(
+fn spatial_filter_accepts_all_formats(
     filters: &[super::super::FilterList],
     commands: &RenderCommands,
     context: FrameContext,
@@ -4026,7 +4055,7 @@ fn c11_accepts_all_formats(
         WorkingFormat::ReducedPrecision,
     ] {
         for output_format in [Format::Rgba8, Format::Bgra8] {
-            let (_, lowered) = lower_authored_c10_graph_for_test(
+            let (_, lowered) = lower_authored_color_filter_graph_for_test(
                 filters.to_vec(),
                 commands.clone(),
                 context,
@@ -4034,14 +4063,14 @@ fn c11_accepts_all_formats(
                 output_format,
                 capabilities,
             )?;
-            accepts &= c11_plan_is_closed(lowered);
+            accepts &= spatial_filter_plan_is_closed(lowered);
         }
     }
     Some(accepts)
 }
 
 #[cfg(test)]
-fn c11_filter_step_shape_is_exact(facts: &ClosedExecutableGraphFacts) -> bool {
+fn spatial_filter_step_shape_is_exact(facts: &ClosedExecutableGraphFacts) -> bool {
     matches!(
         facts.filter_steps.as_slice(),
         [
@@ -4060,41 +4089,46 @@ fn c11_filter_step_shape_is_exact(facts: &ClosedExecutableGraphFacts) -> bool {
 }
 
 #[cfg(test)]
-struct C11MalformedPlanObservation {
+struct SpatialFilterMalformedPlanObservation {
     empty_missing_spatial: bool,
     axes_inputs_edges_aliases: bool,
-    copy_stale_forward_c12: bool,
+    copy_stale_forward_backdrop: bool,
     all_invalid: Vec<LoweredGraphPlan>,
 }
 
 #[cfg(test)]
-fn c11_malformed_plan_observation(
+fn spatial_filter_malformed_plan_observation(
     lowered: &LoweredGraphPlan,
     stale_dependency: RuntimePassId,
-) -> Option<C11MalformedPlanObservation> {
-    let indices = C11PassIndices::try_new(lowered)?;
-    let empty_missing_spatial = c11_empty_missing_spatial_plans(lowered, indices)?;
-    let axes_inputs_edges_aliases = c11_axes_inputs_edges_alias_plans(lowered, indices)?;
-    let copy_stale_forward_c12 = c11_copy_stale_forward_plans(lowered, indices, stale_dependency)?;
-    let invalid =
-        |plans: &[LoweredGraphPlan]| plans.iter().cloned().all(|plan| !c11_plan_is_closed(plan));
+) -> Option<SpatialFilterMalformedPlanObservation> {
+    let indices = SpatialFilterPassIndices::try_new(lowered)?;
+    let empty_missing_spatial = spatial_filter_empty_missing_spatial_plans(lowered, indices)?;
+    let axes_inputs_edges_aliases = spatial_filter_axes_inputs_edges_alias_plans(lowered, indices)?;
+    let copy_stale_forward_backdrop =
+        spatial_filter_copy_stale_forward_plans(lowered, indices, stale_dependency)?;
+    let invalid = |plans: &[LoweredGraphPlan]| {
+        plans
+            .iter()
+            .cloned()
+            .all(|plan| !spatial_filter_plan_is_closed(plan))
+    };
     let all_invalid = empty_missing_spatial
         .iter()
         .chain(&axes_inputs_edges_aliases)
-        .chain(&copy_stale_forward_c12)
+        .chain(&copy_stale_forward_backdrop)
         .cloned()
         .collect::<Vec<_>>();
-    Some(C11MalformedPlanObservation {
+    Some(SpatialFilterMalformedPlanObservation {
         empty_missing_spatial: invalid(&empty_missing_spatial),
         axes_inputs_edges_aliases: invalid(&axes_inputs_edges_aliases),
-        copy_stale_forward_c12: invalid(&copy_stale_forward_c12),
+        copy_stale_forward_backdrop: invalid(&copy_stale_forward_backdrop),
         all_invalid,
     })
 }
 
 #[cfg(test)]
 #[derive(Clone, Copy)]
-struct C11PassIndices {
+struct SpatialFilterPassIndices {
     color: usize,
     blur_horizontal: usize,
     shadow_horizontal: usize,
@@ -4103,7 +4137,7 @@ struct C11PassIndices {
 }
 
 #[cfg(test)]
-impl C11PassIndices {
+impl SpatialFilterPassIndices {
     fn try_new(plan: &LoweredGraphPlan) -> Option<Self> {
         let find = |predicate: fn(&RuntimePassKind) -> bool| {
             plan.passes.iter().position(|pass| predicate(&pass.kind))
@@ -4145,9 +4179,9 @@ impl C11PassIndices {
 }
 
 #[cfg(test)]
-fn c11_empty_missing_spatial_plans(
+fn spatial_filter_empty_missing_spatial_plans(
     lowered: &LoweredGraphPlan,
-    indices: C11PassIndices,
+    indices: SpatialFilterPassIndices,
 ) -> Option<Vec<LoweredGraphPlan>> {
     let mut plans = Vec::new();
     let mut invalid = lowered.clone();
@@ -4182,9 +4216,9 @@ fn c11_empty_missing_spatial_plans(
 }
 
 #[cfg(test)]
-fn c11_axes_inputs_edges_alias_plans(
+fn spatial_filter_axes_inputs_edges_alias_plans(
     lowered: &LoweredGraphPlan,
-    indices: C11PassIndices,
+    indices: SpatialFilterPassIndices,
 ) -> Option<Vec<LoweredGraphPlan>> {
     let mut plans = Vec::new();
     for mutate in [
@@ -4230,9 +4264,9 @@ fn c11_axes_inputs_edges_alias_plans(
 }
 
 #[cfg(test)]
-fn c11_copy_stale_forward_plans(
+fn spatial_filter_copy_stale_forward_plans(
     lowered: &LoweredGraphPlan,
-    indices: C11PassIndices,
+    indices: SpatialFilterPassIndices,
     stale_dependency: RuntimePassId,
 ) -> Option<Vec<LoweredGraphPlan>> {
     let mut plans = Vec::new();
@@ -4257,18 +4291,18 @@ fn c11_copy_stale_forward_plans(
 }
 
 #[cfg(test)]
-fn c11_plan_is_closed(lowered: LoweredGraphPlan) -> bool {
-    c11_preparable_graph_for_test(lowered).is_ok()
+fn spatial_filter_plan_is_closed(lowered: LoweredGraphPlan) -> bool {
+    spatial_filter_preparable_graph_for_test(lowered).is_ok()
 }
 
 #[cfg(test)]
-fn c11_filter_graph_observation(
+fn spatial_filter_graph_observation(
     filters: Vec<super::super::FilterList>,
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C11FilterGraphObservationForTest> {
-    let (_, lowered) = lower_authored_c10_graph_for_test(
+) -> Option<SpatialFilterGraphObservationForTest> {
+    let (_, lowered) = lower_authored_color_filter_graph_for_test(
         filters,
         commands,
         context,
@@ -4276,26 +4310,30 @@ fn c11_filter_graph_observation(
         Format::Rgba8,
         &capabilities,
     )?;
-    let preparable = c11_preparable_graph_for_test(lowered).ok()?;
+    let preparable = spatial_filter_preparable_graph_for_test(lowered).ok()?;
     let closed = &preparable.closed;
-    Some(C11FilterGraphObservationForTest {
-        pass_order: c11_filter_pass_tags(&closed.facts),
-        ordinary_blur_uses_transparent_black: c11_blur_edges_are_exact(closed),
-        drop_shadow_uses_source_alpha_and_continuous_offset: c11_shadow_facts_are_exact(closed),
-        spatial_mappings_are_exact: c11_spatial_mappings_are_exact(closed),
-        sources_and_results_are_distinct: c11_sources_and_results_are_distinct(closed),
-        source_alpha_fanout_reads_original_twice: c11_shadow_fanout_is_exact(closed),
-        original_source_releases_only_after_merge: c11_shadow_releases_are_exact(closed),
-        dependencies_and_last_use_are_exact: c11_dependencies_and_lifetimes_are_exact(closed),
+    Some(SpatialFilterGraphObservationForTest {
+        pass_order: spatial_filter_pass_tags(&closed.facts),
+        ordinary_blur_uses_transparent_black: blur_edges_are_exact(closed),
+        drop_shadow_uses_source_alpha_and_continuous_offset: spatial_filter_shadow_facts_are_exact(
+            closed,
+        ),
+        spatial_mappings_are_exact: spatial_filter_spatial_mappings_are_exact(closed),
+        sources_and_results_are_distinct: spatial_filter_sources_and_results_are_distinct(closed),
+        source_alpha_fanout_reads_original_twice: spatial_filter_shadow_fanout_is_exact(closed),
+        original_source_releases_only_after_merge: spatial_filter_shadow_releases_are_exact(closed),
+        dependencies_and_last_use_are_exact: spatial_filter_dependencies_and_lifetimes_are_exact(
+            closed,
+        ),
     })
 }
 
 #[cfg(test)]
-fn c12_executable_graph_observation(
+fn backdrop_executable_graph_observation(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C12ExecutableGraphObservationForTest> {
+) -> Option<BackdropExecutableGraphObservationForTest> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
         return None;
     };
@@ -4312,7 +4350,7 @@ fn c12_executable_graph_observation(
                 output_format,
             )
             .ok()?;
-            accepts_bounded_top_level_backdrop &= c12_plan_is_exact(lowered.clone());
+            accepts_bounded_top_level_backdrop &= backdrop_plan_is_exact(lowered.clone());
             if selected.is_none() {
                 selected = Some(lowered);
             }
@@ -4330,12 +4368,12 @@ fn c12_executable_graph_observation(
             ExecutableGraphWorkingFormatRequest::Exact(WorkingFormat::HighPrecision),
             &capabilities,
         ),
-        Ok(ExecutableGraphDispatchEligibility::ExactC12(_))
+        Ok(ExecutableGraphDispatchEligibility::ExactBackdrop(_))
     );
-    let rejects_outside_bounded_subset = c12_malformed_plans(&lowered)?
+    let rejects_outside_bounded_subset = backdrop_malformed_plans(&lowered)?
         .into_iter()
-        .all(|plan| !c12_plan_is_exact(plan));
-    Some(C12ExecutableGraphObservationForTest {
+        .all(|plan| !backdrop_plan_is_exact(plan));
+    Some(BackdropExecutableGraphObservationForTest {
         accepts_bounded_top_level_backdrop,
         rejects_outside_bounded_subset,
         rejects_before_resource_acquisition: resources.observation_for_test() == resources_before
@@ -4344,15 +4382,15 @@ fn c12_executable_graph_observation(
 }
 
 #[cfg(test)]
-fn c12_plan_is_exact(lowered: LoweredGraphPlan) -> bool {
+fn backdrop_plan_is_exact(lowered: LoweredGraphPlan) -> bool {
     matches!(
         PrePreparationGraphClassification::classify(lowered),
-        PrePreparationGraphClassification::ExactC12(_)
+        PrePreparationGraphClassification::ExactBackdrop(_)
     )
 }
 
 #[cfg(test)]
-fn c12_malformed_plans(lowered: &LoweredGraphPlan) -> Option<Vec<LoweredGraphPlan>> {
+fn backdrop_malformed_plans(lowered: &LoweredGraphPlan) -> Option<Vec<LoweredGraphPlan>> {
     let copy = lowered
         .passes
         .iter()
@@ -4405,11 +4443,11 @@ fn c12_malformed_plans(lowered: &LoweredGraphPlan) -> Option<Vec<LoweredGraphPla
 }
 
 #[cfg(test)]
-fn c12_backdrop_graph_observation(
+fn backdrop_graph_observation(
     commands: RenderCommands,
     context: FrameContext,
     _capabilities: DeviceCapabilities,
-) -> Option<C12BackdropGraphObservationForTest> {
+) -> Option<BackdropGraphObservationForTest> {
     let FramePlan::GpuGraph(graph) = commands.plan_for(context).ok()? else {
         return None;
     };
@@ -4419,7 +4457,7 @@ fn c12_backdrop_graph_observation(
         Format::Rgba8,
     )
     .ok()?;
-    let PrePreparationGraphClassification::ExactC12(preparable) =
+    let PrePreparationGraphClassification::ExactBackdrop(preparable) =
         PrePreparationGraphClassification::classify(lowered)
     else {
         return None;
@@ -4478,7 +4516,7 @@ fn c12_backdrop_graph_observation(
                     .iter()
                     .any(|read| read.resource == backdrop.result)
         });
-    Some(C12BackdropGraphObservationForTest {
+    Some(BackdropGraphObservationForTest {
         closed_subset_receipt: preparable.proves_closed_backdrop_facts(),
         reads_completed_parent_once,
         copy_precedes_authored_filters: filter_passes.iter().all(|pass| {
@@ -4494,11 +4532,11 @@ fn c12_backdrop_graph_observation(
 }
 
 #[cfg(test)]
-fn c12_backdrop_filter_chain_observation(
+fn backdrop_filter_chain_observation(
     commands: RenderCommands,
     context: FrameContext,
     capabilities: DeviceCapabilities,
-) -> Option<C12BackdropFilterChainObservationForTest> {
+) -> Option<BackdropFilterChainObservationForTest> {
     let FramePlan::GpuGraph(graph) = commands.clone().plan_for(context).ok()? else {
         return None;
     };
@@ -4509,7 +4547,7 @@ fn c12_backdrop_filter_chain_observation(
         &capabilities,
     )
     .ok()?;
-    let PrePreparationGraphClassification::ExactC12(preparable) =
+    let PrePreparationGraphClassification::ExactBackdrop(preparable) =
         PrePreparationGraphClassification::classify(lowered)
     else {
         return None;
@@ -4552,7 +4590,7 @@ fn c12_backdrop_filter_chain_observation(
                     })
                 })
         });
-    let requests = c12_backdrop_blur_cache_requests_for_test(
+    let requests = backdrop_blur_cache_requests_for_test(
         commands,
         context,
         capabilities,
@@ -4560,7 +4598,7 @@ fn c12_backdrop_filter_chain_observation(
     )
     .ok()?;
     let every_mirrored_stage_is_realizable = requests.iter().all(|request| {
-        super::super::shader::c12_backdrop_blur_pass_key_facts_for_test(
+        super::super::shader::backdrop_blur_pass_key_facts_for_test(
             request.keys.samplers(),
             request.keys.layout(),
             request.keys.shader(),
@@ -4568,8 +4606,8 @@ fn c12_backdrop_filter_chain_observation(
         )
         .is_some_and(|facts| facts.has_only_linear_mirror_sampler && facts.has_exact_data_bindings)
     });
-    Some(C12BackdropFilterChainObservationForTest {
-        pass_order: c11_filter_pass_tags(facts),
+    Some(BackdropFilterChainObservationForTest {
+        pass_order: spatial_filter_pass_tags(facts),
         every_backdrop_blur_uses_mirror: !facts.blurs.is_empty()
             && facts
                 .blurs
@@ -4597,25 +4635,27 @@ fn c12_backdrop_filter_chain_observation(
 }
 
 #[cfg(test)]
-fn c11_filter_pass_tags(facts: &ClosedExecutableGraphFacts) -> Vec<C11FilterPassTagForTest> {
+fn spatial_filter_pass_tags(
+    facts: &ClosedExecutableGraphFacts,
+) -> Vec<SpatialFilterPassTagForTest> {
     let mut tags = Vec::new();
     for step in &facts.filter_steps {
         match step {
             ExecutableFilterStepFacts::Color(_) => {
-                tags.push(C11FilterPassTagForTest::Color);
+                tags.push(SpatialFilterPassTagForTest::Color);
             }
             ExecutableFilterStepFacts::Blur { .. } => {
                 tags.extend([
-                    C11FilterPassTagForTest::BlurHorizontalRgba,
-                    C11FilterPassTagForTest::BlurVerticalRgba,
+                    SpatialFilterPassTagForTest::BlurHorizontalRgba,
+                    SpatialFilterPassTagForTest::BlurVerticalRgba,
                 ]);
             }
             ExecutableFilterStepFacts::DropShadow { .. } => {
                 tags.extend([
-                    C11FilterPassTagForTest::BlurHorizontalSourceAlpha,
-                    C11FilterPassTagForTest::BlurVerticalSourceAlpha,
-                    C11FilterPassTagForTest::DropShadowColorize,
-                    C11FilterPassTagForTest::DropShadowMerge,
+                    SpatialFilterPassTagForTest::BlurHorizontalSourceAlpha,
+                    SpatialFilterPassTagForTest::BlurVerticalSourceAlpha,
+                    SpatialFilterPassTagForTest::DropShadowColorize,
+                    SpatialFilterPassTagForTest::DropShadowMerge,
                 ]);
             }
         }
@@ -4624,7 +4664,7 @@ fn c11_filter_pass_tags(facts: &ClosedExecutableGraphFacts) -> Vec<C11FilterPass
 }
 
 #[cfg(test)]
-fn c11_blur_edges_are_exact(closed: &ClosedExecutableGraph) -> bool {
+fn blur_edges_are_exact(closed: &ClosedExecutableGraph) -> bool {
     !closed.facts.blurs.is_empty()
         && closed.facts.blurs.iter().all(|facts| {
             facts.blur.edge == RuntimeSamplingEdge::TransparentBlack
@@ -4644,7 +4684,7 @@ fn c11_blur_edges_are_exact(closed: &ClosedExecutableGraph) -> bool {
 }
 
 #[cfg(test)]
-fn c11_shadow_facts_are_exact(closed: &ClosedExecutableGraph) -> bool {
+fn spatial_filter_shadow_facts_are_exact(closed: &ClosedExecutableGraph) -> bool {
     !closed.facts.drop_shadows.is_empty()
         && closed.facts.drop_shadows.iter().all(|facts| {
             facts.blur.input == RuntimeBlurInput::SourceAlpha
@@ -4656,7 +4696,7 @@ fn c11_shadow_facts_are_exact(closed: &ClosedExecutableGraph) -> bool {
 }
 
 #[cfg(test)]
-fn c11_spatial_mappings_are_exact(closed: &ClosedExecutableGraph) -> bool {
+fn spatial_filter_spatial_mappings_are_exact(closed: &ClosedExecutableGraph) -> bool {
     let resources = closed
         .lowered
         .resources
@@ -4707,7 +4747,7 @@ fn c11_spatial_mappings_are_exact(closed: &ClosedExecutableGraph) -> bool {
 }
 
 #[cfg(test)]
-fn c11_sources_and_results_are_distinct(closed: &ClosedExecutableGraph) -> bool {
+fn spatial_filter_sources_and_results_are_distinct(closed: &ClosedExecutableGraph) -> bool {
     closed.facts.blurs.iter().all(|facts| {
         [facts.source, facts.intermediate, facts.result]
             .into_iter()
@@ -4730,7 +4770,7 @@ fn c11_sources_and_results_are_distinct(closed: &ClosedExecutableGraph) -> bool 
 }
 
 #[cfg(test)]
-fn c11_shadow_fanout_is_exact(closed: &ClosedExecutableGraph) -> bool {
+fn spatial_filter_shadow_fanout_is_exact(closed: &ClosedExecutableGraph) -> bool {
     closed.facts.drop_shadows.iter().all(|facts| {
         let readers = closed
             .lowered
@@ -4750,7 +4790,7 @@ fn c11_shadow_fanout_is_exact(closed: &ClosedExecutableGraph) -> bool {
 }
 
 #[cfg(test)]
-fn c11_shadow_releases_are_exact(closed: &ClosedExecutableGraph) -> bool {
+fn spatial_filter_shadow_releases_are_exact(closed: &ClosedExecutableGraph) -> bool {
     closed.facts.drop_shadows.iter().all(|facts| {
         let horizontal = closed
             .lowered
@@ -4774,7 +4814,7 @@ fn c11_shadow_releases_are_exact(closed: &ClosedExecutableGraph) -> bool {
 }
 
 #[cfg(test)]
-fn c11_dependencies_and_lifetimes_are_exact(closed: &ClosedExecutableGraph) -> bool {
+fn spatial_filter_dependencies_and_lifetimes_are_exact(closed: &ClosedExecutableGraph) -> bool {
     let resources = closed
         .lowered
         .resources
@@ -5084,7 +5124,7 @@ fn resolved_mask_image_ids_inner_to_outer(
 }
 
 #[cfg(test)]
-fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPlan) -> bool {
+fn base_graph_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPlan) -> bool {
     let forbidden_kinds = [
         RuntimePassKind::ClearRoot {
             initialization: RuntimeInitialization::Transparent,
@@ -5100,14 +5140,14 @@ fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPl
     ];
     if forbidden_kinds
         .iter()
-        .any(|kind| c08_pass_class(kind).is_some())
+        .any(|kind| core_pass_class(kind).is_some())
     {
         return false;
     }
     let Some(composite_index) = plan
         .passes
         .iter()
-        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::SpanSourceOver))
+        .position(|pass| core_pass_class(&pass.kind) == Some(CorePassClass::SpanSourceOver))
     else {
         return false;
     };
@@ -5144,16 +5184,16 @@ fn c08_rejects_every_other_pass_kind_and_composite_payload(plan: &LoweredGraphPl
     composite_payloads.into_iter().all(|payload| {
         let mut invalid = plan.clone();
         invalid.passes[composite_index].kind = RuntimePassKind::Composite(payload);
-        C08PreparableGraph::try_from_lowered(invalid).is_err()
+        BasePreparableGraph::try_from_lowered(invalid).is_err()
     })
 }
 
 #[cfg(test)]
-fn c08_rejects_missing_or_reordered_spine_passes(plan: &LoweredGraphPlan) -> bool {
+fn base_graph_rejects_missing_or_reordered_spine_passes(plan: &LoweredGraphPlan) -> bool {
     let Some(capture_index) = plan
         .passes
         .iter()
-        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::VelloCapture))
+        .position(|pass| core_pass_class(&pass.kind) == Some(CorePassClass::VelloCapture))
     else {
         return false;
     };
@@ -5163,7 +5203,7 @@ fn c08_rejects_missing_or_reordered_spine_passes(plan: &LoweredGraphPlan) -> boo
     let Some(present_index) = plan
         .passes
         .iter()
-        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::Present))
+        .position(|pass| core_pass_class(&pass.kind) == Some(CorePassClass::Present))
     else {
         return false;
     };
@@ -5193,15 +5233,15 @@ fn c08_rejects_missing_or_reordered_spine_passes(plan: &LoweredGraphPlan) -> boo
         nonterminal_present,
     ]
     .into_iter()
-    .all(|invalid| C08PreparableGraph::try_from_lowered(invalid).is_err())
+    .all(|invalid| BasePreparableGraph::try_from_lowered(invalid).is_err())
 }
 
 #[cfg(test)]
-fn c08_rejects_malformed_bindings(plan: &LoweredGraphPlan) -> bool {
+fn base_graph_rejects_malformed_bindings(plan: &LoweredGraphPlan) -> bool {
     let Some(capture_index) = plan
         .passes
         .iter()
-        .position(|pass| c08_pass_class(&pass.kind) == Some(C08PassClass::VelloCapture))
+        .position(|pass| core_pass_class(&pass.kind) == Some(CorePassClass::VelloCapture))
     else {
         return false;
     };
@@ -5302,7 +5342,7 @@ fn c08_rejects_malformed_bindings(plan: &LoweredGraphPlan) -> bool {
 
     invalid_plans
         .into_iter()
-        .all(|invalid| C08PreparableGraph::try_from_lowered(invalid).is_err())
+        .all(|invalid| BasePreparableGraph::try_from_lowered(invalid).is_err())
 }
 
 #[cfg(test)]
@@ -5328,7 +5368,7 @@ fn bounded_capture_transform_observation(
         )
         .ok()?;
         let graph =
-            super::super::frame::forced_c08_graph_for_test(commands.clone(), context).ok()?;
+            super::super::frame::forced_base_graph_for_test(commands.clone(), context).ok()?;
         let lowered = LoweredGraphPlan::try_lower_validated_graph(
             &graph,
             WorkingFormat::HighPrecision,
@@ -5336,7 +5376,7 @@ fn bounded_capture_transform_observation(
             &capabilities,
         )
         .ok()?;
-        let preparable = C08PreparableGraph::try_from_lowered(lowered).ok()?;
+        let preparable = BasePreparableGraph::try_from_lowered(lowered).ok()?;
         let actual_capture = preparable.execution.captures().first()?;
         let capture_pass = preparable
             .lowered
@@ -5467,12 +5507,12 @@ fn inverse_transform_point(transform: Transform, point: Point) -> Option<Point> 
 }
 
 #[cfg(test)]
-pub(crate) fn c10_preparable_graph_for_test(
+pub(crate) fn color_filter_preparable_graph_for_test(
     graph: &GpuRenderGraph,
     output_format: Format,
     working_format: WorkingFormat,
     capabilities: &DeviceCapabilities,
-) -> Result<C10PreparableGraph> {
+) -> Result<ColorFilterPreparableGraph> {
     capabilities.validate_supported_working_format(working_format)?;
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
         graph,
@@ -5481,50 +5521,52 @@ pub(crate) fn c10_preparable_graph_for_test(
         capabilities,
     )?;
     match PrePreparationGraphClassification::classify(lowered) {
-        PrePreparationGraphClassification::ExactC10(preparable)
+        PrePreparationGraphClassification::ExactColorFilter(preparable)
             if preparable.proves_closed_color_facts() =>
         {
             Ok(preparable)
         }
-        PrePreparationGraphClassification::ExactC08(_)
-        | PrePreparationGraphClassification::ExactC09(_)
-        | PrePreparationGraphClassification::ExactC10(_)
-        | PrePreparationGraphClassification::ExactC11(_)
-        | PrePreparationGraphClassification::ExactC12(_)
+        PrePreparationGraphClassification::ExactBase(_)
+        | PrePreparationGraphClassification::ExactComposition(_)
+        | PrePreparationGraphClassification::ExactColorFilter(_)
+        | PrePreparationGraphClassification::ExactSpatialFilter(_)
+        | PrePreparationGraphClassification::ExactBackdrop(_)
         | PrePreparationGraphClassification::FuturePasses
         | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
-            "the authored C10 fixture is outside the exact closed color graph",
+            "the authored color-filter fixture is outside the exact closed color graph",
         )),
     }
 }
 
 #[cfg(test)]
-fn c11_preparable_graph_for_test(lowered: LoweredGraphPlan) -> Result<C11PreparableGraph> {
+fn spatial_filter_preparable_graph_for_test(
+    lowered: LoweredGraphPlan,
+) -> Result<SpatialFilterPreparableGraph> {
     match PrePreparationGraphClassification::classify(lowered) {
-        PrePreparationGraphClassification::ExactC11(preparable)
+        PrePreparationGraphClassification::ExactSpatialFilter(preparable)
             if preparable.proves_closed_filter_facts() =>
         {
             Ok(preparable)
         }
-        PrePreparationGraphClassification::ExactC08(_)
-        | PrePreparationGraphClassification::ExactC09(_)
-        | PrePreparationGraphClassification::ExactC10(_)
-        | PrePreparationGraphClassification::ExactC11(_)
-        | PrePreparationGraphClassification::ExactC12(_)
+        PrePreparationGraphClassification::ExactBase(_)
+        | PrePreparationGraphClassification::ExactComposition(_)
+        | PrePreparationGraphClassification::ExactColorFilter(_)
+        | PrePreparationGraphClassification::ExactSpatialFilter(_)
+        | PrePreparationGraphClassification::ExactBackdrop(_)
         | PrePreparationGraphClassification::FuturePasses
         | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
-            "the authored C11 fixture is outside the exact closed spatial-filter graph",
+            "the authored spatial-filter fixture is outside the exact closed spatial-filter graph",
         )),
     }
 }
 
 #[cfg(test)]
-pub(crate) fn c11_preparable_graph_from_graph_for_test(
+pub(crate) fn spatial_filter_preparable_graph_from_graph_for_test(
     graph: &GpuRenderGraph,
     output_format: Format,
     working_format: WorkingFormat,
     capabilities: &DeviceCapabilities,
-) -> Result<C11PreparableGraph> {
+) -> Result<SpatialFilterPreparableGraph> {
     capabilities.validate_supported_working_format(working_format)?;
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
         graph,
@@ -5532,16 +5574,16 @@ pub(crate) fn c11_preparable_graph_from_graph_for_test(
         output_format,
         capabilities,
     )?;
-    c11_preparable_graph_for_test(lowered)
+    spatial_filter_preparable_graph_for_test(lowered)
 }
 
 #[cfg(test)]
-pub(crate) fn c12_preparable_graph_from_graph_for_test(
+pub(crate) fn backdrop_preparable_graph_from_graph_for_test(
     graph: &GpuRenderGraph,
     output_format: Format,
     working_format: WorkingFormat,
     capabilities: &DeviceCapabilities,
-) -> Result<C12PreparableGraph> {
+) -> Result<BackdropPreparableGraph> {
     capabilities.validate_supported_working_format(working_format)?;
     let lowered = LoweredGraphPlan::try_lower_validated_graph(
         graph,
@@ -5550,40 +5592,40 @@ pub(crate) fn c12_preparable_graph_from_graph_for_test(
         capabilities,
     )?;
     match PrePreparationGraphClassification::classify(lowered) {
-        PrePreparationGraphClassification::ExactC12(preparable)
+        PrePreparationGraphClassification::ExactBackdrop(preparable)
             if preparable.proves_closed_backdrop_facts() =>
         {
             Ok(preparable)
         }
-        PrePreparationGraphClassification::ExactC08(_)
-        | PrePreparationGraphClassification::ExactC09(_)
-        | PrePreparationGraphClassification::ExactC10(_)
-        | PrePreparationGraphClassification::ExactC11(_)
-        | PrePreparationGraphClassification::ExactC12(_)
+        PrePreparationGraphClassification::ExactBase(_)
+        | PrePreparationGraphClassification::ExactComposition(_)
+        | PrePreparationGraphClassification::ExactColorFilter(_)
+        | PrePreparationGraphClassification::ExactSpatialFilter(_)
+        | PrePreparationGraphClassification::ExactBackdrop(_)
         | PrePreparationGraphClassification::FuturePasses
         | PrePreparationGraphClassification::Ineligible(_) => Err(preparation_error(
-            "the authored C12 fixture is outside the exact bounded backdrop graph",
+            "the authored backdrop fixture is outside the exact bounded backdrop graph",
         )),
     }
 }
 
 #[cfg(test)]
-impl C08PendingGraphEncoding {
-    pub(crate) const fn summary_for_test(&self) -> &C08CustomSpineEncodingSummary {
+impl PendingGraphEncoding {
+    pub(crate) const fn summary_for_test(&self) -> &CustomSpineEncodingSummary {
         &self.summary
     }
 
     pub(crate) fn into_summary_and_resources(
         self,
-    ) -> (C08CustomSpineEncodingSummary, PendingVelloResourceCommit) {
+    ) -> (CustomSpineEncodingSummary, PendingVelloResourceCommit) {
         (self.summary, self.resources)
     }
 }
 
-pub(crate) use super::encode::EncodedCaptureRawFact as C08EncodedCaptureObservationForTest;
+pub(crate) use super::encode::EncodedCaptureRawFact as EncodedVelloCaptureObservationForTest;
 
 #[cfg(test)]
-impl PendingC08PreparedFrameCommit {
+impl PendingPreparedFrameCommit {
     pub(crate) fn resource_identities_for_test(&self) -> Vec<ResourceIdentity> {
         self.frame_scope.leased_resource_identities_for_test()
     }
@@ -5595,8 +5637,8 @@ impl PendingC08PreparedFrameCommit {
 
 #[cfg(test)]
 impl<'device> PreparedGraph<'device> {
-    pub(crate) fn try_prepare_c10(
-        preparable: C10PreparableGraph,
+    pub(crate) fn try_prepare_color_filter(
+        preparable: ColorFilterPreparableGraph,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
@@ -5605,7 +5647,7 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         let selected_working_format = preparable.working_format();
         let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C10 {
+            GraphPreparationSource::ColorFilter {
                 preparable,
                 operation_limits: None,
             },
@@ -5616,16 +5658,16 @@ impl<'device> PreparedGraph<'device> {
             resources,
             pass_cache_phase,
         )?;
-        if prepared.c10_execution.is_none() {
+        if prepared.color_filter_execution.is_none() {
             return Err(preparation_error(
-                "C10 preparation lost its validated closed execution facts",
+                "color-filter preparation lost its validated closed execution facts",
             ));
         }
         Ok(prepared)
     }
 
-    pub(crate) fn try_prepare_c11(
-        preparable: C11PreparableGraph,
+    pub(crate) fn try_prepare_spatial_filter(
+        preparable: SpatialFilterPreparableGraph,
         capabilities: &DeviceCapabilities,
         device: &'device wgpu::Device,
         queue: &'device wgpu::Queue,
@@ -5634,7 +5676,7 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<Self> {
         let selected_working_format = preparable.working_format();
         let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C11(preparable),
+            GraphPreparationSource::SpatialFilter(preparable),
             selected_working_format,
             capabilities,
             device,
@@ -5642,15 +5684,15 @@ impl<'device> PreparedGraph<'device> {
             resources,
             pass_cache_phase,
         )?;
-        if prepared.c11_execution.is_none() {
+        if prepared.spatial_filter_execution.is_none() {
             return Err(preparation_error(
-                "C11 preparation lost its validated closed execution facts",
+                "spatial-filter preparation lost its validated closed execution facts",
             ));
         }
         Ok(prepared)
     }
 
-    pub(crate) fn try_prepare_c10_with_operation_limits_for_test(
+    pub(crate) fn try_prepare_color_filter_with_operation_limits_for_test(
         lowered: LoweredGraphPlan,
         policy: EffectQualityPolicy,
         capabilities: &DeviceCapabilities,
@@ -5660,16 +5702,16 @@ impl<'device> PreparedGraph<'device> {
         pass_cache_and_limits: (&'device DevicePassCache, ColorFilterOperationBufferLimits),
     ) -> Result<Self> {
         let (pass_cache, operation_limits) = pass_cache_and_limits;
-        let PrePreparationGraphClassification::ExactC10(preparable) =
+        let PrePreparationGraphClassification::ExactColorFilter(preparable) =
             PrePreparationGraphClassification::classify(lowered)
         else {
             return Err(preparation_error(
-                "the C10 limit fixture requires one exact closed color graph",
+                "the color-filter limit fixture requires one exact closed color graph",
             ));
         };
         let selected_working_format = capabilities.resolve_effect_working_format(policy)?;
         let prepared = Self::try_prepare_inner(
-            GraphPreparationSource::C10 {
+            GraphPreparationSource::ColorFilter {
                 preparable,
                 operation_limits: Some(operation_limits),
             },
@@ -5680,9 +5722,9 @@ impl<'device> PreparedGraph<'device> {
             resources,
             (pass_cache, true),
         )?;
-        if prepared.c10_execution.is_none() {
+        if prepared.color_filter_execution.is_none() {
             return Err(preparation_error(
-                "C10 limit preparation lost its validated closed execution facts",
+                "color-filter limit preparation lost its validated closed execution facts",
             ));
         }
         Ok(prepared)
@@ -5798,8 +5840,8 @@ impl<'device> PreparedGraph<'device> {
 
     #[cfg(test)]
     pub(crate) fn exercise_for_test(&mut self) -> Result<PreparedGraphExerciseObservationForTest> {
-        if self.c09_execution.is_some() {
-            self.c08_encoding_state = None;
+        if self.composition_execution.is_some() {
+            self.custom_spine_encoding_state = None;
         }
         let _ = (
             self.generation(),
@@ -5841,7 +5883,7 @@ fn prepared_handoff_is_complete(plan: &RuntimeGraphPreparationPlan) -> bool {
     for pass in &plan.passes {
         vocabulary[runtime_pass_kind_index(&pass.runtime.kind)] = true;
     }
-    let closed_c09_vocabulary = vocabulary[0]
+    let closed_composition_vocabulary = vocabulary[0]
         && vocabulary[1]
         && vocabulary[2]
         && vocabulary[8]
@@ -5856,7 +5898,7 @@ fn prepared_handoff_is_complete(plan: &RuntimeGraphPreparationPlan) -> bool {
             .passes
             .last()
             .is_some_and(|pass| pass.runtime.id == plan.final_present)
-        && closed_c09_vocabulary
+        && closed_composition_vocabulary
         && !plan.resources.is_empty()
         && plan.kernels.is_empty()
 }

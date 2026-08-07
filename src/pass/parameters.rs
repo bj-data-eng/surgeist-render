@@ -167,7 +167,7 @@ pub(super) fn prepared_pass_composite_parameters(
     }
 }
 
-pub(super) fn c12_blur_edge_uniform_bytes(
+pub(super) fn backdrop_blur_edge_uniform_bytes(
     blur: &RuntimeBlur,
     source: &RuntimeReadBinding,
     prepared_parameters: Option<&BlurEdgeParameterBytes>,
@@ -178,7 +178,7 @@ pub(super) fn c12_blur_edge_uniform_bytes(
             || prepared_parameters.is_some()
         {
             return Err(preparation_error(
-                "the C11 transparent blur changed its checked edge contract",
+                "the spatial-filter transparent blur changed its checked edge contract",
             ));
         }
         return Ok(None);
@@ -186,7 +186,7 @@ pub(super) fn c12_blur_edge_uniform_bytes(
     let expected = BlurEdgeParameterBytes::try_from_semantic_bounds(bounds)?;
     if source.sampling_edge() != blur.edge || prepared_parameters != Some(&expected) {
         return Err(preparation_error(
-            "the C12 mirrored blur changed its checked semantic edge",
+            "the backdrop mirrored blur changed its checked semantic edge",
         ));
     }
     let values = [

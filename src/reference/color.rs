@@ -201,7 +201,7 @@ impl StraightRgb {
     }
 }
 
-/// Applies the independent S21 oracle without premultiplied-RGBA8 source
+/// Applies the independent reference color-matrix oracle without premultiplied-RGBA8 source
 /// quantization. This is the high-working-format comparison owner; reduced
 /// comparisons intentionally continue through [`PremultipliedRgba8`].
 pub(crate) fn apply_color_filter_pipeline_to_straight_rgba8(
