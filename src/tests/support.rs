@@ -192,12 +192,6 @@ pub(super) fn spatial_filter_authored_filter_steps_for_test() -> Vec<FilterList>
 }
 
 pub(super) fn bounded_backdrop_graph_commands_for_test() -> command::RenderCommands {
-    bounded_backdrop_scene_for_test()
-        .normalize(Capabilities::CURRENT)
-        .expect("the exact bounded-backdrop fixture must normalize")
-}
-
-fn bounded_backdrop_scene_for_test() -> Scene {
     let filters = FilterList::try_ops(vec![
         FilterOp::brightness(FilterAmount::try_new(1.25).unwrap()),
         FilterOp::blur(FilterBlur::try_new(1.0).unwrap()),
@@ -241,6 +235,8 @@ fn bounded_backdrop_scene_for_test() -> Scene {
             Color::try_rgba(0.0, 1.0, 0.0, 0.75).unwrap(),
         );
     scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the exact bounded-backdrop fixture must normalize")
 }
 
 pub(super) fn runtime_lowering_commands_for_test() -> command::RenderCommands {
