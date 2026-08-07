@@ -23330,12 +23330,13 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
         presented_lifecycle_for_test(&surface),
         PresentedLifecycle::ResizePending { .. }
     ));
-    let failure = ScopedPresentedConfigureControlForTest::failing();
-    let error = pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .expect_err("a scoped configure failure must leave the requested resize pending");
+    let error = pollster::block_on(presented_configuration_validation_failure_stage_for_test(
+        &mut renderer,
+        &surface,
+        RuntimeOperation::SurfaceRendering,
+    ))
+    .expect_err("a real Configure validation failure must leave the requested resize pending");
     assert_eq!(error.code(), ErrorCode::SurfaceConfigureFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    drop(failure);
     assert_eq!(
         presented_resource_id_for_test(&surface),
         Some(initial_resource)
@@ -23345,18 +23346,8 @@ fn presented_setup_and_resize_commit_only_after_clean_configuration() {
         PresentedLifecycle::ResizePending { .. }
     ));
 
-    let checkpoint = ScopedPresentedConfigureControlForTest::paused();
-    {
-        let future = renderer.configure_presented_surface_for_test(&mut surface);
-        let mut future = std::pin::pin!(future);
-        let mut context = Context::from_waker(Waker::noop());
-        assert!(matches!(
-            Future::poll(future.as_mut(), &mut context),
-            Poll::Pending
-        ));
-        checkpoint.wait_for_draft_for_test(Duration::from_secs(2));
-    }
-    drop(checkpoint);
+    discard_presented_configuration_stage_for_test(&mut renderer, &surface)
+        .expect("an explicit Configure draft must be discardable before publication");
     assert_eq!(
         presented_resource_id_for_test(&surface),
         Some(initial_resource)
@@ -24700,13 +24691,29 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
             .is_some(),
         "the earlier donor must record terminal loss before selection"
     );
-    let incompatibility = ScopedDisplayFreePreferredDeviceIncompatibilityForTest::active();
+    let selected_device = select_display_free_presented_device_for_test(
+        &mut renderer,
+        installed_device,
+        &[
+            DisplayFreePresentedDeviceCompatibilityForTest::compatible(terminal_donor),
+            DisplayFreePresentedDeviceCompatibilityForTest::incompatible(installed_device),
+            DisplayFreePresentedDeviceCompatibilityForTest::compatible(healthy_device),
+        ],
+    )
+    .expect("the explicit compatibility stage must find the later healthy slot");
+    assert_eq!(selected_device, healthy_device);
+    let SurfaceBackend::Presented {
+        device_identity, ..
+    } = &mut surface.backend
+    else {
+        panic!("the compatibility fixture must retain a presented surface");
+    };
+    *device_identity = selected_device;
     pollster::block_on(renderer.resume_surface(
         &mut surface,
         Attachment::from_web_canvas("terminal-donor-replacement-target"),
     ))
     .expect("resume must skip the terminal donor and publish through the later healthy slot");
-    drop(incompatibility);
 
     assert!(renderer.device_renderer_released_for_test(terminal_donor));
     assert_eq!(presented_device_identity_for_test(&surface), healthy_device);
@@ -24950,15 +24957,21 @@ fn resize_suspend_resume_and_two_surfaces_keep_device_resources_coherent() {
     let stats_before = renderer.stats();
     let observation_before = presented_observation_for_test(&first);
     let old_target_observation = presented_observation_handle_for_test(&first);
-    let failure = ScopedPresentedConfigureControlForTest::failing();
-    let error = pollster::block_on(renderer.resume_surface(
-        &mut first,
+    let failed_candidate = display_free_presented_surface_on_device_for_test(
+        &mut renderer,
+        first.options,
+        presented_device_identity_for_test(&first),
         Attachment::from_web_canvas("failed-resume-replacement"),
+    );
+    let error = pollster::block_on(presented_configuration_validation_failure_stage_for_test(
+        &mut renderer,
+        &failed_candidate,
+        RuntimeOperation::SurfaceResume,
     ))
-    .expect_err("a failed resume configuration must preserve pre-call state");
+    .expect_err("a failed replacement configuration must preserve the installed surface state");
     assert_eq!(error.code(), ErrorCode::SurfaceConfigureFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    drop(failure);
+    assert_eq!(presented_resource_id_for_test(&failed_candidate), None);
+    drop(failed_candidate);
     assert_eq!(first.attachment.kind(), attachment_kind_before);
     assert_eq!(
         match &first.attachment {
@@ -25096,136 +25109,11 @@ fn assert_successful_presented_resume_coherence(
 }
 
 #[cfg(feature = "render-window")]
-fn display_free_presented_surface_for_test(
-    renderer: &mut Renderer,
-    options: SurfaceOptions,
-) -> Surface {
-    renderer
-        .display_free_presented_surface_for_test(options)
-        .expect("the display-free fixture must establish a real presented surface backend")
-}
-
-#[cfg(feature = "render-window")]
-fn configured_display_free_presented_surface_for_test(renderer: &mut Renderer) -> Surface {
-    let mut surface = display_free_presented_surface_for_test(
-        renderer,
-        SurfaceOptions {
-            size: Size::new(2.0, 2.0),
-            ..SurfaceOptions::default()
-        },
-    );
-    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .expect("the display-free surface must configure through the real Configure transaction");
-    surface
-}
-
-#[cfg(feature = "render-window")]
 fn presented_black_debug_parameters_for_test() -> Parameters {
     Parameters {
         base_color: Color::BLACK,
         debug: true,
     }
-}
-
-#[cfg(feature = "render-window")]
-fn configured_display_free_presented_surface_on_device_for_test(
-    renderer: &mut Renderer,
-    device_identity: DeviceSlotIdentity,
-    attachment: Attachment,
-) -> Surface {
-    let mut surface = renderer
-        .display_free_presented_surface_on_device_for_test(
-            SurfaceOptions {
-                size: Size::new(2.0, 2.0),
-                ..SurfaceOptions::default()
-            },
-            device_identity,
-            attachment,
-        )
-        .expect("the display-free fixture must establish a real presented surface backend");
-    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
-        .expect("the display-free surface must configure through the real Configure transaction");
-    surface
-}
-
-#[cfg(feature = "render-window")]
-fn set_presented_acquire_outcome_for_test(
-    surface: &mut Surface,
-    outcome: PresentedAcquireOutcomeForTest,
-) {
-    match &mut surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface.set_acquire_outcome_for_test(outcome),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn take_last_presented_texture_for_test(surface: &mut Surface) -> Option<wgpu::Texture> {
-    match &mut surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface.take_last_presented_texture_for_test(),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_observation_for_test(
-    surface: &Surface,
-) -> DisplayFreePresentedSurfaceObservationForTest {
-    match &surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface.observation_for_test(),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_observation_handle_for_test(
-    surface: &Surface,
-) -> DisplayFreePresentedSurfaceObservationHandleForTest {
-    match &surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface.observation_handle_for_test(),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_lifecycle_for_test(surface: &Surface) -> PresentedLifecycle {
-    match &surface.backend {
-        SurfaceBackend::Presented { state, .. } => state.lifecycle(),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_resource_id_for_test(surface: &Surface) -> Option<u64> {
-    match &surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface
-            .committed()
-            .map(|resources| resources.resource_id_for_test()),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_configuration_count_for_test(surface: &Surface) -> usize {
-    match &surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface.configuration_count_for_test(),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_target_identity_for_test(surface: &Surface) -> u64 {
-    match &surface.backend {
-        SurfaceBackend::Presented { surface, .. } => surface.target_identity_for_test(),
-        _ => panic!("the fixture must retain a presented surface backend"),
-    }
-}
-
-#[cfg(feature = "render-window")]
-fn presented_device_identity_for_test(surface: &Surface) -> DeviceSlotIdentity {
-    surface
-        .device_identity()
-        .expect("the display-free fixture must retain a device slot identity")
 }
 
 #[test]

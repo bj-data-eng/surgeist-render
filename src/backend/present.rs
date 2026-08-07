@@ -30,112 +30,6 @@ use crate::{
 ))]
 use std::time::{Duration, Instant};
 
-#[cfg(all(test, feature = "render-window"))]
-use std::{
-    cell::RefCell,
-    sync::mpsc::{Receiver, SyncSender, sync_channel},
-};
-
-#[cfg(all(test, feature = "render-window"))]
-thread_local! {
-    static ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST: RefCell<Option<PresentedConfigureControlForTest>> = const { RefCell::new(None) };
-    static ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
-}
-
-#[cfg(all(test, feature = "render-window"))]
-#[derive(Clone)]
-enum PresentedConfigureControlForTest {
-    Fail {
-        scope_resolution_observed: SyncSender<()>,
-    },
-    Pause {
-        reached: SyncSender<()>,
-    },
-}
-
-/// Private deterministic control for the production Configure transaction path.
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) struct ScopedPresentedConfigureControlForTest {
-    observed: Receiver<()>,
-    failure_scope_resolution: Option<Receiver<()>>,
-    previous: Option<PresentedConfigureControlForTest>,
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl ScopedPresentedConfigureControlForTest {
-    pub(crate) fn failing() -> Self {
-        let (scope_resolution_observed, observed) = sync_channel(1);
-        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(PresentedConfigureControlForTest::Fail {
-                scope_resolution_observed,
-            }))
-        });
-        let (_unused, reached) = sync_channel(1);
-        Self {
-            observed: reached,
-            failure_scope_resolution: Some(observed),
-            previous,
-        }
-    }
-
-    pub(crate) fn paused() -> Self {
-        let (reached, observed) = sync_channel(1);
-        let previous = ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
-            active.replace(Some(PresentedConfigureControlForTest::Pause { reached }))
-        });
-        Self {
-            observed,
-            failure_scope_resolution: None,
-            previous,
-        }
-    }
-
-    pub(crate) fn wait_for_draft_for_test(&self, deadline: Duration) {
-        self.observed
-            .recv_timeout(deadline)
-            .expect("the Configure transaction did not reach its bounded draft checkpoint");
-    }
-
-    pub(crate) fn scope_resolution_observed_for_test(&self) -> bool {
-        self.failure_scope_resolution
-            .as_ref()
-            .is_some_and(|observed| observed.try_recv().is_ok())
-    }
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl Drop for ScopedPresentedConfigureControlForTest {
-    fn drop(&mut self) {
-        ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
-/// Models a replacement target that the installed device cannot present to.
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) struct ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
-    previous: bool,
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
-    pub(crate) fn active() -> Self {
-        let previous = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
-            .with(|active| active.replace(true));
-        Self { previous }
-    }
-}
-
-#[cfg(all(test, feature = "render-window"))]
-impl Drop for ScopedDisplayFreePreferredDeviceIncompatibilityForTest {
-    fn drop(&mut self) {
-        ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous;
-        });
-    }
-}
-
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
@@ -199,43 +93,6 @@ impl Backend {
         Ok((presented, identity))
     }
 
-    #[cfg(all(test, feature = "render-window"))]
-    pub(crate) async fn create_display_free_presented_surface_for_test(
-        &mut self,
-        preferred: Option<DeviceSlotIdentity>,
-        operation: RuntimeOperation,
-        format: Format,
-    ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
-        let exclude_preferred = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
-            .with(|active| *active.borrow());
-        let compatible = if exclude_preferred {
-            self.device_states
-                .iter_mut()
-                .enumerate()
-                .find_map(|(slot, state)| {
-                    let identity = DeviceSlotIdentity::new(slot, state.generation);
-                    (Some(identity) != preferred
-                        && state.ready_after_observing_terminal().is_some())
-                    .then_some(identity)
-                })
-        } else {
-            self.compatible_ready_device(preferred, |_| true)
-        };
-        let identity = if let Some(identity) = compatible {
-            Some(identity)
-        } else {
-            self.new_device(None).await?
-        };
-        let identity = require_presented_device_identity(identity)?;
-        self.ready_state_mut(
-            identity,
-            operation,
-            BackendErrorCode::SurfaceCreateFailed,
-            "the selected presentation device is unavailable",
-        )?;
-        Ok((PresentedSurface::display_free_for_test(format), identity))
-    }
-
     #[cfg(any(
         feature = "render-window",
         all(feature = "render-web", target_arch = "wasm32")
@@ -257,41 +114,7 @@ impl Backend {
             "presented device resources are unavailable before configuration",
         )?;
         let draft = surface.configure_draft(&ready.device, physical_size, present_mode);
-        #[cfg(all(test, feature = "render-window"))]
-        let control =
-            ACTIVE_PRESENTED_CONFIGURE_CONTROL_FOR_TEST.with(|active| active.borrow().clone());
-        #[cfg(all(test, feature = "render-window"))]
-        if let Some(PresentedConfigureControlForTest::Fail { .. }) = &control {
-            let _ = ready.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("Surgeist test-injected Configure validation failure"),
-                size: wgpu::Extent3d {
-                    width: 0,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            });
-        }
-        #[cfg(all(test, feature = "render-window"))]
-        if let Some(PresentedConfigureControlForTest::Pause { reached }) = &control {
-            reached
-                .send(())
-                .expect("the Configure test must observe the draft checkpoint");
-            std::future::pending::<()>().await;
-        }
         let result = transaction.finish(operation).await;
-        #[cfg(all(test, feature = "render-window"))]
-        if let Some(PresentedConfigureControlForTest::Fail {
-            scope_resolution_observed,
-        }) = control
-        {
-            let _ = scope_resolution_observed.send(());
-        }
         result?;
         Ok(draft)
     }

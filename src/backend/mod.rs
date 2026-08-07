@@ -13,11 +13,19 @@ pub(crate) use device::{
 #[cfg(test)]
 pub(crate) use offscreen::offscreen_local_scene_texture_descriptor;
 #[cfg(all(test, feature = "render-window"))]
-pub(crate) use present::{
-    ScopedDisplayFreePreferredDeviceIncompatibilityForTest, ScopedPresentedConfigureControlForTest,
+pub(crate) use test_support::{
+    DisplayFreePresentedDeviceCompatibilityForTest,
+    configured_display_free_presented_surface_for_test,
+    configured_display_free_presented_surface_on_device_for_test,
+    discard_presented_configuration_stage_for_test, display_free_presented_surface_for_test,
+    display_free_presented_surface_on_device_for_test, presented_configuration_count_for_test,
+    presented_configuration_validation_failure_stage_for_test, presented_device_identity_for_test,
+    presented_lifecycle_for_test, presented_observation_for_test,
+    presented_observation_handle_for_test, presented_resource_id_for_test,
+    presented_target_identity_for_test, require_presented_device_identity_for_test,
+    select_display_free_presented_device_for_test, set_presented_acquire_outcome_for_test,
+    take_last_presented_texture_for_test,
 };
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) use test_support::require_presented_device_identity_for_test;
 #[cfg(test)]
 pub(crate) use test_support::{
     OffscreenLocalSceneRenderRequest, OffscreenRenderGpuContext, ReadyDeviceStateBorrowForTest,

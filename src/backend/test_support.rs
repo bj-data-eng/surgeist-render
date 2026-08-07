@@ -27,6 +27,352 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(feature = "render-window")]
+use crate::{
+    Attachment, Renderer, SurfaceOptions,
+    geometry::PhysicalSize,
+    gpu_transaction::{GpuOperationStage, GpuOperationTransaction},
+    surface::{
+        DisplayFreePresentedSurfaceObservationForTest,
+        DisplayFreePresentedSurfaceObservationHandleForTest, PresentedAcquireOutcomeForTest,
+        PresentedLifecycle, PresentedSurface, Surface, SurfaceBackend,
+    },
+};
+
+#[cfg(feature = "render-window")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct DisplayFreePresentedDeviceCompatibilityForTest {
+    identity: DeviceSlotIdentity,
+    compatible: bool,
+}
+
+#[cfg(feature = "render-window")]
+impl DisplayFreePresentedDeviceCompatibilityForTest {
+    pub(crate) const fn compatible(identity: DeviceSlotIdentity) -> Self {
+        Self {
+            identity,
+            compatible: true,
+        }
+    }
+
+    pub(crate) const fn incompatible(identity: DeviceSlotIdentity) -> Self {
+        Self {
+            identity,
+            compatible: false,
+        }
+    }
+}
+
+/// Runs the display-free fixture's explicit compatibility stage over real device
+/// terminal signals. The selected identity is then supplied to the ordinary
+/// presented recreation path; no production selection callback is involved.
+#[cfg(feature = "render-window")]
+pub(crate) fn select_display_free_presented_device_for_test(
+    renderer: &mut Renderer,
+    preferred: DeviceSlotIdentity,
+    candidates: &[DisplayFreePresentedDeviceCompatibilityForTest],
+) -> Option<DeviceSlotIdentity> {
+    let is_ready_and_compatible =
+        |renderer: &mut Renderer, candidate: DisplayFreePresentedDeviceCompatibilityForTest| {
+            candidate.compatible
+                && renderer
+                    .device_signal_for_test(candidate.identity)
+                    .is_some_and(|signal| signal.first_terminal().is_none())
+        };
+    if let Some(candidate) = candidates
+        .iter()
+        .copied()
+        .find(|candidate| candidate.identity == preferred)
+        && is_ready_and_compatible(renderer, candidate)
+    {
+        return Some(candidate.identity);
+    }
+    candidates
+        .iter()
+        .copied()
+        .find(|candidate| is_ready_and_compatible(renderer, *candidate))
+        .map(|candidate| candidate.identity)
+}
+
+/// Executes the real Configure draft and transaction scope resolution with an
+/// explicit test-owned invalid WGPU operation. The draft is never returned for
+/// publication, so callers can assert failure atomicity at the owning boundary.
+#[cfg(feature = "render-window")]
+async fn configure_presented_surface_validation_failure_for_test(
+    device: &wgpu::Device,
+    signal: Arc<DeviceSignal>,
+    surface: &PresentedSurface,
+    physical_size: PhysicalSize,
+    present_mode: wgpu::PresentMode,
+    operation: RuntimeOperation,
+) -> Result<()> {
+    let generation = signal.next_test_generation()?;
+    let transaction =
+        GpuOperationTransaction::begin(device, signal, generation, GpuOperationStage::Configure);
+    let draft = surface.configure_draft(device, physical_size, present_mode);
+    let _invalid_texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("Surgeist explicit Configure validation failure stage"),
+        size: wgpu::Extent3d {
+            width: 0,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    });
+    let result = transaction.finish(operation).await;
+    drop(draft);
+    result
+}
+
+/// Executes and then explicitly discards a real Configure transaction and its
+/// draft before publication.
+#[cfg(feature = "render-window")]
+fn discard_presented_configuration_draft_for_test(
+    device: &wgpu::Device,
+    signal: Arc<DeviceSignal>,
+    surface: &PresentedSurface,
+    physical_size: PhysicalSize,
+    present_mode: wgpu::PresentMode,
+) -> Result<()> {
+    let generation = signal.next_test_generation()?;
+    let transaction =
+        GpuOperationTransaction::begin(device, signal, generation, GpuOperationStage::Configure);
+    let draft = surface.configure_draft(device, physical_size, present_mode);
+    drop(draft);
+    drop(transaction);
+    Ok(())
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) async fn presented_configuration_validation_failure_stage_for_test(
+    renderer: &mut Renderer,
+    surface: &Surface,
+    operation: RuntimeOperation,
+) -> Result<()> {
+    let identity = presented_device_identity_for_test(surface);
+    let signal = renderer.device_signal_for_test(identity).ok_or_else(|| {
+        Error::new(
+            BackendErrorCode::SurfaceConfigureFailed,
+            "the explicit Configure failure stage requires a current device signal",
+        )
+    })?;
+    let (native, physical_size) = match &surface.backend {
+        SurfaceBackend::Presented { surface, state, .. } => {
+            (surface.as_ref(), state.requested_physical_size())
+        }
+        _ => {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceConfigureFailed,
+                "the explicit Configure failure stage requires a presented surface",
+            ));
+        }
+    };
+    let present_mode: wgpu::PresentMode = surface.options.present_mode.into();
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::SurfaceConfigureFailed,
+                "the explicit Configure failure stage requires ready device resources",
+            )
+        })?;
+    configure_presented_surface_validation_failure_for_test(
+        ready.device_for_test(),
+        signal,
+        native,
+        physical_size,
+        present_mode,
+        operation,
+    )
+    .await
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn discard_presented_configuration_stage_for_test(
+    renderer: &mut Renderer,
+    surface: &Surface,
+) -> Result<()> {
+    let identity = presented_device_identity_for_test(surface);
+    let signal = renderer.device_signal_for_test(identity).ok_or_else(|| {
+        Error::new(
+            BackendErrorCode::SurfaceConfigureFailed,
+            "the explicit Configure discard stage requires a current device signal",
+        )
+    })?;
+    let (native, physical_size) = match &surface.backend {
+        SurfaceBackend::Presented { surface, state, .. } => {
+            (surface.as_ref(), state.requested_physical_size())
+        }
+        _ => {
+            return Err(Error::new(
+                BackendErrorCode::SurfaceConfigureFailed,
+                "the explicit Configure discard stage requires a presented surface",
+            ));
+        }
+    };
+    let present_mode = surface.options.present_mode.into();
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .ok_or_else(|| {
+            Error::new(
+                BackendErrorCode::SurfaceConfigureFailed,
+                "the explicit Configure discard stage requires ready device resources",
+            )
+        })?;
+    discard_presented_configuration_draft_for_test(
+        ready.device_for_test(),
+        signal,
+        native,
+        physical_size,
+        present_mode,
+    )
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn display_free_presented_surface_for_test(
+    renderer: &mut Renderer,
+    options: SurfaceOptions,
+) -> Surface {
+    renderer
+        .display_free_presented_surface_for_test(options)
+        .expect("the display-free fixture must establish a real presented surface backend")
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn configured_display_free_presented_surface_for_test(
+    renderer: &mut Renderer,
+) -> Surface {
+    let mut surface = display_free_presented_surface_for_test(
+        renderer,
+        SurfaceOptions {
+            size: crate::Size::new(2.0, 2.0),
+            ..SurfaceOptions::default()
+        },
+    );
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .expect("the display-free surface must configure through the real Configure transaction");
+    surface
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn display_free_presented_surface_on_device_for_test(
+    renderer: &mut Renderer,
+    options: SurfaceOptions,
+    device_identity: DeviceSlotIdentity,
+    attachment: Attachment,
+) -> Surface {
+    renderer
+        .display_free_presented_surface_on_device_for_test(options, device_identity, attachment)
+        .expect("the display-free fixture must establish a real presented surface backend")
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn configured_display_free_presented_surface_on_device_for_test(
+    renderer: &mut Renderer,
+    device_identity: DeviceSlotIdentity,
+    attachment: Attachment,
+) -> Surface {
+    let mut surface = display_free_presented_surface_on_device_for_test(
+        renderer,
+        SurfaceOptions {
+            size: crate::Size::new(2.0, 2.0),
+            ..SurfaceOptions::default()
+        },
+        device_identity,
+        attachment,
+    );
+    pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
+        .expect("the display-free surface must configure through the real Configure transaction");
+    surface
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn set_presented_acquire_outcome_for_test(
+    surface: &mut Surface,
+    outcome: PresentedAcquireOutcomeForTest,
+) {
+    match &mut surface.backend {
+        SurfaceBackend::Presented { surface, .. } => {
+            surface.set_acquire_outcome_for_test(outcome);
+        }
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn take_last_presented_texture_for_test(surface: &mut Surface) -> Option<wgpu::Texture> {
+    match &mut surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.take_last_presented_texture_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_observation_for_test(
+    surface: &Surface,
+) -> DisplayFreePresentedSurfaceObservationForTest {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.observation_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_observation_handle_for_test(
+    surface: &Surface,
+) -> DisplayFreePresentedSurfaceObservationHandleForTest {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.observation_handle_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_lifecycle_for_test(surface: &Surface) -> PresentedLifecycle {
+    match &surface.backend {
+        SurfaceBackend::Presented { state, .. } => state.lifecycle(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_resource_id_for_test(surface: &Surface) -> Option<u64> {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface
+            .committed()
+            .map(|resources| resources.resource_id_for_test()),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_configuration_count_for_test(surface: &Surface) -> usize {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.configuration_count_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_target_identity_for_test(surface: &Surface) -> u64 {
+    match &surface.backend {
+        SurfaceBackend::Presented { surface, .. } => surface.target_identity_for_test(),
+        _ => panic!("the fixture must retain a presented surface backend"),
+    }
+}
+
+#[cfg(feature = "render-window")]
+pub(crate) fn presented_device_identity_for_test(surface: &Surface) -> DeviceSlotIdentity {
+    surface
+        .device_identity()
+        .expect("the display-free fixture must retain a device slot identity")
+}
+
 pub(crate) struct OffscreenRenderGpuContext<'a> {
     backend: &'a mut Backend,
     device_identity: DeviceSlotIdentity,
@@ -338,6 +684,28 @@ impl DeviceSlotIdentity {
 }
 
 impl Backend {
+    #[cfg(feature = "render-window")]
+    pub(crate) async fn create_display_free_presented_surface_for_test(
+        &mut self,
+        preferred: Option<DeviceSlotIdentity>,
+        operation: RuntimeOperation,
+        format: Format,
+    ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
+        let identity = if let Some(identity) = self.compatible_ready_device(preferred, |_| true) {
+            Some(identity)
+        } else {
+            self.new_device(None).await?
+        };
+        let identity = super::present::require_presented_device_identity(identity)?;
+        self.ready_state_mut(
+            identity,
+            operation,
+            BackendErrorCode::SurfaceCreateFailed,
+            "the selected presentation device is unavailable",
+        )?;
+        Ok((PresentedSurface::display_free_for_test(format), identity))
+    }
+
     pub(crate) fn device_queue(
         &mut self,
         identity: DeviceSlotIdentity,
