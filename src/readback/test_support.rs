@@ -1,15 +1,16 @@
+#[cfg(not(target_arch = "wasm32"))]
+use super::native::{NativePollAction, handle_native_poll_result};
 use super::{
-    BackendErrorCode, Error, ImageBuffer, PhysicalSize, ReadbackCompletion,
-    ReadbackCompletionResult, ReadbackCompletionStatus, Result, completion_result,
+    BackendErrorCode, Error, ImageBuffer, PhysicalSize, Result,
     layout::{ReadbackLayout, decode_padded_rows},
     lifecycle::{
         ReadbackLifecycle, ReadbackPhase, ReadbackStagingCleanupAction, ReadbackStagingDisposition,
         ReadbackStagingMapState,
     },
-    map_completion_callback,
+    native::{
+        ReadbackCompletion, ReadbackCompletionResult, completion_result, map_completion_callback,
+    },
 };
-#[cfg(not(target_arch = "wasm32"))]
-use super::{NativePollAction, handle_native_poll_result};
 use std::{
     sync::{Arc, Mutex},
     task::{Context, Poll},
@@ -313,15 +314,7 @@ impl ReadbackCompletionForTest {
     }
 
     pub(crate) fn is_canceled_for_test(&self) -> bool {
-        matches!(
-            &self
-                .completion
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .status,
-            ReadbackCompletionStatus::Canceled
-        )
+        self.completion.is_canceled_for_test()
     }
 
     pub(crate) fn accepted_result_count_for_test(&self) -> usize {
@@ -356,15 +349,7 @@ impl ReadbackCompletionForTest {
     }
 
     fn result_will_be_accepted_for_test(&self) -> bool {
-        matches!(
-            &self
-                .completion
-                .state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .status,
-            ReadbackCompletionStatus::Pending { .. }
-        )
+        self.completion.result_will_be_accepted_for_test()
     }
 
     fn record_result_for_test(&self, accepted: bool) {
