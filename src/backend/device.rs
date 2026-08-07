@@ -15,17 +15,6 @@ use crate::{
 };
 use std::sync::{Arc, Mutex};
 
-#[cfg(test)]
-use crate::{
-    resource::{ManagerIdentity, ResourceManagerObservationForTest},
-    shader::DevicePassCacheCountsForTest,
-};
-#[cfg(test)]
-use std::{
-    sync::{Condvar, Weak},
-    time::Duration,
-};
-
 pub(crate) struct DeviceState {
     pub(super) generation: u64,
     lifecycle: DeviceLifecycle,
@@ -41,8 +30,6 @@ pub(super) struct ReadyDeviceState {
     pub(super) engine: VelloEngineState,
     pub(super) resources: ResourceManager,
     pub(super) pass_cache: DevicePassCache,
-    #[cfg(test)]
-    pub(super) drop_witness: Arc<()>,
 }
 
 impl Drop for ReadyDeviceState {
@@ -56,102 +43,6 @@ enum DeviceLifecycle {
     Terminal(Arc<DeviceTerminalSignal>),
 }
 
-#[cfg(test)]
-#[derive(Clone)]
-pub(crate) struct ReadyDeviceStateDropWitnessForTest {
-    ready_bundle: Weak<()>,
-}
-
-#[cfg(test)]
-impl ReadyDeviceStateDropWitnessForTest {
-    fn from_ready_bundle(ready_bundle: &Arc<()>) -> Self {
-        Self {
-            ready_bundle: Arc::downgrade(ready_bundle),
-        }
-    }
-
-    pub(crate) fn was_dropped_for_test(&self) -> bool {
-        self.ready_bundle.upgrade().is_none()
-    }
-}
-
-#[cfg(test)]
-pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
-    adapter: &'ready wgpu::Adapter,
-    device: &'ready wgpu::Device,
-    queue: &'ready wgpu::Queue,
-    engine: &'ready VelloEngineState,
-    resources: &'ready ResourceManager,
-    pass_cache: &'ready DevicePassCache,
-    drop_witness: ReadyDeviceStateDropWitnessForTest,
-}
-
-#[cfg(test)]
-impl ReadyDeviceStateBorrowForTest<'_> {
-    pub(crate) fn sole_resource_manager_identity_for_test(&self) -> Option<ManagerIdentity> {
-        Some(self.resources.identity_for_test())
-    }
-
-    pub(crate) fn adapter_for_test(&self) -> &wgpu::Adapter {
-        self.adapter
-    }
-
-    pub(crate) fn device_for_test(&self) -> &wgpu::Device {
-        self.device
-    }
-
-    pub(crate) fn queue_for_test(&self) -> &wgpu::Queue {
-        self.queue
-    }
-
-    pub(crate) fn checked_pipeline_for_test(&self) -> &wgpu::ComputePipeline {
-        self.engine.checked_pipeline_for_test()
-    }
-
-    pub(crate) fn internal_resources_empty_for_test(&self) -> bool {
-        self.resources.is_empty_for_test()
-    }
-
-    pub(crate) fn internal_resource_manager_observation_for_test(
-        &self,
-    ) -> ResourceManagerObservationForTest {
-        self.resources.observation_for_test()
-    }
-
-    pub(crate) fn resource_cache_budget_for_test(&self) -> ResourceCacheBudget {
-        self.resources.budget_for_test()
-    }
-
-    pub(crate) fn device_pass_cache_counts_for_test(&self) -> DevicePassCacheCountsForTest {
-        self.pass_cache.counts_for_test()
-    }
-
-    pub(crate) fn drop_witness_for_test(&self) -> ReadyDeviceStateDropWitnessForTest {
-        self.drop_witness.clone()
-    }
-}
-
-#[cfg(test)]
-impl ReadyDeviceState {
-    fn seed_pass_cache_sampler_for_test(&mut self) -> DevicePassCacheCountsForTest {
-        let Self {
-            device, pass_cache, ..
-        } = self;
-        pass_cache.seed_sampler_for_test(device)
-    }
-
-    fn borrow_for_test(&self) -> ReadyDeviceStateBorrowForTest<'_> {
-        ReadyDeviceStateBorrowForTest {
-            adapter: &self.adapter,
-            device: &self.device,
-            queue: &self.queue,
-            engine: &self.engine,
-            resources: &self.resources,
-            pass_cache: &self.pass_cache,
-            drop_witness: ReadyDeviceStateDropWitnessForTest::from_ready_bundle(&self.drop_witness),
-        }
-    }
-}
 impl DeviceState {
     async fn new(
         adapter: wgpu::Adapter,
@@ -172,8 +63,6 @@ impl DeviceState {
                 .with_source(source)
             })?;
         let resources = ResourceManager::new(resource_cache_budget);
-        #[cfg(test)]
-        debug_assert!(resources.is_empty_for_test());
         Ok(Self {
             generation: 0,
             lifecycle: DeviceLifecycle::Ready(Box::new(ReadyDeviceState {
@@ -183,8 +72,6 @@ impl DeviceState {
                 engine,
                 resources,
                 pass_cache: DevicePassCache::new(),
-                #[cfg(test)]
-                drop_witness: Arc::new(()),
             })),
             capabilities,
             signal,
@@ -216,7 +103,7 @@ impl DeviceState {
         }
     }
 
-    fn ready_after_observing_terminal(&mut self) -> Option<&ReadyDeviceState> {
+    pub(super) fn ready_after_observing_terminal(&mut self) -> Option<&ReadyDeviceState> {
         self.observe_terminal();
         self.ready()
     }
@@ -227,21 +114,15 @@ impl DeviceState {
             DeviceLifecycle::Terminal(_) => None,
         }
     }
-
-    #[cfg(test)]
-    fn ready_borrow_for_test(&mut self) -> Option<ReadyDeviceStateBorrowForTest<'_>> {
-        self.observe_terminal();
-        self.ready().map(ReadyDeviceState::borrow_for_test)
-    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceCapabilities {
-    high_precision: bool,
-    reduced_precision: bool,
-    high_precision_features: wgpu::TextureFormatFeatures,
-    reduced_precision_features: wgpu::TextureFormatFeatures,
-    max_effect_texture_dimension_2d: u32,
+    pub(super) high_precision: bool,
+    pub(super) reduced_precision: bool,
+    pub(super) high_precision_features: wgpu::TextureFormatFeatures,
+    pub(super) reduced_precision_features: wgpu::TextureFormatFeatures,
+    pub(super) max_effect_texture_dimension_2d: u32,
 }
 
 impl DeviceCapabilities {
@@ -392,33 +273,6 @@ impl DeviceCapabilities {
             ),
         ))
     }
-
-    #[cfg(test)]
-    pub(crate) fn from_test_facts(
-        high_precision: bool,
-        reduced_precision: bool,
-        max_effect_texture_dimension_2d: u32,
-    ) -> Self {
-        let complete_features = |supported| wgpu::TextureFormatFeatures {
-            allowed_usages: if supported {
-                WorkingFormat::HighPrecision.required_usages()
-            } else {
-                wgpu::TextureUsages::empty()
-            },
-            flags: if supported {
-                wgpu::TextureFormatFeatureFlags::FILTERABLE
-            } else {
-                wgpu::TextureFormatFeatureFlags::empty()
-            },
-        };
-        Self {
-            high_precision,
-            reduced_precision,
-            high_precision_features: complete_features(high_precision),
-            reduced_precision_features: complete_features(reduced_precision),
-            max_effect_texture_dimension_2d,
-        }
-    }
 }
 
 fn supports_effect_texture_format(
@@ -442,7 +296,7 @@ pub(crate) enum DeviceTerminalSignal {
 }
 
 impl DeviceTerminalSignal {
-    fn lost(reason: DeviceLossReason, message: String) -> Self {
+    pub(super) fn lost(reason: DeviceLossReason, message: String) -> Self {
         Self::Lost { reason, message }
     }
 
@@ -487,52 +341,35 @@ impl DeviceTerminalSignal {
         error.append_message(format_args!(": {}", self.message()));
         error
     }
-
-    #[cfg(test)]
-    pub(crate) const fn operation_generation_for_test(&self) -> Option<u64> {
-        match self {
-            Self::Lost { .. } => None,
-            Self::Faulted {
-                operation_generation,
-                ..
-            } => *operation_generation,
-        }
-    }
 }
 
 pub(crate) struct DeviceSignal {
-    state: Mutex<DeviceSignalState>,
-    #[cfg(test)]
-    changed: Condvar,
+    pub(super) state: Mutex<DeviceSignalState>,
 }
 
-struct DeviceSignalState {
-    first_terminal: Option<Arc<DeviceTerminalSignal>>,
+pub(super) struct DeviceSignalState {
+    pub(super) first_terminal: Option<Arc<DeviceTerminalSignal>>,
     // The lease clears this only when it still owns the recorded generation.
-    active_operation_generation: Option<u64>,
+    pub(super) active_operation_generation: Option<u64>,
 }
 
 impl DeviceSignal {
-    fn new() -> Self {
+    pub(super) fn new() -> Self {
         Self {
             state: Mutex::new(DeviceSignalState {
                 first_terminal: None,
                 active_operation_generation: None,
             }),
-            #[cfg(test)]
-            changed: Condvar::new(),
         }
     }
 
-    fn record(&self, signal: DeviceTerminalSignal) {
+    pub(super) fn record(&self, signal: DeviceTerminalSignal) {
         let mut state = self
             .state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         if state.first_terminal.is_none() {
             state.first_terminal = Some(Arc::new(signal));
-            #[cfg(test)]
-            self.changed.notify_all();
         }
     }
 
@@ -588,7 +425,7 @@ impl DeviceSignal {
         terminal
     }
 
-    fn record_fault(&self, kind: GpuFaultKind, message: String) {
+    pub(super) fn record_fault(&self, kind: GpuFaultKind, message: String) {
         let mut state = self
             .state
             .lock()
@@ -599,8 +436,6 @@ impl DeviceSignal {
                 message,
                 state.active_operation_generation,
             )));
-            #[cfg(test)]
-            self.changed.notify_all();
         }
     }
 
@@ -620,72 +455,6 @@ impl DeviceSignal {
         if state.active_operation_generation == Some(generation) {
             state.active_operation_generation = None;
         }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn new_for_test() -> Arc<Self> {
-        Arc::new(Self::new())
-    }
-
-    #[cfg(test)]
-    pub(crate) fn next_test_generation(&self) -> Result<u64> {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state
-            .active_operation_generation
-            .map_or(Ok(1), |generation| {
-                generation.checked_add(1).ok_or_else(|| {
-                    Error::invalid_value(
-                        "GPU operation generation",
-                        generation,
-                        "must have remaining generation space",
-                    )
-                })
-            })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn active_generation_for_test(&self) -> Option<u64> {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .active_operation_generation
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_uncaptured_fault_for_test(&self, kind: GpuFaultKind, message: &str) {
-        self.record_fault(kind, message.into());
-    }
-
-    #[cfg(test)]
-    pub(crate) fn record_loss_for_test(&self, reason: DeviceLossReason) {
-        self.record(DeviceTerminalSignal::lost(
-            reason,
-            "test device loss".into(),
-        ));
-    }
-
-    #[cfg(test)]
-    pub(crate) fn finish_active_generation_for_test(
-        &self,
-        generation: u64,
-    ) -> Option<Arc<DeviceTerminalSignal>> {
-        self.finish_active_generation(generation)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn wait_for_terminal(&self, timeout: Duration) -> bool {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let (state, _) = self
-            .changed
-            .wait_timeout_while(state, timeout, |state| state.first_terminal.is_none())
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.first_terminal.is_some()
     }
 }
 
@@ -731,13 +500,6 @@ pub(super) fn require_presented_device_identity(
     })
 }
 
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) fn require_presented_device_identity_for_test(
-    identity: Option<DeviceSlotIdentity>,
-) -> Result<DeviceSlotIdentity> {
-    require_presented_device_identity(identity)
-}
-
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct DeviceSlotIdentity {
     slot: usize,
@@ -745,17 +507,12 @@ pub(crate) struct DeviceSlotIdentity {
 }
 
 impl DeviceSlotIdentity {
-    const fn new(slot: usize, generation: u64) -> Self {
+    pub(super) const fn new(slot: usize, generation: u64) -> Self {
         Self { slot, generation }
     }
 
     pub(crate) const fn slot(self) -> usize {
         self.slot
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mark_stale_for_test(&mut self) {
-        self.generation = self.generation.checked_add(1).unwrap();
     }
 }
 impl Backend {
@@ -869,21 +626,6 @@ impl Backend {
             .ok_or_else(|| Error::new(error_code, unavailable_message))
     }
 
-    #[cfg(test)]
-    pub(crate) fn device_queue(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        operation: RuntimeOperation,
-    ) -> Result<(&wgpu::Device, &wgpu::Queue)> {
-        let ready = self.ready_state_mut(
-            identity,
-            operation,
-            BackendErrorCode::RenderFailed,
-            "GPU device resources are unavailable",
-        )?;
-        Ok((&ready.device, &ready.queue))
-    }
-
     pub(crate) fn gpu_operation_device_queue(
         &mut self,
         identity: DeviceSlotIdentity,
@@ -995,156 +737,5 @@ impl Backend {
         }
         state.observe_terminal();
         state.terminal().is_none().then_some(state.capabilities)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn override_device_effect_precision_facts_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        effect_precisions: EffectPrecisionCapabilities,
-    ) -> bool {
-        let Some(state) = self.device_states.get_mut(identity.slot()) else {
-            return false;
-        };
-        if state.generation != identity.generation {
-            return false;
-        }
-        state.observe_terminal();
-        if state.terminal().is_some() {
-            return false;
-        }
-        state.capabilities = DeviceCapabilities::from_test_facts(
-            effect_precisions.supports_high_precision(),
-            effect_precisions.supports_reduced_precision(),
-            state.capabilities.max_effect_texture_dimension_2d,
-        );
-        true
-    }
-
-    #[cfg(test)]
-    pub(crate) fn signal_loss_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        reason: DeviceLossReason,
-    ) {
-        if let Some(state) = self.device_states.get(identity.slot())
-            && state.generation == identity.generation
-        {
-            state.signal.record(DeviceTerminalSignal::lost(
-                reason,
-                "test device loss".into(),
-            ));
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn signal_uncaptured_fault_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        kind: GpuFaultKind,
-    ) {
-        if let Some(state) = self.device_states.get(identity.slot())
-            && state.generation == identity.generation
-        {
-            state
-                .signal
-                .record_uncaptured_fault_for_test(kind, "test uncaptured GPU fault");
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn device_signal_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-    ) -> Option<Arc<DeviceSignal>> {
-        self.device_states
-            .get(identity.slot())
-            .filter(|state| state.generation == identity.generation)
-            .map(|state| Arc::clone(&state.signal))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn wait_for_terminal_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-        timeout: Duration,
-    ) -> bool {
-        self.device_states
-            .get(identity.slot())
-            .filter(|state| state.generation == identity.generation)
-            .is_some_and(|state| state.signal.wait_for_terminal(timeout))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn renderer_released_for_test(&mut self, identity: DeviceSlotIdentity) -> bool {
-        let Some(state) = self.device_states.get_mut(identity.slot()) else {
-            return false;
-        };
-        state.observe_terminal();
-        state.ready().is_none()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn ready_device_state_borrow_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-    ) -> Option<ReadyDeviceStateBorrowForTest<'_>> {
-        let state = self.device_states.get_mut(identity.slot())?;
-        if state.generation != identity.generation {
-            return None;
-        }
-        state.ready_borrow_for_test()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn seed_device_pass_cache_sampler_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-    ) -> Option<DevicePassCacheCountsForTest> {
-        let state = self.device_states.get_mut(identity.slot())?;
-        if state.generation != identity.generation {
-            return None;
-        }
-        state.observe_terminal();
-        state
-            .ready_mut()
-            .map(ReadyDeviceState::seed_pass_cache_sampler_for_test)
-    }
-    #[cfg(test)]
-    pub(crate) fn active_operation_generation_for_test(
-        &mut self,
-        identity: DeviceSlotIdentity,
-    ) -> Option<u64> {
-        self.device_states
-            .get(identity.slot())
-            .filter(|state| state.generation == identity.generation)
-            .and_then(|state| state.signal.active_generation_for_test())
-    }
-
-    #[cfg(test)]
-    pub(crate) async fn add_device_slot_for_test(&mut self) -> Result<DeviceSlotIdentity> {
-        self.new_device(None).await?.ok_or_else(|| {
-            Error::runtime_unavailable(
-                RuntimeOperation::AdapterSelection,
-                RuntimeCapabilityUnavailableReason::AdapterUnavailable,
-                "the donor WGPU device could not be created",
-            )
-        })
-    }
-
-    #[cfg(test)]
-    pub(crate) fn destroy_device_for_test(&mut self, identity: DeviceSlotIdentity) -> bool {
-        let Some(state) = self.device_states.get_mut(identity.slot()) else {
-            return false;
-        };
-        if state.generation != identity.generation {
-            return false;
-        }
-        let Some(ready) = state.ready() else {
-            return false;
-        };
-        ready.device.destroy();
-        let _ = ready.device.poll(wgpu::PollType::Poll);
-        true
     }
 }

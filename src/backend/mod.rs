@@ -1,25 +1,21 @@
 mod device;
+#[cfg(test)]
+mod test_support;
 
 #[cfg(test)]
 use device::ReadyDeviceState;
-#[cfg(test)]
-pub(crate) use device::ReadyDeviceStateBorrowForTest;
-#[cfg(test)]
-#[expect(
-    unused_imports,
-    reason = "preserves the crate-visible device drop-witness path until T02"
-)]
-pub(crate) use device::ReadyDeviceStateDropWitnessForTest;
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
 use device::require_presented_device_identity;
-#[cfg(all(test, feature = "render-window"))]
-pub(crate) use device::require_presented_device_identity_for_test;
 pub(crate) use device::{
     DeviceCapabilities, DeviceSignal, DeviceSlotIdentity, DeviceState, DeviceTerminalSignal,
 };
+#[cfg(test)]
+pub(crate) use test_support::ReadyDeviceStateBorrowForTest;
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) use test_support::require_presented_device_identity_for_test;
 
 #[cfg(test)]
 use super::gpu_transaction::test_support::{
@@ -1487,23 +1483,22 @@ impl Backend {
         operation: RuntimeOperation,
         format: Format,
     ) -> Result<(PresentedSurface, DeviceSlotIdentity)> {
-        let incompatible_preferred = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
-            .with(|active| {
-                if !*active.borrow() {
-                    return None;
-                }
-                let identity = preferred?;
-                let state = self.device_states.get(identity.slot())?;
-                (state.generation == identity.generation)
-                    .then(|| state.ready())
-                    .flatten()
-                    .map(|ready| Arc::clone(&ready.drop_witness))
-            });
-        let identity = if let Some(identity) = self.compatible_ready_device(preferred, |ready| {
-            !incompatible_preferred
-                .as_ref()
-                .is_some_and(|incompatible| Arc::ptr_eq(incompatible, &ready.drop_witness))
-        }) {
+        let exclude_preferred = ACTIVE_DISPLAY_FREE_PREFERRED_DEVICE_INCOMPATIBILITY_FOR_TEST
+            .with(|active| *active.borrow());
+        let compatible = if exclude_preferred {
+            self.device_states
+                .iter_mut()
+                .enumerate()
+                .find_map(|(slot, state)| {
+                    let identity = DeviceSlotIdentity::new(slot, state.generation);
+                    (Some(identity) != preferred
+                        && state.ready_after_observing_terminal().is_some())
+                    .then_some(identity)
+                })
+        } else {
+            self.compatible_ready_device(preferred, |_| true)
+        };
+        let identity = if let Some(identity) = compatible {
             Some(identity)
         } else {
             self.new_device(None).await?

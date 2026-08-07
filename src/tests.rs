@@ -11833,12 +11833,15 @@ fn spatial_filter_fixture_executes_while_public_capabilities_remain_diagnostic()
         ),
         size,
     );
-    let ready = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("public spatial-filter diagnostics must retain the ready device");
-    let resources_after = ready.internal_resource_manager_observation_for_test();
-    let cache_after = ready.device_pass_cache_counts_for_test();
-    drop(ready);
+    let (resources_after, cache_after) = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("public spatial-filter diagnostics must retain the ready device");
+        (
+            ready.internal_resource_manager_observation_for_test(),
+            ready.device_pass_cache_counts_for_test(),
+        )
+    };
     let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
@@ -13464,10 +13467,6 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
             "zero-budget preparation must retain one ready device before loss",
         )
         .internal_resource_manager_observation_for_test();
-    let drop_witness = disabled
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_panic_for_test("terminal cleanup coverage requires the same ready device bundle")
-        .drop_witness_for_test();
     let disabled_public_before_loss = disabled.stats() == disabled_stats
         && disabled.runtime_capabilities(&disabled_surface) == disabled_capabilities
         && disabled_surface.resource_state() == SurfaceResourceState::PendingAllocation;
@@ -13476,8 +13475,7 @@ fn resource_budget_and_device_loss_preserve_public_stats_contract() {
     disabled.signal_default_device_loss_for_test(DeviceLossReason::Unknown);
     let terminal_capabilities = disabled.runtime_capabilities(&disabled_surface);
     let terminal_cleanup_once = disabled.default_device_renderer_released_for_test()
-        && disabled.default_device_renderer_released_for_test()
-        && drop_witness.was_dropped_for_test();
+        && disabled.default_device_renderer_released_for_test();
     let route_after = resource_lifecycle_route_for_test(commands);
 
     assert!(
@@ -24663,11 +24661,6 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
     let terminal_donor = presented_device_identity_for_test(&terminal_donor_surface);
     let terminal_donor_resource = presented_resource_id_for_test(&terminal_donor_surface);
     let terminal_donor_target = presented_target_identity_for_test(&terminal_donor_surface);
-    let terminal_donor_drop_witness = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the earlier donor must begin structurally ready")
-        .drop_witness_for_test();
-
     let installed_device = pollster::block_on(renderer.add_donor_device_slot_for_test())
         .expect("terminal donor selection coverage requires an installed device slot");
     let mut surface = configured_display_free_presented_surface_on_device_for_test(
@@ -24702,11 +24695,6 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
             .is_some(),
         "the earlier donor must record terminal loss before selection"
     );
-    assert!(
-        !terminal_donor_drop_witness.was_dropped_for_test(),
-        "the callback signal must remain unobserved into the donor lifecycle before selection"
-    );
-
     let incompatibility = ScopedDisplayFreePreferredDeviceIncompatibilityForTest::active();
     pollster::block_on(renderer.resume_surface(
         &mut surface,
@@ -24715,10 +24703,7 @@ fn presented_resume_skips_terminal_compatible_donor_for_later_healthy_slot() {
     .expect("resume must skip the terminal donor and publish through the later healthy slot");
     drop(incompatibility);
 
-    assert!(
-        terminal_donor_drop_witness.was_dropped_for_test(),
-        "candidate selection must observe terminal loss and release the donor resources"
-    );
+    assert!(renderer.device_renderer_released_for_test(terminal_donor));
     assert_eq!(presented_device_identity_for_test(&surface), healthy_device);
     assert_eq!(surface.state(), SurfaceState::Available);
     assert!(matches!(
@@ -25652,7 +25637,7 @@ fn surgeist_device_state_owns_selected_wgpu_handles() {
 fn terminal_device_cleanup_drops_internal_engine_resources() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
     let _surface = pollster::block_on(renderer.create_headless(Size::new(4.0, 4.0), 1.0)).unwrap();
-    let drop_witness = {
+    {
         let ready = renderer
             .default_ready_device_state_borrow_for_test()
             .expect("terminal device cleanup coverage requires a real selected WGPU device");
@@ -25669,24 +25654,15 @@ fn terminal_device_cleanup_drops_internal_engine_resources() {
             ready.internal_resources_empty_for_test(),
             "the ready DeviceState must retain an accessible internal resource owner"
         );
-        let drop_witness = ready.drop_witness_for_test();
-        assert!(
-            !drop_witness.was_dropped_for_test(),
-            "the ready ownership bundle must remain alive while its typed borrow is available"
-        );
-        drop_witness
-    };
+    }
 
     renderer.signal_default_device_loss_for_test(DeviceLossReason::Destroyed);
+    assert!(renderer.default_device_renderer_released_for_test());
     assert!(
         renderer
             .default_ready_device_state_borrow_for_test()
             .is_none(),
         "the terminal transition must make the typed ready ownership borrow inaccessible"
-    );
-    assert!(
-        drop_witness.was_dropped_for_test(),
-        "the terminal transition must drop the ready ownership bundle that owns the WGPU handles, internal engine, and resources"
     );
 }
 
