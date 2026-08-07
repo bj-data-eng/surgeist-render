@@ -1,5 +1,7 @@
 #[cfg(test)]
-use super::{Backend, DeviceSlotIdentity, InternalVelloRenderRequest, RenderTimings};
+use super::execute::InternalVelloRenderRequest;
+#[cfg(test)]
+use super::{Backend, DeviceSlotIdentity, RenderTimings};
 #[cfg(test)]
 use crate::{
     BackendErrorCode, Error, Format, Options, Parameters, PhysicalSize, Result,
