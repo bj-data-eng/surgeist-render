@@ -104,6 +104,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render shader_clear_fill_pass_encodes_when_gpu_context_is_available
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render graph_render_submits_one_transaction_and_publishes_once
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
   ```
@@ -130,6 +131,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render resolved_alpha_mask_low_medium_high_and_extend_modes_match_boundary_oracle
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render plus_blend_clamps_high_precision_results
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
   ```
@@ -157,6 +159,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render canceled_generic_submission_after_real_submit_clears_ownership_without_public_result
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render resource_preparation_is_allocation_safe_and_submission_free
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
   ```
@@ -183,6 +186,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window surface_operation_matrix_covers_every_kind_state_and_duplicate_transition
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window presented_graph_cancellation_after_submit_discards_without_presentation
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window -- -F unsafe-code -D warnings
   ```
@@ -209,6 +213,9 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render real_gpu_smoke_emits_no_uncaptured_error
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window render_window_smoke_executes_direct_and_graph_presented_frames
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-web
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
@@ -236,6 +243,7 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render internal_vello_msaa8_mask_lut_ties_are_tile_translation_invariant
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render repeated_direct_renders_keep_internal_vello_retention_bounded
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
   ```
@@ -262,6 +270,10 @@
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window render_window_smoke_executes_masked_and_blended_graph_frames
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render direct_and_graph_routes_match_each_fixture_configuration_and_pixel_oracle
   CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-web
+  CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
@@ -289,7 +301,10 @@ test -z "$(git diff 1e57d07d2595be95949caeff7b76a573a457723a -- . \
   ':(exclude)src/tests/**' \
   ':(exclude)plans/cycles/cohesive-module-decomposition-c10-runtime-platform-test-hierarchy.md')"
 CARGO_NET_OFFLINE=true cargo fmt --check
-CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
+CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window
+CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-web
+CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
