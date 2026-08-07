@@ -1,4 +1,7 @@
-use crate::{Color, FontData, FontRef, TextGlyph, TextPaint, TextRun, TextRunBounds, Transform};
+use crate::{
+    Color, FontData, FontRef, ImageBuffer, TextGlyph, TextPaint, TextRun, TextRunBounds, Transform,
+    reference::PremultipliedRgba8,
+};
 
 pub(super) const AHEM_FONT_BYTES: &[u8] =
     include_bytes!("../../tests/fixtures/fonts/ahem/Ahem.ttf");
@@ -30,4 +33,24 @@ pub(super) fn ahem_font(name: &'static str) -> FontRef<'static> {
     FontRef::new(AHEM_FONT_ID)
         .named(name)
         .with_data(FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap())
+}
+
+pub(super) fn assert_premultiplied(pixel: PremultipliedRgba8) {
+    assert!(pixel.red() <= pixel.alpha());
+    assert!(pixel.green() <= pixel.alpha());
+    assert!(pixel.blue() <= pixel.alpha());
+}
+
+pub(super) fn pixel_alpha(image: &ImageBuffer, x: u32, y: u32) -> u8 {
+    pixel_rgba(image, x, y)[3]
+}
+
+pub(super) fn pixel_rgba(image: &ImageBuffer, x: u32, y: u32) -> [u8; 4] {
+    let index = ((y * image.size().width() + x) * 4 + 3) as usize;
+    [
+        image.rgba()[index - 3],
+        image.rgba()[index - 2],
+        image.rgba()[index - 1],
+        image.rgba()[index],
+    ]
 }
