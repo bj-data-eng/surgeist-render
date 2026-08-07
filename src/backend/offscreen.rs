@@ -1,5 +1,5 @@
 #[cfg(test)]
-use super::execute::InternalVelloRenderRequest;
+use super::execute::{InternalVelloTextureStage, InternalVelloTextureTarget};
 #[cfg(test)]
 use super::{Backend, DeviceSlotIdentity, RenderTimings};
 #[cfg(test)]
@@ -233,16 +233,18 @@ pub(super) async fn render_internal_vello_local_scene_to_offscreen_texture(
     let result = backend
         .render_internal_vello_to_texture(
             transaction,
-            InternalVelloRenderRequest {
-                identity: device_identity,
-                operation: RuntimeOperation::SurfaceRendering,
+            InternalVelloTextureStage::new(
+                device_identity,
+                RuntimeOperation::SurfaceRendering,
                 scene,
-                target: rendered.view()?,
-                target_extent: rendered.target.descriptor().physical_size(),
-                base_color: parameters.base_color,
-                antialiasing: options.antialiasing(),
-                target_usage: rendered.target.descriptor().usage(),
-            },
+                InternalVelloTextureTarget::new(
+                    rendered.view()?,
+                    rendered.target.descriptor().physical_size(),
+                    rendered.target.descriptor().usage(),
+                ),
+                parameters.base_color,
+                options.antialiasing(),
+            ),
         )
         .await;
     backend.observe_device_terminal(device_identity);

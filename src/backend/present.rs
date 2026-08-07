@@ -1,9 +1,9 @@
-use super::{Backend, DeviceSlotIdentity};
 #[cfg(any(
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
-use super::{ExactSurfaceGraph, SurfaceFrameCommit};
+use super::SurfaceFrameCommit;
+use super::{Backend, DeviceSlotIdentity};
 use crate::error::Result;
 #[cfg(any(
     feature = "render-window",
@@ -126,11 +126,10 @@ impl Backend {
 ))]
 pub(super) fn exact_presented_graph_target(
     surface: &Surface,
-    graph: &ExactSurfaceGraph,
+    selected_working_format: WorkingFormat,
+    graph_output_format: Format,
+    known_output_extent: Option<PhysicalSize>,
 ) -> Result<(DeviceSlotIdentity, PhysicalSize, Format, WorkingFormat)> {
-    let selected_working_format = graph.working_format();
-    let graph_output_format = graph.output_format();
-    let known_output_extent = graph.known_output_extent()?;
     let (device_identity, physical_size, output_format) = match &surface.backend {
         SurfaceBackend::Presented {
             surface: native,

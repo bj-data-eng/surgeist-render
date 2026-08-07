@@ -9,53 +9,44 @@ mod texture;
 pub(crate) use device::{
     DeviceCapabilities, DeviceSignal, DeviceSlotIdentity, DeviceState, DeviceTerminalSignal,
 };
-#[cfg_attr(
-    all(
-        not(test),
-        not(feature = "render-window"),
-        not(all(feature = "render-web", target_arch = "wasm32"))
-    ),
-    expect(
-        unused_imports,
-        reason = "preserve the existing crate-visible execution timing path after the ownership move"
-    )
-)]
-pub(crate) use execute::RenderTimings;
 #[cfg(any(
+    test,
     feature = "render-window",
     all(feature = "render-web", target_arch = "wasm32")
 ))]
+pub(crate) use execute::RenderTimings;
+#[cfg(all(
+    not(test),
+    any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )
+))]
 pub(crate) use execute::render_exact_presented_graph_surface;
+#[cfg(not(test))]
+pub(crate) use execute::{ExactSurfaceGraph, render_exact_headless_graph_surface};
+pub(crate) use execute::{SurfaceFrameCommit, render_internal_vello_surface};
 #[cfg(test)]
-#[expect(
-    unused_imports,
-    reason = "preserve existing crate-visible execution observation paths until T08"
-)]
-pub(crate) use execute::{
-    BackdropFailurePreservationObservationForTest, BackdropGraphEncodingObservationForTest,
-    ColorFilterOversizedBufferPreservationObservationForTest,
-    CompositionOrderedGraphEncodingObservationForTest,
-    CorePassShaderCacheRealizationObservationForTest, CustomSpineEncodingObservationForTest,
-    LayerCompositeCacheRealizationObservationForTest,
-    MultipleVelloCaptureEncodingObservationForTest,
-    OrderedColorFilterGraphEncodingObservationForTest,
-    SpatialFilterFailurePreservationObservationForTest,
-    SpatialFilterGraphEncodingObservationForTest, TwoCaptureFailureForTest,
-    TwoCaptureFailureObservationForTest, VelloCaptureFailureObservationForTest,
-    VelloCaptureRasterContractObservationForTest,
-};
+pub(crate) use offscreen::offscreen_local_scene_texture_descriptor;
+#[cfg(all(
+    test,
+    any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )
+))]
+pub(crate) use test_support::render_exact_presented_graph_surface;
 #[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) use execute::{
+pub(crate) use test_support::{
     CompositionBlendVectorForTest, CompositionGpuVectorResultsForTest,
     CompositionMaskSamplingInputForTest, CompositionMaskSamplingVectorForTest,
     CompositionPreparedGpuVectorsForTest,
 };
-pub(crate) use execute::{
-    ExactSurfaceGraph, SurfaceFrameCommit, render_exact_headless_graph_surface,
-    render_internal_vello_surface,
-};
 #[cfg(test)]
-pub(crate) use offscreen::offscreen_local_scene_texture_descriptor;
+pub(crate) use test_support::{
+    CustomSpineEncodingObservationForTest, ExactSurfaceGraph, TwoCaptureFailureForTest,
+    render_exact_headless_graph_surface,
+};
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) use test_support::{
     DisplayFreePresentedDeviceCompatibilityForTest,
@@ -76,13 +67,7 @@ pub(crate) use test_support::{
     render_internal_vello_local_scene_to_offscreen_texture,
 };
 pub(crate) use texture::create_headless_texture;
-#[cfg_attr(
-    not(test),
-    expect(
-        unused_imports,
-        reason = "preserve the existing crate-visible backend path after the ownership move"
-    )
-)]
+#[cfg(test)]
 pub(crate) use texture::create_texture;
 
 use crate::{ResourceCacheBudget, Result};
