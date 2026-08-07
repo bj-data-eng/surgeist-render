@@ -67,7 +67,12 @@
 - `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, settled hierarchies,
   backend/renderer production code, public exports, dependencies, features,
   error codes, and product expectations are protected surfaces. A test-support
-  task may narrowly rewrite affected `src/tests.rs` harnesses under M04.5.
+  task may narrowly rewrite affected `src/tests.rs` harnesses, existing
+  `pass/test_support.rs` and `resource/test_support.rs` support, and
+  `#[cfg(test)]` harnesses in `backend.rs` and `renderer.rs` under M04.5. Task
+  and holistic review inspect those two mixed files directly and require their
+  production behavior to remain unchanged; no source-text predicate attempts
+  to infer Rust configuration boundaries.
 - Root integration, sibling repositories, API artifacts, unrelated cleanup,
   algorithm changes, error-policy changes, and the future backend, renderer,
   and focused-test cycles are excluded.
@@ -337,8 +342,9 @@ publishes with authority-remote readback:
 ```sh
 set -euo pipefail
 test -z "$(git diff 9673fcda13b614cfac3bd74f23fcf4435ec869ef -- \
-  src/lib.rs Cargo.toml README.md examples src/backend.rs \
-  src/renderer.rs src/frame src/pass src/shader src/resource)"
+  src/lib.rs Cargo.toml README.md examples src/frame src/shader \
+  ':(top)src/pass' ':(top,exclude)src/pass/test_support.rs' \
+  ':(top)src/resource' ':(top,exclude)src/resource/test_support.rs')"
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
