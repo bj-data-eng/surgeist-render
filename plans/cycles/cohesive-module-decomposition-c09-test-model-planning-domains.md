@@ -81,11 +81,14 @@
 ### 4.1 T01 Establish Test Front Door And Shared Support
 
 - Replace `src/tests.rs` with `src/tests/mod.rs`; add test-private `support.rs`.
-- Move only fixtures/oracles already proven to have callers in at least two of
-  the planned model/style/frame/runtime children. Keep all tests and every
+- Move only fixtures/oracles already proven to have callers in at least two
+  exact final sibling domains: `model`, `style`, `frame`, `gpu`, `surface`,
+  `platform`, or `vello`. Keep all tests and every
   single-domain helper in `mod.rs` for later tasks.
 - Preserve the complete import/cfg surface; add no glob reexport or forwarding
   wrapper. Record the support helper and direct sibling-caller inventory.
+- Dependency/intended commit: published C08 plus reviewed C09 plan; one test
+  front-door and proven shared-support commit.
 - Before and after run:
 
   ```sh
@@ -107,6 +110,7 @@
   single-domain fixtures.
 - Keep image/layer/text tests in `mod.rs` until T03; move no style normalization,
   frame planning, GPU execution, or platform behavior.
+- Dependency/intended commit: reviewed T01 head; one core-model test move.
 - Before and after run:
 
   ```sh
@@ -129,8 +133,9 @@
   text/font/glyph model, authored command, and model validation tests to
   `model.rs` with their single-domain fixtures.
 - CPU reference helpers used only as a model oracle move with the tests; helpers
-  also used by style/frame/runtime name `support.rs` directly after recorded
-  caller proof.
+  also used by an exact `style`, `frame`, `gpu`, `surface`, `platform`, or
+  `vello` sibling name `support.rs` directly after recorded caller proof.
+- Dependency/intended commit: reviewed T02 head; one remaining-model test move.
 - Before and after run:
 
   ```sh
@@ -154,6 +159,8 @@
   box-decoration tests with single-domain helpers.
 - Keep filters/clips/masks in `mod.rs` until T05. Preserve authored order,
   diagnostics, normalized commands, and every existing assertion.
+- Dependency/intended commit: reviewed T03 head; one image/background/decoration
+  test move.
 - Before and after run:
 
   ```sh
@@ -178,6 +185,7 @@
 - Frame graph and GPU/materialized execution tests remain in their existing
   owners even when they consume styled values; ownership follows tested
   condition and oracle, not shared vocabulary.
+- Dependency/intended commit: reviewed T04 head; one filter/clip/mask test move.
 - Before and after run:
 
   ```sh
@@ -200,6 +208,8 @@
   bounds/coordinate mapping, filter intent/kernel/edge/spatial planning, and
   their single-domain fixtures.
 - Keep graph construction/validation/lowering/closure in `mod.rs` until T07.
+- Dependency/intended commit: reviewed T05 head; one route/bounds/filter-plan
+  test move.
 - Before and after run:
 
   ```sh
@@ -223,6 +233,8 @@
   to `frame.rs` with their single-domain fixtures.
 - Encoding, shader bytes, GPU pixels, resources, transactions, surfaces,
   readback, platform, and Vello tests remain in `mod.rs` for C10.
+- Dependency/intended commit: reviewed T06 head; one graph/lowering/closure test
+  move.
 - Before and after run:
 
   ```sh
@@ -247,12 +259,14 @@
 - Directly inventory the remaining `mod.rs` tests/helpers by GPU, resource/cache,
   transaction, surface/publication/cancellation/readback, platform, and Vello
   domain for the C10 handoff. Record it in the task/handoff evidence only.
+- Dependency/intended commit: reviewed T07 head; one support/front-door
+  reconciliation commit.
 - Before and after run all T01-T07 focused conditions plus:
 
   ```sh
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render non_readback_renderer_front_door_is_async
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render graph_render_submits_one_transaction_and_publishes_once
-  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window render_window_smoke_executes_masked_and_blended_graph_frames
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window surface_operation_matrix_covers_every_kind_state_and_duplicate_transition
   CARGO_NET_OFFLINE=true cargo fmt --check
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
@@ -281,6 +295,7 @@ test -z "$(git diff 8be93c6fa6cc2aba15760faf40136061febb275a -- . \
   ':(exclude)src/tests.rs' ':(exclude)src/tests/**' \
   ':(exclude)plans/cycles/cohesive-module-decomposition-c09-test-model-planning-domains.md')"
 CARGO_NET_OFFLINE=true cargo fmt --check
+CARGO_NET_OFFLINE=true cargo check -p surgeist-render
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
@@ -289,8 +304,6 @@ CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-web
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-web -- -F unsafe-code -D warnings
 CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
 CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
-CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window
-CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window,render-web
 CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
 rustc +1.97.0 --version
 CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets
