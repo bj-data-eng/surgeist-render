@@ -93,7 +93,7 @@ use prepare::{GraphPreparationSource, RuntimeAllocationRequest, RuntimeGraphPrep
 use std::collections::{BTreeMap, BTreeSet};
 
 #[cfg(test)]
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 
 use super::{
     Result, backend::DeviceCapabilities, renderer::EffectQualityPolicy, resource::WorkingFormat,
@@ -114,7 +114,10 @@ use super::{
         ShaderCompositePathKey, ShaderDataBindingKey, ShaderMaskSamplingKey,
         ShaderSamplingFilterKey, ShaderTextureFormatKey,
     },
-    vello_engine::PendingVelloResourceCommit,
+    vello_engine::{
+        ActiveVelloEncodingScope, EncodedVelloCaptureProof, PendingVelloResourceCommit,
+        scene::VelloScene,
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -5685,6 +5688,206 @@ pub(crate) struct C08EncodedCaptureObservationForTest {
     pub(crate) target_and_view_are_exact: bool,
     encoder_identity: usize,
     scope_identity: usize,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct C08EncodingObservationStateForTest {
+    capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+    graph_encoder_identities: Vec<usize>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static C08_ENCODING_OBSERVATIONS_FOR_TEST: RefCell<C08EncodingObservationStateForTest> =
+        RefCell::new(C08EncodingObservationStateForTest::default());
+}
+
+#[cfg(test)]
+pub(crate) struct C08EncodingSummaryObservationsForTest {
+    pub(crate) c12_later_sibling_transition_is_exact: bool,
+    pub(crate) c11_pass_order: Vec<C11FilterPassTagForTest>,
+    pub(crate) capture_count: usize,
+    pub(crate) captures_share_one_command_encoder: bool,
+    pub(crate) captures_share_one_active_vello_scope: bool,
+    pub(crate) graph_work_shares_one_command_encoder: bool,
+    pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+}
+
+#[cfg(test)]
+fn begin_c08_encoding_observations_for_test(expected_capture_count: usize) {
+    C08_ENCODING_OBSERVATIONS_FOR_TEST.with(|observations| {
+        *observations.borrow_mut() = C08EncodingObservationStateForTest {
+            capture_observations: Vec::with_capacity(expected_capture_count),
+            graph_encoder_identities: Vec::new(),
+        };
+    });
+}
+
+#[cfg(test)]
+fn record_c08_graph_encoder_for_test(encoder: &mut wgpu::CommandEncoder) {
+    let encoder_identity = std::ptr::from_mut(encoder) as usize;
+    C08_ENCODING_OBSERVATIONS_FOR_TEST.with(|observations| {
+        observations
+            .borrow_mut()
+            .graph_encoder_identities
+            .push(encoder_identity);
+    });
+}
+
+#[cfg(test)]
+fn record_c08_capture_observation_for_test(
+    work: &RuntimeVelloCapture,
+    initial_transform: Transform,
+    scene: &VelloScene,
+    target: (&wgpu::Texture, &wgpu::TextureView),
+    proof: &EncodedVelloCaptureProof,
+    encoder: &mut wgpu::CommandEncoder,
+    scope: &ActiveVelloEncodingScope<'_>,
+) {
+    let lowers_with_exact_initial_transform = match work {
+        RuntimeVelloCapture::Span(_) => scene
+            .observation_for_test()
+            .first_glyph_run_for_test()
+            .is_some_and(|run| {
+                run.transform_components_for_test()
+                    .iter()
+                    .zip(initial_transform.as_array())
+                    .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5)
+            }),
+        RuntimeVelloCapture::ClipCoverage(_) => true,
+    };
+    let (texture, view) = target;
+    let target_view_identity = std::ptr::from_ref(view) as usize;
+    let observation = C08EncodedCaptureObservationForTest {
+        lowers_with_exact_initial_transform,
+        uses_transparent_base: proof.transparent_base_for_test(),
+        antialiasing: proof.antialiasing_for_test(),
+        target_extent: proof.target_extent_for_test(),
+        target_format: proof.target_format_for_test(),
+        target_usage: proof.target_usage_for_test(),
+        target_and_view_are_exact: texture.format() == proof.target_format_for_test()
+            && texture.width() == proof.target_extent_for_test().width()
+            && texture.height() == proof.target_extent_for_test().height()
+            && proof.target_view_identity_for_test() == target_view_identity,
+        encoder_identity: std::ptr::from_mut(encoder) as usize,
+        scope_identity: std::ptr::from_ref(scope) as usize,
+    };
+    C08_ENCODING_OBSERVATIONS_FOR_TEST.with(|observations| {
+        observations
+            .borrow_mut()
+            .capture_observations
+            .push(observation);
+    });
+}
+
+#[cfg(test)]
+fn finish_c08_encoding_observations_for_test(
+    scheduled: &[C08ScheduledEncodingKind],
+    expected_capture_count: usize,
+    capture_count: usize,
+    color_filter_count: usize,
+    prepared: &PreparedGraph<'_>,
+) -> C08EncodingSummaryObservationsForTest {
+    let observations = C08_ENCODING_OBSERVATIONS_FOR_TEST
+        .with(|observations| std::mem::take(&mut *observations.borrow_mut()));
+    let captures_share_one_command_encoder =
+        observations
+            .capture_observations
+            .first()
+            .is_some_and(|first| {
+                observations.capture_observations.len() == expected_capture_count
+                    && observations
+                        .capture_observations
+                        .iter()
+                        .all(|capture| capture.encoder_identity == first.encoder_identity)
+            });
+    let captures_share_one_active_vello_scope = observations
+        .capture_observations
+        .first()
+        .is_some_and(|first| {
+            observations.capture_observations.len() == expected_capture_count
+                && observations
+                    .capture_observations
+                    .iter()
+                    .all(|capture| capture.scope_identity == first.scope_identity)
+        });
+    let graph_work_shares_one_command_encoder = observations
+        .capture_observations
+        .first()
+        .map(|capture| capture.encoder_identity)
+        .or_else(|| observations.graph_encoder_identities.first().copied())
+        .is_some_and(|identity| {
+            observations
+                .capture_observations
+                .iter()
+                .all(|capture| capture.encoder_identity == identity)
+                && observations
+                    .graph_encoder_identities
+                    .iter()
+                    .all(|graph_encoder| *graph_encoder == identity)
+        })
+        && (color_filter_count == 0
+            || prepared.c10_execution.is_some()
+            || prepared.c11_execution.is_some()
+            || prepared.c12_execution.is_some());
+
+    C08EncodingSummaryObservationsForTest {
+        c12_later_sibling_transition_is_exact: c12_later_sibling_transition_is_exact_for_test(
+            prepared,
+        ),
+        c11_pass_order: c11_scheduled_pass_order_for_test(scheduled),
+        capture_count,
+        captures_share_one_command_encoder,
+        captures_share_one_active_vello_scope,
+        graph_work_shares_one_command_encoder,
+        capture_observations: observations.capture_observations,
+    }
+}
+
+#[cfg(test)]
+fn c12_later_sibling_transition_is_exact_for_test(prepared: &PreparedGraph<'_>) -> bool {
+    let Some(execution) = prepared.c12_execution.as_ref() else {
+        return false;
+    };
+    let [backdrop] = execution.backdrops.as_slice() else {
+        return false;
+    };
+    let positions = prepared
+        .plan
+        .passes
+        .iter()
+        .enumerate()
+        .map(|(position, pass)| (pass.runtime.id, position))
+        .collect::<BTreeMap<_, _>>();
+    if !positions.contains_key(&backdrop.copy)
+        || !positions.contains_key(&backdrop.group_clear)
+        || !positions.contains_key(&backdrop.backdrop_composite)
+    {
+        return false;
+    }
+    let Some(outer) = positions.get(&backdrop.outer_composite).copied() else {
+        return false;
+    };
+    prepared.plan.passes.iter().skip(outer + 1).any(|pass| {
+        pass.runtime
+            .dependencies
+            .contains(&backdrop.outer_composite)
+            && pass
+                .runtime
+                .reads
+                .iter()
+                .any(|read| read.resource == backdrop.result)
+    })
+}
+
+#[cfg(test)]
+impl std::ops::Deref for C08CustomSpineEncodingSummary {
+    type Target = C08EncodingSummaryObservationsForTest;
+
+    fn deref(&self) -> &Self::Target {
+        &self.observations_for_test
+    }
 }
 
 #[cfg(test)]

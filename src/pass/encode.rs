@@ -39,8 +39,10 @@ use super::{
 
 #[cfg(test)]
 use super::{
-    C08EncodedCaptureObservationForTest, C11FilterPassTagForTest, PREPARED_GRAPH_TEST_SUPPORT,
-    c11_scheduled_pass_order_for_test, inject_color_filter_shader_failure_for_test,
+    C08EncodingSummaryObservationsForTest, PREPARED_GRAPH_TEST_SUPPORT,
+    begin_c08_encoding_observations_for_test, finish_c08_encoding_observations_for_test,
+    inject_color_filter_shader_failure_for_test, record_c08_capture_observation_for_test,
+    record_c08_graph_encoder_for_test,
 };
 
 pub(super) fn backdrop_filter_passes(steps: &[ExecutableFilterStepFacts]) -> Vec<RuntimePassId> {
@@ -317,8 +319,6 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) copy_backdrop_preserves_signed_mapping: bool,
     pub(crate) c12_group_order_is_exact: bool,
     pub(crate) c12_group_resources_are_distinct: bool,
-    #[cfg(test)]
-    pub(crate) c12_later_sibling_transition_is_exact: bool,
     pub(crate) blur_pass_count: usize,
     pub(crate) drop_shadow_colorize_count: usize,
     pub(crate) drop_shadow_merge_count: usize,
@@ -331,17 +331,7 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) original_source_releases_after_merge: bool,
     pub(crate) advances_every_pass_once: bool,
     #[cfg(test)]
-    pub(crate) c11_pass_order: Vec<C11FilterPassTagForTest>,
-    #[cfg(test)]
-    pub(crate) capture_count: usize,
-    #[cfg(test)]
-    pub(crate) captures_share_one_command_encoder: bool,
-    #[cfg(test)]
-    pub(crate) captures_share_one_active_vello_scope: bool,
-    #[cfg(test)]
-    pub(crate) graph_work_shares_one_command_encoder: bool,
-    #[cfg(test)]
-    pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+    pub(super) observations_for_test: C08EncodingSummaryObservationsForTest,
 }
 
 struct C08CustomSpineEncodingProgress {
@@ -394,10 +384,6 @@ struct C08CustomSpineEncodingProgress {
     c11_textures_released: bool,
     shadow_source_read_twice: bool,
     shadow_source_released_after_merge: bool,
-    #[cfg(test)]
-    capture_observations: Vec<C08EncodedCaptureObservationForTest>,
-    #[cfg(test)]
-    composite_encoder_identities: Vec<usize>,
 }
 
 impl C08CustomSpineEncodingProgress {
@@ -452,10 +438,6 @@ impl C08CustomSpineEncodingProgress {
             c11_textures_released: true,
             shadow_source_read_twice: true,
             shadow_source_released_after_merge: true,
-            #[cfg(test)]
-            capture_observations: Vec::with_capacity(expected_capture_count),
-            #[cfg(test)]
-            composite_encoder_identities: Vec::new(),
         }
     }
 
@@ -478,6 +460,14 @@ impl C08CustomSpineEncodingProgress {
             .source_over_count
             .saturating_add(self.layer_composite_count);
         let c12 = c12_execution_receipt(prepared);
+        #[cfg(test)]
+        let observations_for_test = finish_c08_encoding_observations_for_test(
+            &self.scheduled,
+            self.expected_capture_count,
+            self.capture_count,
+            self.color_filter_count,
+            prepared,
+        );
         C08CustomSpineEncodingSummary {
             activity: EncodedGpuGraphActivity::from_scheduled(
                 &self.scheduled,
@@ -540,8 +530,6 @@ impl C08CustomSpineEncodingProgress {
                 && self.copy_backdrop_signed_mapping_is_exact,
             c12_group_order_is_exact: c12.group_order_is_exact,
             c12_group_resources_are_distinct: c12.group_resources_are_distinct,
-            #[cfg(test)]
-            c12_later_sibling_transition_is_exact: c12.later_sibling_transition_is_exact,
             blur_pass_count: self.blur_pass_count,
             drop_shadow_colorize_count: self.drop_shadow_colorize_count,
             drop_shadow_merge_count: self.drop_shadow_merge_count,
@@ -555,62 +543,8 @@ impl C08CustomSpineEncodingProgress {
             advances_every_pass_once: self.completed_pass_count == self.expected_pass_count
                 && prepared.next_pass == self.expected_pass_count,
             #[cfg(test)]
-            c11_pass_order: c11_scheduled_pass_order_for_test(&self.scheduled),
-            #[cfg(test)]
-            capture_count: self.capture_count,
-            #[cfg(test)]
-            captures_share_one_command_encoder: self.captures_share_one_command_encoder(),
-            #[cfg(test)]
-            captures_share_one_active_vello_scope: self.captures_share_one_active_vello_scope(),
-            #[cfg(test)]
-            graph_work_shares_one_command_encoder: self.graph_work_shares_one_command_encoder(
-                prepared.c10_execution.is_some()
-                    || prepared.c11_execution.is_some()
-                    || prepared.c12_execution.is_some(),
-            ),
-            #[cfg(test)]
-            capture_observations: self.capture_observations,
+            observations_for_test,
         }
-    }
-
-    #[cfg(test)]
-    fn captures_share_one_command_encoder(&self) -> bool {
-        self.capture_observations.first().is_some_and(|first| {
-            self.capture_observations.len() == self.expected_capture_count
-                && self
-                    .capture_observations
-                    .iter()
-                    .all(|capture| capture.encoder_identity == first.encoder_identity)
-        })
-    }
-
-    #[cfg(test)]
-    fn captures_share_one_active_vello_scope(&self) -> bool {
-        self.capture_observations.first().is_some_and(|first| {
-            self.capture_observations.len() == self.expected_capture_count
-                && self
-                    .capture_observations
-                    .iter()
-                    .all(|capture| capture.scope_identity == first.scope_identity)
-        })
-    }
-
-    #[cfg(test)]
-    fn graph_work_shares_one_command_encoder(&self, has_color_filters: bool) -> bool {
-        self.capture_observations
-            .first()
-            .map(|capture| capture.encoder_identity)
-            .or_else(|| self.composite_encoder_identities.first().copied())
-            .is_some_and(|identity| {
-                self.capture_observations
-                    .iter()
-                    .all(|capture| capture.encoder_identity == identity)
-                    && self
-                        .composite_encoder_identities
-                        .iter()
-                        .all(|composite| *composite == identity)
-            })
-            && (self.color_filter_count == 0 || has_color_filters)
     }
 }
 
@@ -618,8 +552,6 @@ impl C08CustomSpineEncodingProgress {
 struct C12ExecutionReceipt {
     group_order_is_exact: bool,
     group_resources_are_distinct: bool,
-    #[cfg(test)]
-    later_sibling_transition_is_exact: bool,
 }
 
 fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
@@ -670,26 +602,12 @@ fn c12_execution_receipt(prepared: &PreparedGraph<'_>) -> C12ExecutionReceipt {
         resources.insert(foreground);
     }
     let expected_resource_count = 5usize.saturating_add(usize::from(backdrop.foreground.is_some()));
-    #[cfg(test)]
-    let later_sibling_transition_is_exact =
-        prepared.plan.passes.iter().skip(outer + 1).any(|pass| {
-            pass.runtime
-                .dependencies
-                .contains(&backdrop.outer_composite)
-                && pass
-                    .runtime
-                    .reads
-                    .iter()
-                    .any(|read| read.resource == backdrop.result)
-        });
     C12ExecutionReceipt {
         group_order_is_exact: filters_are_ordered
             && clear < backdrop_composite
             && backdrop_composite < outer
             && foreground_is_ordered,
         group_resources_are_distinct: resources.len() == expected_resource_count,
-        #[cfg(test)]
-        later_sibling_transition_is_exact,
     }
 }
 
@@ -804,8 +722,6 @@ impl C08CustomSpineEncodingSummary {
 
 struct C08EncodedCaptureResult {
     receipt: C08VelloCaptureCompletionReceipt,
-    #[cfg(test)]
-    observation: C08EncodedCaptureObservationForTest,
 }
 
 struct C08VelloCaptureEncodingContext<'encoding, 'device> {
@@ -957,8 +873,6 @@ struct C09LayerCompositeEncodingFacts {
     avoids_read_write_alias: bool,
     exact_resources_and_parameters: bool,
     preserved_signed_mapping: bool,
-    #[cfg(test)]
-    encoder_identity: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1690,6 +1604,8 @@ impl<'device> PreparedGraph<'device> {
         session: &Arc<()>,
         capture_encoding: &mut C08VelloCaptureEncodingContext<'_, '_>,
     ) -> Result<C08CustomSpineEncodingSummary> {
+        #[cfg(test)]
+        begin_c08_encoding_observations_for_test(expected_capture_count);
         let mut progress =
             C08CustomSpineEncodingProgress::new(self.plan.passes.len(), expected_capture_count);
         while let Some(request) = self
@@ -1813,8 +1729,6 @@ impl<'device> PreparedGraph<'device> {
         let target = handoff.target();
         progress.bounded_capture_handoffs &= c08_capture_handoff_is_bounded(&handoff);
         let encoded = Self::encode_c08_vello_capture(handoff, encoder, capture_encoding)?;
-        #[cfg(test)]
-        progress.capture_observations.push(encoded.observation);
         self.complete_c08_capture(request.id, target, session, encoded.receipt)?;
         #[cfg(test)]
         PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
@@ -1876,9 +1790,7 @@ impl<'device> PreparedGraph<'device> {
         progress.copy_backdrop_regions_are_validated &= facts.validated_viewport_and_scissor;
         progress.copy_backdrop_signed_mapping_is_exact &= facts.preserved_signed_mapping;
         #[cfg(test)]
-        progress
-            .composite_encoder_identities
-            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        record_c08_graph_encoder_for_test(encoder);
         self.complete_c08_custom_pass(request.id)?;
         progress.c11_textures_released &= request.releases.iter().all(|resource| {
             self.resource_bindings
@@ -1914,9 +1826,7 @@ impl<'device> PreparedGraph<'device> {
             }
         };
         #[cfg(test)]
-        progress
-            .composite_encoder_identities
-            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        record_c08_graph_encoder_for_test(encoder);
         self.complete_c08_custom_pass(request.id)?;
         progress.blur_pass_count = progress.blur_pass_count.saturating_add(1);
         progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
@@ -1944,9 +1854,7 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<()> {
         let facts = self.encode_c11_drop_shadow_colorize(encoder, request)?;
         #[cfg(test)]
-        progress
-            .composite_encoder_identities
-            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        record_c08_graph_encoder_for_test(encoder);
         self.complete_c08_custom_pass(request.id)?;
         progress.drop_shadow_colorize_count = progress.drop_shadow_colorize_count.saturating_add(1);
         progress.c11_bindings_are_exact &= facts.exact_prepared_bindings;
@@ -1986,9 +1894,7 @@ impl<'device> PreparedGraph<'device> {
                 })
             });
         #[cfg(test)]
-        progress
-            .composite_encoder_identities
-            .push(std::ptr::from_mut(&mut *encoder) as usize);
+        record_c08_graph_encoder_for_test(encoder);
         self.complete_c08_custom_pass(request.id)?;
         let source_is_released = self
             .resource_bindings
@@ -2064,9 +1970,7 @@ impl<'device> PreparedGraph<'device> {
         progress.layer_signed_mapping_is_exact &= facts.preserved_signed_mapping;
         progress.preserves_signed_origin &= facts.preserved_signed_mapping;
         #[cfg(test)]
-        progress
-            .composite_encoder_identities
-            .push(facts.encoder_identity);
+        record_c08_graph_encoder_for_test(encoder);
         self.complete_c08_custom_pass(request.id)?;
         progress.record_custom_completion(C08ScheduledEncodingKind::LayerComposite);
         Ok(())
@@ -2096,29 +2000,10 @@ impl<'device> PreparedGraph<'device> {
         let antialiasing = handoff.antialiasing();
         validate_c08_vello_capture_target(&handoff)?;
         let scene = c08_vello_capture_scene(&handoff)?;
-        #[cfg(test)]
-        let lowers_with_exact_initial_transform = match handoff.work() {
-            RuntimeVelloCapture::Span(_) => scene
-                .observation_for_test()
-                .first_glyph_run_for_test()
-                .is_some_and(|run| {
-                    run.transform_components_for_test()
-                        .iter()
-                        .zip(handoff.initial_transform().as_array())
-                        .all(|(actual, expected)| (*actual - expected as f32).abs() <= 1.0e-5)
-                }),
-            RuntimeVelloCapture::ClipCoverage(_) => true,
-        };
         let prepared = scene.prepare_raster(vello_capture_raster_parameters(
             target_extent,
             antialiasing,
         )?)?;
-        #[cfg(test)]
-        let encoder_identity = std::ptr::from_mut(&mut *encoder) as usize;
-        #[cfg(test)]
-        let scope_identity = std::ptr::from_ref(&*capture_encoding.scope) as usize;
-        #[cfg(test)]
-        let target_view_identity = std::ptr::from_ref(handoff.view()) as usize;
         let encoded = {
             let mut encoding = TransactionEncodingState::new_reusable_graph_capture(
                 capture_encoding.scope,
@@ -2143,20 +2028,15 @@ impl<'device> PreparedGraph<'device> {
         };
         let (lease, proof) = encoded.into_resources_and_proof();
         #[cfg(test)]
-        let observation = C08EncodedCaptureObservationForTest {
-            lowers_with_exact_initial_transform,
-            uses_transparent_base: proof.transparent_base_for_test(),
-            antialiasing: proof.antialiasing_for_test(),
-            target_extent: proof.target_extent_for_test(),
-            target_format: proof.target_format_for_test(),
-            target_usage: proof.target_usage_for_test(),
-            target_and_view_are_exact: handoff.texture().format() == proof.target_format_for_test()
-                && handoff.texture().width() == proof.target_extent_for_test().width()
-                && handoff.texture().height() == proof.target_extent_for_test().height()
-                && proof.target_view_identity_for_test() == target_view_identity,
-            encoder_identity,
-            scope_identity,
-        };
+        record_c08_capture_observation_for_test(
+            handoff.work(),
+            handoff.initial_transform(),
+            &scene,
+            (handoff.texture(), handoff.view()),
+            &proof,
+            encoder,
+            capture_encoding.scope,
+        );
         let receipt = match handoff.complete_after_encoded_capture(proof) {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -2165,11 +2045,7 @@ impl<'device> PreparedGraph<'device> {
             }
         };
         capture_encoding.leases.push(lease);
-        Ok(C08EncodedCaptureResult {
-            receipt,
-            #[cfg(test)]
-            observation,
-        })
+        Ok(C08EncodedCaptureResult { receipt })
     }
 
     fn validate_texture_binding(
@@ -3563,8 +3439,6 @@ impl<'device> PreparedGraph<'device> {
             composite_parameters,
             expected_read_count,
         )?;
-        #[cfg(test)]
-        let encoder_identity = std::ptr::from_mut(&mut *encoder) as usize;
         encode_c09_composite_region(
             encoder,
             target_binding,
@@ -3589,8 +3463,6 @@ impl<'device> PreparedGraph<'device> {
                 && objects.uses_fixed_source_over_blend() == normal_path
                 && objects.uses_replace_blend() == destination_path,
             preserved_signed_mapping,
-            #[cfg(test)]
-            encoder_identity,
         })
     }
 
