@@ -8,12 +8,12 @@
 - Cycle base: `9673fcda13b614cfac3bd74f23fcf4435ec869ef`, the published
   C05 candidate verified on local and authority-remote `main`.
 - Specification: `plans/specs/cohesive-module-decomposition.md` at
-  `314b8252e8db18130abb8031033b5a0be624c81a`, SHA-256
-  `415257797bf18fd6d6a2d3e5a9ffcd07bc42793490da56505a83e7300aa6d1bb`;
+  `bd25c89790358054a2b51c77c5c2b83f71859cf1`, SHA-256
+  `186eb7cf9366302ea5f16476720b3fc996083ea73a0af159d7794d3b0fb13e93`;
   sections M01-M04, M05.3 transaction table, M05.5 readback table, and M06-M09.
 - Sequence: `plans/sequences/cohesive-module-decomposition.md` at
-  `0552b8f92db40cc4bb8ef4977f926d045610781b`, SHA-256
-  `388573ae297d62681792ff0170713e9ab1fe394b40d5e740144423dfd2b37f97`;
+  `b7ce6d17a20c70dc06f68882d5347086e7c5546f`, SHA-256
+  `e4b731ecb2c38543a6011402235d4e3ebc6a587d41badb876206d9f7f703d72a`;
   entry `C06 GPU Transaction And Readback`.
 - Outcome: replace `src/gpu_transaction.rs` with a narrow transaction front
   door and the required graph, Vello, readback, and test-support children; then
@@ -64,9 +64,10 @@
   intrinsic test raw fact may travel only until the immediately following T02,
   T04, T06, or T08 extraction. Final production children import no test support
   and own no fixture, fault control, observation aggregation, or global bridge.
-- `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, `src/tests.rs`, settled
-  hierarchies, backend/renderer monoliths, public exports, dependencies,
-  features, error codes, and test expectations are protected surfaces.
+- `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, settled hierarchies,
+  backend/renderer production code, public exports, dependencies, features,
+  error codes, and product expectations are protected surfaces. A test-support
+  task may narrowly rewrite affected `src/tests.rs` harnesses under M04.5.
 - Root integration, sibling repositories, API artifacts, unrelated cleanup,
   algorithm changes, error-policy changes, and the future backend, renderer,
   and focused-test cycles are excluded.
@@ -80,15 +81,17 @@
 - Behavior and oracle effect: none. This is a mechanical ownership move backed
   by pre/post characterization; no artificial RED applies.
 - Generated-artifact effect: none. Root owns API artifacts and is excluded.
-- Test effect: imports continue through the same explicit crate-visible front
-  doors. No test name, body, expectation, fixture input, or oracle changes.
+- Test effect: product conditions/outcomes and public-route coverage remain.
+  Test-support tasks replace zero-argument global guards and hidden-transition
+  wiring assertions with explicit test-owned setup at natural stage boundaries;
+  test names continue to state their condition and observable outcome.
 - Structural inspection is transient workflow evidence. Add no parser, source-
   text assertion, plan-closure test, committed inventory, ledger, generated
   index, lint, CI rule, or file-size/count gate.
 - Workers record exact pre/post focused commands, moved-item ownership,
   visibility deltas, file deletion/creation, protected-surface diff, and the
-  absence of algorithm/oracle changes. Each task is one logical commit and a
-  separately reviewed exact range.
+  absence of production-algorithm/product-oracle changes. Each task is one
+  logical commit and a separately reviewed exact range.
 
 ## 4 Ordered Tasks
 
@@ -132,6 +135,11 @@
 - Production files retain only minimal intrinsic per-value raw facts/accessors;
   they do not import test support or own a fault control, observation
   model/aggregation, or global bridge.
+- Rewrite affected graph tests to pass explicit test-owned inputs around natural
+  transaction stage boundaries. Retire only hidden timing/identity/wiring
+  assertions whose sole implementation is the forbidden production callback;
+  preserve product failures, cleanup, publication effects, and public-route
+  coverage through real production transitions.
 - Before and after, run all T01 focused tests plus:
 
   ```sh
@@ -143,7 +151,8 @@
 
 - Acceptance: graph/operation test support is test-only immediately after the
   graph move; graph/shared transaction owners have no test-support dependency
-  or global bridge; focused behavior and observations are identical.
+  or global bridge; focused product conditions and outcomes are preserved
+  without simulated results or production fault-control fields.
 - Intended commit: one graph-transaction-test-support extraction.
 
 ### 4.3 T03 Move Vello And Transaction-Readback Owners
@@ -185,6 +194,8 @@
   accessors that cannot be derived from production state without changing
   semantics. Production children may not import test support or own a fixture,
   fault control, observation model/aggregation, or global bridge.
+- Apply the M04.5 explicit-harness replacement to affected Vello/operation tests;
+  preserve product outcomes and public-route coverage, not hidden wiring.
 - Before and after, run all T01 and T03 focused tests plus:
 
   ```sh
@@ -201,7 +212,7 @@
 - Acceptance: `test_support.rs` is compiled only for tests; the front door is
   shared transaction coordination plus explicit reexports; production children
   have no test-support dependency or behavior-changing test control; the full
-  default suite and all focused observations remain identical.
+  default suite and all focused product outcomes remain equivalent.
 - Intended commit: one transaction-test-support reconciliation.
 
 ### 4.5 T05 Establish Readback Front Door, Layout, And Lifecycle Owners
@@ -238,6 +249,8 @@
 - Start only from the reviewed T05 head. Create test-gated
   `readback/test_support.rs`; move lifecycle probes/observations/aggregation out
   of production. Native observations remain with the staged operation until T07.
+- Replace any lifecycle global guard with explicit test-owned stage setup while
+  preserving mapped/failed/canceled cleanup outcomes.
 - Before and after, run all T05 focused tests plus:
 
   ```sh
@@ -288,6 +301,8 @@
 - Reconcile `readback/mod.rs` to test-gated child declaration/reexports, the
   readback operation entry point, and only genuine coordination spanning
   production children. Apply the same final production/test boundary as T04.
+- Replace native hidden-transition wiring with explicit test-owned stage setup;
+  preserve callback, cancellation, cleanup, diagnostic, and publication outcomes.
 - Before and after, run all T05 and T07 focused tests plus:
 
   ```sh
@@ -322,7 +337,7 @@ publishes with authority-remote readback:
 ```sh
 set -euo pipefail
 test -z "$(git diff 9673fcda13b614cfac3bd74f23fcf4435ec869ef -- \
-  src/lib.rs Cargo.toml README.md examples src/tests.rs src/backend.rs \
+  src/lib.rs Cargo.toml README.md examples src/backend.rs \
   src/renderer.rs src/frame src/pass src/shader src/resource)"
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
