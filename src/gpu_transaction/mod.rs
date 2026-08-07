@@ -1,4 +1,6 @@
 mod graph;
+#[cfg(test)]
+mod test_support;
 
 #[expect(
     unused_imports,
@@ -7,9 +9,31 @@ mod graph;
 pub(crate) use graph::GraphSubmissionCommit;
 pub(crate) use graph::{GraphOutputCommit, GraphSubmissionPayload};
 #[cfg(test)]
-pub(crate) use graph::{
+pub(crate) use test_support::{
     GraphResourceRetentionForTest, GraphSubmissionObservationForTest,
-    ScopedGraphPostSubmitControlForTest, ScopedGraphSubmissionObservationForTest,
+    ScopedGpuOperationPostSubmitCheckpointForTest, ScopedGraphPostSubmitControlForTest,
+    ScopedGraphSubmissionObservationForTest,
+};
+
+#[cfg(test)]
+use test_support::{
+    apply_active_graph_post_submit_control_for_test, begin_graph_submission_observation_for_test,
+    notify_active_graph_submission_scope_resolution_for_test, record_active_graph_commit_for_test,
+    record_active_graph_headless_scope_resolution_for_test,
+    wait_at_active_gpu_operation_post_submit_checkpoint_for_test,
+};
+#[cfg(all(
+    test,
+    any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )
+))]
+use test_support::{
+    apply_active_graph_present_failure_for_test,
+    notify_active_graph_presentation_scope_resolution_for_test,
+    record_active_graph_presentation_scope_resolution_for_test,
+    record_active_graph_submission_scope_resolution_for_test,
 };
 
 use super::{
@@ -23,7 +47,6 @@ use std::sync::Arc;
 #[cfg(test)]
 use std::sync::{
     Mutex,
-    atomic::{AtomicBool, Ordering},
     mpsc::{Receiver, SyncSender, sync_channel},
 };
 
@@ -36,7 +59,6 @@ use super::vello_engine::VelloResourceAllocationSummaryForTest;
 #[cfg(test)]
 thread_local! {
     static ACTIVE_GPU_OPERATION_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<GpuOperationSubmissionObservationForTest>> = const { RefCell::new(None) };
-    static ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST: RefCell<Option<GpuOperationPostSubmitControlForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_SUBMISSION_OBSERVATION_FOR_TEST: RefCell<Option<InternalVelloSubmissionObservationForTest>> = const { RefCell::new(None) };
     static ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST: RefCell<Option<InternalVelloPostSubmitControlForTest>> = const { RefCell::new(None) };
 }
@@ -309,77 +331,6 @@ impl Drop for ScopedGpuOperationSubmissionObservationForTest {
     }
 }
 
-/// Private test-only pause immediately after a generic transaction submits work.
-#[cfg(test)]
-pub(crate) struct ScopedGpuOperationPostSubmitCheckpointForTest {
-    observed: Receiver<()>,
-    release: Option<Arc<AtomicBool>>,
-    previous: Option<GpuOperationPostSubmitControlForTest>,
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-enum GpuOperationPostSubmitControlForTest {
-    Pause(SyncSender<()>),
-    Yield {
-        reached: SyncSender<()>,
-        released: Arc<AtomicBool>,
-    },
-}
-
-#[cfg(test)]
-impl ScopedGpuOperationPostSubmitCheckpointForTest {
-    pub(crate) fn begin() -> Self {
-        let (reached, observed) = sync_channel(1);
-        let previous = ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| {
-            active.replace(Some(GpuOperationPostSubmitControlForTest::Pause(reached)))
-        });
-        Self {
-            observed,
-            release: None,
-            previous,
-        }
-    }
-
-    pub(crate) fn yielding() -> Self {
-        let (reached, observed) = sync_channel(1);
-        let released = Arc::new(AtomicBool::new(false));
-        let previous = ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| {
-            active.replace(Some(GpuOperationPostSubmitControlForTest::Yield {
-                reached,
-                released: Arc::clone(&released),
-            }))
-        });
-        Self {
-            observed,
-            release: Some(released),
-            previous,
-        }
-    }
-
-    pub(crate) fn wait_for_submission_for_test(&self, deadline: std::time::Duration) {
-        self.observed
-            .recv_timeout(deadline)
-            .expect("the real generic submission did not reach the bounded post-submit checkpoint");
-    }
-
-    pub(crate) fn release_for_test(&self) {
-        self.release
-            .as_ref()
-            .expect("only a yielding post-submit checkpoint can resume the submission")
-            .store(true, Ordering::SeqCst);
-    }
-}
-
-#[cfg(test)]
-impl Drop for ScopedGpuOperationPostSubmitCheckpointForTest {
-    fn drop(&mut self) {
-        ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous.take();
-        });
-    }
-}
-
 #[cfg(test)]
 fn record_active_gpu_operation_submission_for_test(
     transaction_generation: u64,
@@ -397,33 +348,6 @@ fn record_active_gpu_operation_submission_for_test(
         }
         observation
     })
-}
-
-#[cfg(test)]
-async fn wait_at_active_gpu_operation_post_submit_checkpoint_for_test() {
-    let checkpoint =
-        ACTIVE_GPU_OPERATION_POST_SUBMIT_CHECKPOINT_FOR_TEST.with(|active| active.borrow().clone());
-    match checkpoint {
-        Some(GpuOperationPostSubmitControlForTest::Pause(reached)) => {
-            reached
-                .send(())
-                .expect("the generic submission test must observe the post-submit checkpoint");
-            std::future::pending::<()>().await;
-        }
-        Some(GpuOperationPostSubmitControlForTest::Yield { reached, released }) => {
-            reached
-                .send(())
-                .expect("the generic submission test must observe the post-submit checkpoint");
-            std::future::poll_fn(|_| {
-                released
-                    .load(Ordering::SeqCst)
-                    .then_some(())
-                    .map_or(std::task::Poll::Pending, std::task::Poll::Ready)
-            })
-            .await;
-        }
-        None => {}
-    }
 }
 
 impl Drop for GpuOperationLease {
