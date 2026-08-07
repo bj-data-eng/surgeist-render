@@ -20,19 +20,23 @@ use crate::{
     UnsupportedPrimitive,
 };
 
-use super::{
-    UnwrapOrPanicForTest, command,
+use crate::{
+    command,
     error::BackendErrorCode,
     reference,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     scene,
-    support::{
-        AHEM_FONT_BYTES, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P, AHEM_GLYPH_X, ahem_font,
-        assert_premultiplied, pixel_alpha, text_run_for,
-    },
     vello_engine::{
         glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
         scene::VelloScene,
+    },
+};
+
+use super::{
+    UnwrapOrPanicForTest,
+    support::{
+        AHEM_FONT_BYTES, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P, AHEM_GLYPH_X, ahem_font,
+        assert_premultiplied, pixel_alpha, text_run_for,
     },
 };
 

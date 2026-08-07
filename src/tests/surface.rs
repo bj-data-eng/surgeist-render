@@ -69,7 +69,7 @@ use std::{
     time::Instant,
 };
 
-use super::{
+use super::support::{
     assert_runtime_device_lost, assert_surface_unavailable, default_graph_working_format_for_test,
     explicit_graph_transaction_inputs_for_test, headless_direct_publication_fixture_for_test,
     modeled_resource_key_for_test, prepared_direct_vello_pass_for_test,
@@ -77,7 +77,7 @@ use super::{
 };
 
 #[cfg(feature = "render-window")]
-use super::{
+use super::support::{
     color_from_straight_rgba8_for_test, composition_presented_masked_blended_scene_for_test,
 };
 

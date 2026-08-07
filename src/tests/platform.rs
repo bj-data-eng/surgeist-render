@@ -19,7 +19,7 @@ use crate::{
 };
 
 #[cfg(feature = "render-window")]
-use super::{
+use super::support::{
     COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X, bounded_backdrop_integration_fixture_for_test,
     color_filter_retention_fixture_for_test, color_from_straight_rgba8_for_test,
     composition_mask_image_from_alpha_for_test,

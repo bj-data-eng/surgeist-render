@@ -60,20 +60,17 @@ use crate::{SurfaceOptions, SurfaceState, UnresolvedResource, UnresolvedResource
 use std::{sync::Arc, time::Duration};
 
 use super::support::{
-    AHEM_FONT_BYTES, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P, AHEM_GLYPH_X, ahem_font,
-    box_decoration_edges, pixel_alpha, pixel_rgba, solid_border, text_run_for,
+    AHEM_FONT_BYTES, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P, AHEM_GLYPH_X,
+    GraphPublicStatsForTest, ahem_font, assert_runtime_device_lost, assert_surface_unavailable,
+    box_decoration_edges, color_filter_retention_fixture_for_test,
+    default_graph_working_format_for_test, explicit_graph_transaction_inputs_for_test,
+    graph_canonical_pixel_for_test, graph_supported_working_formats_for_test,
+    graph_transform_point_for_test, headless_direct_publication_fixture_for_test, pixel_alpha,
+    pixel_rgba, premultiply_u8_channel_for_test, prepared_direct_vello_pass_for_test, solid_border,
+    text_run_for,
 };
 #[cfg(feature = "render-window")]
 use super::support::{add_planning_text, bounded_planning_backdrop};
-use super::{
-    GraphPublicStatsForTest, assert_runtime_device_lost, assert_surface_unavailable,
-    color_filter_retention_fixture_for_test, default_graph_working_format_for_test,
-    explicit_graph_transaction_inputs_for_test, graph_canonical_pixel_for_test,
-    graph_supported_working_formats_for_test, graph_transform_point_for_test,
-    headless_direct_publication_fixture_for_test, premultiply_u8_channel_for_test,
-    prepared_direct_vello_pass_for_test,
-};
-
 fn assert_surface_identity_mismatch(
     error: Error,
     operation: RuntimeOperation,

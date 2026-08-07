@@ -20,10 +20,14 @@ use crate::{
     TextPaint, TextRun, TextRunBounds, Transform, UnitFilterAmount, UnresolvedResource,
     UnresolvedResourceKind, UnsupportedPrimitive,
     backend::{
-        Backend, CustomSpineEncodingObservationForTest, DeviceCapabilities, DeviceSlotIdentity,
-        ReadyDeviceStateBorrowForTest,
+        Backend, CustomSpineEncodingObservationForTest, DeviceCapabilities, DeviceSignal,
+        DeviceSlotIdentity, DeviceTerminalSignal, OffscreenLocalSceneRenderRequest,
+        ReadyDeviceStateBorrowForTest, TwoCaptureFailureForTest,
+        offscreen_local_scene_texture_descriptor,
+        render_internal_vello_local_scene_to_offscreen_texture,
     },
     command,
+    encode::image_data,
     filter::{
         BlurPolicy, BlurRadiusInterpretation, KernelSupportRadius, LargeBlurRadiusPolicy,
         TransparentEdgeSamplingPolicy,
@@ -41,7 +45,8 @@ use crate::{
         ResourceManager, ResourceRetentionOutcome, WorkingFormat,
     },
     shader::device_pass_cache_owns_exact_key_spaces_for_test,
-    style::ColorFilterOp,
+    style::{ColorFilterOp, ColorFilterPipeline},
+    surface::{HeadlessResources, SurfaceBackend},
     texture::{
         EffectTextureDescriptor, EffectTextureRole, TextureDescriptor, TextureUsageIntent,
         headless_texture_descriptor,
@@ -49,47 +54,28 @@ use crate::{
     vello_engine::{VelloAtlasOutcome, scene::VelloScene},
 };
 
-use super::premultiply_u8_channel_for_test;
 use super::{
-    BoundedBackdropProductionFrameForTest, COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X,
-    ColorFilterProductionFrameForTest, DeviceSignal, DeviceTerminalSignal, GraphPublicStatsForTest,
-    HeadlessResources, OffscreenLocalSceneRenderRequest, SpatialFilterProductionFrameForTest,
-    SurfaceBackend, TwoCaptureFailureForTest, UnwrapOrPanicForTest, assert_surface_unavailable,
-    bounded_backdrop_integration_fixture_for_test, bounded_backdrop_reference_rect_for_test,
-    color_filter_list, color_filter_pipeline, color_filter_pixel_renderer_for_test,
-    color_filter_public_color_graph_diagnostic_for_test,
-    color_filter_repeated_resource_observations_are_stable_for_test,
-    color_filter_retention_fixture_for_test, color_filter_signed_source_scene_for_test,
-    color_filter_unsupported_backdrop_scene_for_test, color_from_straight_rgba8_for_test,
-    composition_mask_image_from_alpha_for_test, composition_reuse_scene_and_oracle_for_test,
-    default_graph_working_format_for_test, explicit_graph_transaction_inputs_for_test,
-    graph_canonical_pixel_for_test, graph_pixel_renderer_for_test, graph_pixels_match_for_test,
-    graph_supported_working_formats_for_test, graph_transform_point_for_test,
-    high_precision_terminal_error_for_test, image_data, modeled_effect_texture_for_test,
-    modeled_resource_key_for_test, offscreen_local_scene_texture_descriptor,
-    prepared_direct_vello_pass_for_test, reduced_precision_terminal_error_for_test,
-    reference_premultiplied_pixel_for_test, reference_solid_for_test,
-    reference_straight_bytes_for_test, render_bounded_backdrop_fixture_for_test,
-    render_color_filter_fixture_for_test, render_internal_vello_local_scene_to_offscreen_texture,
-    render_spatial_filter_fixture_for_test, repeated_graph_scene_for_test,
-    repeated_spatial_filter_resources_are_stable_for_test,
-    retained_public_filter_diagnostics_are_exact_for_test, single_filter_list_for_test,
-    spatial_filter_image_scene_for_test, spatial_filter_maximum_error_for_test,
-    spatial_filter_mixed_filter_fixture_for_test,
-    spatial_filter_public_spatial_graph_diagnostic_for_test,
-    spatial_filter_reference_buffer_for_test,
-    spatial_filter_zero_budget_releases_all_frame_resources_for_test,
+    UnwrapOrPanicForTest,
     support::{
-        AHEM_GLYPH_X, ahem_font, assert_finite_positive_rect, assert_premultiplied,
+        AHEM_GLYPH_X, COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X, GraphPublicStatsForTest, ahem_font,
+        assert_finite_positive_rect, assert_premultiplied, assert_surface_unavailable,
         authored_color_filter_runs_for_test, bounded_backdrop_graph_commands_for_test,
-        bounded_planning_backdrop, color_then_blur_filters_for_test, composition_commands_for_test,
-        filter_graph_commands_for_test, filter_graph_context_for_test,
-        graph_shader_commands_for_test, graph_shader_frame_context_for_test, opaque_planning_mask,
-        pixel_alpha, pixel_rgba, runtime_lowering_commands_for_test,
-        spatial_filter_authored_filter_steps_for_test,
+        bounded_backdrop_integration_fixture_for_test, bounded_planning_backdrop,
+        color_filter_retention_fixture_for_test, color_from_straight_rgba8_for_test,
+        color_then_blur_filters_for_test, composition_commands_for_test,
+        composition_mask_image_from_alpha_for_test, default_graph_working_format_for_test,
+        explicit_graph_transaction_inputs_for_test, filter_graph_commands_for_test,
+        filter_graph_context_for_test, graph_canonical_pixel_for_test, graph_pixels_match_for_test,
+        graph_shader_commands_for_test, graph_shader_frame_context_for_test,
+        graph_supported_working_formats_for_test, graph_transform_point_for_test,
+        modeled_resource_key_for_test, opaque_planning_mask, pixel_alpha, pixel_rgba,
+        premultiply_u8_channel_for_test, prepared_direct_vello_pass_for_test,
+        reference_solid_for_test, reference_straight_bytes_for_test, repeated_graph_scene_for_test,
+        runtime_lowering_commands_for_test, spatial_filter_authored_filter_steps_for_test,
+        spatial_filter_maximum_error_for_test, spatial_filter_mixed_filter_fixture_for_test,
     },
 };
-use super::{
+use crate::{
     error::BackendErrorCode,
     gpu_transaction::{
         GpuOperationLease, GpuOperationStage,
@@ -2180,7 +2166,7 @@ fn render_graph_alpha_vector_for_test(
 }
 
 fn graph_alpha_vector_has_exact_grid_for_test(
-    graph: &super::renderer::ForcedGraphRenderResultForTest,
+    graph: &crate::renderer::ForcedGraphRenderResultForTest,
     width: u32,
 ) -> bool {
     graph.output_extent == PhysicalSize::new(width, 1)
@@ -2383,7 +2369,7 @@ fn color_filter_reference_straight_pixels_for_test(
         .expect("the color-filter oracle fixture contains one nonempty color run");
     match working_format {
         WorkingFormat::HighPrecision => {
-            super::reference::apply_color_filter_pipeline_to_straight_rgba8(
+            crate::reference::apply_color_filter_pipeline_to_straight_rgba8(
                 source_pixels,
                 &pipeline,
             )
@@ -2703,7 +2689,7 @@ fn graph_channel_error_for_test(actual: u8, expected: u8) -> u8 {
 
 struct GraphAlphaVectorOutputForTest {
     output: ImageBuffer,
-    graph: super::renderer::ForcedGraphRenderResultForTest,
+    graph: crate::renderer::ForcedGraphRenderResultForTest,
     used_graph_transaction: bool,
     publication_count: usize,
 }
@@ -2862,7 +2848,7 @@ fn composition_read_gpu_vectors_for_test(
 async fn composition_submit_and_read_gpu_vectors_for_test(
     backend: &mut Backend,
     identity: DeviceSlotIdentity,
-    transaction: super::gpu_transaction::GpuOperationTransaction,
+    transaction: crate::gpu_transaction::GpuOperationTransaction,
     prepared: CompositionPreparedGpuVectorsForTest,
 ) -> Result<CompositionGpuVectorResultsForTest> {
     let CompositionPreparedGpuVectorsForTest {
@@ -2916,7 +2902,7 @@ async fn composition_submit_and_read_gpu_vectors_for_test(
             },
         );
     }
-    super::gpu_transaction::test_support::submit_command_buffer_for_test(
+    crate::gpu_transaction::test_support::submit_command_buffer_for_test(
         transaction,
         &queue,
         encoder.finish(),
@@ -3004,6 +2990,7 @@ fn composition_mask_boundary_vectors_for_test()
 fn composition_gpu_vectors_match(
     observed: &CompositionGpuVectorResultsForTest,
     expected: &[[f32; 4]],
+
     tolerance: f32,
 ) -> bool {
     observed.rgba.len() == expected.len()
@@ -3167,7 +3154,7 @@ fn blend_shaders_match_independent_known_vectors() {
 fn assert_composition_blend_gpu_vectors(
     mut backend: Backend,
     identity: DeviceSlotIdentity,
-    requests: &super::pass::LayerCompositeCacheRequestsForTest,
+    requests: &crate::pass::LayerCompositeCacheRequestsForTest,
     vectors: &[CompositionBlendVectorForTest],
     expected: &[[f32; 4]],
 ) {
@@ -7451,7 +7438,7 @@ fn non_readback_gpu_submissions_are_owned_by_gpu_operation_transactions() {
         .expect("real GPU transaction submission coverage requires a host adapter");
     let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
     let generation = signal.next_test_generation().unwrap();
-    let transaction = super::gpu_transaction::GpuOperationTransaction::begin(
+    let transaction = crate::gpu_transaction::GpuOperationTransaction::begin(
         &device,
         Arc::clone(&signal),
         generation,
@@ -7494,7 +7481,7 @@ fn canceled_generic_submission_after_real_submit_clears_ownership_without_public
     let uploaded_images_before = renderer.uploaded_images_for_test();
     let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
     let generation = signal.next_test_generation().unwrap();
-    let transaction = super::gpu_transaction::GpuOperationTransaction::begin(
+    let transaction = crate::gpu_transaction::GpuOperationTransaction::begin(
         &device,
         Arc::clone(&signal),
         generation,
@@ -8056,7 +8043,7 @@ fn mask_upload_allocation_uses_image_extent_not_local_bounds() {
             },
         );
     }
-    let observed = super::pass::mask_upload_allocation_observation_for_test(
+    let observed = crate::pass::mask_upload_allocation_observation_for_test(
         scene.normalize(Capabilities::CURRENT).unwrap(),
         composition_frame_context_for_test(),
     );
@@ -8074,7 +8061,7 @@ fn zero_sized_mask_image_annihilates_without_texture_allocation() {
     let descriptor = ResolvedMaskUploadDescriptor::try_from_image(zero_image).unwrap();
 
     assert!(
-        super::resource::ResourceAllocationPreflight::zero_sized_mask_is_explicitly_empty_for_test(
+        crate::resource::ResourceAllocationPreflight::zero_sized_mask_is_explicitly_empty_for_test(
             &descriptor,
         ),
         "zero mask allocated a substitute texture"
@@ -8998,11 +8985,13 @@ fn renderer_reports_backend_capabilities_by_family() {
 }
 
 #[test]
+
 fn blend_capability_accessors_preserve_direct_vello_claims_without_background_blend() {
     let compositing = Capabilities::CURRENT.compositing();
     let offscreen = Capabilities::CURRENT.offscreen_pipeline();
 
     assert!(compositing.supports_layer_opacity());
+
     assert!(compositing.supports_blend_modes());
     assert!(offscreen.supports_direct_vello_opacity_isolation());
     assert!(offscreen.supports_direct_vello_blend_isolation());
@@ -10498,6 +10487,7 @@ fn assert_replace_underflow_fault() {
 fn assert_replace_overflow_fault() {
     let overflow_manager = ResourceManager::default();
     let mut overflow_frame = overflow_manager.begin_frame().unwrap();
+
     let overflow_survivor = overflow_frame
         .acquire(modeled_resource_key_for_test(72), 1)
         .unwrap();
@@ -11102,7 +11092,7 @@ fn resource_lifecycle_route_for_test(
 }
 
 fn prepared_resources_are_resolved_and_bounded(
-    resources: &super::resource::ResourceManagerObservationForTest,
+    resources: &crate::resource::ResourceManagerObservationForTest,
     budget: ResourceCacheBudget,
 ) -> bool {
     resources.leased_count == 0
@@ -11113,7 +11103,7 @@ fn prepared_resources_are_resolved_and_bounded(
 }
 
 fn prepared_resources_are_fully_released(
-    resources: &super::resource::ResourceManagerObservationForTest,
+    resources: &crate::resource::ResourceManagerObservationForTest,
 ) -> bool {
     prepared_resources_are_resolved_and_bounded(resources, ResourceCacheBudget::DISABLED)
         && resources.idle_count == 0
@@ -11202,8 +11192,8 @@ fn composition_shader_composite_command_variants_for_test() -> Vec<command::Rend
 fn composition_composite_requests_for_test(
     capabilities: DeviceCapabilities,
     working_format: WorkingFormat,
-) -> super::pass::LayerCompositeCacheRequestsForTest {
-    super::pass::layer_composite_cache_requests_for_test(
+) -> crate::pass::LayerCompositeCacheRequestsForTest {
+    crate::pass::layer_composite_cache_requests_for_test(
         &composition_shader_composite_command_variants_for_test(),
         composition_frame_context_for_test(),
         capabilities,
@@ -11215,7 +11205,7 @@ fn composition_composite_requests_for_test(
 fn composition_selected_backend_and_requests_for_test() -> (
     Backend,
     DeviceSlotIdentity,
-    super::pass::LayerCompositeCacheRequestsForTest,
+    crate::pass::LayerCompositeCacheRequestsForTest,
 ) {
     let mut backend = Backend::new(ResourceCacheBudget::DISABLED);
     let identity = pollster::block_on(backend.select_device(None))
@@ -11332,7 +11322,7 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
     };
 
     let shader_failure =
-        super::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization();
+        crate::pass::ScopedColorFilterShaderFailureForTest::after_checked_realization();
     let failure = pollster::block_on(renderer.render_color_filter_fixture_for_test(
         &mut surface,
         &scene,
@@ -11412,8 +11402,8 @@ fn unsupported_broad_backdrop_scene(size: Size, inner_bounds: Rect) -> Scene {
 }
 
 fn composition_resource_observations_are_stable(
-    observations: &[super::resource::ResourceManagerObservationForTest],
-    warmed: &super::resource::ResourceManagerObservationForTest,
+    observations: &[crate::resource::ResourceManagerObservationForTest],
+    warmed: &crate::resource::ResourceManagerObservationForTest,
 ) -> bool {
     observations.iter().all(|observation| {
         observation.leased_count == 0
@@ -11471,7 +11461,7 @@ fn composition_unsupported_dispatch_scenes_for_test() -> (Scene, Scene) {
 }
 
 fn graph_frame_resources_are_retained(
-    resources: &super::resource::ResourceManagerObservationForTest,
+    resources: &crate::resource::ResourceManagerObservationForTest,
 ) -> bool {
     resources.entry_count
         > resources
@@ -11481,8 +11471,8 @@ fn graph_frame_resources_are_retained(
 }
 
 fn graph_resource_observations_are_stable(
-    observations: &[super::resource::ResourceManagerObservationForTest],
-    warmed: &super::resource::ResourceManagerObservationForTest,
+    observations: &[crate::resource::ResourceManagerObservationForTest],
+    warmed: &crate::resource::ResourceManagerObservationForTest,
 ) -> bool {
     observations.iter().all(|observation| {
         observation.leased_count == 0
@@ -11498,7 +11488,7 @@ fn graph_resource_observations_are_stable(
 }
 
 fn is_injected_color_filter_shader_failure(
-    failure: Result<super::renderer::ColorFilterRenderResultForTest>,
+    failure: Result<crate::renderer::ColorFilterRenderResultForTest>,
 ) -> bool {
     failure.is_err_and(|error| {
         error.code() == ErrorCode::RenderFailed
@@ -11523,4 +11513,718 @@ fn assert_bounded_backdrop_filter_execution_is_public(scene: &Scene, size: Size)
         surface.headless_publication_count_for_test(),
         publication_before.saturating_add(1)
     );
+}
+
+struct BoundedBackdropProductionFrameForTest {
+    output: ImageBuffer,
+    result: crate::renderer::BoundedBackdropRenderResultForTest,
+    publication_count: usize,
+}
+
+fn render_bounded_backdrop_fixture_for_test(
+    scene: &Scene,
+    size: PhysicalSize,
+    parameters: Parameters,
+    working_format: WorkingFormat,
+) -> BoundedBackdropProductionFrameForTest {
+    let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
+    let publication_before = surface.headless_publication_count_for_test();
+    let result = pollster::block_on(renderer.render_bounded_backdrop_fixture_for_test(
+        &mut surface,
+        scene,
+        parameters,
+        working_format,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("the bounded-backdrop fixture must use the production graph: {error}")
+    });
+    BoundedBackdropProductionFrameForTest {
+        output: pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
+            panic!("the published bounded-backdrop fixture must be readable: {error}")
+        }),
+        result,
+        publication_count: surface
+            .headless_publication_count_for_test()
+            .saturating_sub(publication_before),
+    }
+}
+
+struct SpatialFilterProductionFrameForTest {
+    output: ImageBuffer,
+    result: crate::renderer::SpatialFilterRenderResultForTest,
+    publication_count: usize,
+}
+
+fn single_filter_list_for_test(operation: FilterOp) -> Vec<FilterList> {
+    vec![
+        FilterList::try_ops(vec![operation])
+            .expect("the spatial-filter operation must form one filter"),
+    ]
+}
+
+fn graph_pixel_renderer_for_test(
+    working_format: WorkingFormat,
+    size: PhysicalSize,
+) -> (Renderer, Surface) {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| {
+        panic!("spatial-filter pixel execution requires a real renderer: {error}")
+    });
+    assert!(
+        graph_supported_working_formats_for_test(&mut renderer).contains(&working_format),
+        "spatial-filter pixel execution requires the requested real working format"
+    );
+    let surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("spatial-filter pixel execution requires a headless surface: {error}")
+    });
+    (renderer, surface)
+}
+
+fn render_spatial_filter_fixture_for_test(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+    scene: &Scene,
+    filters: Vec<FilterList>,
+    working_format: WorkingFormat,
+) -> SpatialFilterProductionFrameForTest {
+    let publication_before = surface.headless_publication_count_for_test();
+    let result = pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
+        surface,
+        scene,
+        filters,
+        Parameters::default(),
+        working_format,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("the spatial-filter fixture must use the production graph: {error}")
+    });
+    SpatialFilterProductionFrameForTest {
+        output: pollster::block_on(renderer.read_headless(surface)).unwrap_or_else(|error| {
+            panic!("the published spatial-filter fixture must be readable: {error}")
+        }),
+        result,
+        publication_count: surface
+            .headless_publication_count_for_test()
+            .saturating_sub(publication_before),
+    }
+}
+
+fn spatial_filter_public_spatial_graph_diagnostic_for_test(
+    scene: &Scene,
+    operation: FilterOp,
+    size: PhysicalSize,
+) -> Option<UnsupportedPrimitive> {
+    let commands = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the public spatial-filter diagnostic fixture must normalize capture input");
+    let context = crate::frame::FrameContext::try_new(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+        Antialiasing::Area,
+        Color::TRANSPARENT,
+    )
+    .expect("the public spatial-filter diagnostic fixture must form a frame context");
+    let graph = crate::frame::authored_filter_graph_for_test(
+        single_filter_list_for_test(operation),
+        commands,
+        context,
+    )
+    .expect("the public spatial-filter diagnostic fixture must form an authored graph");
+    crate::renderer::unsupported_graph_diagnostic_for_test(
+        &graph,
+        Format::Rgba8,
+        &DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .expect("the retained public dispatch classifier must diagnose a spatial-filter graph")
+}
+
+fn repeated_spatial_filter_resources_are_stable_for_test(
+    scene: &Scene,
+    filters: &[FilterList],
+    size: PhysicalSize,
+    expected: &[u8],
+) -> bool {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    ))
+    .expect("spatial-filter retained-resource coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("spatial-filter retained-resource coverage requires a surface");
+    for _ in 0..2 {
+        pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
+            &mut surface,
+            scene,
+            filters.to_vec(),
+            Parameters::default(),
+            WorkingFormat::ReducedPrecision,
+        ))
+        .expect("spatial-filter retained-resource warm-up must succeed");
+    }
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("spatial-filter retained-resource warm-up must keep its device");
+    let warmed_resources = ready.internal_resource_manager_observation_for_test();
+    let warmed_cache = ready.device_pass_cache_counts_for_test();
+    let mut resources = Vec::new();
+    let mut caches = Vec::new();
+    for _ in 0..3 {
+        pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
+            &mut surface,
+            scene,
+            filters.to_vec(),
+            Parameters::default(),
+            WorkingFormat::ReducedPrecision,
+        ))
+        .expect("repeated spatial-filter retained-resource frames must succeed");
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("repeated spatial-filter frames must keep their device");
+        resources.push(ready.internal_resource_manager_observation_for_test());
+        caches.push(ready.device_pass_cache_counts_for_test());
+    }
+    let output = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated spatial-filter publication must remain readable");
+
+    color_filter_repeated_resource_observations_are_stable_for_test(&resources, &warmed_resources)
+        && resources.iter().all(|actual| {
+            actual.gaussian_kernel_count_for_test()
+                == warmed_resources.gaussian_kernel_count_for_test()
+        })
+        && warmed_resources.gaussian_kernel_count_for_test() > 0
+        && warmed_resources.effect_texture_count_for_test() > 0
+        && warmed_cache.has_render_pipelines()
+        && caches.iter().all(|actual| *actual == warmed_cache)
+        && spatial_filter_maximum_error_for_test(
+            output.rgba(),
+            expected,
+            WorkingFormat::ReducedPrecision,
+        ) <= (4, 4)
+}
+
+fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
+    scene: &Scene,
+    filters: &[FilterList],
+    size: PhysicalSize,
+    expected: &[u8],
+) -> bool {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default()
+            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
+            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    ))
+    .expect("spatial-filter zero-budget coverage requires a renderer");
+    let mut surface = pollster::block_on(renderer.create_headless(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        1.0,
+    ))
+    .expect("spatial-filter zero-budget coverage requires a surface");
+    pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
+        &mut surface,
+        scene,
+        filters.to_vec(),
+        Parameters::default(),
+        WorkingFormat::ReducedPrecision,
+    ))
+    .expect("the first spatial-filter zero-budget frame must succeed");
+    let first = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the first spatial-filter zero-budget publication must be readable");
+    let cache_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the first spatial-filter zero-budget frame must keep its device")
+        .device_pass_cache_counts_for_test();
+    pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
+        &mut surface,
+        scene,
+        filters.to_vec(),
+        Parameters::default(),
+        WorkingFormat::ReducedPrecision,
+    ))
+    .expect("the repeated spatial-filter zero-budget frame must succeed");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the repeated spatial-filter zero-budget frame must keep its device");
+    let resources = ready.internal_resource_manager_observation_for_test();
+    let cache_after = ready.device_pass_cache_counts_for_test();
+    let second = pollster::block_on(renderer.read_headless(&surface))
+        .expect("the repeated spatial-filter zero-budget publication must be readable");
+
+    resources.leased_count == 0
+        && resources.idle_count == 0
+        && resources.active_frame_count == 0
+        && resources.resolved_lease_count == 0
+        && resources.entry_count == 0
+        && resources.retained_bytes == 0
+        && resources.accounted_entry_bytes == Some(0)
+        && resources.committed_transient_buffer_count_for_test() == 0
+        && resources.committed_transient_image_count_for_test() == 0
+        && resources.effect_texture_count_for_test() == 0
+        && resources.gaussian_kernel_count_for_test() == 0
+        && cache_before == cache_after
+        && cache_after.has_render_pipelines()
+        && first.rgba() == second.rgba()
+        && spatial_filter_maximum_error_for_test(
+            second.rgba(),
+            expected,
+            WorkingFormat::ReducedPrecision,
+        ) <= (4, 4)
+}
+
+struct ColorFilterProductionFrameForTest {
+    output: ImageBuffer,
+    stats: Stats,
+    working_format: WorkingFormat,
+    output_extent: PhysicalSize,
+    source_origin: Option<(i32, i32)>,
+    source_extent: Option<PhysicalSize>,
+    source_texel_origin: Option<Point>,
+    source_raster_scale: Option<f64>,
+    publication_count: usize,
+}
+
+fn render_color_filter_fixture_for_test(
+    renderer: &mut Renderer,
+    surface: &mut Surface,
+    scene: &Scene,
+    filters: Vec<FilterList>,
+    parameters: Parameters,
+    working_format: WorkingFormat,
+) -> ColorFilterProductionFrameForTest {
+    let publication_before = surface.headless_publication_count_for_test();
+    let graph = pollster::block_on(renderer.render_color_filter_fixture_for_test(
+        surface,
+        scene,
+        filters,
+        parameters,
+        working_format,
+    ))
+    .unwrap_or_else(|error| {
+        panic!("the color-filter fixture must execute through the shared exact graph: {error}")
+    });
+    let publication_count = surface
+        .headless_publication_count_for_test()
+        .saturating_sub(publication_before);
+    let output = pollster::block_on(renderer.read_headless(surface)).unwrap_or_else(|error| {
+        panic!(
+            "the already-published color-filter RED fixture must be explicitly readable: {error}"
+        )
+    });
+    ColorFilterProductionFrameForTest {
+        output,
+        stats: graph.stats,
+        working_format: graph.working_format,
+        output_extent: graph.output_extent,
+        source_origin: Some(graph.source_origin),
+        source_extent: Some(graph.source_extent),
+        source_texel_origin: Some(graph.source_texel_origin),
+        source_raster_scale: Some(graph.source_raster_scale),
+        publication_count,
+    }
+}
+
+fn color_filter_pixel_renderer_for_test(
+    working_format: WorkingFormat,
+    width: u32,
+) -> (Renderer, Surface) {
+    let mut renderer = pollster::block_on(Renderer::new(
+        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    ))
+    .unwrap_or_else(|error| {
+        panic!("color-filter pixel execution requires a real renderer: {error}")
+    });
+    let supported = graph_supported_working_formats_for_test(&mut renderer);
+    assert!(
+        supported.contains(&working_format),
+        "color-filter pixel execution requires the requested real working format"
+    );
+    let adapter = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("color-filter pixel execution requires one ready real adapter")
+        .adapter_for_test()
+        .get_info();
+    eprintln!(
+        "color-filter real adapter name={} backend={:?} device_type={:?} driver={} driver_info={}",
+        adapter.name, adapter.backend, adapter.device_type, adapter.driver, adapter.driver_info
+    );
+    let surface =
+        pollster::block_on(renderer.create_headless(Size::new(f64::from(width), 1.0), 1.0))
+            .unwrap_or_else(|error| {
+                panic!("color-filter pixel execution requires a headless surface: {error}")
+            });
+    (renderer, surface)
+}
+
+fn color_filter_repeated_resource_observations_are_stable_for_test(
+    observations: &[crate::resource::ResourceManagerObservationForTest],
+    warmed: &crate::resource::ResourceManagerObservationForTest,
+) -> bool {
+    observations.iter().all(|observation| {
+        observation.leased_count == 0
+            && observation.active_frame_count == 0
+            && observation.resolved_lease_count == 0
+            && observation.next_resource == warmed.next_resource
+            && observation.entry_count == warmed.entry_count
+            && observation.retained_bytes == warmed.retained_bytes
+            && observation.payload_creation_attempts == warmed.payload_creation_attempts
+            && observation.entry_identities_for_test() == warmed.entry_identities_for_test()
+            && observation.committed_transient_buffer_count_for_test()
+                == warmed.committed_transient_buffer_count_for_test()
+            && observation.committed_transient_image_count_for_test()
+                == warmed.committed_transient_image_count_for_test()
+            && observation.effect_texture_count_for_test() == warmed.effect_texture_count_for_test()
+    })
+}
+
+fn color_filter_public_color_graph_diagnostic_for_test(
+    scene: &Scene,
+    filters: Vec<FilterList>,
+    size: Size,
+) -> Option<UnsupportedPrimitive> {
+    let commands = scene
+        .normalize(Capabilities::CURRENT)
+        .expect("the public color-filter diagnostic fixture must normalize ordinary capture input");
+    let context =
+        crate::frame::FrameContext::try_new(size, 1.0, Antialiasing::Area, Color::TRANSPARENT)
+            .expect("the public color-filter diagnostic fixture must form a frame context");
+    let graph = crate::frame::authored_filter_graph_for_test(filters, commands, context)
+        .expect("the public diagnostic fixture must form the same authored color-filter graph");
+    crate::renderer::unsupported_graph_diagnostic_for_test(
+        &graph,
+        Format::Rgba8,
+        &DeviceCapabilities::from_test_facts(true, true, 4_096),
+    )
+    .expect("the retained public dispatch classifier must diagnose a color-filter graph")
+}
+
+fn retained_public_filter_diagnostics_are_exact_for_test() -> bool {
+    let capabilities = Capabilities::CURRENT;
+    let supported = [
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuColorFilterExecution,
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuBlurFilterExecution,
+        ),
+        (
+            PrimitiveFamily::Filters,
+            PrimitiveOperation::GpuDropShadowFilterExecution,
+        ),
+    ];
+    let unsupported = [
+        (PrimitiveFamily::Filters, PrimitiveOperation::LayerFilter),
+        (
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::FilteredImagePaint,
+        ),
+        (
+            PrimitiveFamily::ImageSampling,
+            PrimitiveOperation::ColorFilteredImagePaint,
+        ),
+        (
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::LayerFilterExecution,
+        ),
+        (
+            PrimitiveFamily::OffscreenPipeline,
+            PrimitiveOperation::BroadBackdropExecution,
+        ),
+    ];
+    let supported_are_exact = supported.into_iter().all(|(family, operation)| {
+        capabilities
+            .ensure_supported(UnsupportedPrimitive::new(family, operation))
+            .is_ok()
+    });
+    let unsupported_are_exact = unsupported.into_iter().all(|(family, operation)| {
+        let expected = UnsupportedPrimitive::new(family, operation);
+        capabilities
+            .ensure_supported(expected)
+            .is_err_and(|error| error.unsupported_primitive() == Some(expected))
+    });
+    let reference =
+        UnresolvedResource::new(UnresolvedResourceKind::Filter, "#color_filter-reference");
+    let reference_error = Error::unresolved_resource(reference.clone());
+    supported_are_exact
+        && unsupported_are_exact
+        && capabilities.filters().supports_gpu_color_filter_execution()
+        && capabilities.filters().supports_gpu_blur_filter_execution()
+        && capabilities
+            .filters()
+            .supports_gpu_drop_shadow_filter_execution()
+        && !capabilities.filters().supports_layer_filters()
+        && !capabilities
+            .image_sampling()
+            .supports_filtered_image_paint()
+        && !capabilities
+            .image_sampling()
+            .supports_color_filtered_image_paint()
+        && !capabilities
+            .offscreen_pipeline()
+            .supports_layer_filter_execution()
+        && capabilities
+            .offscreen_pipeline()
+            .supports_bounded_backdrop_filter_execution()
+        && reference_error.code() == ErrorCode::UnresolvedResource
+        && reference_error.unresolved_resource_diagnostic() == Some(&reference)
+}
+
+fn color_filter_unsupported_backdrop_scene_for_test() -> Scene {
+    let backdrop_filters = color_filter_list([ColorFilterOp::Invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )]);
+    let backdrop = Layer::new()
+        .try_transform(Transform::translation(1.0, 0.0).unwrap())
+        .unwrap()
+        .try_backdrop_filter(
+            BackdropFilterInput::try_new(
+                backdrop_filters,
+                BackdropCaptureBounds::try_new(Rect::new(0.0, 0.0, 4.0, 4.0)).unwrap(),
+                None,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    let mut scene = Scene::new();
+    scene
+        .fill(Rect::new(0.0, 0.0, 4.0, 4.0), Color::BLACK)
+        .layer(backdrop, |scene| {
+            scene.fill(
+                Rect::new(1.0, 1.0, 2.0, 2.0),
+                Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
+            );
+        });
+    scene
+}
+
+fn composition_reuse_scene_and_oracle_for_test()
+-> (Scene, PhysicalSize, Vec<u8>, ResolvedMaskUploadKey) {
+    let size = PhysicalSize::new(4, 4);
+    let bounds = Rect::new(0.0, 0.0, 4.0, 4.0);
+    let source = [224, 64, 32, 192];
+    let destination = [48, 160, 208, 255];
+    let mask = composition_mask_image_from_alpha_for_test(
+        PhysicalSize::new(2, 2),
+        &[160, 160, 160, 160],
+        ImageQuality::High,
+        Extend::Reflect,
+    );
+    let mask_key = ResolvedMaskUploadDescriptor::try_from_image(mask.clone())
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse mask must produce an upload key: {error}")
+        })
+        .cache_key();
+    let layer = Layer::new()
+        .try_clip(Shape::rect(bounds))
+        .unwrap_or_else(|error| panic!("the masked-composition reuse clip must be valid: {error}"))
+        .try_opacity(0.75)
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse opacity must be valid: {error}")
+        })
+        .blend(BlendMode::Multiply)
+        .with_resolved_alpha_mask(
+            ResolvedLayerAlphaMask::try_new(mask.clone(), bounds).unwrap_or_else(|error| {
+                panic!("the masked-composition reuse mask bounds must be valid: {error}")
+            }),
+        );
+    let mut scene = Scene::new();
+    scene
+        .fill(bounds, color_from_straight_rgba8_for_test(destination))
+        .layer(layer, |scene| {
+            scene.fill(bounds, color_from_straight_rgba8_for_test(source));
+        });
+
+    let source = reference_solid_for_test(size, source)
+        .apply_resolved_alpha_mask(bounds, &mask, bounds)
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse mask oracle must resolve: {error}")
+        })
+        .apply_opacity(0.75)
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse opacity oracle must resolve: {error}")
+        });
+    let destination = reference_solid_for_test(size, destination);
+    let expected = source
+        .blend_over(&destination, BlendMode::Multiply)
+        .unwrap_or_else(|error| {
+            panic!("the masked-composition reuse blend oracle must resolve: {error}")
+        });
+    (
+        scene,
+        size,
+        reference_straight_bytes_for_test(&expected),
+        mask_key,
+    )
+}
+
+pub(super) fn color_filter_pipeline<const N: usize>(
+    ops: [ColorFilterOp; N],
+) -> ColorFilterPipeline {
+    color_filter_list(ops)
+        .color_filter_pipeline()
+        .unwrap()
+        .unwrap()
+}
+
+pub(super) fn color_filter_list<const N: usize>(ops: [ColorFilterOp; N]) -> FilterList {
+    let ops = ops
+        .into_iter()
+        .map(|op| match op {
+            ColorFilterOp::Brightness(amount) => FilterOp::brightness(amount),
+            ColorFilterOp::Contrast(amount) => FilterOp::contrast(amount),
+            ColorFilterOp::Grayscale(amount) => FilterOp::grayscale(amount),
+            ColorFilterOp::HueRotate(angle) => FilterOp::hue_rotate(angle),
+            ColorFilterOp::Invert(amount) => FilterOp::invert(amount),
+            ColorFilterOp::Opacity(amount) => FilterOp::opacity(amount),
+            ColorFilterOp::Saturate(amount) => FilterOp::saturate(amount),
+            ColorFilterOp::Sepia(amount) => FilterOp::sepia(amount),
+        })
+        .collect();
+    FilterList::try_ops(ops).unwrap()
+}
+
+pub(super) fn modeled_effect_texture_for_test(
+    physical_size: PhysicalSize,
+) -> (ResourceCacheKey, u64) {
+    let descriptor =
+        EffectTextureDescriptor::try_capture(physical_size, wgpu::TextureUsages::TEXTURE_BINDING)
+            .unwrap();
+    (
+        ResourceCacheKey::EffectTexture(descriptor.cache_key()),
+        descriptor.checked_byte_len().unwrap(),
+    )
+}
+
+pub(super) fn bounded_backdrop_reference_rect_for_test(
+    size: PhysicalSize,
+    rect: (u32, u32, u32, u32),
+    straight: [u8; 4],
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut buffer = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
+    for y in rect.1..rect.1 + rect.3 {
+        for x in rect.0..rect.0 + rect.2 {
+            buffer
+                .set_pixel(x, y, reference_premultiplied_pixel_for_test(straight))
+                .unwrap();
+        }
+    }
+    buffer
+}
+
+pub(super) fn spatial_filter_reference_buffer_for_test(
+    size: PhysicalSize,
+    opaque_pixels: &[(u32, u32, PremultipliedRgba8)],
+) -> ReferencePremultipliedRgba8Buffer {
+    let mut source = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
+    for &(x, y, pixel) in opaque_pixels {
+        source.set_pixel(x, y, pixel).unwrap();
+    }
+    source
+}
+
+pub(super) fn spatial_filter_image_scene_for_test(
+    size: PhysicalSize,
+    pixels: Vec<u8>,
+    destination: Rect,
+) -> Scene {
+    let image = Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        Arc::<[u8]>::from(pixels),
+    )
+    .expect("the spatial-filter pixel fixture must form one RGBA image");
+    let mut scene = Scene::new();
+    scene.image(image, destination, ImageFit::Stretch);
+    scene
+}
+
+pub(super) fn high_precision_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
+    (actual.len() == expected.len() && actual.len().is_multiple_of(4)).then(|| {
+        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
+            0,
+            |maximum, (actual, expected)| {
+                // The caller first proves canonical terminal bytes. Once target
+                // alpha quantizes to zero, straight RGB has only the black form.
+                let expected_rgb = if actual[3] == 0 {
+                    [0, 0, 0]
+                } else {
+                    [expected[0], expected[1], expected[2]]
+                };
+                maximum
+                    .max(actual[0].abs_diff(expected_rgb[0]))
+                    .max(actual[1].abs_diff(expected_rgb[1]))
+                    .max(actual[2].abs_diff(expected_rgb[2]))
+                    .max(actual[3].abs_diff(expected[3]))
+            },
+        )
+    })
+}
+
+pub(super) fn reduced_precision_terminal_error_for_test(
+    actual: &[u8],
+    expected: &[u8],
+) -> Option<(u8, u8)> {
+    (actual.len() == expected.len()).then(|| {
+        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
+            (0, 0),
+            |(max_alpha, max_premul), (actual, expected)| {
+                let alpha = max_alpha.max(actual[3].abs_diff(expected[3]));
+                let premul = (0..3).fold(max_premul, |maximum, channel| {
+                    maximum.max(
+                        premultiply_u8_channel_for_test(actual[channel], actual[3]).abs_diff(
+                            premultiply_u8_channel_for_test(expected[channel], expected[3]),
+                        ),
+                    )
+                });
+                (alpha, premul)
+            },
+        )
+    })
+}
+
+pub(super) fn color_filter_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
+    let hidden_prefix = [[17, 31, 47, 255], [233, 199, 151, 127]];
+    let bytes = hidden_prefix
+        .into_iter()
+        .chain(visible_pixels.iter().copied())
+        .flat_map(|pixel| pixel.into_iter())
+        .collect::<Vec<_>>();
+    let source_width = u32::try_from(visible_pixels.len() + hidden_prefix.len())
+        .expect("the color-filter pixel vector must fit u32");
+    let image = Image::from_rgba(
+        Size::new(f64::from(source_width), 1.0),
+        Arc::<[u8]>::from(bytes),
+    )
+    .expect("the color-filter pixel vector must form one valid image");
+    let mut scene = Scene::new();
+    scene.image(
+        image,
+        Rect::new(
+            f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X),
+            0.0,
+            f64::from(source_width),
+            1.0,
+        ),
+        ImageFit::Stretch,
+    );
+    scene
+}
+
+pub(super) fn reference_premultiplied_pixel_for_test(straight: [u8; 4]) -> PremultipliedRgba8 {
+    PremultipliedRgba8::try_new(
+        premultiply_u8_channel_for_test(straight[0], straight[3]),
+        premultiply_u8_channel_for_test(straight[1], straight[3]),
+        premultiply_u8_channel_for_test(straight[2], straight[3]),
+        straight[3],
+    )
+    .unwrap()
 }
