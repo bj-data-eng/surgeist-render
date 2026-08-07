@@ -4224,8 +4224,6 @@ impl Backend {
         let submission_scope =
             super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
         let submission = submission_scope.observation_for_test();
-        let graph_scope = super::gpu_transaction::ScopedGraphSubmissionObservationForTest::begin();
-        let graph_submission = graph_scope.observation_for_test();
         let direct_scope =
             super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
         let direct_submission = direct_scope.observation_for_test();
@@ -4238,10 +4236,8 @@ impl Backend {
             )
             .await?;
         let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
-            && graph_submission.queue_submission_count_for_test() == 0
             && direct_submission.queue_submission_count_for_test() == 0;
         drop(direct_scope);
-        drop(graph_scope);
         drop(submission_scope);
         let (resources_after, cache_after) =
             self.spatial_filter_resource_and_cache_state(identity)?;
@@ -4301,8 +4297,6 @@ impl Backend {
         let submission_scope =
             super::gpu_transaction::ScopedGpuOperationSubmissionObservationForTest::begin();
         let submission = submission_scope.observation_for_test();
-        let graph_scope = super::gpu_transaction::ScopedGraphSubmissionObservationForTest::begin();
-        let graph_submission = graph_scope.observation_for_test();
         let direct_scope =
             super::gpu_transaction::ScopedInternalVelloSubmissionObservationForTest::begin();
         let direct_submission = direct_scope.observation_for_test();
@@ -4323,10 +4317,8 @@ impl Backend {
             )
             .await?;
         let performs_no_submission_or_retry = submission.queue_submission_count_for_test() == 0
-            && graph_submission.queue_submission_count_for_test() == 0
             && direct_submission.queue_submission_count_for_test() == 0;
         drop(direct_scope);
-        drop(graph_scope);
         drop(submission_scope);
         let (resources_after, cache_after) =
             self.spatial_filter_resource_and_cache_state(identity)?;

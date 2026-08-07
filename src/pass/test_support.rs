@@ -8,8 +8,8 @@ use super::close::{
 };
 use super::close::{ExecutableFilterStepFacts, preparation_error};
 use super::encode::{
-    CustomSpineEncodingSummary, PendingGraphEncoding, PendingPreparedFrameCommit,
-    backdrop_filter_passes, vello_capture_raster_parameters,
+    CustomSpineEncodingSummary, PendingGraphEncoding, backdrop_filter_passes,
+    vello_capture_raster_parameters,
 };
 use super::lower::{
     lowering_error, runtime_pass_cache_keys, shader_binding_role, shader_sampling_edge,
@@ -59,9 +59,6 @@ use super::super::texture::EffectTextureRole;
 
 #[cfg(test)]
 use super::super::{Point, Rect, command::RenderClip, command::RenderCommands};
-
-#[cfg(test)]
-use super::super::resource::ResourceAccountingFault;
 
 #[cfg(test)]
 use super::super::frame::GraphLoweringView;
@@ -5623,17 +5620,6 @@ impl PendingGraphEncoding {
 }
 
 pub(crate) use super::encode::EncodedCaptureRawFact as EncodedVelloCaptureObservationForTest;
-
-#[cfg(test)]
-impl PendingPreparedFrameCommit {
-    pub(crate) fn resource_identities_for_test(&self) -> Vec<ResourceIdentity> {
-        self.frame_scope.leased_resource_identities_for_test()
-    }
-
-    pub(crate) fn poison_retained_byte_accounting_for_test(&self) -> ResourceAccountingFault {
-        self.frame_scope.poison_retained_byte_accounting_for_test()
-    }
-}
 
 #[cfg(test)]
 impl<'device> PreparedGraph<'device> {

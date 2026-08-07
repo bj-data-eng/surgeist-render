@@ -334,17 +334,6 @@ impl FrameResourceScope {
         lock_state(&self.state).trim_idle()
     }
 
-    pub(crate) fn leased_resource_identities_for_test(&self) -> Vec<ResourceIdentity> {
-        lock_state(&self.state)
-            .entries
-            .iter()
-            .filter_map(|(identity, entry)| {
-                (entry.state == (ResourceEntryState::Leased { frame: self.frame }))
-                    .then_some(*identity)
-            })
-            .collect()
-    }
-
     pub(crate) fn poison_retained_byte_accounting_for_test(&self) -> ResourceAccountingFault {
         let mut state = lock_state(&self.state);
         let registered_entry_bytes = state
@@ -360,32 +349,6 @@ impl FrameResourceScope {
         };
         state.record_accounting_fault(fault);
         fault
-    }
-}
-
-impl ResourceRetentionOutcome {
-    pub(crate) const fn retains_reusable_resources(self) -> bool {
-        matches!(
-            self,
-            Self::RetainedReusable {
-                resource_count: 1..,
-                ..
-            } | Self::Trimmed {
-                retained_count: 1..,
-                ..
-            }
-        )
-    }
-
-    pub(crate) const fn released_all_idle_resources(self) -> bool {
-        matches!(
-            self,
-            Self::Trimmed {
-                released_count: 1..,
-                retained_count: 0,
-                retained_byte_len: 0,
-            }
-        )
     }
 }
 

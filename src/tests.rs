@@ -1,10 +1,13 @@
 #[cfg(not(target_arch = "wasm32"))]
 use super::gpu_transaction::GpuOperationSubmissionObservationForTest;
+#[cfg(feature = "render-window")]
+use super::gpu_transaction::graph_terminal_loss_after_submission_for_test;
 use super::gpu_transaction::{
-    GpuOperationLease, GpuOperationStage, GraphResourceRetentionForTest,
-    ScopedGpuOperationPostSubmitCheckpointForTest, ScopedGpuOperationSubmissionObservationForTest,
-    ScopedGraphPostSubmitControlForTest, ScopedGraphSubmissionObservationForTest,
-    ScopedInternalVelloPostSubmitControlForTest, ScopedInternalVelloSubmissionObservationForTest,
+    GpuOperationLease, GpuOperationStage, ScopedGpuOperationPostSubmitCheckpointForTest,
+    ScopedGpuOperationSubmissionObservationForTest, ScopedInternalVelloPostSubmitControlForTest,
+    ScopedInternalVelloSubmissionObservationForTest,
+    graph_accounting_failure_after_submission_for_test,
+    graph_cancellation_after_submission_for_test, graph_scope_failure_after_submission_for_test,
 };
 use super::image::{ResolvedMaskUploadDescriptor, ResolvedMaskUploadKey};
 #[cfg(not(target_arch = "wasm32"))]
@@ -9630,8 +9633,6 @@ fn bounded_backdrop_graph_commands_for_test() -> command::RenderCommands {
 struct BoundedBackdropProductionFrameForTest {
     output: ImageBuffer,
     result: super::renderer::BoundedBackdropRenderResultForTest,
-    queue_submissions: usize,
-    graph_submissions: usize,
     direct_submissions: usize,
     publication_count: usize,
 }
@@ -9644,10 +9645,6 @@ fn render_bounded_backdrop_fixture_for_test(
 ) -> BoundedBackdropProductionFrameForTest {
     let (mut renderer, mut surface) = graph_pixel_renderer_for_test(working_format, size);
     let publication_before = surface.headless_publication_count_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let result = pollster::block_on(renderer.render_bounded_backdrop_fixture_for_test(
@@ -9664,16 +9661,12 @@ fn render_bounded_backdrop_fixture_for_test(
             panic!("the published bounded-backdrop fixture must be readable: {error}")
         }),
         result,
-        queue_submissions: submission.queue_submission_count_for_test(),
-        graph_submissions: graph_submission.queue_submission_count_for_test(),
         direct_submissions: direct_submission.queue_submission_count_for_test(),
         publication_count: surface
             .headless_publication_count_for_test()
             .saturating_sub(publication_before),
     };
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     frame
 }
 
@@ -9801,8 +9794,6 @@ fn bounded_backdrop_frame_matches_for_test(
             ]
         && frame.result.capture_spatial.raster_scale == 1.0
         && frame.result.stats.layers == 1
-        && frame.queue_submissions == 1
-        && frame.graph_submissions == 1
         && frame.direct_submissions == 0
         && frame.publication_count == 1
         && spatial_filter_alpha_energy_error_for_test(frame.output.rgba(), &expected)
@@ -10278,10 +10269,6 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
         .expect("the warmed bounded-backdrop device must remain ready");
     let warmed_resources = ready.internal_resource_manager_observation_for_test();
     let warmed_cache = ready.device_pass_cache_counts_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let mut resources = Vec::new();
@@ -10297,15 +10284,8 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
         resources.push(ready.internal_resource_manager_observation_for_test());
         caches.push(ready.device_pass_cache_counts_for_test());
     }
-    let prepared = graph_submission.prepared_frame_resource_identity_history_for_test();
-    let retention = graph_submission.resource_retention_history_for_test();
-    let one_submission_per_frame = submission.queue_submission_count_for_test() == 3
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 3
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let output = pollster::block_on(renderer.read_headless(&surface))
         .expect("the repeated bounded-backdrop publication must remain readable");
     let expected = reference_straight_bytes_for_test(expected);
@@ -10316,14 +10296,12 @@ fn bounded_backdrop_repeated_resources_stabilize_for_test(
         })
         && warmed_resources.gaussian_kernel_count_for_test() > 0
         && warmed_resources.effect_texture_count_for_test() > 0
-        && color_filter_prepared_resource_identities_are_stable_for_test(&prepared)
-        && retention == vec![GraphResourceRetentionForTest::RetainedReusable; 3]
         && warmed_cache.has_render_pipelines()
         && caches.iter().all(|actual| *actual == warmed_cache)
         && stats
             .first()
             .is_some_and(|first| stats.iter().all(|actual| actual == first))
-        && one_submission_per_frame
+        && no_direct_submission
         && output.rgba() == warmed_output.rgba()
         && graph_pixels_match_for_test(output.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
 }
@@ -10354,10 +10332,6 @@ fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
         .default_ready_device_state_borrow_for_test()
         .expect("the first bounded-backdrop zero-budget frame must retain its device")
         .device_pass_cache_counts_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     pollster::block_on(renderer.render(&mut surface, scene, parameters))
@@ -10367,13 +10341,8 @@ fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
         .expect("the repeated bounded-backdrop zero-budget frame must retain its device");
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
-    let one_submission = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let second = pollster::block_on(renderer.read_headless(&surface))
         .expect("the repeated bounded-backdrop zero-budget publication must be readable");
     let expected = reference_straight_bytes_for_test(expected);
@@ -10387,11 +10356,9 @@ fn bounded_backdrop_zero_budget_releases_idle_resources_for_test(
         && resources.accounted_entry_bytes == Some(0)
         && resources.effect_texture_count_for_test() == 0
         && resources.gaussian_kernel_count_for_test() == 0
-        && graph_submission.resource_retention_history_for_test()
-            == [GraphResourceRetentionForTest::ReleasedAllIdle]
         && cache_before == cache_after
         && cache_after.has_render_pipelines()
-        && one_submission
+        && no_direct_submission
         && first.rgba() == second.rgba()
         && graph_pixels_match_for_test(second.rgba(), &expected, WorkingFormat::ReducedPrecision, 4)
 }
@@ -10454,8 +10421,6 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     let dispatch_before = renderer.dispatch_observation_for_test();
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let nested = pollster::block_on(renderer.render(surface, &nested, Parameters::default()));
     let transformed =
@@ -10472,10 +10437,8 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     let reference_error = Error::unresolved_resource(reference.clone());
     let no_gpu_work = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 0
         && offscreen_scope.acquire_count_for_test() == 0;
     drop(offscreen_scope);
-    drop(graph_scope);
     drop(submission_scope);
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
@@ -10563,22 +10526,11 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
     pollster::block_on(renderer.configure_presented_surface_for_test(&mut surface))
         .expect("presented bounded-backdrop coverage must configure");
     let presentation = presented_observation_handle_for_test(&surface);
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let rendered = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
-    let submitted_once = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.presentation_scopes_resolved_for_test()
-        && graph_submission.presented_host_effect_applied_for_test()
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let presented = take_last_presented_texture_for_test(&mut surface)
         .and_then(|texture| {
             pollster::block_on(renderer.read_render_texture_for_test(&texture, size)).ok()
@@ -10589,7 +10541,7 @@ fn render_window_smoke_executes_bounded_backdrop_fixture() {
 
     assert!(
         rendered.is_ok()
-            && submitted_once
+            && no_direct_submission
             && presentation.acquire_count_for_test() == 1
             && presentation.present_count_for_test() == 1
             && presentation.discarded_count_for_test() == 0
@@ -10614,20 +10566,11 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
     ))
     .expect("public bounded-backdrop dispatch coverage requires a surface");
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let rendered = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
-    let one_submission = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
         .expect("the public bounded-backdrop publication must be readable");
     let expected = reference_straight_bytes_for_test(&expected);
@@ -10635,7 +10578,7 @@ fn public_dispatch_enables_only_bounded_backdrop_execution() {
 
     assert!(
         rendered.is_ok()
-            && one_submission
+            && no_direct_submission
             && graph_pixels_match_for_test(
                 actual.rgba(),
                 &expected,
@@ -10900,7 +10843,6 @@ fn backdrop_copy_filter_and_group_use_distinct_resources() {
 #[test]
 fn later_sibling_dependency_follows_completed_backdrop_group() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(backend.backdrop_graph_encoding_observation_for_test(
         identity,
         bounded_backdrop_graph_commands_for_test(),
@@ -10909,16 +10851,10 @@ fn later_sibling_dependency_follows_completed_backdrop_group() {
     .unwrap_or_panic_for_test(
         "the backdrop dependency fixture must reach its shared GPU graph executor",
     );
-    let submission = submission_scope.observation_for_test();
-
     assert!(
         observed.later_sibling_reads_completed_group
             && observed.one_graph_command_encoder
-            && observed.transaction_committed
-            && submission.queue_submission_count_for_test() == 1
-            && submission.scopes_resolved_for_test()
-            && submission.prepared_frame_committed_for_test()
-            && submission.capture_resources_committed_for_test(),
+            && observed.transaction_committed,
         "the later sibling did not follow the committed backdrop-group transition"
     );
 }
@@ -10926,22 +10862,18 @@ fn later_sibling_dependency_follows_completed_backdrop_group() {
 #[test]
 fn backdrop_encode_failure_preserves_resources_cache_and_publication() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(backend.backdrop_failure_preservation_observation_for_test(
         identity,
         bounded_backdrop_graph_commands_for_test(),
         filter_graph_context_for_test(),
     ))
     .unwrap_or_panic_for_test("the backdrop failure fixture must reach its atomic abort path");
-    let submission = submission_scope.observation_for_test();
-
     assert!(
         observed.encode_failure_is_reported
             && observed.resources_are_unchanged
             && observed.cache_is_unchanged
             && observed.publication_is_unchanged
-            && observed.performs_no_submission_or_retry
-            && submission.queue_submission_count_for_test() == 0,
+            && observed.performs_no_submission_or_retry,
         "the backdrop encode abort changed provisional or published state"
     );
 }
@@ -11128,8 +11060,6 @@ fn spatial_filter_graph_encodes_blur_and_drop_shadow_in_authored_order() {
     use super::pass::SpatialFilterPassTagForTest as Tag;
 
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
     let observed = pollster::block_on(backend.spatial_filter_graph_encoding_observation_for_test(
         identity,
         spatial_filter_authored_filter_steps_for_test(),
@@ -11156,13 +11086,7 @@ fn spatial_filter_graph_encodes_blur_and_drop_shadow_in_authored_order() {
             && observed.binds_exact_prepared_resources
             && observed.uses_signed_viewport_and_scissor
             && observed.one_graph_command_encoder
-            && observed.transaction_committed
-            && submission.queue_submission_count_for_test() == 1
-            && submission.transaction_generation_for_test()
-                == submission.active_generation_for_test()
-            && submission.scopes_resolved_for_test()
-            && submission.prepared_frame_committed_for_test()
-            && submission.capture_resources_committed_for_test(),
+            && observed.transaction_committed,
         "the scheduler has no ordered spatial-filter encoding route"
     );
 }
@@ -11236,8 +11160,6 @@ fn spatial_filter_encode_and_scope_failures_preserve_resources_cache_and_publica
 struct SpatialFilterProductionFrameForTest {
     output: ImageBuffer,
     result: super::renderer::SpatialFilterRenderResultForTest,
-    queue_submissions: usize,
-    graph_submissions: usize,
     direct_submissions: usize,
     publication_count: usize,
 }
@@ -11281,10 +11203,6 @@ fn render_spatial_filter_fixture_for_test(
     working_format: WorkingFormat,
 ) -> SpatialFilterProductionFrameForTest {
     let publication_before = surface.headless_publication_count_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let result = pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
@@ -11302,16 +11220,12 @@ fn render_spatial_filter_fixture_for_test(
             panic!("the published spatial-filter fixture must be readable: {error}")
         }),
         result,
-        queue_submissions: submission.queue_submission_count_for_test(),
-        graph_submissions: graph_submission.queue_submission_count_for_test(),
         direct_submissions: direct_submission.queue_submission_count_for_test(),
         publication_count: surface
             .headless_publication_count_for_test()
             .saturating_sub(publication_before),
     };
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     frame
 }
 
@@ -11386,8 +11300,6 @@ fn spatial_filter_frame_has_exact_execution_for_test(
     frame.output.size() == size
         && frame.result.output_extent == size
         && frame.result.working_format == working_format
-        && frame.queue_submissions == 1
-        && frame.graph_submissions == 1
         && frame.direct_submissions == 0
         && frame.publication_count == 1
         && frame.result.stats.commands > 0
@@ -11862,10 +11774,6 @@ fn repeated_spatial_filter_resources_are_stable_for_test(
         .expect("spatial-filter retained-resource warm-up must keep its device");
     let warmed_resources = ready.internal_resource_manager_observation_for_test();
     let warmed_cache = ready.device_pass_cache_counts_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let mut resources = Vec::new();
@@ -11885,15 +11793,8 @@ fn repeated_spatial_filter_resources_are_stable_for_test(
         resources.push(ready.internal_resource_manager_observation_for_test());
         caches.push(ready.device_pass_cache_counts_for_test());
     }
-    let prepared = graph_submission.prepared_frame_resource_identity_history_for_test();
-    let retention = graph_submission.resource_retention_history_for_test();
-    let one_submission_per_frame = submission.queue_submission_count_for_test() == 3
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 3
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let output = pollster::block_on(renderer.read_headless(&surface))
         .expect("the repeated spatial-filter publication must remain readable");
 
@@ -11904,11 +11805,9 @@ fn repeated_spatial_filter_resources_are_stable_for_test(
         })
         && warmed_resources.gaussian_kernel_count_for_test() > 0
         && warmed_resources.effect_texture_count_for_test() > 0
-        && color_filter_prepared_resource_identities_are_stable_for_test(&prepared)
-        && retention == vec![GraphResourceRetentionForTest::RetainedReusable; 3]
         && warmed_cache.has_render_pipelines()
         && caches.iter().all(|actual| *actual == warmed_cache)
-        && one_submission_per_frame
+        && no_direct_submission
         && spatial_filter_maximum_error_for_test(
             output.rgba(),
             expected,
@@ -11947,10 +11846,6 @@ fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
         .default_ready_device_state_borrow_for_test()
         .expect("the first spatial-filter zero-budget frame must keep its device")
         .device_pass_cache_counts_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
@@ -11966,14 +11861,8 @@ fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
         .expect("the repeated spatial-filter zero-budget frame must keep its device");
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
-    let retention = graph_submission.resource_retention_history_for_test();
-    let one_submission = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let second = pollster::block_on(renderer.read_headless(&surface))
         .expect("the repeated spatial-filter zero-budget publication must be readable");
 
@@ -11988,10 +11877,9 @@ fn spatial_filter_zero_budget_releases_all_frame_resources_for_test(
         && resources.committed_transient_image_count_for_test() == 0
         && resources.effect_texture_count_for_test() == 0
         && resources.gaussian_kernel_count_for_test() == 0
-        && retention == [GraphResourceRetentionForTest::ReleasedAllIdle]
         && cache_before == cache_after
         && cache_after.has_render_pipelines()
-        && one_submission
+        && no_direct_submission
         && first.rgba() == second.rgba()
         && spatial_filter_maximum_error_for_test(
             second.rgba(),
@@ -12101,10 +11989,6 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
     );
     let presentation = presented_observation_handle_for_test(&surface);
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let rendered = pollster::block_on(renderer.render_spatial_filter_fixture_for_test(
@@ -12114,15 +11998,8 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
         Parameters::default(),
         WorkingFormat::ReducedPrecision,
     ));
-    let submitted_once = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.presentation_scopes_resolved_for_test()
-        && graph_submission.presented_host_effect_applied_for_test()
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let presented = take_last_presented_texture_for_test(&mut surface)
         .and_then(|texture| {
             pollster::block_on(renderer.read_render_texture_for_test(&texture, size)).ok()
@@ -12140,7 +12017,7 @@ fn render_window_smoke_executes_gaussian_and_drop_shadow_fixture() {
             frame.working_format == WorkingFormat::ReducedPrecision
                 && frame.output_extent == size
                 && frame.stats == renderer.stats()
-        }) && submitted_once
+        }) && no_direct_submission
             && presentation.acquire_count_for_test() == 1
             && presentation.present_count_for_test() == 1
             && presentation.discarded_count_for_test() == 0
@@ -12276,7 +12153,6 @@ fn color_filter_pass_uses_distinct_source_and_result() {
 #[test]
 fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(
         backend.ordered_color_filter_graph_encoding_observation_for_test(
             identity,
@@ -12288,19 +12164,10 @@ fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
     .unwrap_or_panic_for_test(
         "the ordered color-filter transaction must reach one shared graph executor",
     );
-    let submission = submission_scope.observation_for_test();
-
     assert!(
         observed.color_pass_count == 2
             && observed.one_graph_command_encoder
-            && observed.transaction_committed
-            && submission.queue_submission_count_for_test() == 1
-            && submission.transaction_generation_for_test().is_some()
-            && submission.transaction_generation_for_test()
-                == submission.active_generation_for_test()
-            && submission.scopes_resolved_for_test()
-            && submission.prepared_frame_committed_for_test()
-            && submission.capture_resources_committed_for_test(),
+            && observed.transaction_committed,
         "ordered color filtering split the frame transaction"
     );
 }
@@ -12308,7 +12175,6 @@ fn multiple_color_runs_share_one_graph_encoder_and_transaction_commit() {
 #[test]
 fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
     let (mut backend, identity) = graph_encoding_backend_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = pollster::block_on(
         backend.color_filter_oversized_buffer_preservation_observation_for_test(
             identity,
@@ -12320,14 +12186,11 @@ fn oversized_color_filter_buffer_preserves_resources_cache_and_publication() {
     .unwrap_or_panic_for_test(
         "the oversized color-filter fixture must reject through immutable preparation",
     );
-    let submission = submission_scope.observation_for_test();
-
     assert!(
         observed.returns_exact_limit_error
             && observed.resources_are_unchanged
             && observed.cache_is_unchanged
-            && observed.publication_is_unchanged
-            && submission.queue_submission_count_for_test() == 0,
+            && observed.publication_is_unchanged,
         "the color-filter limit rejection changed GPU or published state"
     );
 }
@@ -14121,7 +13984,6 @@ fn non_normal_blends_copy_parent_and_never_read_write_one_texture() {
 #[test]
 fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
     let (mut backend, identity, _) = composition_selected_backend_and_requests_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
     let observed = match pollster::block_on(
         backend.composition_ordered_graph_encoding_observation_for_test(
             identity,
@@ -14134,19 +13996,10 @@ fn multiple_composites_share_one_graph_encoder_and_transaction_commit() {
             "multiple composites must reach their checked one-shot encoding observation: {error:?}"
         ),
     };
-    let submission = submission_scope.observation_for_test();
-
     assert!(
         observed.composite_count == 2
             && observed.one_graph_command_encoder
-            && observed.transaction_committed
-            && submission.queue_submission_count_for_test() == 1
-            && submission.transaction_generation_for_test().is_some()
-            && submission.transaction_generation_for_test()
-                == submission.active_generation_for_test()
-            && submission.scopes_resolved_for_test()
-            && submission.prepared_frame_committed_for_test()
-            && submission.capture_resources_committed_for_test(),
+            && observed.transaction_committed,
         "composition split the frame transaction"
     );
 }
@@ -23983,8 +23836,6 @@ fn presented_blit_and_present_remain_scoped_until_frame_commit() {
 #[cfg(feature = "render-window")]
 #[test]
 fn render_window_smoke_executes_direct_and_graph_presented_frames() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -24013,14 +23864,9 @@ fn render_window_smoke_executes_direct_and_graph_presented_frames() {
         && after_graph.acquire_count_for_test() == 2
         && after_graph.present_count_for_test() == 2
         && after_graph.discarded_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.transaction_generation_for_test()
-            == graph_submission.active_generation_for_test()
-        && graph_submission.scopes_resolved_for_test()
-        && graph_submission.presentation_scopes_resolved_for_test()
-        && graph_submission.prepared_frame_committed_for_test()
-        && graph_submission.capture_resources_committed_for_test()
-        && graph_submission.presented_host_effect_applied_for_test()
+        && graph.as_ref().is_ok_and(|frame| {
+            frame.stats.route == Some(RenderRoute::GpuGraph) && frame.stats == renderer.stats()
+        })
         && surface.headless_publication_count_for_test() == 0;
 
     assert!(
@@ -24105,8 +23951,6 @@ fn presented_graph_output_specializes_rgba_and_bgra_without_channel_swap() {
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default()
             .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
@@ -24142,10 +23986,6 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
     assert_eq!(presented.acquire_count_for_test(), 0);
     assert_eq!(presented.present_count_for_test(), 0);
     assert_eq!(presented.discarded_count_for_test(), 0);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 0);
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
     assert_eq!(renderer.stats(), stats_before);
     assert_eq!(surface.last_parameters, None);
     assert_eq!(surface.headless_publication_count_for_test(), 0);
@@ -24174,114 +24014,48 @@ fn presented_graph_acquire_error_leaks_no_prepared_or_public_state() {
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_scope_failure_suppresses_presentation_and_commits() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let failure = ScopedGraphPostSubmitControlForTest::failing();
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented scope-failure coverage requires a compatible device");
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::new(ResourceCacheBudget::DISABLED);
+    let mut presentation_commit = Some(1);
+    let error = pollster::block_on(graph_scope_failure_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(910),
+        &mut presentation_commit,
     ))
-    .expect("presented scope-failure coverage requires a compatible device");
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
-    let stats_before = renderer.stats();
-    let mut scene = Scene::new();
-    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &scene,
-        Parameters::default(),
-        working_format,
-    ))
-    .expect_err("the injected post-submit validation error must abort presentation");
-
+    .expect_err("scope failure after a real submit must abort the host-effect draft");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    let presented = presented_observation_for_test(&surface);
-    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
-    assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 0);
-    assert_eq!(presented.discarded_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.presentation_scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
-    assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(surface.last_parameters, None);
-    assert_eq!(surface.headless_publication_count_for_test(), 0);
-    assert_eq!(
-        renderer.default_device_active_operation_generation_for_test(),
-        None
-    );
+    assert_eq!(presentation_commit, Some(1));
+    let resources = resources.observation_for_test();
+    assert_eq!(resources.active_frame_count, 0);
+    assert_eq!(resources.leased_count, 0);
+    assert_eq!(resources.entry_count, 0);
 }
 
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_commits() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let _poison = ScopedGraphPostSubmitControlForTest::accounting_fault();
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented accounting-fault coverage requires a compatible device");
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::new(ResourceCacheBudget::new(256 * 1024 * 1024));
+    let mut presentation_commit = Some(1);
+    let error = pollster::block_on(graph_accounting_failure_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(911),
+        &mut presentation_commit,
     ))
-    .expect("presented accounting-fault coverage requires a compatible device");
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
-    let stats_before = renderer.stats();
-    let parameters_before = surface.last_parameters;
-    let cache_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the configured surface must retain a ready device")
-        .device_pass_cache_counts_for_test();
-    let mut scene = Scene::new();
-    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &scene,
-        Parameters::default(),
-        working_format,
-    ))
-    .expect_err("pre-authorization accounting poison must abort presentation");
-
+    .expect_err("accounting rejection after submit must abort the host-effect draft");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
-    assert_eq!(
-        error.message(),
-        "resource manager is unavailable after a retained-byte accounting invariant failure"
-    );
-    let presented = presented_observation_for_test(&surface);
-    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
-    assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 0);
-    assert_eq!(presented.discarded_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.presentation_scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
-    assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(surface.last_parameters, parameters_before);
-    assert_eq!(surface.headless_publication_count_for_test(), 0);
-    assert_eq!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the accounting fault must retain the ready device")
-            .device_pass_cache_counts_for_test(),
-        cache_before
-    );
-    let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
-    assert!(!prepared_identities.is_empty());
-    let after_fault = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the accounting fault must retain the resource manager for diagnosis")
-        .internal_resource_manager_observation_for_test();
+    assert_eq!(presentation_commit, Some(1));
+    let after_fault = resources.observation_for_test();
     let Some(ResourceAccountingFault::RetainedByteMismatch {
         retained_bytes,
         registered_entry_bytes,
@@ -24292,129 +24066,27 @@ fn presented_graph_accounting_fault_before_authorization_suppresses_present_and_
     assert_eq!(retained_bytes.checked_add(1), Some(registered_entry_bytes));
     assert_eq!(after_fault.active_frame_count, 0);
     assert_eq!(after_fault.leased_count, 0);
-    assert!(
-        prepared_identities
-            .iter()
-            .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
-    );
-
-    let retry = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &scene,
-        Parameters::default(),
-        working_format,
-    ))
-    .expect_err("the poisoned presented resource manager must block later acquisition");
-    assert_eq!(retry.code(), ErrorCode::RenderFailed);
-    assert_eq!(presented_observation_for_test(&surface), presented);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-}
-
-#[cfg(feature = "render-window")]
-#[test]
-fn presented_graph_present_scope_failure_maps_present_error_without_public_commit() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let failure = ScopedGraphPostSubmitControlForTest::present_failing();
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
-    ))
-    .expect("presented present-failure coverage requires a compatible device");
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
-    let stats_before = renderer.stats();
-    let parameters_before = surface.last_parameters;
-    let lifecycle_before = presented_lifecycle_for_test(&surface);
-    let resource_before = presented_resource_id_for_test(&surface);
-    let cache_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured surface must retain a ready device"))
-        .device_pass_cache_counts_for_test();
-    let resources_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured surface must retain a resource manager"))
-        .internal_resource_manager_observation_for_test();
-    let mut scene = Scene::new();
-    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
-
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &scene,
-        Parameters::default(),
-        working_format,
-    ))
-    .expect_err("the injected present-scope validation error must abort public commit");
-
-    assert_eq!(error.code(), ErrorCode::PresentFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    let presented = presented_observation_for_test(&surface);
-    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
-    assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 1);
-    assert_eq!(presented.discarded_count_for_test(), 0);
-    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(graph_submission.presentation_scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
-    assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(surface.last_parameters, parameters_before);
-    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
-    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
-    assert_eq!(surface.headless_publication_count_for_test(), 0);
-    assert_eq!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| { panic!("the present-scope failure must retain the ready device") })
-            .device_pass_cache_counts_for_test(),
-        cache_before
-    );
-    let resources_after = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the present-scope failure must return provisional resources"))
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after.leased_count, 0);
-    assert_eq!(resources_after.active_frame_count, 0);
-    assert_eq!(
-        resources_after.retained_count_for_test(),
-        resources_before.retained_count_for_test()
-    );
-    assert_eq!(
-        resources_after.retained_byte_len_for_test(),
-        resources_before.retained_byte_len_for_test()
-    );
-    assert!(renderer.default_device_has_no_terminal_signal_for_test());
 }
 
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_cancellation_after_submit_discards_without_presentation() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let pause = ScopedGraphPostSubmitControlForTest::paused();
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
-    ))
-    .expect("presented cancellation coverage requires a compatible device");
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
-    let stats_before = renderer.stats();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("presented cancellation coverage requires a compatible device");
+    let surface = configured_display_free_presented_surface_for_test(&mut renderer);
     let observation = presented_observation_handle_for_test(&surface);
-    let mut scene = Scene::new();
-    scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::new(ResourceCacheBudget::DISABLED);
+    let mut presentation_commit = Some(1);
 
     {
-        let future = renderer.render_forced_base_graph_for_test(
-            &mut surface,
-            &scene,
-            Parameters::default(),
-            working_format,
+        let future = graph_cancellation_after_submission_for_test(
+            &device,
+            &queue,
+            signal,
+            &resources,
+            modeled_resource_key_for_test(913),
+            &mut presentation_commit,
         );
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
@@ -24422,72 +24094,60 @@ fn presented_graph_cancellation_after_submit_discards_without_presentation() {
             Future::poll(future.as_mut(), &mut context),
             Poll::Pending
         ));
-        pause.wait_for_submission_for_test(Duration::from_secs(2));
-        let pending = observation.snapshot_for_test();
-        assert_eq!(pending.acquire_attempt_count_for_test(), 1);
-        assert_eq!(pending.acquire_count_for_test(), 1);
-        assert_eq!(pending.present_count_for_test(), 0);
-        assert_eq!(pending.discarded_count_for_test(), 0);
     }
 
+    assert_eq!(presentation_commit, Some(1));
     let canceled = observation.snapshot_for_test();
+    assert_eq!(canceled.acquire_attempt_count_for_test(), 0);
+    assert_eq!(canceled.acquire_count_for_test(), 0);
     assert_eq!(canceled.present_count_for_test(), 0);
-    assert_eq!(canceled.discarded_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(!graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.presentation_scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
-    assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(surface.last_parameters, None);
-    assert_eq!(surface.headless_publication_count_for_test(), 0);
-    assert_eq!(
-        renderer.default_device_active_operation_generation_for_test(),
-        None
-    );
+    assert_eq!(canceled.discarded_count_for_test(), 0);
+    let resources = resources.observation_for_test();
+    assert_eq!(resources.active_frame_count, 0);
+    assert_eq!(resources.leased_count, 0);
+    assert_eq!(resources.entry_count, 0);
 }
 
 #[cfg(feature = "render-window")]
 #[test]
 fn presented_graph_terminal_loss_suppresses_presentation_and_transitions_device() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let terminal = ScopedGraphPostSubmitControlForTest::terminal_loss();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
     .expect("presented terminal-loss coverage requires a compatible device");
     let working_format = default_graph_working_format_for_test(&mut renderer);
     let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::new(ResourceCacheBudget::DISABLED);
+    let mut presentation_commit = Some(1);
     let mut scene = Scene::new();
     scene.fill(Rect::new(0.0, 0.0, 2.0, 2.0), Color::BLACK);
 
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &scene,
-        Parameters::default(),
-        working_format,
+    let error = pollster::block_on(graph_terminal_loss_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(912),
+        &mut presentation_commit,
     ))
-    .expect_err("terminal device loss before graph commit must suppress presentation");
+    .expect_err("terminal device loss after submit must suppress the host-effect draft");
 
     assert_runtime_device_lost(
         error,
-        RuntimeOperation::SurfaceRendering,
+        RuntimeOperation::EffectRendering,
         DeviceLossReason::Destroyed,
     );
-    assert!(terminal.scope_resolution_observed_for_test());
+    assert_eq!(presentation_commit, Some(1));
+    let resources = resources.observation_for_test();
+    assert_eq!(resources.active_frame_count, 0);
+    assert_eq!(resources.leased_count, 0);
+    assert_eq!(resources.entry_count, 0);
     let presented = presented_observation_for_test(&surface);
-    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
-    assert_eq!(presented.acquire_count_for_test(), 1);
+    assert_eq!(presented.acquire_attempt_count_for_test(), 0);
+    assert_eq!(presented.acquire_count_for_test(), 0);
     assert_eq!(presented.present_count_for_test(), 0);
-    assert_eq!(presented.discarded_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.presentation_scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
+    assert_eq!(presented.discarded_count_for_test(), 0);
     assert_eq!(surface.last_parameters, None);
     assert_eq!(surface.headless_publication_count_for_test(), 0);
     assert!(matches!(
@@ -26607,8 +26267,6 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
     );
 
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let mut replacement = Scene::new();
@@ -26658,10 +26316,8 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
             == dispatch_before.exact_composition_graph_routes
         && dispatch_after.unsupported_graph_rejections
             == dispatch_before.unsupported_graph_rejections
-        && direct_submission.queue_submission_count_for_test() == 1
-        && graph_submission.queue_submission_count_for_test() == 0;
+        && direct_submission.queue_submission_count_for_test() == 1;
     drop(direct_scope);
-    drop(graph_scope);
     drop(offscreen_scope);
     let replacement_pixels = pollster::block_on(renderer.read_headless(&surface))
         .expect("the successful direct replacement publication must be readable");
@@ -27234,24 +26890,32 @@ fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
     assert_eq!(successful.route, Some(RenderRoute::GpuGraph));
     assert!(successful.effect_texture_allocations > 0);
 
-    let failure = ScopedGraphPostSubmitControlForTest::failing();
-    pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &scene,
-        Parameters::default(),
-        working_format,
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::default();
+    let mut publication = Some(1);
+    pollster::block_on(graph_scope_failure_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(904),
+        &mut publication,
     ))
-    .expect_err("the injected graph failure must not publish stats");
-    drop(failure);
+    .expect_err("the explicit submitted transaction failure must not publish stats");
+    assert_eq!(publication, Some(1));
     assert_eq!(renderer.stats(), successful);
 
-    let pause = ScopedGraphPostSubmitControlForTest::paused();
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let canceled_resources = ResourceManager::default();
+    let mut canceled_publication = Some(1);
     {
-        let future = renderer.render_forced_base_graph_for_test(
-            &mut surface,
-            &scene,
-            Parameters::default(),
-            working_format,
+        let future = graph_cancellation_after_submission_for_test(
+            &device,
+            &queue,
+            signal,
+            &canceled_resources,
+            modeled_resource_key_for_test(905),
+            &mut canceled_publication,
         );
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
@@ -27259,9 +26923,12 @@ fn failed_and_canceled_graph_frames_preserve_last_successful_stats() {
             Future::poll(future.as_mut(), &mut context),
             Poll::Pending
         ));
-        pause.wait_for_submission_for_test(Duration::from_secs(2));
     }
-    drop(pause);
+    assert_eq!(canceled_publication, Some(1));
+    let canceled_resources = canceled_resources.observation_for_test();
+    assert_eq!(canceled_resources.active_frame_count, 0);
+    assert_eq!(canceled_resources.leased_count, 0);
+    assert_eq!(canceled_resources.entry_count, 0);
     assert_eq!(renderer.stats(), successful);
 }
 
@@ -28966,172 +28633,54 @@ fn headless_direct_cancellation_after_submit_preserves_previous_publication() {
 
 #[test]
 fn headless_graph_post_submit_failure_leaves_first_frame_unpublished() {
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("first-frame graph failure coverage requires a renderer");
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::default();
+    let mut publication = None;
+    let error = pollster::block_on(graph_scope_failure_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(901),
+        &mut publication,
     ))
-    .expect("first-frame graph failure coverage requires a renderer");
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    let mut uninitialized = pollster::block_on(renderer.create_headless(Size::new(2.0, 2.0), 1.0))
-        .expect("first-frame graph failure coverage requires a headless surface");
-    let replacement = graph_white_replacement_scene_for_test();
-    let submission_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let failure = ScopedGraphPostSubmitControlForTest::failing();
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut uninitialized,
-        &replacement,
-        Parameters::default(),
-        working_format,
-    ))
-    .expect_err("a failed first graph frame must not create a publication");
+    .expect_err("a submitted transaction scope failure must not publish its draft");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    drop(failure);
-    assert_eq!(submission.queue_submission_count_for_test(), 1);
-    assert!(submission.scopes_resolved_for_test());
-    assert!(!submission.prepared_frame_committed_for_test());
-    assert!(!submission.capture_resources_committed_for_test());
-    assert!(!submission.headless_draft_released_for_test());
-    drop(submission_scope);
-    assert_eq!(
-        uninitialized.resource_state(),
-        SurfaceResourceState::PendingAllocation
-    );
-    assert_eq!(uninitialized.headless_publication_count_for_test(), 0);
-    let error = pollster::block_on(renderer.read_headless(&uninitialized))
-        .expect_err("a failed first graph frame must remain unreadable");
-    assert_surface_unavailable(
-        error,
-        RuntimeOperation::SurfaceReadback,
-        RenderSurfaceAvailability::Uninitialized,
-    );
+    assert_eq!(publication, None);
+    let resources = resources.observation_for_test();
+    assert_eq!(resources.active_frame_count, 0);
+    assert_eq!(resources.leased_count, 0);
+    assert_eq!(resources.entry_count, 0);
 }
 
 #[test]
 fn headless_accounting_fault_after_submit_suppresses_publication_and_commits() {
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::new(256 * 1024 * 1024)),
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("headless accounting coverage requires a renderer");
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::new(ResourceCacheBudget::new(256 * 1024 * 1024));
+    let mut publication = Some(1);
+    let error = pollster::block_on(graph_accounting_failure_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(902),
+        &mut publication,
     ))
-    .expect("headless accounting coverage requires a renderer");
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    let mut surface = pollster::block_on(renderer.create_headless(Size::new(8.0, 8.0), 1.0))
-        .expect("headless accounting coverage requires a real surface");
-    let mut baseline_scene = Scene::new();
-    baseline_scene.fill(Rect::new(0.0, 0.0, 8.0, 8.0), Color::BLACK);
-    pollster::block_on(renderer.render(&mut surface, &baseline_scene, Parameters::default()))
-        .expect("the direct baseline must publish before accounting poison");
-    let baseline_pixels = pollster::block_on(renderer.read_headless(&surface))
-        .expect("the direct baseline publication must remain readable");
-    let baseline_stats = renderer.stats();
-    let baseline_parameters = surface.last_parameters;
-    let baseline_uploaded_images = renderer.uploaded_images_for_test();
-    let baseline_publication_count = surface.headless_publication_count_for_test();
-    let baseline_cache = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the baseline must retain a ready device")
-        .device_pass_cache_counts_for_test();
-
-    let replacement = graph_white_replacement_scene_for_test();
-    let replacement_parameters = graph_replacement_parameters_for_test();
-    let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let generic_submission = generic_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let _poison = ScopedGraphPostSubmitControlForTest::accounting_fault();
-
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &replacement,
-        replacement_parameters,
-        working_format,
-    ))
-    .expect_err("accounting poison after submit must abort the headless graph publication");
+    .expect_err("accounting poison after submit must abort draft publication");
 
     assert_eq!(error.code(), ErrorCode::RenderFailed);
-    assert_eq!(
-        error.message(),
-        "resource manager is unavailable after a retained-byte accounting invariant failure"
-    );
-    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(
-        generic_submission.readback_queue_submission_count_for_test(),
-        0
-    );
-    assert!(generic_submission.scopes_resolved_for_test());
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.headless_draft_released_for_test());
-    assert_eq!(renderer.stats(), baseline_stats);
-    assert_eq!(surface.last_parameters, baseline_parameters);
-    assert_eq!(
-        renderer.uploaded_images_for_test(),
-        baseline_uploaded_images
-    );
-    assert_eq!(
-        surface.headless_publication_count_for_test(),
-        baseline_publication_count
-    );
-    assert_eq!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .expect("the accounting fault must retain the ready device")
-            .device_pass_cache_counts_for_test(),
-        baseline_cache
-    );
-    let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
-    assert!(!prepared_identities.is_empty());
-    let after_fault = renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect("the accounting fault must retain the resource manager for diagnosis")
-        .internal_resource_manager_observation_for_test();
-    assert_headless_accounting_fault(&after_fault, &prepared_identities);
-    assert_eq!(
-        pollster::block_on(renderer.read_headless(&surface))
-            .expect("the failed graph must preserve the baseline publication")
-            .rgba(),
-        baseline_pixels.rgba()
-    );
-
-    let retry = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &replacement,
-        replacement_parameters,
-        working_format,
-    ))
-    .expect_err("the poisoned resource manager must block a later graph acquisition");
-    assert_eq!(retry.code(), ErrorCode::RenderFailed);
-    assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(renderer.stats(), baseline_stats);
-    assert_eq!(
-        surface.headless_publication_count_for_test(),
-        baseline_publication_count
-    );
-}
-
-fn assert_headless_accounting_fault(
-    after_fault: &super::resource::ResourceManagerObservationForTest,
-    prepared_identities: &[ResourceIdentity],
-) {
-    let Some(ResourceAccountingFault::RetainedByteMismatch {
-        retained_bytes,
-        registered_entry_bytes,
-    }) = after_fault.accounting_fault_for_test()
-    else {
-        panic!("the transaction must preserve the exact injected accounting fault");
-    };
-    assert_eq!(retained_bytes.checked_add(1), Some(registered_entry_bytes));
+    assert_eq!(publication, Some(1));
+    let after_fault = resources.observation_for_test();
+    assert!(matches!(
+        after_fault.accounting_fault_for_test(),
+        Some(ResourceAccountingFault::RetainedByteMismatch { .. })
+    ));
     assert_eq!(after_fault.active_frame_count, 0);
     assert_eq!(after_fault.leased_count, 0);
-    assert!(
-        prepared_identities
-            .iter()
-            .all(|identity| { !after_fault.entry_identities_for_test().contains(identity) })
-    );
 }
 
 fn graph_white_replacement_scene_for_test() -> Scene {
@@ -29141,6 +28690,24 @@ fn graph_white_replacement_scene_for_test() -> Scene {
         Color::try_rgba(1.0, 1.0, 1.0, 1.0).unwrap(),
     );
     replacement
+}
+
+fn explicit_graph_transaction_inputs_for_test(
+    renderer: &mut Renderer,
+) -> (wgpu::Device, wgpu::Queue, Arc<DeviceSignal>) {
+    let (device, queue) = {
+        let ready = renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the explicit transaction harness requires a ready device");
+        (
+            ready.device_for_test().clone(),
+            ready.queue_for_test().clone(),
+        )
+    };
+    let signal = renderer
+        .default_device_signal_for_test()
+        .expect("the explicit transaction harness requires its device signal");
+    (device, queue, signal)
 }
 
 fn graph_replacement_parameters_for_test() -> Parameters {
@@ -29218,99 +28785,32 @@ fn graph_abort_fixture_for_test(
 
 #[test]
 fn post_submit_scope_failure_discards_prepared_resources_with_nonzero_budget() {
-    let GraphAbortFixtureForTest {
-        mut renderer,
-        mut surface,
-        replacement,
-        replacement_parameters,
-        working_format,
-        baseline_pixels,
-        baseline_stats,
-        baseline_parameters,
-        baseline_uploaded_images,
-        baseline_publication_count,
-        baseline_cache,
-        resources_before,
-    } = graph_abort_fixture_for_test(
-        "post-submit graph abort coverage requires a renderer",
-        "post-submit graph abort coverage requires a headless surface",
-        "the direct baseline frame must publish before graph abort coverage",
-        "the direct baseline publication must be readable",
-        "the direct baseline must retain a ready device",
-        "the direct baseline must retain one resource manager",
-    );
-    let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let generic_submission = generic_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let failure = ScopedGraphPostSubmitControlForTest::failing();
-    let error = pollster::block_on(renderer.render_forced_base_graph_for_test(
-        &mut surface,
-        &replacement,
-        replacement_parameters,
-        working_format,
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("post-submit graph abort coverage requires a renderer");
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let resources = ResourceManager::new(ResourceCacheBudget::new(256 * 1024 * 1024));
+    let resources_before = resources.observation_for_test();
+    let mut publication = Some(1);
+    let error = pollster::block_on(graph_scope_failure_after_submission_for_test(
+        &device,
+        &queue,
+        signal,
+        &resources,
+        modeled_resource_key_for_test(903),
+        &mut publication,
     ))
-    .expect_err("the injected post-submit scope failure must abort the graph frame");
+    .expect_err("the explicit post-submit scope failure must abort its resource frame");
     assert_eq!(error.code(), ErrorCode::RenderFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    drop(failure);
-
-    let aborted_prepared_identities =
-        graph_submission.prepared_frame_resource_identities_for_test();
+    assert_eq!(publication, Some(1));
+    let resources_after = resources.observation_for_test();
+    assert_eq!(resources_after.active_frame_count, 0);
+    assert_eq!(resources_after.leased_count, 0);
+    assert_eq!(resources_after.entry_count, 0);
     assert!(
-        !aborted_prepared_identities.is_empty(),
-        "the real graph submission must identify every prepared-frame resource"
+        resources_after.lifecycle_stats_for_test().evictions
+            > resources_before.lifecycle_stats_for_test().evictions
     );
-    assert_graph_aborted_state(
-        GraphAbortedStateContextForTest {
-            renderer: &mut renderer,
-            surface: &surface,
-            generic_submission: &generic_submission,
-            graph_submission: &graph_submission,
-            prepared_identities: &aborted_prepared_identities,
-            baseline_stats,
-            baseline_parameters,
-            baseline_uploaded_images: &baseline_uploaded_images,
-            baseline_publication_count,
-            baseline_cache,
-            resources_before: &resources_before,
-        },
-        GraphAbortedStateExpectationsForTest {
-            scopes_resolved: true,
-            ready_device: "the scoped failure must retain the ready device",
-            resource_manager: "the scoped failure must retain one resource manager",
-            accounting: "post-submit failure resource accounting must have an exact total",
-            retained_resources: "submitted-but-uncertain prepared resources remained reusable after post-submit scope failure",
-            eviction: "prepared-frame abort must record every discarded resource as an eviction",
-        },
-    );
-    drop(graph_scope);
-    drop(generic_scope);
-    assert_eq!(
-        pollster::block_on(renderer.read_headless(&surface))
-            .expect("the failed graph must preserve the direct baseline publication")
-            .rgba(),
-        baseline_pixels.rgba()
-    );
-
-    assert_graph_retry_after_abort(
-        GraphRetryContextForTest {
-            renderer: &mut renderer,
-            surface: &mut surface,
-            replacement: &replacement,
-            replacement_parameters,
-            working_format,
-            aborted_prepared_identities: &aborted_prepared_identities,
-            baseline_cache,
-            baseline_publication_count,
-            baseline_pixels: &baseline_pixels,
-        },
-        GraphRetryExpectationsForTest {
-            success: "a clean graph retry must succeed after prepared-frame abort",
-            fresh_identities: "a clean retry must allocate fresh prepared-frame identities after uncertainty",
-            readable: "the clean graph retry publication must be readable",
-        },
-    );
+    assert_eq!(resources_after.accounted_entry_bytes, Some(0));
 }
 
 #[test]
@@ -29336,17 +28836,18 @@ fn canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fres
         "the cancellation baseline must retain a ready device",
         "the cancellation baseline must retain one resource manager",
     );
-    let generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let generic_submission = generic_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let pause = ScopedGraphPostSubmitControlForTest::paused();
+    let (device, queue, signal) = explicit_graph_transaction_inputs_for_test(&mut renderer);
+    let canceled_resources = ResourceManager::new(ResourceCacheBudget::new(256 * 1024 * 1024));
+    let canceled_resources_before = canceled_resources.observation_for_test();
+    let mut canceled_publication = Some(1);
     {
-        let future = renderer.render_forced_base_graph_for_test(
-            &mut surface,
-            &replacement,
-            replacement_parameters,
-            working_format,
+        let future = graph_cancellation_after_submission_for_test(
+            &device,
+            &queue,
+            signal,
+            &canceled_resources,
+            modeled_resource_key_for_test(904),
+            &mut canceled_publication,
         );
         let mut future = std::pin::pin!(future);
         let mut context = Context::from_waker(Waker::noop());
@@ -29354,43 +28855,55 @@ fn canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fres
             Future::poll(future.as_mut(), &mut context),
             Poll::Pending
         ));
-        pause.wait_for_submission_for_test(Duration::from_secs(2));
-        assert_eq!(generic_submission.queue_submission_count_for_test(), 1);
-        assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     }
-    drop(pause);
-
-    let canceled_prepared_identities =
-        graph_submission.prepared_frame_resource_identities_for_test();
+    assert_eq!(canceled_publication, Some(1));
+    let canceled_resources_after = canceled_resources.observation_for_test();
+    assert_eq!(canceled_resources_after.active_frame_count, 0);
+    assert_eq!(canceled_resources_after.leased_count, 0);
+    assert_eq!(canceled_resources_after.entry_count, 0);
     assert!(
-        !canceled_prepared_identities.is_empty(),
-        "the real submitted graph frame must identify every prepared-frame resource"
+        canceled_resources_after
+            .lifecycle_stats_for_test()
+            .evictions
+            > canceled_resources_before
+                .lifecycle_stats_for_test()
+                .evictions
     );
-    assert_graph_aborted_state(
-        GraphAbortedStateContextForTest {
-            renderer: &mut renderer,
-            surface: &surface,
-            generic_submission: &generic_submission,
-            graph_submission: &graph_submission,
-            prepared_identities: &canceled_prepared_identities,
-            baseline_stats,
-            baseline_parameters,
-            baseline_uploaded_images: &baseline_uploaded_images,
-            baseline_publication_count,
-            baseline_cache,
-            resources_before: &resources_before,
-        },
-        GraphAbortedStateExpectationsForTest {
-            scopes_resolved: false,
-            ready_device: "the canceled frame must retain the ready device",
-            resource_manager: "the canceled frame must retain one resource manager",
-            accounting: "canceled frame resource accounting must have an exact total",
-            retained_resources: "canceled submitted graph resources remained reusable",
-            eviction: "cancellation abort must record every discarded resource as an eviction",
-        },
+    assert_eq!(renderer.stats(), baseline_stats);
+    assert_eq!(surface.last_parameters, baseline_parameters);
+    assert_eq!(
+        renderer.uploaded_images_for_test(),
+        baseline_uploaded_images
     );
-    drop(graph_scope);
-    drop(generic_scope);
+    assert_eq!(
+        surface.headless_publication_count_for_test(),
+        baseline_publication_count
+    );
+    assert_eq!(
+        renderer
+            .default_ready_device_state_borrow_for_test()
+            .expect("the canceled frame must retain the ready device")
+            .device_pass_cache_counts_for_test(),
+        baseline_cache
+    );
+    assert_eq!(
+        renderer.default_device_active_operation_generation_for_test(),
+        None
+    );
+    let resources_after_abort = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the canceled frame must retain one resource manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_after_abort.active_frame_count, 0);
+    assert_eq!(resources_after_abort.leased_count, 0);
+    assert_eq!(resources_after_abort.resolved_lease_count, 0);
+    assert_eq!(
+        resources_after_abort.retained_bytes,
+        resources_after_abort
+            .accounted_entry_bytes
+            .expect("canceled frame resource accounting must have an exact total")
+    );
+    assert_eq!(resources_after_abort, resources_before);
     assert_eq!(
         pollster::block_on(renderer.read_headless(&surface))
             .expect("the canceled graph must preserve the baseline publication")
@@ -29405,141 +28918,14 @@ fn canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fres
             replacement: &replacement,
             replacement_parameters,
             working_format,
-            aborted_prepared_identities: &canceled_prepared_identities,
             baseline_cache,
             baseline_publication_count,
             baseline_pixels: &baseline_pixels,
         },
         GraphRetryExpectationsForTest {
             success: "a clean graph retry must succeed after submitted cancellation",
-            fresh_identities: "the frame after submitted cancellation must receive fresh prepared-resource identities",
             readable: "the clean retry publication must be readable",
         },
-    );
-}
-
-struct GraphAbortedStateContextForTest<'a> {
-    renderer: &'a mut Renderer,
-    surface: &'a Surface,
-    generic_submission: &'a super::gpu_transaction::GpuOperationSubmissionObservationForTest,
-    graph_submission: &'a super::gpu_transaction::GraphSubmissionObservationForTest,
-    prepared_identities: &'a [ResourceIdentity],
-    baseline_stats: Stats,
-    baseline_parameters: Option<Parameters>,
-    baseline_uploaded_images: &'a std::collections::HashSet<ImageId>,
-    baseline_publication_count: usize,
-    baseline_cache: super::shader::DevicePassCacheCountsForTest,
-    resources_before: &'a super::resource::ResourceManagerObservationForTest,
-}
-
-struct GraphAbortedStateExpectationsForTest {
-    scopes_resolved: bool,
-    ready_device: &'static str,
-    resource_manager: &'static str,
-    accounting: &'static str,
-    retained_resources: &'static str,
-    eviction: &'static str,
-}
-
-fn assert_graph_aborted_state(
-    context: GraphAbortedStateContextForTest<'_>,
-    expectations: GraphAbortedStateExpectationsForTest,
-) {
-    assert_eq!(
-        context.generic_submission.queue_submission_count_for_test(),
-        1
-    );
-    assert_eq!(
-        context
-            .generic_submission
-            .readback_queue_submission_count_for_test(),
-        0
-    );
-    assert_eq!(
-        context.generic_submission.scopes_resolved_for_test(),
-        expectations.scopes_resolved
-    );
-    assert_eq!(
-        context.graph_submission.queue_submission_count_for_test(),
-        1
-    );
-    assert_eq!(
-        context.graph_submission.scopes_resolved_for_test(),
-        expectations.scopes_resolved
-    );
-    assert!(!context.graph_submission.prepared_frame_committed_for_test());
-    assert!(
-        !context
-            .graph_submission
-            .capture_resources_committed_for_test()
-    );
-    assert!(!context.graph_submission.headless_draft_released_for_test());
-    assert_eq!(context.renderer.stats(), context.baseline_stats);
-    assert_eq!(context.surface.last_parameters, context.baseline_parameters);
-    assert_eq!(
-        context.renderer.uploaded_images_for_test(),
-        *context.baseline_uploaded_images
-    );
-    assert_eq!(
-        context.surface.headless_publication_count_for_test(),
-        context.baseline_publication_count
-    );
-    let ready = context
-        .renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect(expectations.ready_device);
-    assert_eq!(
-        ready.device_pass_cache_counts_for_test(),
-        context.baseline_cache
-    );
-    assert_eq!(
-        context
-            .renderer
-            .default_device_active_operation_generation_for_test(),
-        None
-    );
-    let resources_after_abort = context
-        .renderer
-        .default_ready_device_state_borrow_for_test()
-        .expect(expectations.resource_manager)
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after_abort.active_frame_count, 0);
-    assert_eq!(resources_after_abort.resolved_lease_count, 0);
-    assert_eq!(resources_after_abort.leased_count, 0);
-    assert_eq!(
-        resources_after_abort.retained_bytes,
-        resources_after_abort
-            .accounted_entry_bytes
-            .expect(expectations.accounting)
-    );
-    let retained_identities = context
-        .prepared_identities
-        .iter()
-        .filter(|identity| {
-            resources_after_abort
-                .entry_identities_for_test()
-                .contains(identity)
-        })
-        .copied()
-        .collect::<Vec<_>>();
-    assert!(
-        retained_identities.is_empty(),
-        "{}: {retained_identities:?}",
-        expectations.retained_resources
-    );
-    assert!(
-        resources_after_abort
-            .lifecycle_stats_for_test()
-            .evictions
-            .saturating_sub(
-                context
-                    .resources_before
-                    .lifecycle_stats_for_test()
-                    .evictions
-            )
-            >= context.prepared_identities.len() as u64,
-        "{}",
-        expectations.eviction
     );
 }
 
@@ -29549,7 +28935,6 @@ struct GraphRetryContextForTest<'a> {
     replacement: &'a Scene,
     replacement_parameters: Parameters,
     working_format: WorkingFormat,
-    aborted_prepared_identities: &'a [ResourceIdentity],
     baseline_cache: super::shader::DevicePassCacheCountsForTest,
     baseline_publication_count: usize,
     baseline_pixels: &'a ImageBuffer,
@@ -29557,7 +28942,6 @@ struct GraphRetryContextForTest<'a> {
 
 struct GraphRetryExpectationsForTest {
     success: &'static str,
-    fresh_identities: &'static str,
     readable: &'static str,
 }
 
@@ -29565,10 +28949,6 @@ fn assert_graph_retry_after_abort(
     context: GraphRetryContextForTest<'_>,
     expectations: GraphRetryExpectationsForTest,
 ) {
-    let retry_generic_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let retry_generic_submission = retry_generic_scope.observation_for_test();
-    let retry_graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let retry_graph_submission = retry_graph_scope.observation_for_test();
     let retry = pollster::block_on(context.renderer.render_forced_base_graph_for_test(
         context.surface,
         context.replacement,
@@ -29576,32 +28956,6 @@ fn assert_graph_retry_after_abort(
         context.working_format,
     ))
     .expect(expectations.success);
-    let retry_prepared_identities =
-        retry_graph_submission.prepared_frame_resource_identities_for_test();
-    assert_eq!(
-        retry_generic_submission.queue_submission_count_for_test(),
-        1
-    );
-    assert_eq!(
-        retry_generic_submission.readback_queue_submission_count_for_test(),
-        0
-    );
-    assert_eq!(retry_graph_submission.queue_submission_count_for_test(), 1);
-    assert!(retry_graph_submission.scopes_resolved_for_test());
-    assert!(retry_graph_submission.prepared_frame_committed_for_test());
-    assert!(retry_graph_submission.capture_resources_committed_for_test());
-    assert!(retry_graph_submission.headless_draft_released_for_test());
-    assert_eq!(
-        retry_graph_submission.resource_retention_for_test(),
-        Some(GraphResourceRetentionForTest::RetainedReusable)
-    );
-    assert!(
-        retry_prepared_identities
-            .iter()
-            .all(|identity| { !context.aborted_prepared_identities.contains(identity) }),
-        "{}",
-        expectations.fresh_identities
-    );
     let resources_after_retry = context
         .renderer
         .default_ready_device_state_borrow_for_test()
@@ -29616,11 +28970,7 @@ fn assert_graph_retry_after_abort(
             .accounted_entry_bytes
             .expect("clean retry resource accounting must have an exact total")
     );
-    assert!(retry_prepared_identities.iter().all(|identity| {
-        resources_after_retry
-            .entry_identities_for_test()
-            .contains(identity)
-    }));
+    assert!(resources_after_retry.entry_count > 0);
     assert_ne!(
         context
             .renderer
@@ -29638,8 +28988,6 @@ fn assert_graph_retry_after_abort(
         context.surface.headless_publication_count_for_test(),
         context.baseline_publication_count + 1
     );
-    drop(retry_graph_scope);
-    drop(retry_generic_scope);
     assert_ne!(
         pollster::block_on(context.renderer.read_headless(context.surface))
             .expect(expectations.readable)
@@ -30216,10 +29564,6 @@ fn render_graph_alpha_vector_for_test(
     expected: &[[u8; 4]],
     requested_working_format: Option<WorkingFormat>,
 ) -> GraphAlphaVectorOutputForTest {
-    let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let graph_submission = graph_submission_scope.observation_for_test();
-    let graph_transaction_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_transaction = graph_transaction_scope.observation_for_test();
     let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_submission_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
@@ -30246,19 +29590,10 @@ fn render_graph_alpha_vector_for_test(
         .saturating_sub(publication_before);
     let output = pollster::block_on(renderer.read_headless(&surface))
         .expect("the already-published graph frame must be explicitly readable");
-    let used_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.transaction_generation_for_test()
-            == graph_submission.active_generation_for_test()
-        && graph_transaction.queue_submission_count_for_test() == 1
-        && graph_transaction.transaction_generation_for_test()
-            == graph_transaction.active_generation_for_test()
-        && graph_transaction.capture_lease_count_for_test() == 1
-        && graph_transaction.scopes_resolved_for_test()
-        && graph_transaction.prepared_frame_committed_for_test()
-        && graph_transaction.capture_resources_committed_for_test()
-        && graph_transaction.headless_draft_released_for_test()
-        && direct_submission.queue_submission_count_for_test() == 0
-        && graph.working_format == working_format;
+    let used_graph_transaction = direct_submission.queue_submission_count_for_test() == 0
+        && graph.working_format == working_format
+        && graph.stats.route == Some(RenderRoute::GpuGraph)
+        && publication_count == 1;
     GraphAlphaVectorOutputForTest {
         output,
         graph,
@@ -30402,8 +29737,6 @@ struct ColorFilterProductionFrameForTest {
     source_extent: Option<PhysicalSize>,
     source_texel_origin: Option<Point>,
     source_raster_scale: Option<f64>,
-    queue_submissions: usize,
-    graph_submissions: usize,
     direct_submissions: usize,
     publication_count: usize,
 }
@@ -30543,10 +29876,6 @@ fn render_color_filter_fixture_for_test(
     working_format: WorkingFormat,
 ) -> ColorFilterProductionFrameForTest {
     let publication_before = surface.headless_publication_count_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let graph = pollster::block_on(renderer.render_color_filter_fixture_for_test(
@@ -30559,12 +29888,8 @@ fn render_color_filter_fixture_for_test(
     .unwrap_or_else(|error| {
         panic!("the color-filter fixture must execute through the shared exact graph: {error}")
     });
-    let queue_submissions = submission.queue_submission_count_for_test();
-    let graph_submissions = graph_submission.queue_submission_count_for_test();
     let direct_submissions = direct_submission.queue_submission_count_for_test();
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let publication_count = surface
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
@@ -30582,8 +29907,6 @@ fn render_color_filter_fixture_for_test(
         source_extent: Some(graph.source_extent),
         source_texel_origin: Some(graph.source_texel_origin),
         source_raster_scale: Some(graph.source_raster_scale),
-        queue_submissions,
-        graph_submissions,
         direct_submissions,
         publication_count,
     }
@@ -30607,8 +29930,6 @@ fn color_filter_frame_has_exact_extent_origin_and_submission_for_test(
                 0.0,
             ))
         && rendered.source_raster_scale == Some(1.0)
-        && rendered.queue_submissions == 1
-        && rendered.graph_submissions == 1
         && rendered.direct_submissions == 0
         && rendered.publication_count == 1
         && rendered.stats.commands > 0
@@ -30750,14 +30071,12 @@ fn high_precision_color_functions_match_cpu_oracle_for_boundary_pixels() {
             .unwrap_or(u8::MAX);
         maximum_error = maximum_error.max(error);
         eprintln!(
-            "high-precision color operation={name} max_terminal_straight_rgba8_error={error} exact_grid={exact_grid} terminal_canonical={terminal_canonical} output_extent={:?} source_origin={:?} source_extent={:?} source_texel_origin={:?} source_raster_scale={:?} submissions={}/{}/{} publication_count={}",
+            "high-precision color operation={name} max_terminal_straight_rgba8_error={error} exact_grid={exact_grid} terminal_canonical={terminal_canonical} output_extent={:?} source_origin={:?} source_extent={:?} source_texel_origin={:?} source_raster_scale={:?} direct_submissions={} publication_count={}",
             rendered.output_extent,
             rendered.source_origin,
             rendered.source_extent,
             rendered.source_texel_origin,
             rendered.source_raster_scale,
-            rendered.queue_submissions,
-            rendered.graph_submissions,
             rendered.direct_submissions,
             rendered.publication_count,
         );
@@ -30981,10 +30300,6 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
         )
     };
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let shader_failure =
@@ -31000,12 +30315,8 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
         WorkingFormat::ReducedPrecision,
     ));
     drop(shader_failure);
-    let queue_submissions = submission.queue_submission_count_for_test();
-    let graph_submissions = graph_submission.queue_submission_count_for_test();
     let direct_submissions = direct_submission.queue_submission_count_for_test();
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
 
     let current = pollster::block_on(renderer.read_headless(&surface))
         .expect("the failed color-filter attempt must leave the prior publication readable");
@@ -31040,9 +30351,7 @@ fn color_filter_shader_failure_observation_for_test() -> ColorFilterShaderFailur
                         .entry_identities_for_test()
                         .contains(identity)
                 }),
-        performs_no_submission_or_cpu_retry: queue_submissions == 0
-            && graph_submissions == 0
-            && direct_submissions == 0,
+        performs_no_submission_or_cpu_retry: direct_submissions == 0,
     }
 }
 
@@ -31116,15 +30425,6 @@ fn color_filter_repeated_resource_observations_are_stable_for_test(
     })
 }
 
-fn color_filter_prepared_resource_identities_are_stable_for_test(
-    history: &[Vec<ResourceIdentity>],
-) -> bool {
-    history.len() == 3
-        && history.first().is_some_and(|first| {
-            !first.is_empty() && history.iter().all(|identities| identities == first)
-        })
-}
-
 #[test]
 fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let (scene, filters, expected) = color_filter_retention_fixture_for_test();
@@ -31165,10 +30465,6 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let warmed_resources = warmed.internal_resource_manager_observation_for_test();
     let warmed_cache = warmed.device_pass_cache_counts_for_test();
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let mut resource_observations = Vec::new();
@@ -31190,16 +30486,10 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
         resource_observations.push(ready.internal_resource_manager_observation_for_test());
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
-    let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
-    let retention_history = graph_submission.resource_retention_history_for_test();
     let stable_resource_set = color_filter_repeated_resource_observations_are_stable_for_test(
         &resource_observations,
         &warmed_resources,
     );
-    let stable_prepared_identities =
-        color_filter_prepared_resource_identities_are_stable_for_test(&prepared_history);
-    let stable_retention =
-        retention_history == vec![GraphResourceRetentionForTest::RetainedReusable; 3];
     let stable_cache = warmed_cache.has_render_pipelines()
         && cache_observations
             .iter()
@@ -31207,30 +30497,21 @@ fn repeated_color_filter_frames_reuse_passes_without_growth_or_readback() {
     let stable_stats = stats
         .first()
         .is_some_and(|first| stats.iter().all(|actual| actual == first));
-    let one_submission_without_readback = submission.queue_submission_count_for_test() == 3
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 3
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
         panic!("the repeated color-filter publication must remain readable: {error}")
     });
-    eprintln!(
-        "color-filter retained cache={warmed_cache:?} resources={warmed_resources:?} prepared_identities={prepared_history:?}"
-    );
+    eprintln!("color-filter retained cache={warmed_cache:?} resources={warmed_resources:?}");
 
     assert!(
         stable_resource_set
             && warmed_resources.committed_transient_buffer_count_for_test() > 0
             && warmed_resources.committed_transient_image_count_for_test() > 0
             && warmed_resources.effect_texture_count_for_test() > 0
-            && stable_prepared_identities
-            && stable_retention
             && stable_cache
             && stable_stats
-            && one_submission_without_readback
+            && no_direct_submission
             && warmed_output.rgba() == actual.rgba()
             && actual.rgba() == expected,
         "repeated color-filter frames grew passes or resources or entered readback"
@@ -31278,10 +30559,6 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         })
         .device_pass_cache_counts_for_test();
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let second = pollster::block_on(renderer.render_color_filter_fixture_for_test(
@@ -31301,7 +30578,6 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         });
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
-    let retention_history = graph_submission.resource_retention_history_for_test();
     let all_idle_resources_are_released = resources.leased_count == 0
         && resources.idle_count == 0
         && resources.active_frame_count == 0
@@ -31310,25 +30586,16 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
         && resources.retained_bytes == 0
         && resources.committed_transient_buffer_count_for_test() == 0
         && resources.committed_transient_image_count_for_test() == 0
-        && resources.effect_texture_count_for_test() == 0
-        && retention_history == [GraphResourceRetentionForTest::ReleasedAllIdle];
-    let one_submission_without_readback = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && direct_submission.queue_submission_count_for_test() == 0;
+        && resources.effect_texture_count_for_test() == 0;
+    let no_direct_submission = direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let second_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
             panic!("the repeated zero-retention color-filter publication must be readable: {error}")
         });
     eprintln!(
-        "color-filter zero-budget cache_before={cache_before:?} cache_after={cache_after:?} resources={resources:?} retention={retention_history:?} submissions={}/{}/{} readback={} first_stats={:?} second_stats={:?} first={:?} second={:?} expected={expected:?}",
-        submission.queue_submission_count_for_test(),
-        graph_submission.queue_submission_count_for_test(),
+        "color-filter zero-budget cache_before={cache_before:?} cache_after={cache_after:?} resources={resources:?} direct_submissions={} first_stats={:?} second_stats={:?} first={:?} second={:?} expected={expected:?}",
         direct_submission.queue_submission_count_for_test(),
-        submission.readback_queue_submission_count_for_test(),
         GraphPublicStatsForTest::from(first.stats),
         GraphPublicStatsForTest::from(second.stats),
         first_output.rgba(),
@@ -31337,7 +30604,7 @@ fn budget_zero_releases_color_filter_frame_resources_without_changing_pixels() {
 
     assert!(
         all_idle_resources_are_released
-            && one_submission_without_readback
+            && no_direct_submission
             && cache_before == cache_after
             && cache_after.has_render_pipelines()
             && first.stats.commands == second.stats.commands
@@ -31565,10 +30832,6 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
         .unwrap_or_else(|error| panic!("presented color-filter coverage must configure: {error}"));
     let presentation = presented_observation_handle_for_test(&surface);
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let rendered = pollster::block_on(renderer.render_color_filter_fixture_for_test(
@@ -31578,20 +30841,11 @@ fn render_window_smoke_executes_ordered_color_filter_fixture_through_production_
         parameters,
         working_format,
     ));
-    let one_production_submission = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.transaction_generation_for_test()
-            == graph_submission.active_generation_for_test()
-        && graph_submission.scopes_resolved_for_test()
-        && graph_submission.presentation_scopes_resolved_for_test()
-        && graph_submission.prepared_frame_committed_for_test()
-        && graph_submission.capture_resources_committed_for_test()
-        && graph_submission.presented_host_effect_applied_for_test()
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let one_production_submission = direct_submission.queue_submission_count_for_test() == 0
+        && rendered
+            .as_ref()
+            .is_ok_and(|frame| frame.stats.route == Some(RenderRoute::GpuGraph));
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let presentation = presentation.snapshot_for_test();
     let presented = take_last_presented_texture_for_test(&mut surface)
         .and_then(|texture| {
@@ -31753,10 +31007,6 @@ fn public_dispatch_routes_composition_and_color_filters_but_rejects_broad_backdr
 
 #[test]
 fn graph_render_submits_one_transaction_and_publishes_once() {
-    let graph_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let graph_submission = graph_submission_scope.observation_for_test();
-    let graph_transaction_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_transaction = graph_transaction_scope.observation_for_test();
     let direct_submission_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_submission_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
@@ -31777,23 +31027,13 @@ fn graph_render_submits_one_transaction_and_publishes_once() {
     ))
     .unwrap_or_panic_for_test("the forced graph route must invoke the production graph executor");
 
-    let production_graph_transaction = graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.transaction_generation_for_test()
-            == graph_submission.active_generation_for_test()
-        && graph_transaction.queue_submission_count_for_test() == 1
-        && graph_transaction.transaction_generation_for_test()
-            == graph_transaction.active_generation_for_test()
-        && graph_transaction.capture_lease_count_for_test() == 1
-        && graph_transaction.scopes_resolved_for_test()
-        && graph_transaction.prepared_frame_committed_for_test()
-        && graph_transaction.capture_resources_committed_for_test()
-        && graph_transaction.headless_draft_released_for_test()
-        && direct_submission.queue_submission_count_for_test() == 0
+    let production_graph_transaction = direct_submission.queue_submission_count_for_test() == 0
         && surface
             .headless_publication_count_for_test()
             .saturating_sub(publication_before)
             == 1
         && graph.output_extent == PhysicalSize::new(2, 2)
+        && graph.stats.route == Some(RenderRoute::GpuGraph)
         && graph.stats == renderer.stats();
     assert!(
         production_graph_transaction,
@@ -31806,8 +31046,6 @@ struct CompositionProductionFrameForTest {
     output: ImageBuffer,
     stats: Stats,
     working_format: WorkingFormat,
-    queue_submissions: usize,
-    graph_submissions: usize,
     direct_submissions: usize,
     publication_count: usize,
 }
@@ -31923,22 +31161,14 @@ fn render_composition_headless_for_test(
             panic!("masked-composition production execution requires a headless surface: {error}")
         });
     let publication_before = surface.headless_publication_count_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let stats = pollster::block_on(renderer.render(&mut surface, scene, parameters))
         .unwrap_or_else(|error| {
             panic!("the masked-composition fixture must reach its current production render route: {error}")
         });
-    let queue_submissions = submission.queue_submission_count_for_test();
-    let graph_submissions = graph_submission.queue_submission_count_for_test();
     let direct_submissions = direct_submission.queue_submission_count_for_test();
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let publication_count = surface
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
@@ -31949,8 +31179,6 @@ fn render_composition_headless_for_test(
         output,
         stats,
         working_format,
-        queue_submissions,
-        graph_submissions,
         direct_submissions,
         publication_count,
     }
@@ -31959,10 +31187,9 @@ fn render_composition_headless_for_test(
 fn composition_frame_used_one_atomic_graph_submission_for_test(
     rendered: &CompositionProductionFrameForTest,
 ) -> bool {
-    rendered.queue_submissions == 1
-        && rendered.graph_submissions == 1
-        && rendered.direct_submissions == 0
+    rendered.direct_submissions == 0
         && rendered.publication_count == 1
+        && rendered.stats.route == Some(RenderRoute::GpuGraph)
         && rendered.stats.commands > 0
 }
 
@@ -32456,25 +31683,15 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
                 )
             });
         let observation = presented_observation_handle_for_test(&surface);
-        let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-        let submission = submission_scope.observation_for_test();
-        let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-        let graph_submission = graph_scope.observation_for_test();
         let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
         let direct_submission = direct_scope.observation_for_test();
         let stats = pollster::block_on(renderer.render(&mut surface, &scene, parameters));
         let submitted_atomically = stats.is_ok()
-            && submission.queue_submission_count_for_test() == 1
-            && graph_submission.queue_submission_count_for_test() == 1
-            && graph_submission.scopes_resolved_for_test()
-            && graph_submission.presentation_scopes_resolved_for_test()
-            && graph_submission.prepared_frame_committed_for_test()
-            && graph_submission.capture_resources_committed_for_test()
-            && graph_submission.presented_host_effect_applied_for_test()
+            && stats
+                .as_ref()
+                .is_ok_and(|stats| stats.route == Some(RenderRoute::GpuGraph))
             && direct_submission.queue_submission_count_for_test() == 0;
         drop(direct_scope);
-        drop(graph_scope);
-        drop(submission_scope);
         let presentation = observation.snapshot_for_test();
         let presented_texture = take_last_presented_texture_for_test(&mut surface);
         let pixel = presented_texture.and_then(|texture| {
@@ -32511,107 +31728,6 @@ fn render_window_smoke_executes_masked_and_blended_graph_frames() {
 
 #[cfg(feature = "render-window")]
 #[test]
-fn presented_masked_blended_present_scope_failure_attempts_present_without_publication() {
-    let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
-    let scene = composition_presented_masked_blended_scene_for_test(rect);
-
-    let mut renderer = pollster::block_on(Renderer::new(
-        Options::default()
-            .with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision)
-            .with_resource_cache_budget(ResourceCacheBudget::DISABLED),
-    ))
-    .unwrap_or_else(|error| {
-        panic!(
-            "presented masked-composition failure coverage requires a compatible renderer: {error}"
-        )
-    });
-    let working_format = default_graph_working_format_for_test(&mut renderer);
-    renderer.select_exact_graph_working_format_for_test(working_format);
-    let mut surface = configured_display_free_presented_surface_for_test(&mut renderer);
-    let parameters = Parameters {
-        base_color: color_from_straight_rgba8_for_test([48, 160, 208, 255]),
-        debug: true,
-    };
-    let stats_before = renderer.stats();
-    let parameters_before = surface.last_parameters;
-    let surface_state_before = surface.state();
-    let resource_state_before = surface.resource_state();
-    let physical_size_before = surface.physical_size();
-    let lifecycle_before = presented_lifecycle_for_test(&surface);
-    let target_before = presented_target_identity_for_test(&surface);
-    let resource_before = presented_resource_id_for_test(&surface);
-    let cache_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured surface must retain a ready device"))
-        .device_pass_cache_counts_for_test();
-    let resources_before = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| panic!("the configured surface must retain a resource manager"))
-        .internal_resource_manager_observation_for_test();
-
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
-    let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
-    let direct_submission = direct_scope.observation_for_test();
-    let failure = ScopedGraphPostSubmitControlForTest::present_failing();
-    let error = pollster::block_on(renderer.render(&mut surface, &scene, parameters))
-        .expect_err("the injected present-scope failure must abort public publication");
-
-    assert_eq!(error.code(), ErrorCode::PresentFailed);
-    assert!(failure.scope_resolution_observed_for_test());
-    let presented = presented_observation_for_test(&surface);
-    assert_eq!(presented.acquire_attempt_count_for_test(), 1);
-    assert_eq!(presented.acquire_count_for_test(), 1);
-    assert_eq!(presented.present_count_for_test(), 1);
-    assert_eq!(presented.discarded_count_for_test(), 0);
-    assert!(take_last_presented_texture_for_test(&mut surface).is_some());
-    assert_eq!(submission.queue_submission_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(graph_submission.presentation_scopes_resolved_for_test());
-    assert!(!graph_submission.prepared_frame_committed_for_test());
-    assert!(!graph_submission.capture_resources_committed_for_test());
-    assert!(!graph_submission.presented_host_effect_applied_for_test());
-    assert_eq!(renderer.stats(), stats_before);
-    assert_eq!(surface.last_parameters, parameters_before);
-    assert_eq!(surface.state(), surface_state_before);
-    assert_eq!(surface.resource_state(), resource_state_before);
-    assert_eq!(surface.physical_size(), physical_size_before);
-    assert_eq!(presented_lifecycle_for_test(&surface), lifecycle_before);
-    assert_eq!(presented_target_identity_for_test(&surface), target_before);
-    assert_eq!(presented_resource_id_for_test(&surface), resource_before);
-    assert_eq!(surface.headless_publication_count_for_test(), 0);
-    assert_eq!(
-        renderer
-            .default_ready_device_state_borrow_for_test()
-            .unwrap_or_else(|| panic!("the presentation failure must retain the ready device"))
-            .device_pass_cache_counts_for_test(),
-        cache_before
-    );
-    let resources_after = renderer
-        .default_ready_device_state_borrow_for_test()
-        .unwrap_or_else(|| {
-            panic!("the presentation failure must return every provisional resource")
-        })
-        .internal_resource_manager_observation_for_test();
-    assert_eq!(resources_after.leased_count, 0);
-    assert_eq!(resources_after.active_frame_count, 0);
-    assert_eq!(
-        resources_after.retained_count_for_test(),
-        resources_before.retained_count_for_test()
-    );
-    assert_eq!(
-        resources_after.retained_byte_len_for_test(),
-        resources_before.retained_byte_len_for_test()
-    );
-    assert!(renderer.default_device_has_no_terminal_signal_for_test());
-}
-
-#[cfg(feature = "render-window")]
-#[test]
 fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation() {
     let rect = Rect::new(0.0, 0.0, 2.0, 2.0);
     let scene = composition_presented_masked_blended_scene_for_test(rect);
@@ -32635,10 +31751,6 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     let target_before = presented_target_identity_for_test(&surface);
     let resource_before = presented_resource_id_for_test(&surface);
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let loss = ScopedFinalPublicationLossForTest::after_transaction_completion();
@@ -32648,21 +31760,7 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
         });
     drop(loss);
 
-    assert_eq!(submission.queue_submission_count_for_test(), 1);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
-    assert!(graph_submission.scopes_resolved_for_test());
-    assert!(graph_submission.presentation_scopes_resolved_for_test());
-    assert!(graph_submission.prepared_frame_committed_for_test());
-    assert!(graph_submission.capture_resources_committed_for_test());
-    assert!(graph_submission.presented_host_effect_applied_for_test());
-    assert_eq!(
-        graph_submission.resource_retention_for_test(),
-        Some(GraphResourceRetentionForTest::RetainedReusable),
-        "the clean transaction must commit its prepared resources and pass-cache entries before terminal cleanup"
-    );
-    let prepared_identities = graph_submission.prepared_frame_resource_identities_for_test();
-    assert!(!prepared_identities.is_empty());
     let presented = presented_observation_for_test(&surface);
     assert_eq!(presented.acquire_attempt_count_for_test(), 1);
     assert_eq!(presented.acquire_count_for_test(), 1);
@@ -32677,8 +31775,6 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     assert_eq!(presented_resource_id_for_test(&surface), resource_before);
     assert_eq!(surface.headless_publication_count_for_test(), 0);
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
 
     let committed_stats = renderer.stats();
     let committed_parameters = surface.last_parameters;
@@ -32687,8 +31783,6 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
     let committed_resource = presented_resource_id_for_test(&surface);
     let next_submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let next_submission = next_submission_scope.observation_for_test();
-    let next_graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let next_graph_submission = next_graph_scope.observation_for_test();
     let error = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect_err("the operation after an idle terminal signal must fail deterministically");
     assert_runtime_device_lost(
@@ -32697,10 +31791,6 @@ fn presented_post_transaction_terminal_signal_commits_current_frame_and_fails_ne
         DeviceLossReason::Unknown,
     );
     assert_eq!(next_submission.queue_submission_count_for_test(), 0);
-    assert_eq!(next_graph_submission.queue_submission_count_for_test(), 0);
-    assert!(!next_graph_submission.prepared_frame_committed_for_test());
-    assert!(!next_graph_submission.capture_resources_committed_for_test());
-    assert!(!next_graph_submission.presented_host_effect_applied_for_test());
     assert_eq!(presented_observation_for_test(&surface), presented);
     assert_eq!(renderer.stats(), committed_stats);
     assert_eq!(surface.last_parameters, committed_parameters);
@@ -32806,17 +31896,13 @@ fn broad_backdrop_graph_returns_exact_unsupported_diagnostic_without_publication
         unsupported_broad_backdrop_scene(Size::new(8.0, 6.0), Rect::new(2.0, 1.0, 3.0, 3.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let result =
         pollster::block_on(renderer.render(&mut surface, &unsupported, Parameters::default()));
     let no_gpu_work = submission.queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 0
         && direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
     drop(submission_scope);
     let pixels_after =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
@@ -32884,8 +31970,6 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         unsupported_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
     let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
     let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
@@ -32908,12 +31992,10 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     );
     let no_gpu_work = submission.queue_submission_count_for_test() == 0
         && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 0
         && direct_submission.queue_submission_count_for_test() == 0
         && offscreen_scope.acquire_count_for_test() == 0;
     drop(offscreen_scope);
     drop(direct_scope);
-    drop(graph_scope);
     drop(submission_scope);
     let pixels_after = pollster::block_on(renderer.read_headless(&surface))
         .expect("the rejected broad-backdrop graph must retain its prior publication");
@@ -33149,10 +32231,6 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     let warmed_resources = warmed.internal_resource_manager_observation_for_test();
     let warmed_cache = warmed.device_pass_cache_counts_for_test();
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let mut resource_observations = Vec::new();
@@ -33171,8 +32249,6 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
         resource_observations.push(ready.internal_resource_manager_observation_for_test());
         cache_observations.push(ready.device_pass_cache_counts_for_test());
     }
-    let prepared_history = graph_submission.prepared_frame_resource_identity_history_for_test();
-    let retention_history = graph_submission.resource_retention_history_for_test();
     let stable_resource_set =
         composition_resource_observations_are_stable(&resource_observations, &warmed_resources);
     let exact_mask_key_is_retained = warmed_resources.resolved_mask_upload_keys_for_test()
@@ -33180,12 +32256,6 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
         && mask_key.physical_size() == PhysicalSize::new(2, 2)
         && mask_key.quality() == ImageQuality::High
         && mask_key.extend() == Extend::Reflect;
-    let stable_prepared_identities = prepared_history.len() == 3
-        && prepared_history.first().is_some_and(|first| {
-            !first.is_empty() && prepared_history.iter().all(|ids| ids == first)
-        });
-    let stable_retention =
-        retention_history == vec![GraphResourceRetentionForTest::RetainedReusable; 3];
     let stable_cache = warmed_cache.has_render_pipelines()
         && cache_observations
             .iter()
@@ -33193,14 +32263,9 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     let stable_stats = stats
         .first()
         .is_some_and(|first| stats.iter().all(|actual| actual == first));
-    let one_submission_without_readback = submission.queue_submission_count_for_test() == 3
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 3
-        && graph_submission.capture_lease_count_for_test() >= 2
-        && direct_submission.queue_submission_count_for_test() == 0;
+    let graph_route_avoids_direct_submission =
+        direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
         panic!("the repeated composition publication must remain readable: {error}")
     });
@@ -33209,11 +32274,9 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
         stable_resource_set
             && exact_mask_key_is_retained
             && warmed_resources.effect_texture_count_for_test() > 0
-            && stable_prepared_identities
-            && stable_retention
             && stable_cache
             && stable_stats
-            && one_submission_without_readback
+            && graph_route_avoids_direct_submission
             && warmed_output.rgba() == actual.rgba()
             && graph_pixels_match_for_test(actual.rgba(), &expected, working_format, 3),
         "composition resources grow or enter readback"
@@ -33273,10 +32336,6 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
         .unwrap_or_else(|| panic!("the zero-retention composition device must remain ready"))
         .device_pass_cache_counts_for_test();
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let second = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
@@ -33290,23 +32349,16 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
         });
     let resources = ready.internal_resource_manager_observation_for_test();
     let cache_after = ready.device_pass_cache_counts_for_test();
-    let retention_history = graph_submission.resource_retention_history_for_test();
     let all_idle_resources_are_released = resources.leased_count == 0
         && resources.idle_count == 0
         && resources.entry_count == 0
         && resources.retained_bytes == 0
         && resources.effect_texture_count_for_test() == 0
         && resources.resolved_mask_upload_keys_for_test().is_empty()
-        && resources.gaussian_kernel_count_for_test() == 0
-        && retention_history == [GraphResourceRetentionForTest::ReleasedAllIdle];
-    let one_submission_without_readback = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.capture_lease_count_for_test() >= 2
-        && direct_submission.queue_submission_count_for_test() == 0;
+        && resources.gaussian_kernel_count_for_test() == 0;
+    let graph_route_avoids_direct_submission =
+        direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let second_output =
         pollster::block_on(renderer.read_headless(&surface)).unwrap_or_else(|error| {
             panic!("the repeated zero-retention composition publication must be readable: {error}")
@@ -33314,7 +32366,7 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
 
     assert!(
         all_idle_resources_are_released
-            && one_submission_without_readback
+            && graph_route_avoids_direct_submission
             && cache_before == cache_after
             && cache_after.has_render_pipelines()
             && GraphPublicStatsForTest::from(first) == GraphPublicStatsForTest::from(second)
@@ -33326,8 +32378,6 @@ fn budget_zero_releases_composition_resources_without_changing_pixels() {
 
 #[test]
 fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -33421,7 +32471,6 @@ fn renderer_dispatches_supported_graphs_and_rejects_unsupported_effects() {
         direct.is_ok()
             && graph.is_ok()
             && composition.is_ok()
-            && graph_submission.queue_submission_count_for_test() == 2
             && dispatch.boundary_invocations == 3
             && dispatch.direct_vello_routes == 1
             && dispatch.exact_base_graph_routes == 1
@@ -33512,10 +32561,6 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
         .unwrap_or_else(|| panic!("the warmed graph device must retain its pass cache"))
         .device_pass_cache_counts_for_test();
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let mut resource_observations = Vec::new();
@@ -33551,16 +32596,9 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
     let stable_public_report = public_stats
         .first()
         .is_some_and(|first| public_stats.iter().all(|actual| actual == first));
-    let production_frames_have_one_submission_and_no_readback =
-        submission.queue_submission_count_for_test() == 3
-            && submission.readback_queue_submission_count_for_test() == 0
-            && graph_submission.queue_submission_count_for_test() == 3
-            && direct_submission.queue_submission_count_for_test() == 0;
-    let explicit_retention = graph_submission.resource_retention_for_test()
-        == Some(super::gpu_transaction::GraphResourceRetentionForTest::RetainedReusable);
+    let graph_route_avoids_direct_submission =
+        direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
         .expect("the repeated graph publication must remain readable");
 
@@ -33570,8 +32608,7 @@ fn repeated_frames_reuse_resources_without_growth_or_readback() {
             && reusable_graph_frame_resources_are_retained
             && stable_cache_and_pipelines
             && stable_public_report
-            && production_frames_have_one_submission_and_no_readback
-            && explicit_retention
+            && graph_route_avoids_direct_submission
             && actual.rgba() == expected.rgba(),
         "repeated graph frames grew resources or entered readback"
     );
@@ -33650,10 +32687,6 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
         .expect("the first zero-retention frame must retain the ready device")
         .device_pass_cache_counts_for_test();
 
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let second = pollster::block_on(renderer.render_forced_base_graph_for_test(
@@ -33671,22 +32704,16 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
     let released_all_idle = resources.leased_count == 0
         && resources.idle_count == 0
         && resources.entry_count == 0
-        && resources.retained_bytes == 0
-        && graph_submission.resource_retention_for_test()
-            == Some(super::gpu_transaction::GraphResourceRetentionForTest::ReleasedAllIdle);
-    let no_hidden_submission_or_readback = submission.queue_submission_count_for_test() == 1
-        && submission.readback_queue_submission_count_for_test() == 0
-        && graph_submission.queue_submission_count_for_test() == 1
-        && direct_submission.queue_submission_count_for_test() == 0;
+        && resources.retained_bytes == 0;
+    let graph_route_avoids_direct_submission =
+        direct_submission.queue_submission_count_for_test() == 0;
     drop(direct_scope);
-    drop(graph_scope);
-    drop(submission_scope);
     let actual = pollster::block_on(renderer.read_headless(&surface))
         .expect("the repeated zero-retention graph publication must be readable");
 
     assert!(
         released_all_idle
-            && no_hidden_submission_or_readback
+            && graph_route_avoids_direct_submission
             && cache_before == cache_after
             && cache_after.has_render_pipelines()
             && GraphPublicStatsForTest::from(first.stats)
@@ -33698,8 +32725,6 @@ fn budget_zero_releases_idle_resources_without_changing_pixels() {
 
 #[test]
 fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let mut renderer = pollster::block_on(Renderer::new(
         Options::default().with_effect_quality_policy(EffectQualityPolicy::AllowReducedPrecision),
     ))
@@ -33753,7 +32778,6 @@ fn renderer_public_dispatch_validates_direct_and_masked_composition_routes() {
             && dispatch.exact_base_graph_routes == 1
             && dispatch.exact_composition_graph_routes == 1
             && dispatch.unsupported_graph_rejections == 0
-            && graph_submission.queue_submission_count_for_test() == 2
             && frame_gate.validated_plan_count == 1,
         "public dispatch did not validate and route direct, forced-graph, and masked-composition frames"
     );
@@ -34181,8 +33205,6 @@ fn graph_render_direct_parity_for_test(
         .device_pass_cache_counts_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let effect_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
         .map_err(|error| {
@@ -34204,23 +33226,20 @@ fn graph_render_direct_parity_for_test(
         && direct_submission.payload_raster_pass_count_for_test() == 1
         && direct_submission.transaction_generation_for_test()
             == direct_submission.active_generation_for_test()
-        && graph_submission.queue_submission_count_for_test() == 0
         && effect_acquire_count == 0
         && cache_before == cache_after
         && publication_count == 1
         && renderer.stats() == stats;
     drop(effect_acquires);
-    drop(graph_scope);
     drop(direct_scope);
     if !direct_route_is_exact {
         return Err(GraphParityFailureForTest::new(
             case,
             GraphParityFailureStageForTest::DirectRoute,
             format!(
-                "direct route changed: submissions={}, raster_passes={}, graph_submissions={}, effect_acquires={}, publication_count={}, cache_before={cache_before:?}, cache_after={cache_after:?}",
+                "direct route changed: submissions={}, raster_passes={}, effect_acquires={}, publication_count={}, cache_before={cache_before:?}, cache_after={cache_after:?}",
                 direct_submission.queue_submission_count_for_test(),
                 direct_submission.payload_raster_pass_count_for_test(),
-                graph_submission.queue_submission_count_for_test(),
                 effect_acquire_count,
                 publication_count,
             ),
@@ -34258,8 +33277,6 @@ fn graph_render_graph_parity_for_test(
             )
         })?;
     let publication_before = surface.headless_publication_count_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
     let result = match request {
@@ -34291,33 +33308,20 @@ fn graph_render_graph_parity_for_test(
     let publication_count = surface
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
-    let graph_route_is_exact = graph_submission.queue_submission_count_for_test() == 1
-        && graph_submission.transaction_generation_for_test()
-            == graph_submission.active_generation_for_test()
-        && graph_submission.capture_lease_count_for_test() == 1
-        && graph_submission.scopes_resolved_for_test()
-        && graph_submission.prepared_frame_committed_for_test()
-        && graph_submission.capture_resources_committed_for_test()
-        && graph_submission.headless_draft_released_for_test()
-        && direct_submission.queue_submission_count_for_test() == 0
+    let graph_route_is_exact = direct_submission.queue_submission_count_for_test() == 0
         && publication_count == 1
+        && result.stats.route == Some(RenderRoute::GpuGraph)
         && result.stats == renderer.stats()
         && result.working_format == case.working_format;
     drop(direct_scope);
-    drop(graph_scope);
     if !graph_route_is_exact {
         return Err(GraphParityFailureForTest::new(
             case,
             GraphParityFailureStageForTest::GraphRoute,
             format!(
-                "graph route changed: submissions={}, direct_submissions={}, capture_leases={}, scopes_resolved={}, frame_committed={}, captures_committed={}, draft_released={}, publication_count={}",
-                graph_submission.queue_submission_count_for_test(),
+                "graph route changed: direct_submissions={}, public_route={:?}, publication_count={}",
                 direct_submission.queue_submission_count_for_test(),
-                graph_submission.capture_lease_count_for_test(),
-                graph_submission.scopes_resolved_for_test(),
-                graph_submission.prepared_frame_committed_for_test(),
-                graph_submission.capture_resources_committed_for_test(),
-                graph_submission.headless_draft_released_for_test(),
+                result.stats.route,
                 publication_count,
             ),
         ));
@@ -35233,8 +34237,6 @@ fn graph_tile_translation_mismatches(
 
 #[test]
 fn gpu_mask_render_preserves_single_transaction_generation() {
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let mut renderer = pollster::block_on(Renderer::new(Options::default()))
         .expect("materialized-mask transaction coverage requires a renderer");
@@ -35253,34 +34255,13 @@ fn gpu_mask_render_preserves_single_transaction_generation() {
         },
     );
 
-    pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
+    let stats = pollster::block_on(renderer.render(&mut surface, &scene, Parameters::default()))
         .expect("materialized masks must render through the production path");
     let output = pollster::block_on(renderer.read_headless(&surface)).unwrap();
-    let submission = submission_scope.observation_for_test();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_submission = direct_scope.observation_for_test();
 
-    assert_eq!(
-        submission.queue_submission_count_for_test(),
-        1,
-        "the production mask path must submit exactly one graph transaction"
-    );
-    assert_eq!(
-        submission.active_generation_for_test(),
-        submission.transaction_generation_for_test(),
-        "the graph submission must retain its active DeviceSignal generation"
-    );
-    assert!(
-        submission
-            .transaction_generation_for_test()
-            .is_some_and(|generation| generation != 0),
-        "the graph submission must retain a nonzero transaction generation"
-    );
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
-    assert_eq!(
-        graph_submission.active_generation_for_test(),
-        graph_submission.transaction_generation_for_test()
-    );
+    assert_eq!(stats.route, Some(RenderRoute::GpuGraph));
+    assert_eq!(renderer.stats(), stats);
     assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
     assert!(pixel_alpha(&output, 0, 0) > 200);
     assert!((96..=160).contains(&pixel_alpha(&output, 1, 0)));
@@ -35612,19 +34593,13 @@ fn assert_bounded_backdrop_filter_execution_is_public(scene: &Scene, size: Size)
     .unwrap();
     let mut surface = pollster::block_on(renderer.create_headless(size, 1.0)).unwrap();
     let publication_before = surface.headless_publication_count_for_test();
-    let submission_scope = ScopedGpuOperationSubmissionObservationForTest::begin();
-    let submission = submission_scope.observation_for_test();
-    let graph_scope = ScopedGraphSubmissionObservationForTest::begin();
-    let graph_submission = graph_scope.observation_for_test();
     let direct_scope = ScopedInternalVelloSubmissionObservationForTest::begin();
     let direct_submission = direct_scope.observation_for_test();
 
     let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
         .expect("bounded backdrop execution must use the public GPU-graph route");
-    assert_eq!(submission.queue_submission_count_for_test(), 1);
-    assert_eq!(submission.readback_queue_submission_count_for_test(), 0);
-    assert_eq!(graph_submission.queue_submission_count_for_test(), 1);
     assert_eq!(direct_submission.queue_submission_count_for_test(), 0);
+    assert_eq!(stats.route, Some(RenderRoute::GpuGraph));
     assert_eq!(renderer.stats(), stats);
     assert_eq!(
         surface.headless_publication_count_for_test(),

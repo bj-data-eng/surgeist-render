@@ -8,33 +8,17 @@ mod test_support;
 )]
 pub(crate) use graph::GraphSubmissionCommit;
 pub(crate) use graph::{GraphOutputCommit, GraphSubmissionPayload};
+#[cfg(all(test, feature = "render-window"))]
+pub(crate) use test_support::graph_terminal_loss_after_submission_for_test;
 #[cfg(test)]
 pub(crate) use test_support::{
-    GraphResourceRetentionForTest, GraphSubmissionObservationForTest,
-    ScopedGpuOperationPostSubmitCheckpointForTest, ScopedGraphPostSubmitControlForTest,
-    ScopedGraphSubmissionObservationForTest,
+    ScopedGpuOperationPostSubmitCheckpointForTest,
+    graph_accounting_failure_after_submission_for_test,
+    graph_cancellation_after_submission_for_test, graph_scope_failure_after_submission_for_test,
 };
 
 #[cfg(test)]
-use test_support::{
-    apply_active_graph_post_submit_control_for_test, begin_graph_submission_observation_for_test,
-    notify_active_graph_submission_scope_resolution_for_test, record_active_graph_commit_for_test,
-    record_active_graph_headless_scope_resolution_for_test,
-    wait_at_active_gpu_operation_post_submit_checkpoint_for_test,
-};
-#[cfg(all(
-    test,
-    any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    )
-))]
-use test_support::{
-    apply_active_graph_present_failure_for_test,
-    notify_active_graph_presentation_scope_resolution_for_test,
-    record_active_graph_presentation_scope_resolution_for_test,
-    record_active_graph_submission_scope_resolution_for_test,
-};
+use test_support::wait_at_active_gpu_operation_post_submit_checkpoint_for_test;
 
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,

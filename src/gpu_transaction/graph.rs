@@ -1,24 +1,4 @@
 use super::{GpuOperationTransaction, VelloResourceCommitProof};
-#[cfg(test)]
-use super::{
-    apply_active_graph_post_submit_control_for_test, begin_graph_submission_observation_for_test,
-    notify_active_graph_submission_scope_resolution_for_test, record_active_graph_commit_for_test,
-    record_active_graph_headless_scope_resolution_for_test,
-    wait_at_active_gpu_operation_post_submit_checkpoint_for_test,
-};
-#[cfg(all(
-    test,
-    any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    )
-))]
-use super::{
-    apply_active_graph_present_failure_for_test,
-    notify_active_graph_presentation_scope_resolution_for_test,
-    record_active_graph_presentation_scope_resolution_for_test,
-    record_active_graph_submission_scope_resolution_for_test,
-};
 use crate::{
     Result, RuntimeOperation,
     pass::{
@@ -54,16 +34,6 @@ pub(crate) struct GraphSubmissionCommit {
     output: GraphOutputCommit,
     frame_cleanup: FrameCleanup,
     activity: EncodedGpuGraphActivity,
-}
-
-struct GraphSubmittedCommand {
-    #[cfg(test)]
-    raw_fact: GraphSubmissionRawFact,
-}
-
-#[cfg(test)]
-pub(super) struct GraphSubmissionRawFact {
-    pub(super) id: u64,
 }
 
 struct GraphSubmittedResources {
@@ -258,7 +228,10 @@ impl GpuOperationTransaction {
         payload: GraphSubmissionPayload,
         operation: RuntimeOperation,
     ) -> Result<GraphSubmissionCommit> {
-        #[cfg(not(test))]
+        #[cfg(not(any(
+            feature = "render-window",
+            all(feature = "render-web", target_arch = "wasm32")
+        )))]
         let _ = device;
         let GraphSubmissionPayload {
             command_buffer,
@@ -267,49 +240,25 @@ impl GpuOperationTransaction {
             activity,
             output,
         } = payload;
-        let submitted = self
-            .submit_graph_command(
-                device,
-                queue,
-                command_buffer,
-                &capture_resources,
-                &prepared_frame,
-            )
-            .await;
-        #[cfg(not(test))]
-        let _ = submitted;
+        self.submit_graph_command(queue, command_buffer).await;
         let resources = GraphSubmittedResources {
             capture_resources,
             prepared_frame,
         };
         let (output, frame_cleanup) = match output {
             PendingGraphHostEffect::Headless(publication) => {
-                self.finish_graph_headless(
-                    publication,
-                    resources,
-                    pass_cache,
-                    operation,
-                    &submitted,
-                )
-                .await?
+                self.finish_graph_headless(publication, resources, pass_cache, operation)
+                    .await?
             }
             #[cfg(any(
                 feature = "render-window",
                 all(feature = "render-web", target_arch = "wasm32")
             ))]
             PendingGraphHostEffect::Presented(effect) => {
-                self.finish_base_graph_presented(
-                    device, effect, resources, pass_cache, operation, &submitted,
-                )
-                .await?
+                self.finish_base_graph_presented(device, effect, resources, pass_cache, operation)
+                    .await?
             }
         };
-        #[cfg(test)]
-        record_active_graph_commit_for_test(
-            &submitted.raw_fact,
-            &output,
-            frame_cleanup.retention(),
-        );
         Ok(GraphSubmissionCommit {
             output,
             frame_cleanup,
@@ -323,13 +272,8 @@ impl GpuOperationTransaction {
         submitted_resources: GraphSubmittedResources,
         pass_cache: &mut DevicePassCache,
         operation: RuntimeOperation,
-        _submitted: &GraphSubmittedCommand,
     ) -> Result<(GraphOutputCommit, FrameCleanup)> {
         let result = self.finish(operation).await;
-        #[cfg(test)]
-        record_active_graph_headless_scope_resolution_for_test(&_submitted.raw_fact);
-        #[cfg(test)]
-        notify_active_graph_submission_scope_resolution_for_test(&_submitted.raw_fact);
         result?;
         let resources = AccountingReadyGraphResources::try_new(
             submitted_resources.capture_resources,
@@ -356,14 +300,9 @@ impl GpuOperationTransaction {
         submitted_resources: GraphSubmittedResources,
         pass_cache: &mut DevicePassCache,
         operation: RuntimeOperation,
-        _submitted: &GraphSubmittedCommand,
     ) -> Result<(GraphOutputCommit, FrameCleanup)> {
         let mut transaction = self;
         let result = transaction.resolve_submission_phase(operation).await;
-        #[cfg(test)]
-        record_active_graph_submission_scope_resolution_for_test(&_submitted.raw_fact);
-        #[cfg(test)]
-        notify_active_graph_submission_scope_resolution_for_test(&_submitted.raw_fact);
         result?;
         let resources = AccountingReadyGraphResources::try_new(
             submitted_resources.capture_resources,
@@ -377,53 +316,13 @@ impl GpuOperationTransaction {
             });
         transaction.begin_present_phase(device, operation)?;
         let output = clean.apply();
-        #[cfg(test)]
-        apply_active_graph_present_failure_for_test(&_submitted.raw_fact, device);
         let result = transaction.finish(operation).await;
-        #[cfg(test)]
-        record_active_graph_presentation_scope_resolution_for_test(&_submitted.raw_fact);
-        #[cfg(test)]
-        notify_active_graph_presentation_scope_resolution_for_test(&_submitted.raw_fact);
         result?;
         let frame_cleanup = resources.commit(pass_cache)?;
         Ok((output, frame_cleanup))
     }
 
-    async fn submit_graph_command(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        command_buffer: wgpu::CommandBuffer,
-        capture_resources: &PendingVelloResourceCommit,
-        prepared_frame: &PendingPreparedFrameCommit,
-    ) -> GraphSubmittedCommand {
-        #[cfg(not(test))]
-        let _ = (device, capture_resources, prepared_frame);
-        #[cfg(test)]
-        let capture_lease_count = capture_resources.lease_count_for_test();
-        #[cfg(test)]
-        let prepared_frame_resource_identities = prepared_frame.resource_identities_for_test();
+    async fn submit_graph_command(&self, queue: &wgpu::Queue, command_buffer: wgpu::CommandBuffer) {
         queue.submit([command_buffer]);
-        #[cfg(test)]
-        let raw_fact = begin_graph_submission_observation_for_test(
-            self.lease.generation(),
-            self.lease.active_generation_for_test(),
-            capture_lease_count,
-            prepared_frame_resource_identities,
-        );
-        #[cfg(test)]
-        apply_active_graph_post_submit_control_for_test(
-            &raw_fact,
-            device,
-            &self.lease.signal,
-            prepared_frame,
-        )
-        .await;
-        #[cfg(test)]
-        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
-        GraphSubmittedCommand {
-            #[cfg(test)]
-            raw_fact,
-        }
     }
 }
