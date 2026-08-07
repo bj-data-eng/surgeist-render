@@ -313,6 +313,7 @@ authority-remote readback:
 set -euo pipefail
 test -z "$(git diff a8719e7633bc6445542bb4c5d3b2ac16294b117b -- . \
   ':(exclude)src/renderer.rs' ':(exclude)src/renderer/**' \
+  ':(exclude)src/tests.rs' \
   ':(exclude)plans/cycles/cohesive-module-decomposition-c08-renderer-orchestration.md')"
 CARGO_NET_OFFLINE=true cargo fmt --check
 CARGO_NET_OFFLINE=true cargo check -p surgeist-render
