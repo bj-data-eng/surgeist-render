@@ -1,5 +1,3 @@
-#[cfg(all(test, not(target_arch = "wasm32")))]
-use self::native::take_native_readback_observation_for_test;
 use self::{layout::ReadbackLayout, lifecycle::ReadbackOwner, native::ReadbackMapFuture};
 use super::{
     BackendErrorCode, Error, ImageBuffer, PhysicalSize, Result, RuntimeOperation,
@@ -20,9 +18,9 @@ pub(crate) use test_support::{
 };
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
-pub(crate) use native::{
-    NativeReadbackObservationForTest, NativeReadbackObservationSnapshotForTest,
-    NativeReadbackPhaseForTest, ScopedNativeReadbackObservationForTest,
+pub(crate) use test_support::{
+    NativeReadbackLateCallbackStageForTest, NativeReadbackStageForTest,
+    NativeReadbackStagePhaseForTest,
 };
 
 pub(crate) async fn read_texture_rgba(
@@ -35,9 +33,6 @@ pub(crate) async fn read_texture_rgba(
     if physical_size.width() == 0 || physical_size.height() == 0 {
         return ImageBuffer::try_new(physical_size, Vec::new());
     }
-
-    #[cfg(all(test, not(target_arch = "wasm32")))]
-    let observation = take_native_readback_observation_for_test();
 
     let transaction =
         backend.begin_gpu_operation(device_identity, GpuOperationStage::Readback, operation)?;
@@ -63,10 +58,6 @@ pub(crate) async fn read_texture_rgba(
             mapped_at_creation: false,
         });
         let mut owner = ReadbackOwner::allocated(buffer, layout, physical_size);
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &observation {
-            observation.attach_staging(&owner.staging_map());
-        }
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("Surgeist scoped texture readback copy"),
         });
@@ -88,10 +79,6 @@ pub(crate) async fn read_texture_rgba(
         );
         let pending_submission = transaction.submit_readback(queue, encoder.finish());
         let submission_index = pending_submission.submission_index();
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        if let Some(observation) = &observation {
-            observation.record_copy_submitted(&submission_index);
-        }
         owner.copy_submitted(submission_index);
         (owner, pending_submission)
     };
@@ -102,10 +89,6 @@ pub(crate) async fn read_texture_rgba(
         Ok(submission) => submission,
         Err(error) => {
             owner.fail();
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            if let Some(observation) = &observation {
-                observation.record_phase(NativeReadbackPhaseForTest::Failed);
-            }
             return Err(error);
         }
     };
@@ -118,23 +101,14 @@ pub(crate) async fn read_texture_rgba(
         Ok((device, _)) => device.clone(),
         Err(error) => {
             owner.fail();
-            #[cfg(all(test, not(target_arch = "wasm32")))]
-            if let Some(observation) = &observation {
-                observation.record_phase(NativeReadbackPhaseForTest::Failed);
-            }
             return Err(error);
         }
     };
-    let readback_result = match ReadbackMapFuture::start(
-        owner,
-        device,
-        submission.into_submission_index(),
-        #[cfg(all(test, not(target_arch = "wasm32")))]
-        observation,
-    ) {
-        Ok(readback) => readback.await,
-        Err(error) => Err(error),
-    };
+    let readback_result =
+        match ReadbackMapFuture::start(owner, device, submission.into_submission_index()) {
+            Ok(readback) => readback.await,
+            Err(error) => Err(error),
+        };
 
     backend.observe_device_terminal(device_identity);
     if let Some(error) = backend.terminal_error(device_identity, operation) {

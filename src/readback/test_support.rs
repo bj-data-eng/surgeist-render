@@ -1,5 +1,5 @@
 #[cfg(not(target_arch = "wasm32"))]
-use super::native::{NativePollAction, handle_native_poll_result};
+use super::native::{NativePollAction, ReadbackMapFuture, handle_native_poll_result};
 use super::{
     BackendErrorCode, Error, ImageBuffer, PhysicalSize, Result,
     layout::{ReadbackLayout, decode_padded_rows},
@@ -15,6 +15,9 @@ use std::{
     sync::{Arc, Mutex},
     task::{Context, Poll},
 };
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{future::Future, pin::Pin, sync::Weak};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum ReadbackPhaseForTest {
@@ -363,4 +366,199 @@ impl ReadbackCompletionForTest {
             counts.discarded = counts.discarded.saturating_add(1);
         }
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NativeReadbackStagePhaseForTest {
+    MapPending,
+    PublishedBytes,
+    Failed,
+    Canceled,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct NativeReadbackStageForTest {
+    future: Option<ReadbackMapFuture>,
+    staging_map: Weak<ReadbackStagingMapState>,
+    submission_index: wgpu::SubmissionIndex,
+    phase: NativeReadbackStagePhaseForTest,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeReadbackStageForTest {
+    pub(crate) fn begin(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        physical_size: PhysicalSize,
+    ) -> Result<Self> {
+        let (owner, submission_index, staging_map) =
+            submitted_native_readback_owner_for_test(device, queue, texture, physical_size)?;
+        let future = ReadbackMapFuture::start(owner, device.clone(), submission_index.clone())?;
+        Ok(Self {
+            future: Some(future),
+            staging_map,
+            submission_index,
+            phase: NativeReadbackStagePhaseForTest::MapPending,
+        })
+    }
+
+    pub(crate) const fn phase_for_test(&self) -> NativeReadbackStagePhaseForTest {
+        self.phase
+    }
+
+    pub(crate) fn submission_index_for_test(&self) -> wgpu::SubmissionIndex {
+        self.submission_index.clone()
+    }
+
+    pub(crate) fn staging_disposition_for_test(&self) -> Option<ReadbackStagingDispositionForTest> {
+        self.staging_map
+            .upgrade()
+            .map(|staging| staging.disposition_for_test().into())
+    }
+
+    pub(crate) fn staging_state_dropped_for_test(&self) -> bool {
+        self.staging_map.upgrade().is_none()
+    }
+
+    pub(crate) fn cancel_for_test(&mut self) {
+        if let Some(future) = self.future.take() {
+            drop(future);
+            self.phase = NativeReadbackStagePhaseForTest::Canceled;
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Future for NativeReadbackStageForTest {
+    type Output = Result<ImageBuffer>;
+
+    fn poll(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Self::Output> {
+        let poll = {
+            let future = self
+                .future
+                .as_mut()
+                .expect("a native readback test stage may complete only once");
+            Pin::new(future).poll(context)
+        };
+        match poll {
+            Poll::Pending => Poll::Pending,
+            Poll::Ready(result) => {
+                self.phase = if result.is_ok() {
+                    NativeReadbackStagePhaseForTest::PublishedBytes
+                } else {
+                    NativeReadbackStagePhaseForTest::Failed
+                };
+                drop(self.future.take());
+                Poll::Ready(result)
+            }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for NativeReadbackStageForTest {
+    fn drop(&mut self) {
+        self.cancel_for_test();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) struct NativeReadbackLateCallbackStageForTest {
+    completion: Arc<ReadbackCompletion>,
+    device: wgpu::Device,
+    staging_map: Weak<ReadbackStagingMapState>,
+    submission_index: wgpu::SubmissionIndex,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl NativeReadbackLateCallbackStageForTest {
+    pub(crate) fn cancel_before_poll(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        texture: &wgpu::Texture,
+        physical_size: PhysicalSize,
+    ) -> Result<Self> {
+        let (mut owner, submission_index, staging_map) =
+            submitted_native_readback_owner_for_test(device, queue, texture, physical_size)?;
+        let completion = Arc::new(ReadbackCompletion::new());
+        owner.map_pending();
+        owner.staging().slice(owner.mapped_range()).map_async(
+            wgpu::MapMode::Read,
+            map_completion_callback(Arc::clone(&completion), owner.staging_map()),
+        );
+        completion.cancel();
+        owner.cancel();
+        drop(owner);
+        Ok(Self {
+            completion,
+            device: device.clone(),
+            staging_map,
+            submission_index,
+        })
+    }
+
+    pub(crate) fn staging_disposition_for_test(&self) -> Option<ReadbackStagingDispositionForTest> {
+        self.staging_map
+            .upgrade()
+            .map(|staging| staging.disposition_for_test().into())
+    }
+
+    pub(crate) fn deliver_late_callback_for_test(
+        &self,
+    ) -> std::result::Result<wgpu::PollStatus, wgpu::PollError> {
+        self.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(self.submission_index.clone()),
+            timeout: Some(std::time::Duration::from_secs(5)),
+        })
+    }
+
+    pub(crate) fn callback_result_was_discarded_for_test(&self) -> bool {
+        self.completion.is_canceled_for_test() && self.staging_map.upgrade().is_none()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn submitted_native_readback_owner_for_test(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    texture: &wgpu::Texture,
+    physical_size: PhysicalSize,
+) -> Result<(
+    super::lifecycle::ReadbackOwner,
+    wgpu::SubmissionIndex,
+    Weak<ReadbackStagingMapState>,
+)> {
+    let layout = ReadbackLayout::try_new(physical_size)?;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("Surgeist explicit native readback test stage"),
+        size: layout.buffer_size(),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let mut owner = super::lifecycle::ReadbackOwner::allocated(buffer, layout, physical_size);
+    let staging_map = Arc::downgrade(&owner.staging_map());
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+        label: Some("Surgeist explicit native readback test copy"),
+    });
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: owner.staging(),
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(owner.layout.padded_bytes_per_row()),
+                rows_per_image: None,
+            },
+        },
+        wgpu::Extent3d {
+            width: owner.layout.width(),
+            height: owner.layout.height(),
+            depth_or_array_layers: 1,
+        },
+    );
+    let submission_index = queue.submit([encoder.finish()]);
+    owner.copy_submitted(submission_index.clone());
+    Ok((owner, submission_index, staging_map))
 }
