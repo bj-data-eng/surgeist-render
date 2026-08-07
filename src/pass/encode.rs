@@ -3,6 +3,9 @@ use std::{
     sync::Arc,
 };
 
+#[cfg(test)]
+use std::cell::Cell;
+
 use super::super::{
     Color, Format, PhysicalSize, Result, Transform,
     encode::{encode_vello_clip_coverage_scene, encode_vello_scene_with_initial_transform},
@@ -35,12 +38,6 @@ use super::{
         PreparedC11PassObjects, PreparedGraph, PreparedTextureBinding,
         RuntimePassPreparationRequest, VELLO_CAPTURE_TEXTURE_USAGES,
     },
-};
-
-#[cfg(test)]
-use super::{
-    C08EncodedCaptureObservationForTest, C11FilterPassTagForTest, PREPARED_GRAPH_TEST_SUPPORT,
-    c11_scheduled_pass_order_for_test, inject_color_filter_shader_failure_for_test,
 };
 
 pub(super) fn backdrop_filter_passes(steps: &[ExecutableFilterStepFacts]) -> Vec<RuntimePassId> {
@@ -200,6 +197,38 @@ pub(super) enum C08ScheduledEncodingKind {
     Present,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ScheduledFilterRawFact {
+    Color,
+    BlurHorizontalRgba,
+    BlurVerticalRgba,
+    BlurHorizontalSourceAlpha,
+    BlurVerticalSourceAlpha,
+    DropShadowColorize,
+    DropShadowMerge,
+}
+
+#[cfg(test)]
+thread_local! {
+    static COLOR_FILTER_SHADER_FAILURE_RAW_HOOK: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(super) fn replace_color_filter_shader_failure_raw_hook(active: bool) -> bool {
+    COLOR_FILTER_SHADER_FAILURE_RAW_HOOK.with(|hook| hook.replace(active))
+}
+
+#[cfg(test)]
+fn inject_color_filter_shader_failure_from_raw_hook() -> Result<()> {
+    if COLOR_FILTER_SHADER_FAILURE_RAW_HOOK.with(Cell::get) {
+        return Err(preparation_error(
+            "injected color-filter shader failure after checked realization",
+        ));
+    }
+    Ok(())
+}
+
 /// Immutable counts derived only from runtime passes that finished encoding.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct EncodedGpuGraphActivity {
@@ -331,7 +360,7 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) original_source_releases_after_merge: bool,
     pub(crate) advances_every_pass_once: bool,
     #[cfg(test)]
-    pub(crate) c11_pass_order: Vec<C11FilterPassTagForTest>,
+    pub(crate) c11_pass_order: Vec<ScheduledFilterRawFact>,
     #[cfg(test)]
     pub(crate) capture_count: usize,
     #[cfg(test)]
@@ -341,7 +370,7 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     #[cfg(test)]
     pub(crate) graph_work_shares_one_command_encoder: bool,
     #[cfg(test)]
-    pub(crate) capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+    pub(crate) capture_observations: Vec<EncodedCaptureRawFact>,
 }
 
 struct C08CustomSpineEncodingProgress {
@@ -395,7 +424,7 @@ struct C08CustomSpineEncodingProgress {
     shadow_source_read_twice: bool,
     shadow_source_released_after_merge: bool,
     #[cfg(test)]
-    capture_observations: Vec<C08EncodedCaptureObservationForTest>,
+    capture_observations: Vec<EncodedCaptureRawFact>,
     #[cfg(test)]
     composite_encoder_identities: Vec<usize>,
 }
@@ -555,7 +584,7 @@ impl C08CustomSpineEncodingProgress {
             advances_every_pass_once: self.completed_pass_count == self.expected_pass_count
                 && prepared.next_pass == self.expected_pass_count,
             #[cfg(test)]
-            c11_pass_order: c11_scheduled_pass_order_for_test(&self.scheduled),
+            c11_pass_order: scheduled_filter_raw_facts(&self.scheduled),
             #[cfg(test)]
             capture_count: self.capture_count,
             #[cfg(test)]
@@ -612,6 +641,43 @@ impl C08CustomSpineEncodingProgress {
             })
             && (self.color_filter_count == 0 || has_color_filters)
     }
+}
+
+#[cfg(test)]
+fn scheduled_filter_raw_facts(
+    scheduled: &[C08ScheduledEncodingKind],
+) -> Vec<ScheduledFilterRawFact> {
+    scheduled
+        .iter()
+        .filter_map(|kind| match kind {
+            C08ScheduledEncodingKind::ColorFilter => Some(ScheduledFilterRawFact::Color),
+            C08ScheduledEncodingKind::BlurHorizontalRgba => {
+                Some(ScheduledFilterRawFact::BlurHorizontalRgba)
+            }
+            C08ScheduledEncodingKind::BlurVerticalRgba => {
+                Some(ScheduledFilterRawFact::BlurVerticalRgba)
+            }
+            C08ScheduledEncodingKind::BlurHorizontalSourceAlpha => {
+                Some(ScheduledFilterRawFact::BlurHorizontalSourceAlpha)
+            }
+            C08ScheduledEncodingKind::BlurVerticalSourceAlpha => {
+                Some(ScheduledFilterRawFact::BlurVerticalSourceAlpha)
+            }
+            C08ScheduledEncodingKind::DropShadowColorize => {
+                Some(ScheduledFilterRawFact::DropShadowColorize)
+            }
+            C08ScheduledEncodingKind::DropShadowMerge => {
+                Some(ScheduledFilterRawFact::DropShadowMerge)
+            }
+            C08ScheduledEncodingKind::ClearRoot
+            | C08ScheduledEncodingKind::VelloCapture
+            | C08ScheduledEncodingKind::CanonicalizeCapture
+            | C08ScheduledEncodingKind::CopyBackdrop
+            | C08ScheduledEncodingKind::SpanSourceOver
+            | C08ScheduledEncodingKind::LayerComposite
+            | C08ScheduledEncodingKind::Present => None,
+        })
+        .collect()
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -805,7 +871,21 @@ impl C08CustomSpineEncodingSummary {
 struct C08EncodedCaptureResult {
     receipt: C08VelloCaptureCompletionReceipt,
     #[cfg(test)]
-    observation: C08EncodedCaptureObservationForTest,
+    observation: EncodedCaptureRawFact,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct EncodedCaptureRawFact {
+    pub(crate) lowers_with_exact_initial_transform: bool,
+    pub(crate) uses_transparent_base: bool,
+    pub(crate) antialiasing: Antialiasing,
+    pub(crate) target_extent: PhysicalSize,
+    pub(crate) target_format: wgpu::TextureFormat,
+    pub(crate) target_usage: wgpu::TextureUsages,
+    pub(crate) target_and_view_are_exact: bool,
+    encoder_identity: usize,
+    scope_identity: usize,
 }
 
 struct C08VelloCaptureEncodingContext<'encoding, 'device> {
@@ -1581,13 +1661,7 @@ impl<'device> PreparedGraph<'device> {
             }
         };
         #[cfg(test)]
-        if PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
-            let mut state = support.get();
-            let inject = state.fail_scope_resolution;
-            state.fail_scope_resolution = false;
-            support.set(state);
-            inject
-        }) {
+        if std::mem::take(&mut self.scope_resolution_failure_raw_hook) {
             scope.inject_validation_error_for_test();
         }
         let leases = match scope.finish_with_leases(leases).await {
@@ -1796,15 +1870,8 @@ impl<'device> PreparedGraph<'device> {
         progress: &mut C08CustomSpineEncodingProgress,
     ) -> Result<()> {
         #[cfg(test)]
-        if PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
-            let mut state = support.get();
-            let inject = state.fail_capture_encoding_after == Some(progress.capture_count);
-            if inject {
-                state.fail_capture_encoding_after = None;
-                support.set(state);
-            }
-            inject
-        }) {
+        if self.capture_encoding_failure_after_raw_hook == Some(progress.capture_count) {
+            self.capture_encoding_failure_after_raw_hook = None;
             return Err(preparation_error(
                 "injected C08 Vello capture encoding failure",
             ));
@@ -1817,12 +1884,10 @@ impl<'device> PreparedGraph<'device> {
         progress.capture_observations.push(encoded.observation);
         self.complete_c08_capture(request.id, target, session, encoded.receipt)?;
         #[cfg(test)]
-        PREPARED_GRAPH_TEST_SUPPORT.with(|support| {
-            let mut state = support.get();
-            state.acquired_capture_lease_count =
-                state.acquired_capture_lease_count.saturating_add(1);
-            support.set(state);
-        });
+        {
+            self.acquired_capture_lease_count_raw_fact =
+                self.acquired_capture_lease_count_raw_fact.saturating_add(1);
+        }
         progress.record_capture_completion();
         Ok(())
     }
@@ -2143,7 +2208,7 @@ impl<'device> PreparedGraph<'device> {
         };
         let (lease, proof) = encoded.into_resources_and_proof();
         #[cfg(test)]
-        let observation = C08EncodedCaptureObservationForTest {
+        let observation = EncodedCaptureRawFact {
             lowers_with_exact_initial_transform,
             uses_transparent_base: proof.transparent_base_for_test(),
             antialiasing: proof.antialiasing_for_test(),
@@ -2875,7 +2940,7 @@ impl<'device> PreparedGraph<'device> {
     ) -> Result<C10ColorFilterEncodingFacts> {
         let prepared = self.prepare_c10_color_filter_encoding(request)?;
         #[cfg(test)]
-        inject_color_filter_shader_failure_for_test()?;
+        inject_color_filter_shader_failure_from_raw_hook()?;
         let spatial_buffer = self.create_c08_spatial_uniform_buffer(prepared.spatial);
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("Surgeist C10 exact color-filter bindings"),
