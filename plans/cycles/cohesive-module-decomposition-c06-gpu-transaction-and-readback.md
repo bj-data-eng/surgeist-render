@@ -1,0 +1,358 @@
+# P02-I02-S01-C06 GPU Transaction And Readback
+
+## 1 Header
+
+- Cycle: `P02/I02/S01/C06`.
+- Owning repository: `surgeist-render`.
+- Status: `draft`.
+- Cycle base: `9673fcda13b614cfac3bd74f23fcf4435ec869ef`, the published
+  C05 candidate verified on local and authority-remote `main`.
+- Specification: `plans/specs/cohesive-module-decomposition.md` at
+  `314b8252e8db18130abb8031033b5a0be624c81a`, SHA-256
+  `415257797bf18fd6d6a2d3e5a9ffcd07bc42793490da56505a83e7300aa6d1bb`;
+  sections M01-M04, M05.3 transaction table, M05.5 readback table, and M06-M09.
+- Sequence: `plans/sequences/cohesive-module-decomposition.md` at
+  `0552b8f92db40cc4bb8ef4977f926d045610781b`, SHA-256
+  `388573ae297d62681792ff0170713e9ab1fe394b40d5e740144423dfd2b37f97`;
+  entry `C06 GPU Transaction And Readback`.
+- Outcome: replace `src/gpu_transaction.rs` with a narrow transaction front
+  door and the required graph, Vello, readback, and test-support children; then
+  replace `src/readback.rs` with a narrow operation front door and the required
+  layout, lifecycle, native, and test-support children without changing public
+  behavior, transaction proofs, readback bytes, or test oracles.
+
+## 2 Boundary
+
+- Transaction shared owner: `GpuOperationStage`, `GpuOperationDraft`,
+  `GpuOperationLease`, `GpuOperationTransaction`, shared scope/error
+  classification, and operation-wide begin/finish/drop coordination remain in
+  `gpu_transaction/mod.rs`.
+- Graph owner: graph submission payload and command/resource readiness,
+  accounting, host effects, graph output commit, and graph submission commit
+  proof move to `gpu_transaction/graph.rs`.
+- Vello owner: `InternalVelloPayload`, Vello submission, and
+  `VelloResourceCommitProof` move to `gpu_transaction/vello.rs`.
+- Transaction-readback owner: `ReadbackSubmission`,
+  `PendingReadbackSubmission`, and their commit transition move to
+  `gpu_transaction/readback.rs`.
+- Transaction test owner: post-submit controls plus operation, graph, and Vello
+  submission observations move to test-only
+  `gpu_transaction/test_support.rs`.
+- Readback layout owner: validated row layout, mapped-range validation, and
+  padded-row decode move to `readback/layout.rs`.
+- Readback lifecycle owner: readback phase, owner, staging disposition, cleanup,
+  mapping state, and lifecycle transitions move to `readback/lifecycle.rs`.
+- Readback native owner: completion state/callback, native polling/helper,
+  readback future, and native platform behavior move to `readback/native.rs`.
+- Readback test owner: native observations and standalone lifecycle/completion
+  probes move to test-only `readback/test_support.rs`.
+- `readback/mod.rs` retains only the readback operation front door and genuine
+  coordination spanning layout, lifecycle, and native completion.
+- Preserve transaction stages; validation, internal and out-of-memory error
+  mapping; device-terminal precedence; exactly-once submission and commit;
+  post-submit behavior; generation and lease ownership; graph/Vello resource
+  readiness; and cancellation/drop cleanup.
+- Preserve row alignment, byte counts, mapped ranges, RGBA decode order,
+  staging-buffer phases and disposition, callback and wake behavior, native
+  polling deadlines, future ownership, late-callback cancellation behavior,
+  and failure-atomic image publication.
+- Preserve the M06 transaction/backend mutual edge. Child imports must name the
+  owning front door or child explicitly; no trait, callback abstraction,
+  dynamic dispatch, duplicated state, compatibility module, `include!`, or
+  `#[path]` bridge may disguise an ownership cycle.
+- M04.5 applies only during T01-T02 and T04-T05: a minimal intrinsic
+  `#[cfg(test)]` raw fact may travel with the production value it observes until
+  the immediately following test-support task. No production child imports
+  test support, and final production children own no fixture, fault control,
+  observation model/aggregation, or global observation bridge.
+- `src/lib.rs`, `Cargo.toml`, `README.md`, `examples/`, `src/tests.rs`, the
+  already-settled frame/pass/shader/resource hierarchies, backend/renderer
+  monoliths, public exports, dependencies, features, error codes, and test
+  expectations are protected surfaces.
+- Root integration, sibling repositories, API artifacts, unrelated cleanup,
+  algorithm changes, error-policy changes, and the future backend, renderer,
+  and focused-test cycles are excluded.
+
+## 3 Effects And Evidence Policy
+
+- API effect: none. Existing public and crate-visible paths remain explicit at
+  the new module front doors; no public visibility is added.
+- Dependency and feature effect: none. `Cargo.toml` and the resolved trees are
+  unchanged.
+- Behavior and oracle effect: none. This is a mechanical ownership move backed
+  by pre/post characterization; no artificial RED applies.
+- Generated-artifact effect: none. Root owns API artifacts and is excluded.
+- Test effect: imports continue through the same explicit crate-visible front
+  doors. No test name, body, expectation, fixture input, or oracle changes.
+- Structural inspection is transient workflow evidence. Add no parser, source-
+  text assertion, plan-closure test, committed inventory, ledger, generated
+  index, lint, CI rule, or file-size/count gate.
+- Planning provenance remains only under `plans/`. The C05 planning-name content
+  and pathname predicates remain empty for every tracked non-plan Rust/WGSL
+  artifact and pathname; no task identifier is introduced into code, comments,
+  labels, diagnostics, filenames, or test names.
+- Workers record exact pre/post focused commands, moved-item ownership,
+  visibility deltas, file deletion/creation, protected-surface diff, and the
+  absence of algorithm/oracle changes. Each task is one logical commit and a
+  separately reviewed exact range.
+
+## 4 Ordered Tasks
+
+### 4.1 T01 Establish Transaction Front Door And Graph Owner
+
+- Start from the reviewed cycle base. Replace `src/gpu_transaction.rs` with
+  `src/gpu_transaction/mod.rs`; retain only shared operation-stage,
+  draft/lease/transaction coordination there. Move graph payload, submitted
+  command/resources, readiness/accounting receipts, host effects, graph output
+  commit, and graph commit transitions to `graph.rs` with the narrowest required
+  visibility.
+- Keep Vello, transaction-readback, and test-support implementation temporarily
+  in `mod.rs`. Graph-coupled observations may remain attached under M04.5 until
+  T03; do not detach them into global state or redesign the graph commit path.
+- Before and after, run:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render graph_render_submits_one_transaction_and_publishes_once
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render multiple_composites_share_one_graph_encoder_and_transaction_commit
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render canceled_graph_after_real_submit_discards_prepared_resources_and_retries_fresh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_graph_post_submit_failure_leaves_first_frame_unpublished
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render presented_graph_scope_failure_suppresses_presentation_and_commits
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: the old file is gone; graph production ownership is in
+  `graph.rs`; `mod.rs` contains shared transaction coordination rather than a
+  copied graph implementation; graph submission, readiness, commit, failure,
+  cancellation, and publication observations are identical.
+- Intended commit: one transaction-front-door/graph-owner move.
+
+### 4.2 T02 Move Vello And Transaction-Readback Owners
+
+- Start only from the reviewed T01 head. Move internal Vello payload,
+  submission, and resource commit proof to `vello.rs`. Move pending/committed
+  readback submission facts and transitions to `readback.rs`. Reconcile shared
+  transaction methods in `mod.rs` through explicit child contracts.
+- Preserve one transaction generation, scope resolution, queue submission,
+  post-submit ordering, lease commit/discard, device-signal precedence, and
+  readback submission index. Vello-coupled observations may remain attached
+  under M04.5 until T03.
+- Before and after, run:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render non_readback_gpu_submissions_are_owned_by_gpu_operation_transactions
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render dropped_gpu_operation_future_aborts_draft_state_and_leases
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render direct_render_submits_one_transaction_owned_raster_pass
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render internal_vello_encoding_shares_the_frame_transaction_submission
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render encoded_vello_pass_requires_transaction_submission_and_explicit_lease_commit
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render readback_transaction_maps_validation_internal_oom_and_terminal_failures
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render --features render-window,render-web
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: all four production transaction files exist; each M05.3
+  responsibility has one owner; shared transaction coordination remains narrow;
+  operation, Vello, and readback submission behavior and observations are
+  identical; no new crate-level edge exists.
+- Intended commit: one Vello/readback transaction-owner move.
+
+### 4.3 T03 Move Transaction Test Support And Reconcile Front Door
+
+- Start only from the reviewed T02 head. Move operation, graph, and Vello
+  submission observation models/aggregation, post-submit controls, scoped test
+  guards, checkpoints, and test-only recorders to test-gated
+  `gpu_transaction/test_support.rs`.
+- Leave production children only minimal intrinsic per-value raw facts or
+  accessors that cannot be derived from production state without changing
+  semantics. Production children may not import test support or own a fixture,
+  fault control, observation model/aggregation, or global bridge.
+- Before and after, run all T01 and T02 focused tests plus:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_direct_post_submit_failure_preserves_previous_and_initial_publication
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render post_submit_scope_failure_discards_prepared_resources_with_nonzero_budget
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render terminal_signal_after_transaction_completion_preserves_public_frame_state
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render presented_post_transaction_terminal_signal_commits_current_frame_and_fails_next_operation
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: `test_support.rs` is compiled only for tests; the front door is
+  shared transaction coordination plus explicit reexports; production children
+  have no test-support dependency or behavior-changing test control; the full
+  default suite and all focused observations remain identical.
+- Intended commit: one transaction-test-support reconciliation.
+
+### 4.4 T04 Establish Readback Front Door, Layout, And Lifecycle Owners
+
+- Start only from the reviewed T03 head. Replace `src/readback.rs` with
+  `src/readback/mod.rs`. Move row-layout construction/validation, mapped-range
+  validation, and padded-row decode to `layout.rs`. Move phase, owner, staging
+  disposition, cleanup, map state, and lifecycle transitions to `lifecycle.rs`.
+- Keep native completion/polling/future and readback test support temporarily in
+  `mod.rs`. Lifecycle-coupled test facts may remain attached under M04.5 until
+  T06; row bytes, ranges, cleanup actions, and state transitions do not change.
+- Before and after, run:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render readback_state_machine_cleans_map_pending_mapped_failed_and_canceled_buffers
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render readback_map_callback_publishes_once_and_wakes_latest_waker
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_render_can_be_read_back
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render high_precision_low_alpha_pixels_preserve_straight_rgb
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render nonzero_headless_read_before_publication_reports_uninitialized_without_map
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: the old file is gone; layout and lifecycle responsibilities have
+  one owner each; `mod.rs` retains the operation front door and temporarily
+  staged native/test support only; decoded bytes, state transitions, cleanup,
+  waking, and publication behavior are unchanged.
+- Intended commit: one readback-front-door/layout/lifecycle move.
+
+### 4.5 T05 Move Native Readback Owner
+
+- Start only from the reviewed T04 head. Move completion callback/state, native
+  polling decision and helper, helper/callback ownership, `ReadbackMapFuture`,
+  and native completion behavior to `native.rs`. Keep the operation entry point
+  in `mod.rs` and communicate through explicit layout/lifecycle/native facts.
+- Preserve callback-at-most-once behavior, latest-waker replacement, native
+  polling deadline, helper lifetime, cancel/drop behavior, late callback
+  discard, staging cleanup, and diagnostic text/error conditions.
+- Before and after, run:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render native_readback_callback_progresses_and_cleans_up_with_diagnostic_deadline
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render canceled_native_readback_discards_late_callback_without_publication_change
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render readback_map_callback_publishes_once_and_wakes_latest_waker
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render headless_render_can_be_read_back
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render --features render-window,render-web
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
+  ```
+
+- Acceptance: native ownership is in `native.rs`; `mod.rs` has no callback,
+  poll-helper, or future implementation; native and wasm compilation plus all
+  focused completion/cancellation behavior and diagnostics are unchanged.
+- Intended commit: one native-readback-owner move.
+
+### 4.6 T06 Move Readback Test Support And Reconcile Front Door
+
+- Start only from the reviewed T05 head. Move native observation models,
+  standalone state-machine/completion probes, scoped guards, test lifetimes,
+  and test-only aggregation to test-gated `readback/test_support.rs`.
+- Reconcile `readback/mod.rs` to test-gated child declaration/reexports, the
+  readback operation entry point, and only genuine coordination spanning
+  production children. Apply the same final production/test boundary as T03.
+- Before and after, run all T04 and T05 focused tests plus:
+
+  ```sh
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render readback_transaction_maps_validation_internal_oom_and_terminal_failures
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render canceled_native_readback_discards_late_callback_without_publication_change
+  CARGO_NET_OFFLINE=true cargo fmt --check
+  CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
+  CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window -- -F unsafe-code -D warnings
+  ```
+
+- Acceptance: all five readback files exist; test support is test-only;
+  production children have no test-support dependency, fault control,
+  observation model/aggregation, or global bridge; `mod.rs` is a narrow readback
+  operation front door; focused/default/window behavior and oracles are
+  identical.
+- Intended commit: one readback-test-support/front-door reconciliation.
+
+## 5 Verification And Completion
+
+Each task records passing pre-move characterization and identical post-move
+operation/oracle results; structural source checks are workflow evidence only
+and are not tests. Each task requires a separate task-review `CLEAN` verdict.
+After all tasks are clean, the coordinator makes a status-only `complete`
+commit, runs this matrix, obtains a distinct holistic `CLEAN` review over the
+exact cycle range, repeats the matrix at the unchanged reviewed head, and
+publishes with authority-remote readback:
+
+```sh
+set -euo pipefail
+test ! -e src/gpu_transaction.rs
+test ! -e src/readback.rs
+for required_file in \
+  src/gpu_transaction/mod.rs src/gpu_transaction/graph.rs \
+  src/gpu_transaction/vello.rs src/gpu_transaction/readback.rs \
+  src/gpu_transaction/test_support.rs src/readback/mod.rs \
+  src/readback/layout.rs src/readback/lifecycle.rs src/readback/native.rs \
+  src/readback/test_support.rs; do
+  test -f "$required_file"
+done
+test -z "$(rg -n 'include!|#\s*\[\s*path\s*=' src/gpu_transaction src/readback || true)"
+test -z "$(git diff 9673fcda13b614cfac3bd74f23fcf4435ec869ef -- \
+  src/lib.rs Cargo.toml README.md examples src/tests.rs src/backend.rs \
+  src/renderer.rs src/frame src/pass src/shader src/resource)"
+planning_content_pattern='(?<![A-Za-z0-9_])(?:[PISCT][0-9]{2}[A-Za-z0-9_]*|[pisct][0-9]{2}_[A-Za-z0-9_]*)(?![A-Za-z0-9_])'
+planning_filename_pattern='(?:^|[/_.-])[pisct][0-9]{2}(?=$|[/_.-])|sequence[0-9]+'
+non_plan_paths=("${(@f)$(git ls-files | rg -v '^plans/')}")
+non_plan_code=("${(@f)$(git ls-files -- '*.rs' '*.wgsl' | rg -v '^plans/')}")
+test "${#non_plan_paths[@]}" -gt 0
+test "${#non_plan_code[@]}" -gt 0
+test -z "$(printf '%s\n' "${non_plan_paths[@]}" | rg --pcre2 "$planning_content_pattern" || true)"
+test -z "$(printf '%s\n' "${non_plan_paths[@]}" | rg -i --pcre2 "$planning_filename_pattern" || true)"
+test -z "$(rg -n --pcre2 "$planning_content_pattern" "${non_plan_code[@]}" || true)"
+CARGO_NET_OFFLINE=true cargo fmt --check
+CARGO_NET_OFFLINE=true cargo check -p surgeist-render
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window -- -F unsafe-code -D warnings
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-web
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-web -- -F unsafe-code -D warnings
+CARGO_NET_OFFLINE=true cargo test -p surgeist-render --features render-window,render-web
+CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets --features render-window,render-web -- -F unsafe-code -D warnings
+CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window
+CARGO_NET_OFFLINE=true cargo run -p surgeist-render --example render_window_smoke --features render-window,render-web
+CARGO_NET_OFFLINE=true cargo check -p surgeist-render --target wasm32-unknown-unknown --features render-web --lib --tests
+rustc +1.97.0 --version
+CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets
+CARGO_NET_OFFLINE=true cargo +1.97.0 check -p surgeist-render --all-targets --features render-window,render-web
+CARGO_NET_OFFLINE=true RUSTDOCFLAGS="-D warnings" cargo doc -p surgeist-render --no-deps --features render-window,render-web
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e normal --depth 1
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e dev --depth 1
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i bytemuck
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render -e features -i vello_shaders
+CARGO_NET_OFFLINE=true cargo tree -p surgeist-render --target wasm32-unknown-unknown --features render-web -e features -i getrandom@0.3.4
+test -z "$(git ls-files -- Cargo.lock)"
+owned_rust_files=("${(@f)$(
+  {
+    git ls-files -- '*.rs'
+    git ls-files --others --exclude-standard -- '*.rs'
+  } | sort -u
+)}")
+test "${#owned_rust_files[@]}" -gt 0
+if rg -n --pcre2 '#\s*\[\s*(?:unsafe\s*\(|no_mangle\b|export_name\b)|\bunsafe\s*(?:\{|fn\b|trait\b|impl\b|extern\b)|\bstatic\s+mut\b|\bextern\s*(?:"[^"]*")?\s*\{' "${owned_rust_files[@]}"; then
+  exit 1
+else
+  test "$?" -eq 1
+fi
+git diff --check 9673fcda13b614cfac3bd74f23fcf4435ec869ef..HEAD
+test "$(git rev-parse HEAD)" = "$(git rev-parse main)"
+test -z "$(git status --porcelain)"
+```
+
+Both native smoke executables must render and exit on the native host. If a
+known macOS session condition causes an environmental failure, record that
+single result and follow the active goal note rather than repeatedly rerunning
+it; all non-smoke gates remain mandatory. Every unsafe-scan match is classified;
+any executable match blocks completion. The publication head is immutable after
+holistic review. Root integration remains excluded.
+
+The C06-to-C07 leaf handoff reports the immutable published C06 candidate and
+authority-remote readback SHA, the exact reviewed planning revision, clean task
+and holistic verdicts, the stable transaction/readback private hierarchies,
+clean status, and explicit exclusion of root integration.
