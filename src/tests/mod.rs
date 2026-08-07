@@ -87,9 +87,18 @@ use support::{
     color_then_blur_filters_for_test, composition_commands_for_test,
     filter_graph_commands_for_test, filter_graph_context_for_test, graph_shader_commands_for_test,
     graph_shader_frame_context_for_test, image_from_buffer, opaque_planning_mask, pixel_alpha,
-    pixel_rgba, resolved_layer_alpha_mask_from_buffer, runtime_lowering_commands_for_test,
-    solid_border, spatial_filter_authored_filter_steps_for_test, text_run_for,
+    pixel_rgba, runtime_lowering_commands_for_test, solid_border,
+    spatial_filter_authored_filter_steps_for_test, text_run_for,
 };
+
+fn resolved_layer_alpha_mask_from_buffer(buffer: ImageBuffer) -> ResolvedLayerAlphaMask {
+    let size = buffer.size();
+    ResolvedLayerAlphaMask::try_new(
+        image_from_buffer(buffer),
+        Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
+    )
+    .unwrap()
+}
 
 trait UnwrapOrPanicForTest<T> {
     #[track_caller]

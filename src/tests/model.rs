@@ -27,14 +27,16 @@ use super::{
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     scene,
     support::{
-        AHEM_FONT_BYTES, AHEM_FONT_ID, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P,
-        AHEM_GLYPH_X, ahem_font, assert_premultiplied, pixel_alpha, text_run_for,
+        AHEM_FONT_BYTES, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P, AHEM_GLYPH_X, ahem_font,
+        assert_premultiplied, pixel_alpha, text_run_for,
     },
     vello_engine::{
         glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
         scene::VelloScene,
     },
 };
+
+const AHEM_FONT_ID: u64 = 9001;
 
 #[test]
 fn scene_encoding_is_deterministic() {

@@ -8,7 +8,7 @@ use crate::{
 
 pub(super) const AHEM_FONT_BYTES: &[u8] =
     include_bytes!("../../tests/fixtures/fonts/ahem/Ahem.ttf");
-pub(super) const AHEM_FONT_ID: u64 = 9001;
+const AHEM_FONT_ID: u64 = 9001;
 pub(super) const AHEM_GLYPH_X: u32 = 58;
 pub(super) const AHEM_GLYPH_DESCENT_P: u32 = 82;
 pub(super) const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
@@ -47,15 +47,6 @@ pub(super) fn image_from_buffer(buffer: ImageBuffer) -> Image {
     .unwrap()
 }
 
-pub(super) fn resolved_layer_alpha_mask_from_buffer(buffer: ImageBuffer) -> ResolvedLayerAlphaMask {
-    let size = buffer.size();
-    ResolvedLayerAlphaMask::try_new(
-        image_from_buffer(buffer),
-        Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
-    )
-    .unwrap()
-}
-
 pub(super) fn add_planning_text(scene: &mut Scene, bounds: TextRunBounds) {
     let glyphs = [TextGlyph::try_new(1, 1.0, 2.0, 5.0).unwrap()];
     let run = TextRun::try_new(
@@ -76,7 +67,11 @@ pub(super) fn opaque_planning_mask(size: PhysicalSize) -> ResolvedLayerAlphaMask
         .checked_mul(usize::try_from(size.height()).unwrap())
         .and_then(|pixels| pixels.checked_mul(4))
         .unwrap();
-    resolved_layer_alpha_mask_from_buffer(ImageBuffer::try_new(size, vec![255; byte_len]).unwrap())
+    ResolvedLayerAlphaMask::try_new(
+        image_from_buffer(ImageBuffer::try_new(size, vec![255; byte_len]).unwrap()),
+        Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
+    )
+    .unwrap()
 }
 
 pub(super) fn bounded_planning_backdrop() -> Layer {
