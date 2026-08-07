@@ -39,10 +39,9 @@ use super::{
 
 #[cfg(test)]
 use super::{
-    C08EncodingSummaryObservationsForTest, PREPARED_GRAPH_TEST_SUPPORT,
-    begin_c08_encoding_observations_for_test, finish_c08_encoding_observations_for_test,
-    inject_color_filter_shader_failure_for_test, record_c08_capture_observation_for_test,
-    record_c08_graph_encoder_for_test,
+    PREPARED_GRAPH_TEST_SUPPORT, begin_c08_encoding_observations_for_test,
+    finish_c08_encoding_observations_for_test, inject_color_filter_shader_failure_for_test,
+    record_c08_capture_observation_for_test, record_c08_graph_encoder_for_test,
 };
 
 pub(super) fn backdrop_filter_passes(steps: &[ExecutableFilterStepFacts]) -> Vec<RuntimePassId> {
@@ -330,8 +329,6 @@ pub(crate) struct C08CustomSpineEncodingSummary {
     pub(crate) drop_shadow_reads_original_source_twice: bool,
     pub(crate) original_source_releases_after_merge: bool,
     pub(crate) advances_every_pass_once: bool,
-    #[cfg(test)]
-    pub(super) observations_for_test: C08EncodingSummaryObservationsForTest,
 }
 
 struct C08CustomSpineEncodingProgress {
@@ -461,7 +458,7 @@ impl C08CustomSpineEncodingProgress {
             .saturating_add(self.layer_composite_count);
         let c12 = c12_execution_receipt(prepared);
         #[cfg(test)]
-        let observations_for_test = finish_c08_encoding_observations_for_test(
+        finish_c08_encoding_observations_for_test(
             &self.scheduled,
             self.expected_capture_count,
             self.capture_count,
@@ -542,8 +539,6 @@ impl C08CustomSpineEncodingProgress {
             original_source_releases_after_merge: self.shadow_source_released_after_merge,
             advances_every_pass_once: self.completed_pass_count == self.expected_pass_count
                 && prepared.next_pass == self.expected_pass_count,
-            #[cfg(test)]
-            observations_for_test,
         }
     }
 }

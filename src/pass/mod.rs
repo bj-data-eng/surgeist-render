@@ -5701,6 +5701,8 @@ struct C08EncodingObservationStateForTest {
 thread_local! {
     static C08_ENCODING_OBSERVATIONS_FOR_TEST: RefCell<C08EncodingObservationStateForTest> =
         RefCell::new(C08EncodingObservationStateForTest::default());
+    static C08_ENCODING_SUMMARY_OBSERVATION_FOR_TEST:
+        Cell<Option<&'static C08EncodingSummaryObservationsForTest>> = const { Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -5721,6 +5723,9 @@ fn begin_c08_encoding_observations_for_test(expected_capture_count: usize) {
             capture_observations: Vec::with_capacity(expected_capture_count),
             graph_encoder_identities: Vec::new(),
         };
+    });
+    C08_ENCODING_SUMMARY_OBSERVATION_FOR_TEST.with(|observation| {
+        observation.set(None);
     });
 }
 
@@ -5788,7 +5793,7 @@ fn finish_c08_encoding_observations_for_test(
     capture_count: usize,
     color_filter_count: usize,
     prepared: &PreparedGraph<'_>,
-) -> C08EncodingSummaryObservationsForTest {
+) {
     let observations = C08_ENCODING_OBSERVATIONS_FOR_TEST
         .with(|observations| std::mem::take(&mut *observations.borrow_mut()));
     let captures_share_one_command_encoder =
@@ -5832,7 +5837,7 @@ fn finish_c08_encoding_observations_for_test(
             || prepared.c11_execution.is_some()
             || prepared.c12_execution.is_some());
 
-    C08EncodingSummaryObservationsForTest {
+    let completed = Box::leak(Box::new(C08EncodingSummaryObservationsForTest {
         c12_later_sibling_transition_is_exact: c12_later_sibling_transition_is_exact_for_test(
             prepared,
         ),
@@ -5842,7 +5847,10 @@ fn finish_c08_encoding_observations_for_test(
         captures_share_one_active_vello_scope,
         graph_work_shares_one_command_encoder,
         capture_observations: observations.capture_observations,
-    }
+    }));
+    C08_ENCODING_SUMMARY_OBSERVATION_FOR_TEST.with(|observation| {
+        observation.set(Some(completed));
+    });
 }
 
 #[cfg(test)]
@@ -5886,7 +5894,11 @@ impl std::ops::Deref for C08CustomSpineEncodingSummary {
     type Target = C08EncodingSummaryObservationsForTest;
 
     fn deref(&self) -> &Self::Target {
-        &self.observations_for_test
+        C08_ENCODING_SUMMARY_OBSERVATION_FOR_TEST.with(|observation| {
+            observation
+                .get()
+                .expect("completed C08 encoding must publish its test observation")
+        })
     }
 }
 
