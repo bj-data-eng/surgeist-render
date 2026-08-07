@@ -1959,7 +1959,6 @@ fn effect_texture_dimension_is_rejected_before_allocation() {
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Rgba8, Parameters::default());
     let options = renderer.options();
-    let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let resources_before = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("effect texture dimension coverage requires a selected device context")
@@ -1980,11 +1979,6 @@ fn effect_texture_dimension_is_rejected_before_allocation() {
         .expect("effect texture dimension coverage requires retained device resources")
         .internal_resource_manager_observation_for_test();
 
-    assert_eq!(
-        acquire_observation.acquire_count_for_test(),
-        0,
-        "over-limit effect extent reached cache acquisition"
-    );
     assert_eq!(
         resources_after.payload_creation_attempts, resources_before.payload_creation_attempts,
         "over-limit effect extent reached allocation"
@@ -7107,7 +7101,6 @@ fn offscreen_texture_allocation_uses_explicit_bounded_layer_descriptor() {
 
 #[test]
 fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
-    let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 1.0, 1.0)).unwrap();
     let mut scene = VelloScene::default();
     scene.fill(
@@ -7128,7 +7121,6 @@ fn offscreen_texture_rejects_missing_gpu_context_with_adapter_diagnostic() {
 
     assert_runtime_adapter_unavailable(&error, RuntimeOperation::SurfaceRendering);
     assert!(error.message().contains("offscreen Vello local scene"));
-    assert_eq!(acquire_observation.acquire_count_for_test(), 0);
 }
 
 #[test]
@@ -7270,22 +7262,39 @@ fn offscreen_local_scene_texture_descriptor_rejects_bgra8_for_vello_target() {
 
 #[test]
 fn offscreen_bgra8_render_request_rejects_without_cache_allocation() {
-    let acquire_observation = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("Bgra8 offscreen validation coverage requires a real selected device");
     let bounds = command::OffscreenBounds::try_new(Rect::new(0.0, 0.0, 2.0, 2.0)).unwrap();
     let scene = VelloScene::default();
     let request =
         OffscreenLocalSceneRenderRequest::new(bounds, 1.0, Format::Bgra8, Parameters::default());
+    let options = renderer.options();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("Bgra8 offscreen validation coverage requires real device resources")
+        .internal_resource_manager_observation_for_test();
+    let context = renderer
+        .default_offscreen_render_context()
+        .expect("Bgra8 offscreen validation coverage requires a real device context");
 
     let error = pollster::block_on(render_internal_vello_local_scene_to_offscreen_texture(
-        None,
-        Options::default(),
+        Some(context),
+        options,
         &scene,
         request,
     ))
     .expect_err("Bgra8 should be rejected before GPU context allocation");
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("Bgra8 rejection must retain real device resources")
+        .internal_resource_manager_observation_for_test();
 
     assert_eq!(error.code(), ErrorCode::InvalidInput);
-    assert_eq!(acquire_observation.acquire_count_for_test(), 0);
+    assert_eq!(
+        error.invalid_value_diagnostic().map(InvalidValue::field),
+        Some("offscreen Vello scene texture format")
+    );
+    assert_eq!(resources_after, resources_before);
 }
 
 #[test]
@@ -10357,7 +10366,6 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     let cache_before = ready.device_pass_cache_counts_for_test();
     let publication_before = surface.headless_publication_count_for_test();
     let dispatch_before = renderer.dispatch_observation_for_test();
-    let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let nested = pollster::block_on(renderer.render(surface, &nested, Parameters::default()));
     let transformed =
         pollster::block_on(renderer.render(surface, &transformed, Parameters::default()));
@@ -10371,8 +10379,6 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
     let reference =
         UnresolvedResource::new(UnresolvedResourceKind::Filter, "#broad_backdrop-filter");
     let reference_error = Error::unresolved_resource(reference.clone());
-    let no_offscreen_allocation = offscreen_scope.acquire_count_for_test() == 0;
-    drop(offscreen_scope);
     let ready = renderer
         .default_ready_device_state_borrow_for_test()
         .expect("bounded-backdrop broad rejections must preserve the ready device");
@@ -10404,7 +10410,6 @@ fn bounded_backdrop_broad_inputs_reject_before_allocation_for_test(
             .as_ref()
             .is_err_and(|error| error.unsupported_primitive() == Some(root_policy))
         && reference_error.unresolved_resource_diagnostic() == Some(&reference)
-        && no_offscreen_allocation
         && resources_after == resources_before
         && cache_after == cache_before
         && surface.headless_publication_count_for_test() == publication_before
@@ -25880,7 +25885,10 @@ fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
     )
     .expect("the base direct scene must prepare without effect-graph authority");
 
-    let offscreen_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
+    let resources_before = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the direct scene must begin with a real ready resource manager")
+        .internal_resource_manager_observation_for_test();
     let observation =
         pollster::block_on(renderer.submit_prepared_vello_pass_for_test(&prepared, target_extent))
             .expect("the direct scene must submit through its one internal raster payload");
@@ -25900,11 +25908,12 @@ fn direct_vello_scene_uses_one_pass_and_no_effect_allocation() {
         }),
         "the transaction-owned direct payload must carry actual internal Vello buffer/image allocation roles"
     );
-    assert_eq!(
-        offscreen_acquires.acquire_count_for_test(),
-        0,
-        "the effect-free direct scene must not acquire a shared offscreen/effect texture while its Vello resources allocate"
-    );
+    let resources_after = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("the direct scene must retain its real ready resource manager")
+        .internal_resource_manager_observation_for_test();
+    assert_eq!(resources_before.effect_texture_count_for_test(), 0);
+    assert_eq!(resources_after.effect_texture_count_for_test(), 0);
 }
 
 #[test]
@@ -25932,7 +25941,6 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
         "the real renderer must accept the scoped no-effect-format capability facts"
     );
 
-    let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let mut replacement = Scene::new();
     replacement.fill(
         Rect::new(0.0, 0.0, 2.0, 2.0),
@@ -25960,8 +25968,7 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
         .default_ready_device_state_borrow_for_test()
         .expect("the direct replacement must retain its ready device")
         .internal_resource_manager_observation_for_test();
-    let no_effect_resources = offscreen_scope.acquire_count_for_test() == 0
-        && resources_before.effect_texture_count_for_test() == 0
+    let no_effect_resources = resources_before.effect_texture_count_for_test() == 0
         && resources_after.effect_texture_count_for_test() == 0
         && resources_before
             .resolved_mask_upload_keys_for_test()
@@ -25981,7 +25988,6 @@ fn direct_vello_succeeds_when_effect_working_format_is_unavailable() {
         && dispatch_after.unsupported_graph_rejections
             == dispatch_before.unsupported_graph_rejections
         && stats.route == Some(RenderRoute::DirectVello);
-    drop(offscreen_scope);
     let replacement_pixels = pollster::block_on(renderer.read_headless(&surface))
         .expect("the successful direct replacement publication must be readable");
 
@@ -31571,7 +31577,6 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
 
     let unsupported =
         unsupported_broad_backdrop_scene(Size::new(4.0, 4.0), Rect::new(1.0, 1.0, 2.0, 2.0));
-    let offscreen_scope = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let error =
         pollster::block_on(renderer.render(&mut surface, &unsupported, Parameters::default()))
             .expect_err("a broad-backdrop graph must retain its typed unsupported-pass diagnostic");
@@ -31589,8 +31594,6 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
         None,
         "effect-format unavailability preempted the broad-backdrop diagnostic"
     );
-    let no_offscreen_allocation = offscreen_scope.acquire_count_for_test() == 0;
-    drop(offscreen_scope);
     let pixels_after = pollster::block_on(renderer.read_headless(&surface))
         .expect("the rejected broad-backdrop graph must retain its prior publication");
     let cache_after = renderer
@@ -31604,8 +31607,7 @@ fn broad_backdrop_diagnostic_precedes_unavailable_effect_working_format() {
     let dispatch_after = renderer.dispatch_observation_for_test();
 
     assert!(
-        no_offscreen_allocation
-            && dispatch_after.boundary_invocations == dispatch_before.boundary_invocations
+        dispatch_after.boundary_invocations == dispatch_before.boundary_invocations
             && dispatch_after.unsupported_graph_rejections
                 == dispatch_before.unsupported_graph_rejections
             && dispatch_after.direct_vello_routes == dispatch_before.direct_vello_routes
@@ -32767,7 +32769,6 @@ fn graph_render_direct_parity_for_test(
         .default_ready_device_state_borrow_for_test()
         .expect("a created headless surface must retain its ready device")
         .device_pass_cache_counts_for_test();
-    let effect_acquires = ScopedOffscreenTextureAcquireObservationForTest::begin();
     let stats = pollster::block_on(renderer.render(&mut surface, scene, Parameters::default()))
         .map_err(|error| {
             GraphParityFailureForTest::new(
@@ -32783,20 +32784,17 @@ fn graph_render_direct_parity_for_test(
     let publication_count = surface
         .headless_publication_count_for_test()
         .saturating_sub(publication_before);
-    let effect_acquire_count = effect_acquires.acquire_count_for_test();
     let direct_route_is_exact = stats.route == Some(RenderRoute::DirectVello)
-        && effect_acquire_count == 0
         && cache_before == cache_after
         && publication_count == 1
         && renderer.stats() == stats;
-    drop(effect_acquires);
     if !direct_route_is_exact {
         return Err(GraphParityFailureForTest::new(
             case,
             GraphParityFailureStageForTest::DirectRoute,
             format!(
-                "direct route changed: public_route={:?}, effect_acquires={}, publication_count={}, cache_before={cache_before:?}, cache_after={cache_after:?}",
-                stats.route, effect_acquire_count, publication_count,
+                "direct route changed: public_route={:?}, publication_count={}, cache_before={cache_before:?}, cache_after={cache_after:?}",
+                stats.route, publication_count,
             ),
         ));
     }

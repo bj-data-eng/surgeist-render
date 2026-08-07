@@ -15,21 +15,14 @@ pub(crate) use device::{
     DeviceCapabilities, DeviceSignal, DeviceSlotIdentity, DeviceState, DeviceTerminalSignal,
 };
 #[cfg(test)]
-pub(crate) use offscreen::{
-    OffscreenLocalSceneRenderRequest, OffscreenRenderGpuContext,
-    ScopedOffscreenTextureAcquireObservationForTest, offscreen_local_scene_texture_descriptor,
-    render_internal_vello_local_scene_to_offscreen_texture,
-};
-#[cfg(test)]
-#[expect(
-    unused_imports,
-    reason = "preserve the existing crate-visible backend paths after the ownership move"
-)]
-pub(crate) use offscreen::{OffscreenRenderTarget, OffscreenRenderedTextureLease};
-#[cfg(test)]
-pub(crate) use test_support::ReadyDeviceStateBorrowForTest;
+pub(crate) use offscreen::offscreen_local_scene_texture_descriptor;
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) use test_support::require_presented_device_identity_for_test;
+#[cfg(test)]
+pub(crate) use test_support::{
+    OffscreenLocalSceneRenderRequest, OffscreenRenderGpuContext, ReadyDeviceStateBorrowForTest,
+    render_internal_vello_local_scene_to_offscreen_texture,
+};
 pub(crate) use texture::create_headless_texture;
 #[cfg_attr(
     not(test),

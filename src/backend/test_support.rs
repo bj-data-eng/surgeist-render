@@ -4,24 +4,121 @@ use super::{
         DeviceCapabilities, DeviceSignal, DeviceSlotIdentity, DeviceTerminalSignal,
         ReadyDeviceState,
     },
+    offscreen::{self, OffscreenRenderTarget, OffscreenRenderedTextureLease},
 };
 use crate::{
+    Format, Options, Parameters,
     capability::EffectPrecisionCapabilities,
+    command::OffscreenBounds,
     error::{
         BackendErrorCode, DeviceLossReason, Error, GpuFaultKind, Result,
         RuntimeCapabilityUnavailableReason, RuntimeOperation,
     },
     renderer::ResourceCacheBudget,
     resource::{
-        ManagerIdentity, ResourceManager, ResourceManagerObservationForTest, WorkingFormat,
+        ManagerIdentity, ResourceAccountingFault, ResourceManager,
+        ResourceManagerObservationForTest, WorkingFormat,
     },
     shader::{DevicePassCache, DevicePassCacheCountsForTest},
-    vello_engine::VelloEngineState,
+    vello_engine::{VelloEngineState, scene::VelloScene},
 };
 use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
+
+pub(crate) struct OffscreenRenderGpuContext<'a> {
+    backend: &'a mut Backend,
+    device_identity: DeviceSlotIdentity,
+}
+
+impl<'a> OffscreenRenderGpuContext<'a> {
+    #[must_use]
+    pub(crate) fn new(backend: &'a mut Backend, device_identity: DeviceSlotIdentity) -> Self {
+        Self {
+            backend,
+            device_identity,
+        }
+    }
+}
+
+/// Test-owned request facts for a Vello scene already encoded in
+/// offscreen-local coordinates. Bounds size allocates the real target texture;
+/// it is not a scene crop.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct OffscreenLocalSceneRenderRequest {
+    bounds: OffscreenBounds,
+    scale: f64,
+    format: Format,
+    parameters: Parameters,
+}
+
+impl OffscreenLocalSceneRenderRequest {
+    #[must_use]
+    pub(crate) const fn new(
+        bounds: OffscreenBounds,
+        scale: f64,
+        format: Format,
+        parameters: Parameters,
+    ) -> Self {
+        Self {
+            bounds,
+            scale,
+            format,
+            parameters,
+        }
+    }
+}
+
+impl OffscreenRenderTarget {
+    #[must_use]
+    pub(crate) const fn resource_id(self) -> u64 {
+        self.resource_identity.get()
+    }
+
+    #[must_use]
+    pub(crate) const fn bounds(self) -> OffscreenBounds {
+        self.bounds
+    }
+}
+
+impl OffscreenRenderedTextureLease {
+    #[must_use]
+    pub(crate) const fn target(&self) -> OffscreenRenderTarget {
+        self.target
+    }
+
+    #[must_use]
+    pub(crate) const fn timings(&self) -> super::RenderTimings {
+        self.timings
+    }
+
+    pub(crate) fn poison_retained_byte_accounting_for_test(&self) -> ResourceAccountingFault {
+        self.frame_scope
+            .as_ref()
+            .expect("an unresolved offscreen lease must own its resource frame")
+            .poison_retained_byte_accounting_for_test()
+    }
+}
+
+pub(crate) async fn render_internal_vello_local_scene_to_offscreen_texture(
+    context: Option<OffscreenRenderGpuContext<'_>>,
+    options: Options,
+    scene: &VelloScene,
+    request: OffscreenLocalSceneRenderRequest,
+) -> Result<OffscreenRenderedTextureLease> {
+    let context = context.map(|context| (context.backend, context.device_identity));
+    offscreen::render_internal_vello_local_scene_to_offscreen_texture(
+        context,
+        options,
+        scene,
+        request.bounds,
+        request.scale,
+        request.format,
+        request.parameters,
+    )
+    .await
+}
 
 pub(crate) struct ReadyDeviceStateBorrowForTest<'ready> {
     adapter: &'ready wgpu::Adapter,
