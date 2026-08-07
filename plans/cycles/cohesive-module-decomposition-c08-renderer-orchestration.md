@@ -82,8 +82,9 @@
 
 ## 4 Preconditions And Landing
 
-- Local `main`, `origin/main`, and authority-remote `main` equal the C07 base
-  before T01; the worktree is clean.
+- `origin/main` and authority-remote `main` equal the C07 base before T01.
+  Local `main` is the reviewed planning/status head descended from that base;
+  the worktree is clean.
 - Work remains in this leaf repository and current worktree. Do not edit root or
   siblings and do not create a separate worktree.
 - Use installed tooling offline. Do not acquire or update dependencies,
@@ -175,8 +176,9 @@
   pre-execution eligibility, device/surface gating used by classification, and
   typed unsupported-graph translation.
 - Preserve validation precedence and exact Direct Vello, executable graph,
-  fixture-only test entry, and unsupported routes. Test facts may travel with
-  the classified values only until T06.
+  fixture-only test entry, and unsupported routes. Keep test-only classification
+  fixtures, observations, and entry points in `mod.rs`; T04 moves no test fact
+  into `dispatch.rs`.
 - Before and after run:
 
   ```sh
@@ -199,6 +201,8 @@
   execution dispatch, and their private coordination to `dispatch.rs`.
 - Retain public `Renderer::render` in `mod.rs` as the crate-facing orchestrator;
   it calls the dispatch and publication owners without duplicating either.
+- Execution-attached test facts may travel with their production value only
+  until the immediately following T06 support extraction under M04.5.
 - Preserve one transaction, prepared resources, cache/resource accounting,
   pixels, statistics, cancellation, terminal signals, and failure order.
 - Before and after run:
