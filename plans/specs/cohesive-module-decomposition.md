@@ -95,11 +95,15 @@ The numbers explain why the files were inspected; they are not acceptance
 thresholds. M05 is based on the independent owners visible in the item groups,
 not on the physical counts.
 
-At the published C05 base, the non-plan Rust/WGSL inventory contains 2,013
-matching lines across 22 files for the historical `C03`, `C06`-`C12`, `S21`,
-`S34`, and lowercase symbol families. No tracked non-plan filename currently
-matches a planning identifier. These are finite planning facts, not a required
-count or permanent source-inspection test.
+At the published C05 base, the non-plan Rust/WGSL inventory contains 2,139 token
+matches on 2,013 lines across 22 files for the historical `C03`, `C06`-`C12`,
+`S21`, `S34`, and lowercase symbol families. The bounded token grammar is an
+uppercase `P`, `I`, `S`, `C`, or `T` followed by exactly two digits and optional
+ASCII identifier continuation, or the lowercase equivalent followed by exactly
+two digits, an underscore, and optional ASCII identifier continuation. Requiring
+the lowercase underscore excludes Rust primitives such as `i32`. No tracked
+non-plan filename currently matches a planning identifier. These are finite
+planning facts, not a required count or permanent source-inspection test.
 
 ## M04 Decomposition Principles
 
