@@ -1,3 +1,9 @@
+#[cfg(not(target_arch = "wasm32"))]
+use crate::backend::{
+    CompositionBlendVectorForTest, CompositionGpuVectorResultsForTest,
+    CompositionMaskSamplingInputForTest, CompositionMaskSamplingVectorForTest,
+    CompositionPreparedGpuVectorsForTest,
+};
 use crate::{
     Antialiasing, AvailableRuntimeCapabilities, BackdropCaptureBounds, BackdropFilterInput,
     BackgroundBlendList, BackgroundBlendMode, BlendMode, Capabilities, ClipInput, Color,
@@ -14,10 +20,8 @@ use crate::{
     TextPaint, TextRun, TextRunBounds, Transform, UnitFilterAmount, UnresolvedResource,
     UnresolvedResourceKind, UnsupportedPrimitive,
     backend::{
-        Backend, CompositionBlendVectorForTest, CompositionGpuVectorResultsForTest,
-        CompositionMaskSamplingInputForTest, CompositionMaskSamplingVectorForTest,
-        CompositionPreparedGpuVectorsForTest, CustomSpineEncodingObservationForTest,
-        DeviceCapabilities, DeviceSlotIdentity, ReadyDeviceStateBorrowForTest,
+        Backend, CustomSpineEncodingObservationForTest, DeviceCapabilities, DeviceSlotIdentity,
+        ReadyDeviceStateBorrowForTest,
     },
     command,
     filter::{
