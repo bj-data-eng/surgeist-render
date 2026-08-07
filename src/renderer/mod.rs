@@ -1,6 +1,18 @@
 mod options;
+mod publication;
 
 pub use options::{Antialiasing, EffectQualityPolicy, Options, ResourceCacheBudget};
+use publication::RenderPublication;
+#[cfg(test)]
+pub(crate) use publication::ScopedFinalPublicationLossForTest;
+#[cfg(all(
+    test,
+    any(
+        feature = "render-window",
+        all(feature = "render-web", target_arch = "wasm32")
+    )
+))]
+use publication::inject_final_publication_loss_for_test;
 
 #[cfg(test)]
 use super::resource::{ResourceManagerObservationForTest, WorkingFormat};
@@ -17,7 +29,7 @@ use super::{
         FrameContext, FramePlan, GpuRenderGraph, GraphLoweringCompositeKind, GraphLoweringPassKind,
     },
     geometry::physical_size,
-    gpu_transaction::{GpuOperationDraft, GpuOperationStage},
+    gpu_transaction::GpuOperationStage,
     pass::{ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest},
     readback::read_texture_rgba,
     stats::collect_render_stats,
@@ -26,17 +38,14 @@ use super::{
     vello_engine::scene::VelloScene,
     *,
 };
+#[cfg(all(test, feature = "render-window"))]
+use std::cell::RefCell;
 #[cfg(test)]
-use std::{cell::RefCell, sync::Arc};
+use std::sync::Arc;
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
 };
-
-#[cfg(test)]
-thread_local! {
-    static ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST: RefCell<bool> = const { RefCell::new(false) };
-}
 
 #[cfg(all(test, feature = "render-window"))]
 thread_local! {
@@ -324,46 +333,6 @@ struct BoundedBackdropFixturePreparationForTest {
     capture_spatial: super::pass::ColorFilterSpatialObservationForTest,
 }
 
-struct RenderPublication {
-    frame: SurfaceFrameCommit,
-    stats: Stats,
-    uploaded_images: HashSet<ImageId>,
-    parameters: Parameters,
-}
-
-impl RenderPublication {
-    fn commit(self, renderer: &mut Renderer, surface: &mut Surface) -> Stats {
-        self.frame.commit(surface);
-        renderer.stats = self.stats;
-        renderer.uploaded_images = self.uploaded_images;
-        surface.last_parameters = Some(self.parameters);
-        self.stats
-    }
-}
-
-/// Private control that injects loss after a clean transaction and before publication.
-#[cfg(test)]
-pub(crate) struct ScopedFinalPublicationLossForTest {
-    previous: bool,
-}
-
-#[cfg(test)]
-impl ScopedFinalPublicationLossForTest {
-    pub(crate) fn after_transaction_completion() -> Self {
-        let previous = ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| active.replace(true));
-        Self { previous }
-    }
-}
-
-#[cfg(test)]
-impl Drop for ScopedFinalPublicationLossForTest {
-    fn drop(&mut self) {
-        ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| {
-            *active.borrow_mut() = self.previous;
-        });
-    }
-}
-
 /// Private control that injects loss after presented creation and before configuration.
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) struct ScopedPresentedCreationTerminalLossForTest {
@@ -384,13 +353,6 @@ impl Drop for ScopedPresentedCreationTerminalLossForTest {
         ACTIVE_PRESENTED_CREATION_LOSS_FOR_TEST.with(|active| {
             *active.borrow_mut() = self.previous;
         });
-    }
-}
-
-#[cfg(test)]
-fn inject_final_publication_loss_for_test(signal: &DeviceSignal) {
-    if ACTIVE_FINAL_PUBLICATION_LOSS_FOR_TEST.with(|active| *active.borrow()) {
-        signal.record_loss_for_test(DeviceLossReason::Unknown);
     }
 }
 
@@ -1079,12 +1041,7 @@ impl Renderer {
         self.publish_clean_render_frame(
             surface,
             device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
+            RenderPublication::new(frame, stats, uploaded_images, parameters),
             frame_start,
         )
     }
@@ -1252,42 +1209,6 @@ impl Renderer {
         Ok(frame)
     }
 
-    fn publish_clean_render_frame(
-        &mut self,
-        surface: &mut Surface,
-        device_identity: DeviceSlotIdentity,
-        mut publication: RenderPublication,
-        frame_start: Instant,
-    ) -> Result<Stats> {
-        publication
-            .frame
-            .apply_stats_observation(&mut publication.stats);
-        let timings = publication.frame.timings();
-        publication.stats.render_time = timings.render_time;
-        publication.stats.present_time = timings.present_time;
-        publication.stats.frame_time = frame_start.elapsed();
-        let mut published = None;
-        GpuOperationDraft::new(&mut published, publication).commit();
-        let publication =
-            published.expect("a clean GPU transaction must commit its staged public state");
-        #[cfg(test)]
-        {
-            let Some(publication_signal) = self
-                .backend
-                .as_mut()
-                .and_then(|backend| backend.device_signal_for_test(device_identity))
-            else {
-                panic!("a clean frame must retain its device signal until publication");
-            };
-            inject_final_publication_loss_for_test(&publication_signal);
-        }
-        let stats = publication.commit(self, surface);
-        if let Some(backend) = self.backend.as_mut() {
-            backend.observe_device_terminal(device_identity);
-        }
-        Ok(stats)
-    }
-
     /// Test-only entry for forcing ordinary commands through the exact
     /// production graph executor without adding a public route or option.
     #[cfg(test)]
@@ -1397,12 +1318,7 @@ impl Renderer {
         let stats = self.publish_clean_render_frame(
             surface,
             device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
+            RenderPublication::new(frame, stats, uploaded_images, parameters),
             frame_start,
         )?;
         Ok(ForcedGraphRenderResultForTest {
@@ -1618,12 +1534,7 @@ impl Renderer {
         let stats = self.publish_clean_render_frame(
             surface,
             prepared.device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
+            RenderPublication::new(frame, stats, uploaded_images, parameters),
             prepared.frame_start,
         )?;
         Ok(ColorFilterRenderResultForTest {
@@ -1793,12 +1704,7 @@ impl Renderer {
         let stats = self.publish_clean_render_frame(
             surface,
             prepared.device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
+            RenderPublication::new(frame, stats, uploaded_images, parameters),
             prepared.frame_start,
         )?;
         Ok(SpatialFilterRenderResultForTest {
@@ -1930,12 +1836,7 @@ impl Renderer {
         let stats = self.publish_clean_render_frame(
             surface,
             prepared.device_identity,
-            RenderPublication {
-                frame,
-                stats,
-                uploaded_images,
-                parameters,
-            },
+            RenderPublication::new(frame, stats, uploaded_images, parameters),
             prepared.frame_start,
         )?;
         Ok(BoundedBackdropRenderResultForTest {
@@ -2846,11 +2747,6 @@ impl Renderer {
         self.backend
             .as_mut()?
             .active_operation_generation_for_test(device_identity)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn uploaded_images_for_test(&self) -> HashSet<ImageId> {
-        self.uploaded_images.clone()
     }
 
     #[cfg(test)]
