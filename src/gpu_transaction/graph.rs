@@ -1,4 +1,4 @@
-use super::{GpuOperationTransaction, VelloResourceCommitProof};
+use super::{GpuOperationTransaction, vello::VelloResourceCommitProof};
 use crate::{
     Result, RuntimeOperation,
     pass::{
@@ -172,7 +172,7 @@ impl AccountingReadyGraphResources {
         self.prepared_frame.ensure_commit_ready(pass_cache)?;
         let capture_cleanup = self
             .capture_resources
-            .commit(VelloResourceCommitProof { _private: () })?;
+            .commit(VelloResourceCommitProof::new())?;
         let prepared_cleanup = self.prepared_frame.commit(pass_cache)?;
         Ok(capture_cleanup.followed_by(prepared_cleanup))
     }

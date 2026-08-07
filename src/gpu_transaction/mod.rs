@@ -1,6 +1,8 @@
 mod graph;
+mod readback;
 #[cfg(test)]
 mod test_support;
+mod vello;
 
 #[expect(
     unused_imports,
@@ -8,6 +10,11 @@ mod test_support;
 )]
 pub(crate) use graph::GraphSubmissionCommit;
 pub(crate) use graph::{GraphOutputCommit, GraphSubmissionPayload};
+#[expect(
+    unused_imports,
+    reason = "preserves the existing crate-visible readback transaction front-door paths"
+)]
+pub(crate) use readback::{PendingReadbackSubmission, ReadbackSubmission};
 #[cfg(all(test, feature = "render-window"))]
 pub(crate) use test_support::graph_terminal_loss_after_submission_for_test;
 #[cfg(test)]
@@ -16,6 +23,7 @@ pub(crate) use test_support::{
     graph_accounting_failure_after_submission_for_test,
     graph_cancellation_after_submission_for_test, graph_scope_failure_after_submission_for_test,
 };
+pub(crate) use vello::{InternalVelloPayload, VelloResourceCommitProof};
 
 #[cfg(test)]
 use test_support::wait_at_active_gpu_operation_post_submit_checkpoint_for_test;
@@ -23,8 +31,10 @@ use test_support::wait_at_active_gpu_operation_post_submit_checkpoint_for_test;
 use super::{
     BackendErrorCode, Error, GpuFaultKind, Result, RuntimeOperation,
     backend::{DeviceSignal, DeviceTerminalSignal},
-    vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit},
 };
+
+#[cfg(test)]
+use super::vello_engine::{DirectVelloLogicalPass, PendingVelloResourceCommit};
 
 use std::sync::Arc;
 
@@ -353,17 +363,6 @@ pub(crate) struct GpuOperationTransaction {
     stage: GpuOperationStage,
 }
 
-#[must_use = "internal Vello command buffers must remain owned by their GPU transaction"]
-pub(crate) struct InternalVelloPayload {
-    command_buffer: wgpu::CommandBuffer,
-    resources: PendingVelloResourceCommit,
-    logical_pass: DirectVelloLogicalPass,
-    #[cfg(test)]
-    submission_observation: Option<InternalVelloSubmissionObservationForTest>,
-    #[cfg(test)]
-    after_submit_checkpoint: Option<AfterInternalVelloSubmitCheckpointForTest>,
-}
-
 /// Test-only evidence carried by the real single-buffer internal raster payload.
 #[cfg(test)]
 #[derive(Clone, Default)]
@@ -629,98 +628,6 @@ impl AfterInternalVelloSubmitCheckpointForTest {
     }
 }
 
-/// Proof that an internal Vello submission has reached its clean terminal boundary.
-pub(crate) struct VelloResourceCommitProof {
-    _private: (),
-}
-
-/// Transaction-owned result of submitting one texture readback copy.
-#[must_use = "the exact readback submission index must drive map completion"]
-pub(crate) struct ReadbackSubmission {
-    submission_index: wgpu::SubmissionIndex,
-}
-
-impl ReadbackSubmission {
-    pub(crate) fn into_submission_index(self) -> wgpu::SubmissionIndex {
-        self.submission_index
-    }
-}
-
-/// A submitted readback copy whose WGPU error scopes are still resolving.
-#[must_use = "the readback transaction scopes must resolve before mapping"]
-pub(crate) struct PendingReadbackSubmission {
-    submission_index: wgpu::SubmissionIndex,
-    transaction: GpuOperationTransaction,
-    #[cfg(test)]
-    submission_observation: Option<GpuOperationSubmissionObservationForTest>,
-}
-
-impl PendingReadbackSubmission {
-    pub(crate) fn submission_index(&self) -> wgpu::SubmissionIndex {
-        self.submission_index.clone()
-    }
-
-    pub(crate) async fn finish(self, operation: RuntimeOperation) -> Result<ReadbackSubmission> {
-        #[cfg(test)]
-        wait_at_active_gpu_operation_post_submit_checkpoint_for_test().await;
-
-        let result = self.transaction.finish(operation).await;
-        #[cfg(test)]
-        if let Some(observation) = self.submission_observation {
-            observation.record_scope_resolution(true);
-        }
-        result.map(|()| ReadbackSubmission {
-            submission_index: self.submission_index,
-        })
-    }
-}
-
-impl InternalVelloPayload {
-    pub(crate) fn new(
-        command_buffer: wgpu::CommandBuffer,
-        resources: PendingVelloResourceCommit,
-        logical_pass: DirectVelloLogicalPass,
-    ) -> Self {
-        Self {
-            command_buffer,
-            resources,
-            logical_pass,
-            #[cfg(test)]
-            submission_observation: None,
-            #[cfg(test)]
-            after_submit_checkpoint: None,
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn observed_for_test(
-        command_buffer: wgpu::CommandBuffer,
-        resources: PendingVelloResourceCommit,
-        logical_pass: DirectVelloLogicalPass,
-        submission_observation: InternalVelloSubmissionObservationForTest,
-    ) -> Self {
-        let mut payload = Self::new(command_buffer, resources, logical_pass);
-        payload.submission_observation = Some(submission_observation);
-        payload
-    }
-
-    #[cfg(test)]
-    pub(crate) fn paused_after_submit_for_test(
-        command_buffer: wgpu::CommandBuffer,
-        resources: PendingVelloResourceCommit,
-        logical_pass: DirectVelloLogicalPass,
-        checkpoint: AfterInternalVelloSubmitCheckpointForTest,
-    ) -> Self {
-        Self {
-            command_buffer,
-            resources,
-            logical_pass,
-            submission_observation: None,
-            after_submit_checkpoint: Some(checkpoint),
-        }
-    }
-}
-
 impl GpuOperationTransaction {
     pub(crate) fn begin(
         device: &wgpu::Device,
@@ -845,19 +752,6 @@ impl GpuOperationTransaction {
         Ok(())
     }
 
-    #[cfg(test)]
-    pub(crate) async fn finish_vello_resources_without_submission_for_test(
-        self,
-        resources: PendingVelloResourceCommit,
-        operation: RuntimeOperation,
-    ) -> Result<()> {
-        self.finish(operation).await?;
-        resources
-            .into_accounting_ready()?
-            .commit(VelloResourceCommitProof { _private: () })?;
-        Ok(())
-    }
-
     /// Submits one command buffer while this transaction owns its generation and scopes.
     #[cfg(test)]
     pub(crate) async fn submit_command_buffer(
@@ -905,90 +799,6 @@ impl GpuOperationTransaction {
             observation.record_scope_resolution(false);
         }
         result
-    }
-
-    /// Submits one texture-copy command and returns its exact queue submission index.
-    pub(crate) fn submit_readback(
-        self,
-        queue: &wgpu::Queue,
-        command_buffer: wgpu::CommandBuffer,
-    ) -> PendingReadbackSubmission {
-        let submission_index = queue.submit([command_buffer]);
-        #[cfg(test)]
-        let submission_observation = record_active_gpu_operation_submission_for_test(
-            self.lease.generation(),
-            self.lease.active_generation_for_test(),
-            Some(submission_index.clone()),
-        );
-
-        PendingReadbackSubmission {
-            submission_index,
-            transaction: self,
-            #[cfg(test)]
-            submission_observation,
-        }
-    }
-
-    pub(crate) async fn submit_internal_vello(
-        self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        payload: InternalVelloPayload,
-        operation: RuntimeOperation,
-    ) -> Result<()> {
-        #[cfg(not(test))]
-        let _ = device;
-        let InternalVelloPayload {
-            command_buffer,
-            resources,
-            logical_pass,
-            #[cfg(test)]
-            submission_observation,
-            #[cfg(test)]
-            after_submit_checkpoint,
-        } = payload;
-        queue.submit([command_buffer]);
-        #[cfg(not(test))]
-        let _ = logical_pass;
-        #[cfg(test)]
-        let active_generation = self.lease.active_generation_for_test();
-        #[cfg(test)]
-        let allocation_summary = resources.allocation_summary_for_test();
-        #[cfg(test)]
-        if let Some(observation) = submission_observation {
-            observation.record_payload_submission(
-                self.lease.generation(),
-                active_generation,
-                &logical_pass,
-                allocation_summary.clone(),
-            );
-        }
-        #[cfg(test)]
-        record_active_internal_vello_submission_for_test(
-            self.lease.generation(),
-            active_generation,
-            &logical_pass,
-            allocation_summary,
-        );
-        #[cfg(test)]
-        if let Some(checkpoint) = after_submit_checkpoint {
-            checkpoint.wait().await;
-        }
-        #[cfg(test)]
-        if let Some(control) = ACTIVE_INTERNAL_VELLO_POST_SUBMIT_CONTROL_FOR_TEST
-            .with(|active| active.borrow().clone())
-        {
-            control.apply(device, &resources).await;
-        }
-        match self.finish(operation).await {
-            Ok(()) => {
-                resources
-                    .into_accounting_ready()?
-                    .commit(VelloResourceCommitProof { _private: () })?;
-                Ok(())
-            }
-            Err(error) => Err(error),
-        }
     }
 }
 
