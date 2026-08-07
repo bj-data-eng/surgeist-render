@@ -39,15 +39,6 @@ pub(super) fn ahem_font(name: &'static str) -> FontRef<'static> {
         .with_data(FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap())
 }
 
-pub(super) fn image_from_buffer(buffer: ImageBuffer) -> Image {
-    let size = buffer.size();
-    Image::from_rgba(
-        Size::new(f64::from(size.width()), f64::from(size.height())),
-        buffer.into_rgba(),
-    )
-    .unwrap()
-}
-
 pub(super) fn add_planning_text(scene: &mut Scene, bounds: TextRunBounds) {
     let glyphs = [TextGlyph::try_new(1, 1.0, 2.0, 5.0).unwrap()];
     let run = TextRun::try_new(
@@ -68,8 +59,15 @@ pub(super) fn opaque_planning_mask(size: PhysicalSize) -> ResolvedLayerAlphaMask
         .checked_mul(usize::try_from(size.height()).unwrap())
         .and_then(|pixels| pixels.checked_mul(4))
         .unwrap();
+    let image = Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
+        ImageBuffer::try_new(size, vec![255; byte_len])
+            .unwrap()
+            .into_rgba(),
+    )
+    .unwrap();
     ResolvedLayerAlphaMask::try_new(
-        image_from_buffer(ImageBuffer::try_new(size, vec![255; byte_len]).unwrap()),
+        image,
         Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
     )
     .unwrap()
