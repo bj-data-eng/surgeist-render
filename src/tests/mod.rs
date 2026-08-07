@@ -1,3 +1,5 @@
+mod support;
+
 #[cfg(feature = "render-window")]
 use super::gpu_transaction::test_support::graph_terminal_loss_after_submission_for_test;
 use super::gpu_transaction::test_support::{
@@ -81,12 +83,10 @@ use proptest::prelude::*;
 
 use super::error::BackendErrorCode;
 use super::*;
-
-const AHEM_FONT_BYTES: &[u8] = include_bytes!("../tests/fixtures/fonts/ahem/Ahem.ttf");
-const AHEM_FONT_ID: u64 = 9001;
-const AHEM_GLYPH_X: u32 = 58;
-const AHEM_GLYPH_DESCENT_P: u32 = 82;
-const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
+use support::{
+    AHEM_FONT_BYTES, AHEM_FONT_ID, AHEM_GLYPH_ASCENT_E_ACUTE, AHEM_GLYPH_DESCENT_P, AHEM_GLYPH_X,
+    ahem_font, text_run_for,
+};
 
 trait UnwrapOrPanicForTest<T> {
     #[track_caller]
@@ -656,25 +656,6 @@ fn assert_missing_glyph_error(error: &Error, glyph_id: u32) {
         diagnostic.invariant(),
         "must identify a drawable glyph in the selected FontData"
     );
-}
-
-fn text_run_for<'a>(
-    font_data: FontData,
-    size: f32,
-    transform: Transform,
-    glyphs: &'a [TextGlyph],
-) -> TextRun<'a> {
-    TextRun::try_new(
-        FontRef::new(AHEM_FONT_ID)
-            .named("selected glyph preflight")
-            .with_data(font_data),
-        size,
-        transform,
-        TextPaint::try_fill(Color::BLACK.into()).unwrap(),
-        glyphs,
-        TextRunBounds::unspecified(),
-    )
-    .unwrap()
 }
 
 fn assert_selected_glyph_trace(run: &TextRun<'_>, expected: SelectedGlyphTrace) {
@@ -2523,12 +2504,6 @@ fn scene_lowering_preserves_authored_text_run_bounds() {
         panic!("text shadow run should retain wrapped authored bounds in the scene");
     };
     assert_eq!(*shadow_bounds, bounds);
-}
-
-fn ahem_font(name: &'static str) -> FontRef<'static> {
-    FontRef::new(AHEM_FONT_ID)
-        .named(name)
-        .with_data(FontData::try_from_bytes(AHEM_FONT_BYTES.to_vec(), 0).unwrap())
 }
 
 #[cfg(any(
