@@ -14,7 +14,6 @@ use crate::{
     filter::BlurPolicy,
     reference::{self, PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     resource::{ResourceCacheKey, WorkingFormat},
-    style::{ColorFilterOp, ColorFilterPipeline},
     texture::EffectTextureDescriptor,
     vello_engine::{
         PreparedVelloPass, RasterParameters,
@@ -28,168 +27,6 @@ const AHEM_FONT_ID: u64 = 9001;
 pub(super) const AHEM_GLYPH_X: u32 = 58;
 pub(super) const AHEM_GLYPH_DESCENT_P: u32 = 82;
 pub(super) const AHEM_GLYPH_ASCENT_E_ACUTE: u32 = 100;
-
-pub(super) fn color_filter_pipeline<const N: usize>(
-    ops: [ColorFilterOp; N],
-) -> ColorFilterPipeline {
-    color_filter_list(ops)
-        .color_filter_pipeline()
-        .unwrap()
-        .unwrap()
-}
-
-pub(super) fn color_filter_list<const N: usize>(ops: [ColorFilterOp; N]) -> FilterList {
-    let ops = ops
-        .into_iter()
-        .map(|op| match op {
-            ColorFilterOp::Brightness(amount) => FilterOp::brightness(amount),
-            ColorFilterOp::Contrast(amount) => FilterOp::contrast(amount),
-            ColorFilterOp::Grayscale(amount) => FilterOp::grayscale(amount),
-            ColorFilterOp::HueRotate(angle) => FilterOp::hue_rotate(angle),
-            ColorFilterOp::Invert(amount) => FilterOp::invert(amount),
-            ColorFilterOp::Opacity(amount) => FilterOp::opacity(amount),
-            ColorFilterOp::Saturate(amount) => FilterOp::saturate(amount),
-            ColorFilterOp::Sepia(amount) => FilterOp::sepia(amount),
-        })
-        .collect();
-    FilterList::try_ops(ops).unwrap()
-}
-
-pub(super) fn modeled_effect_texture_for_test(
-    physical_size: PhysicalSize,
-) -> (ResourceCacheKey, u64) {
-    let descriptor =
-        EffectTextureDescriptor::try_capture(physical_size, wgpu::TextureUsages::TEXTURE_BINDING)
-            .unwrap();
-    (
-        ResourceCacheKey::EffectTexture(descriptor.cache_key()),
-        descriptor.checked_byte_len().unwrap(),
-    )
-}
-
-pub(super) fn bounded_backdrop_reference_rect_for_test(
-    size: PhysicalSize,
-    rect: (u32, u32, u32, u32),
-    straight: [u8; 4],
-) -> ReferencePremultipliedRgba8Buffer {
-    let mut buffer = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
-    for y in rect.1..rect.1 + rect.3 {
-        for x in rect.0..rect.0 + rect.2 {
-            buffer
-                .set_pixel(x, y, reference_premultiplied_pixel_for_test(straight))
-                .unwrap();
-        }
-    }
-    buffer
-}
-
-pub(super) fn spatial_filter_reference_buffer_for_test(
-    size: PhysicalSize,
-    opaque_pixels: &[(u32, u32, PremultipliedRgba8)],
-) -> ReferencePremultipliedRgba8Buffer {
-    let mut source = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
-    for &(x, y, pixel) in opaque_pixels {
-        source.set_pixel(x, y, pixel).unwrap();
-    }
-    source
-}
-
-pub(super) fn spatial_filter_image_scene_for_test(
-    size: PhysicalSize,
-    pixels: Vec<u8>,
-    destination: Rect,
-) -> Scene {
-    let image = Image::from_rgba(
-        Size::new(f64::from(size.width()), f64::from(size.height())),
-        Arc::<[u8]>::from(pixels),
-    )
-    .expect("the spatial-filter pixel fixture must form one RGBA image");
-    let mut scene = Scene::new();
-    scene.image(image, destination, ImageFit::Stretch);
-    scene
-}
-
-pub(super) fn high_precision_terminal_error_for_test(actual: &[u8], expected: &[u8]) -> Option<u8> {
-    (actual.len() == expected.len() && actual.len().is_multiple_of(4)).then(|| {
-        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
-            0,
-            |maximum, (actual, expected)| {
-                // The caller first proves canonical terminal bytes. Once target
-                // alpha quantizes to zero, straight RGB has only the black form.
-                let expected_rgb = if actual[3] == 0 {
-                    [0, 0, 0]
-                } else {
-                    [expected[0], expected[1], expected[2]]
-                };
-                maximum
-                    .max(actual[0].abs_diff(expected_rgb[0]))
-                    .max(actual[1].abs_diff(expected_rgb[1]))
-                    .max(actual[2].abs_diff(expected_rgb[2]))
-                    .max(actual[3].abs_diff(expected[3]))
-            },
-        )
-    })
-}
-
-pub(super) fn reduced_precision_terminal_error_for_test(
-    actual: &[u8],
-    expected: &[u8],
-) -> Option<(u8, u8)> {
-    (actual.len() == expected.len()).then(|| {
-        actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
-            (0, 0),
-            |(max_alpha, max_premul), (actual, expected)| {
-                let alpha = max_alpha.max(actual[3].abs_diff(expected[3]));
-                let premul = (0..3).fold(max_premul, |maximum, channel| {
-                    maximum.max(
-                        premultiply_u8_channel_for_test(actual[channel], actual[3]).abs_diff(
-                            premultiply_u8_channel_for_test(expected[channel], expected[3]),
-                        ),
-                    )
-                });
-                (alpha, premul)
-            },
-        )
-    })
-}
-
-pub(super) fn color_filter_signed_source_scene_for_test(visible_pixels: &[[u8; 4]]) -> Scene {
-    let hidden_prefix = [[17, 31, 47, 255], [233, 199, 151, 127]];
-    let bytes = hidden_prefix
-        .into_iter()
-        .chain(visible_pixels.iter().copied())
-        .flat_map(|pixel| pixel.into_iter())
-        .collect::<Vec<_>>();
-    let source_width = u32::try_from(visible_pixels.len() + hidden_prefix.len())
-        .expect("the color-filter pixel vector must fit u32");
-    let image = Image::from_rgba(
-        Size::new(f64::from(source_width), 1.0),
-        Arc::<[u8]>::from(bytes),
-    )
-    .expect("the color-filter pixel vector must form one valid image");
-    let mut scene = Scene::new();
-    scene.image(
-        image,
-        Rect::new(
-            f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X),
-            0.0,
-            f64::from(source_width),
-            1.0,
-        ),
-        ImageFit::Stretch,
-    );
-    scene
-}
-
-pub(super) fn reference_premultiplied_pixel_for_test(straight: [u8; 4]) -> PremultipliedRgba8 {
-    PremultipliedRgba8::try_new(
-        premultiply_u8_channel_for_test(straight[0], straight[3]),
-        premultiply_u8_channel_for_test(straight[1], straight[3]),
-        premultiply_u8_channel_for_test(straight[2], straight[3]),
-        straight[3],
-    )
-    .unwrap()
-}
 
 pub(super) fn text_run_for<'a>(
     font_data: FontData,
@@ -539,7 +376,12 @@ pub(super) fn graph_shader_frame_context_for_test() -> crate::frame::FrameContex
 }
 
 pub(super) fn modeled_resource_key_for_test(discriminator: u32) -> ResourceCacheKey {
-    modeled_effect_texture_for_test(PhysicalSize::new(discriminator.max(1), 1)).0
+    let descriptor = EffectTextureDescriptor::try_capture(
+        PhysicalSize::new(discriminator.max(1), 1),
+        wgpu::TextureUsages::TEXTURE_BINDING,
+    )
+    .unwrap();
+    ResourceCacheKey::EffectTexture(descriptor.cache_key())
 }
 
 pub(super) fn explicit_graph_transaction_inputs_for_test(
@@ -571,7 +413,7 @@ pub(super) fn bounded_backdrop_integration_fixture_for_test() -> (
     let prior = [224, 48, 24, 255];
     let foreground = [240, 224, 32, 255];
     let later = [32, 224, 96, 160];
-    let invert = ColorFilterOp::Invert(UnitFilterAmount::try_new(1.0).unwrap());
+    let invert = UnitFilterAmount::try_new(1.0).unwrap();
     let blur = FilterBlur::try_new(0.75).unwrap();
     let filters = FilterList::try_ops(vec![
         FilterOp::invert(UnitFilterAmount::try_new(1.0).unwrap()),
@@ -604,21 +446,42 @@ pub(super) fn bounded_backdrop_integration_fixture_for_test() -> (
             Rect::new(5.0, 1.0, 2.0, 4.0),
             color_from_straight_rgba8_for_test(later),
         );
-    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 0, 8, 6), base);
-    let parent = bounded_backdrop_reference_rect_for_test(size, (0, 1, 3, 4), prior)
+    let reference_rect = |rect: (u32, u32, u32, u32), straight: [u8; 4]| {
+        let mut buffer = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
+        let pixel = PremultipliedRgba8::try_new(
+            premultiply_u8_channel_for_test(straight[0], straight[3]),
+            premultiply_u8_channel_for_test(straight[1], straight[3]),
+            premultiply_u8_channel_for_test(straight[2], straight[3]),
+            straight[3],
+        )
+        .unwrap();
+        for y in rect.1..rect.1 + rect.3 {
+            for x in rect.0..rect.0 + rect.2 {
+                buffer.set_pixel(x, y, pixel).unwrap();
+            }
+        }
+        buffer
+    };
+    let parent = reference_rect((0, 0, 8, 6), base);
+    let parent = reference_rect((0, 1, 3, 4), prior)
         .source_over(&parent)
         .unwrap();
+    let invert_pipeline = FilterList::try_ops(vec![FilterOp::invert(invert)])
+        .unwrap()
+        .color_filter_pipeline()
+        .unwrap()
+        .unwrap();
     let filtered = parent
-        .apply_color_filter_pipeline(&color_filter_pipeline([invert]))
+        .apply_color_filter_pipeline(&invert_pipeline)
         .and_then(|buffer| {
             buffer.apply_mirrored_blur_for_gpu_oracle(blur, BlurPolicy::css_filter_default())
         })
         .unwrap();
-    let group = bounded_backdrop_reference_rect_for_test(size, (3, 2, 2, 2), foreground)
+    let group = reference_rect((3, 2, 2, 2), foreground)
         .source_over(&filtered)
         .unwrap();
     let completed = group.source_over(&parent).unwrap();
-    let expected = bounded_backdrop_reference_rect_for_test(size, (5, 1, 2, 4), later)
+    let expected = reference_rect((5, 1, 2, 4), later)
         .source_over(&completed)
         .unwrap();
     (
@@ -638,13 +501,49 @@ pub(super) fn spatial_filter_maximum_error_for_test(
     working_format: WorkingFormat,
 ) -> (u8, u8) {
     match working_format {
-        WorkingFormat::HighPrecision => (
-            high_precision_terminal_error_for_test(actual, expected).unwrap_or(u8::MAX),
-            0,
-        ),
+        WorkingFormat::HighPrecision => {
+            let maximum = if actual.len() == expected.len() && actual.len().is_multiple_of(4) {
+                actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
+                    0,
+                    |maximum, (actual, expected)| {
+                        let expected_rgb = if actual[3] == 0 {
+                            [0, 0, 0]
+                        } else {
+                            [expected[0], expected[1], expected[2]]
+                        };
+                        maximum
+                            .max(actual[0].abs_diff(expected_rgb[0]))
+                            .max(actual[1].abs_diff(expected_rgb[1]))
+                            .max(actual[2].abs_diff(expected_rgb[2]))
+                            .max(actual[3].abs_diff(expected[3]))
+                    },
+                )
+            } else {
+                u8::MAX
+            };
+            (maximum, 0)
+        }
         WorkingFormat::ReducedPrecision => {
-            reduced_precision_terminal_error_for_test(actual, expected)
-                .unwrap_or((u8::MAX, u8::MAX))
+            if actual.len() == expected.len() {
+                actual.chunks_exact(4).zip(expected.chunks_exact(4)).fold(
+                    (0, 0),
+                    |(max_alpha, max_premul), (actual, expected)| {
+                        let alpha = max_alpha.max(actual[3].abs_diff(expected[3]));
+                        let premul = (0..3).fold(max_premul, |maximum, channel| {
+                            maximum.max(
+                                premultiply_u8_channel_for_test(actual[channel], actual[3])
+                                    .abs_diff(premultiply_u8_channel_for_test(
+                                        expected[channel],
+                                        expected[3],
+                                    )),
+                            )
+                        });
+                        (alpha, premul)
+                    },
+                )
+            } else {
+                (u8::MAX, u8::MAX)
+            }
         }
     }
 }
@@ -652,14 +551,14 @@ pub(super) fn spatial_filter_maximum_error_for_test(
 pub(super) fn spatial_filter_mixed_filter_fixture_for_test()
 -> (Scene, Vec<FilterList>, PhysicalSize, Vec<u8>) {
     let size = PhysicalSize::new(15, 13);
-    let source = spatial_filter_reference_buffer_for_test(
-        size,
-        &[
-            (5, 5, PremultipliedRgba8::try_new(224, 64, 16, 255).unwrap()),
-            (6, 5, PremultipliedRgba8::try_new(32, 192, 96, 255).unwrap()),
-            (6, 6, PremultipliedRgba8::try_new(48, 80, 240, 255).unwrap()),
-        ],
-    );
+    let mut source = ReferencePremultipliedRgba8Buffer::try_new(size).unwrap();
+    for (x, y, pixel) in [
+        (5, 5, PremultipliedRgba8::try_new(224, 64, 16, 255).unwrap()),
+        (6, 5, PremultipliedRgba8::try_new(32, 192, 96, 255).unwrap()),
+        (6, 6, PremultipliedRgba8::try_new(48, 80, 240, 255).unwrap()),
+    ] {
+        source.set_pixel(x, y, pixel).unwrap();
+    }
     let blur = FilterBlur::try_new(0.75).unwrap();
     let shadow = FilterDropShadow::try_new(
         Point::new(-1.25, 0.5),
@@ -669,8 +568,18 @@ pub(super) fn spatial_filter_mixed_filter_fixture_for_test()
     .unwrap();
     let invert = UnitFilterAmount::try_new(0.25).unwrap();
     let opacity = UnitFilterAmount::try_new(0.8).unwrap();
+    let invert_pipeline = FilterList::try_ops(vec![FilterOp::invert(invert)])
+        .unwrap()
+        .color_filter_pipeline()
+        .unwrap()
+        .unwrap();
+    let opacity_pipeline = FilterList::try_ops(vec![FilterOp::opacity(opacity)])
+        .unwrap()
+        .color_filter_pipeline()
+        .unwrap()
+        .unwrap();
     let expected = source
-        .apply_color_filter_pipeline(&color_filter_pipeline([ColorFilterOp::Invert(invert)]))
+        .apply_color_filter_pipeline(&invert_pipeline)
         .and_then(|buffer| buffer.apply_blur(blur, BlurPolicy::css_filter_default()))
         .and_then(|buffer| {
             buffer.apply_fractional_drop_shadow_for_gpu_oracle(
@@ -678,17 +587,19 @@ pub(super) fn spatial_filter_mixed_filter_fixture_for_test()
                 BlurPolicy::css_filter_default(),
             )
         })
-        .and_then(|buffer| {
-            buffer.apply_color_filter_pipeline(&color_filter_pipeline([ColorFilterOp::Opacity(
-                opacity,
-            )]))
-        })
+        .and_then(|buffer| buffer.apply_color_filter_pipeline(&opacity_pipeline))
         .map(|buffer| reference_straight_bytes_for_test(&buffer))
         .unwrap();
-    let scene = spatial_filter_image_scene_for_test(
-        size,
+    let image = Image::from_rgba(
+        Size::new(f64::from(size.width()), f64::from(size.height())),
         reference_straight_bytes_for_test(&source),
+    )
+    .expect("the spatial-filter pixel fixture must form one RGBA image");
+    let mut scene = Scene::new();
+    scene.image(
+        image,
         Rect::new(0.0, 0.0, f64::from(size.width()), f64::from(size.height())),
+        ImageFit::Stretch,
     );
     let filters = vec![
         FilterList::try_ops(vec![
@@ -796,7 +707,7 @@ pub(super) fn default_graph_working_format_for_test(renderer: &mut Renderer) -> 
 pub(super) const COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X: i32 = -2;
 
 pub(super) fn color_filter_retention_fixture_for_test() -> (Scene, Vec<FilterList>, Vec<u8>) {
-    let source = vec![
+    let source = [
         [0, 0, 0, 255],
         [255, 255, 255, 255],
         [255, 0, 0, 255],
@@ -807,13 +718,35 @@ pub(super) fn color_filter_retention_fixture_for_test() -> (Scene, Vec<FilterLis
         .iter()
         .flat_map(|pixel| [255 - pixel[0], 255 - pixel[1], 255 - pixel[2], pixel[3]])
         .collect();
-    (
-        color_filter_signed_source_scene_for_test(&source),
-        vec![color_filter_list([ColorFilterOp::Invert(
-            UnitFilterAmount::try_new(1.0).unwrap(),
-        )])],
-        expected,
+    let hidden_prefix = [[17, 31, 47, 255], [233, 199, 151, 127]];
+    let bytes = hidden_prefix
+        .into_iter()
+        .chain(source.iter().copied())
+        .flat_map(|pixel| pixel.into_iter())
+        .collect::<Vec<_>>();
+    let source_width = u32::try_from(source.len() + hidden_prefix.len())
+        .expect("the color-filter pixel vector must fit u32");
+    let image = Image::from_rgba(
+        Size::new(f64::from(source_width), 1.0),
+        Arc::<[u8]>::from(bytes),
     )
+    .expect("the color-filter pixel vector must form one valid image");
+    let mut scene = Scene::new();
+    scene.image(
+        image,
+        Rect::new(
+            f64::from(COLOR_FILTER_PIXEL_FIXTURE_SIGNED_X),
+            0.0,
+            f64::from(source_width),
+            1.0,
+        ),
+        ImageFit::Stretch,
+    );
+    let filters = FilterList::try_ops(vec![FilterOp::invert(
+        UnitFilterAmount::try_new(1.0).unwrap(),
+    )])
+    .unwrap();
+    (scene, vec![filters], expected)
 }
 
 pub(super) fn composition_mask_image_from_alpha_for_test(
@@ -849,11 +782,14 @@ pub(super) fn reference_solid_for_test(
         .unwrap()
         .checked_mul(usize::try_from(size.height()).unwrap())
         .unwrap();
-    ReferencePremultipliedRgba8Buffer::from_pixels(
-        size,
-        vec![reference_premultiplied_pixel_for_test(straight); pixel_count],
+    let pixel = PremultipliedRgba8::try_new(
+        premultiply_u8_channel_for_test(straight[0], straight[3]),
+        premultiply_u8_channel_for_test(straight[1], straight[3]),
+        premultiply_u8_channel_for_test(straight[2], straight[3]),
+        straight[3],
     )
-    .unwrap()
+    .unwrap();
+    ReferencePremultipliedRgba8Buffer::from_pixels(size, vec![pixel; pixel_count]).unwrap()
 }
 
 pub(super) fn reference_straight_bytes_for_test(
