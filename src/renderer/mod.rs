@@ -1,11 +1,17 @@
+mod dispatch;
 mod options;
 mod publication;
 #[cfg(test)]
 mod test_support;
 
+use dispatch::{PreparedRendererExecution, RendererFrameDispatch, runtime_surface_format};
 pub use options::{Antialiasing, EffectQualityPolicy, Options, ResourceCacheBudget};
 use publication::RenderPublication;
 
+#[cfg(test)]
+use super::frame::{FramePlan, GpuRenderGraph};
+#[cfg(test)]
+use super::pass::ExecutableGraphDispatchEligibility;
 #[cfg(test)]
 use super::resource::{ResourceManagerObservationForTest, WorkingFormat};
 #[cfg(any(
@@ -17,17 +23,14 @@ use super::{
     backend::*,
     command::RenderCommands,
     encode::encode_vello_scene,
-    frame::{
-        FrameContext, FramePlan, GpuRenderGraph, GraphLoweringCompositeKind, GraphLoweringPassKind,
-    },
+    frame::FrameContext,
     geometry::physical_size,
     gpu_transaction::GpuOperationStage,
-    pass::{ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest},
+    pass::ExecutableGraphWorkingFormatRequest,
     readback::read_texture_rgba,
     stats::collect_render_stats,
     surface::{HeadlessResources, RendererIdentity, SurfaceBackend},
     validation::*,
-    vello_engine::scene::VelloScene,
     *,
 };
 #[cfg(all(test, feature = "render-window"))]
@@ -64,18 +67,6 @@ pub struct Renderer {
     dispatch_observation: RendererDispatchObservationForTest,
     #[cfg(test)]
     exact_graph_working_format: Option<WorkingFormat>,
-}
-
-#[must_use = "the renderer dispatch boundary must resolve to exactly one execution route"]
-enum RendererFrameDispatch {
-    DirectVello(RenderCommands),
-    ExactGraph(Box<ExactSurfaceGraph>),
-}
-
-#[must_use = "prepared renderer execution must reach its selected GPU transaction"]
-enum PreparedRendererExecution {
-    DirectVello(Box<VelloScene>),
-    ExactGraph(Box<ExactSurfaceGraph>),
 }
 
 #[cfg(test)]
@@ -821,88 +812,47 @@ impl Renderer {
         Ok(created)
     }
 
-    fn classify_frame_dispatch(
-        &mut self,
-        plan: FramePlan,
-        output_format: Format,
-        working_format: ExecutableGraphWorkingFormatRequest,
-        capabilities: &DeviceCapabilities,
-    ) -> Result<RendererFrameDispatch> {
-        #[cfg(test)]
-        {
-            self.dispatch_observation.boundary_invocations = self
-                .dispatch_observation
-                .boundary_invocations
-                .saturating_add(1);
-        }
-        match plan {
-            FramePlan::DirectVello(plan) => {
-                #[cfg(test)]
-                {
-                    self.dispatch_observation.direct_vello_routes = self
+    #[cfg(test)]
+    fn observe_frame_dispatch_for_test(&mut self, dispatch: &Result<RendererFrameDispatch>) {
+        self.dispatch_observation.boundary_invocations = self
+            .dispatch_observation
+            .boundary_invocations
+            .saturating_add(1);
+        match dispatch {
+            Ok(RendererFrameDispatch::DirectVello(_)) => {
+                self.dispatch_observation.direct_vello_routes = self
+                    .dispatch_observation
+                    .direct_vello_routes
+                    .saturating_add(1);
+            }
+            Ok(RendererFrameDispatch::ExactGraph(graph)) => match graph.as_ref() {
+                ExactSurfaceGraph::Base(_) => {
+                    self.dispatch_observation.exact_base_graph_routes = self
                         .dispatch_observation
-                        .direct_vello_routes
+                        .exact_base_graph_routes
                         .saturating_add(1);
                 }
-                Ok(RendererFrameDispatch::DirectVello(plan.into_commands()))
-            }
-            FramePlan::GpuGraph(graph) => match ExecutableGraphDispatchEligibility::try_classify(
-                &graph,
-                output_format,
-                working_format,
-                capabilities,
-            )? {
-                ExecutableGraphDispatchEligibility::ExactBase(preparable) => {
-                    #[cfg(test)]
-                    {
-                        self.dispatch_observation.exact_base_graph_routes = self
-                            .dispatch_observation
-                            .exact_base_graph_routes
-                            .saturating_add(1);
-                    }
-                    Ok(RendererFrameDispatch::ExactGraph(Box::new(
-                        ExactSurfaceGraph::Base(preparable),
-                    )))
+                ExactSurfaceGraph::Composition(_) => {
+                    self.dispatch_observation.exact_composition_graph_routes = self
+                        .dispatch_observation
+                        .exact_composition_graph_routes
+                        .saturating_add(1);
                 }
-                ExecutableGraphDispatchEligibility::ExactComposition(preparable) => {
-                    #[cfg(test)]
-                    {
-                        self.dispatch_observation.exact_composition_graph_routes = self
-                            .dispatch_observation
-                            .exact_composition_graph_routes
-                            .saturating_add(1);
-                    }
-                    Ok(RendererFrameDispatch::ExactGraph(Box::new(
-                        ExactSurfaceGraph::Composition(preparable),
-                    )))
+                ExactSurfaceGraph::Backdrop(_) => {
+                    self.dispatch_observation.exact_backdrop_graph_routes = self
+                        .dispatch_observation
+                        .exact_backdrop_graph_routes
+                        .saturating_add(1);
                 }
-                ExecutableGraphDispatchEligibility::ExactBackdrop(preparable) => {
-                    #[cfg(test)]
-                    {
-                        self.dispatch_observation.exact_backdrop_graph_routes = self
-                            .dispatch_observation
-                            .exact_backdrop_graph_routes
-                            .saturating_add(1);
-                    }
-                    Ok(RendererFrameDispatch::ExactGraph(Box::new(
-                        ExactSurfaceGraph::Backdrop(preparable),
-                    )))
-                }
-                ExecutableGraphDispatchEligibility::FuturePasses => {
-                    #[cfg(test)]
-                    {
-                        self.dispatch_observation.unsupported_graph_rejections = self
-                            .dispatch_observation
-                            .unsupported_graph_rejections
-                            .saturating_add(1);
-                    }
-                    reject_future_graph_with_typed_diagnostic(&graph)?;
-                    Err(Error::new(
-                        BackendErrorCode::RenderFailed,
-                        "a future GPU graph had no unavailable execution pass",
-                    ))
-                }
+                ExactSurfaceGraph::ColorFilter(_) | ExactSurfaceGraph::SpatialFilter(_) => {}
             },
+            Ok(RendererFrameDispatch::RejectedFutureGraph(_)) => {
+                self.dispatch_observation.unsupported_graph_rejections = self
+                    .dispatch_observation
+                    .unsupported_graph_rejections
+                    .saturating_add(1);
+            }
+            Err(_) => {}
         }
     }
 
@@ -1113,7 +1063,10 @@ impl Renderer {
             runtime_surface_format(surface),
             working_format,
             &capabilities,
-        )?;
+        );
+        #[cfg(test)]
+        self.observe_frame_dispatch_for_test(&dispatch);
+        let dispatch = dispatch?;
         Ok(match dispatch {
             RendererFrameDispatch::DirectVello(normalized) => {
                 let vello_scene = encode_vello_scene(&normalized, surface.scale())?;
@@ -1125,6 +1078,7 @@ impl Renderer {
             RendererFrameDispatch::ExactGraph(graph) => {
                 (graph_source, PreparedRendererExecution::ExactGraph(graph))
             }
+            RendererFrameDispatch::RejectedFutureGraph(error) => return Err(error),
         })
     }
 
@@ -1373,12 +1327,14 @@ impl Renderer {
                     "the private base graph forced route lost immutable device capabilities",
                 )
             })?;
-        let preparable = match self.classify_frame_dispatch(
+        let dispatch = self.classify_frame_dispatch(
             FramePlan::GpuGraph(graph),
             runtime_surface_format(surface),
             ExecutableGraphWorkingFormatRequest::Exact(working_format),
             &capabilities,
-        )? {
+        );
+        self.observe_frame_dispatch_for_test(&dispatch);
+        let preparable = match dispatch? {
             RendererFrameDispatch::ExactGraph(graph) => match *graph {
                 ExactSurfaceGraph::Base(preparable) => preparable,
                 ExactSurfaceGraph::Composition(_)
@@ -1612,6 +1568,7 @@ impl Renderer {
                     "the private color-filter fixture left its exact renderer dispatch route",
                 ));
             }
+            RendererFrameDispatch::RejectedFutureGraph(error) => return Err(error),
         };
         let output_extent = preparable.output_extent()?;
         let source_spatial = preparable.first_color_spatial_for_test().ok_or_else(|| {
@@ -1761,6 +1718,7 @@ impl Renderer {
                     "the private spatial-filter fixture left its exact renderer dispatch route",
                 ));
             }
+            RendererFrameDispatch::RejectedFutureGraph(error) => return Err(error),
         };
         let output_extent = preparable.output_extent()?;
         let (source_spatial, result_spatial) =
@@ -1893,6 +1851,7 @@ impl Renderer {
                     "the private bounded-backdrop fixture left its exact renderer dispatch route",
                 ));
             }
+            RendererFrameDispatch::RejectedFutureGraph(error) => return Err(error),
         };
         let output_extent = preparable.output_extent()?;
         let (parent_spatial, capture_spatial) =
@@ -2893,24 +2852,6 @@ impl Renderer {
     }
 }
 
-fn runtime_surface_format(surface: &Surface) -> Format {
-    #[cfg(any(
-        feature = "render-window",
-        all(feature = "render-web", target_arch = "wasm32")
-    ))]
-    if let SurfaceBackend::Presented {
-        surface: native, ..
-    } = &surface.backend
-    {
-        return match native.format {
-            wgpu::TextureFormat::Rgba8Unorm => Format::Rgba8,
-            wgpu::TextureFormat::Bgra8Unorm => Format::Bgra8,
-            _ => surface.options.format,
-        };
-    }
-    surface.options.format
-}
-
 fn runtime_surface_unavailable_reason(
     _surface: &Surface,
 ) -> Option<RuntimeCapabilityUnavailableReason> {
@@ -2944,76 +2885,6 @@ fn surface_identity_mismatch(
     Error::runtime_capability_unavailable(diagnostic)
 }
 
-fn reject_future_graph_with_typed_diagnostic(graph: &GpuRenderGraph) -> Result<()> {
-    let mut has_copy_backdrop = false;
-    let mut has_color_filter = false;
-    let mut has_blur = false;
-    let mut has_drop_shadow = false;
-
-    for pass in graph.lowering_view()?.passes() {
-        match pass.kind()? {
-            GraphLoweringPassKind::ClearRoot { .. }
-            | GraphLoweringPassKind::VelloCapture(Some(_))
-            | GraphLoweringPassKind::CanonicalizeCapture
-            | GraphLoweringPassKind::Present => {}
-            GraphLoweringPassKind::CopyBackdrop => has_copy_backdrop = true,
-            GraphLoweringPassKind::ColorFilter(Some(_)) => has_color_filter = true,
-            GraphLoweringPassKind::BlurHorizontal(Some(_))
-            | GraphLoweringPassKind::BlurVertical(Some(_)) => has_blur = true,
-            GraphLoweringPassKind::DropShadowColorize(Some(_)) => has_drop_shadow = true,
-            GraphLoweringPassKind::Composite(Some(composite)) => match composite.kind() {
-                GraphLoweringCompositeKind::SpanSourceOver => {}
-                GraphLoweringCompositeKind::Layer { .. } => {}
-                GraphLoweringCompositeKind::DropShadow => has_drop_shadow = true,
-            },
-            GraphLoweringPassKind::VelloCapture(None)
-            | GraphLoweringPassKind::ColorFilter(None)
-            | GraphLoweringPassKind::BlurHorizontal(None)
-            | GraphLoweringPassKind::BlurVertical(None)
-            | GraphLoweringPassKind::DropShadowColorize(None)
-            | GraphLoweringPassKind::Composite(None) => {
-                return Err(Error::new(
-                    BackendErrorCode::RenderFailed,
-                    "a malformed GPU graph reached production dispatch",
-                ));
-            }
-        }
-    }
-
-    let unsupported = if has_copy_backdrop {
-        Some((
-            PrimitiveFamily::OffscreenPipeline,
-            PrimitiveOperation::BroadBackdropExecution,
-        ))
-    } else if has_drop_shadow {
-        Some((
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuDropShadowFilterExecution,
-        ))
-    } else if has_blur {
-        Some((
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuBlurFilterExecution,
-        ))
-    } else if has_color_filter {
-        Some((
-            PrimitiveFamily::Filters,
-            PrimitiveOperation::GpuColorFilterExecution,
-        ))
-    } else {
-        None
-    };
-    if let Some((family, operation)) = unsupported {
-        return Err(Error::unsupported_render_primitive(
-            UnsupportedPrimitive::new(family, operation),
-        ));
-    }
-    Err(Error::new(
-        BackendErrorCode::RenderFailed,
-        "a future GPU graph had no unavailable execution pass",
-    ))
-}
-
 #[cfg(test)]
 pub(crate) fn unsupported_graph_diagnostic_for_test(
     graph: &GpuRenderGraph,
@@ -3027,7 +2898,7 @@ pub(crate) fn unsupported_graph_diagnostic_for_test(
         capabilities,
     )? {
         ExecutableGraphDispatchEligibility::FuturePasses => {
-            let error = reject_future_graph_with_typed_diagnostic(graph)
+            let error = dispatch::reject_future_graph_with_typed_diagnostic(graph)
                 .expect_err("an unsupported graph diagnostic probe must reject before execution");
             Ok(error.unsupported_primitive())
         }
