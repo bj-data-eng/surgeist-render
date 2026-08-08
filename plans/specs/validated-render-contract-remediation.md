@@ -12,14 +12,14 @@ rendering surface:
 3. every item exported through the current crate front door has rustdoc that
    explains its applicable phase, units, invariants, defaults, failures, and
    behavior; and
-4. the unused parallel render-command statistics path and its dead-code
-   allowance are removed.
+4. the normalized-command statistics helper and its import are compiled only as
+   test support, and its dead-code allowance is removed.
 
 The initiative is complete when distinct same-sized image contents remain
 distinct even when a test deliberately gives them the same 64-bit fingerprint,
 overflowing rectangle maxima fail at construction and canonical validation,
 strict missing-docs rustdoc succeeds for the current public surface, and no
-dead-code allowance remains for `RenderCommands::stats`.
+production target retains `RenderCommands::stats` or its dead-code allowance.
 
 ## R02 Ownership And Boundary
 
@@ -36,8 +36,8 @@ In scope:
   `src/validation.rs` canonical rectangle validation;
 - rustdoc on every currently exported item in the 17 source files identified
   by R03, including public enum variants and public fields;
-- removal of `RenderCommands::stats`, its lint allowance, and its now-unused
-  import from `src/command.rs`;
+- test-only isolation of `RenderCommands::stats` and its import, plus removal of
+  its lint allowance from `src/command.rs`;
 - focused, condition-named behavior tests and one-time strict rustdoc evidence.
 
 Out of scope:
@@ -124,13 +124,17 @@ becomes an executable repository test or permanent gate.
 
 ### R03.4 Dead command path
 
-- `src/command.rs` retains unused private `RenderCommands::stats` under a
-  method-scoped `#[allow(dead_code)]`.
+- `src/command.rs` retains private `RenderCommands::stats` in every library
+  build under a method-scoped `#[allow(dead_code)]`.
+- The helper is not dead test support: 21 current call sites in
+  `src/tests/model.rs`, `src/tests/style.rs`, and `src/tests/vello.rs` inspect
+  normalized-command behavior through it when `cfg(test)` is active.
 - The production renderer instead starts from route and timing state, clones
   previously observed image identities, calls `collect_render_stats`, and
   publishes the resulting state.
-- Routing production through the unused helper would lose those semantics; the
-  correct remediation is deletion, not adoption.
+- Routing production through the helper would lose those semantics, while
+  deleting it would break focused normalization tests. The defect is that test
+  support and its allowance remain compiled in non-test library targets.
 
 ## R04 Resolved Design Decisions
 
@@ -235,12 +239,18 @@ Strict rustdoc with `-D missing_docs` is completion evidence for this initiative
 not a committed crate lint. Normal rustdoc and Clippy must also reject broken
 links, warnings, or misleading code examples.
 
-### R04.6 Dead-code removal
+### R04.6 Test-only statistics isolation
 
-Delete `RenderCommands::stats`, its `#[allow(dead_code)]`, and the unused
-`collect_render_stats` import from `src/command.rs`. Preserve the active
-stateful statistics publication path in `src/renderer/dispatch.rs` and its test
-support. Do not create a replacement helper or allowance.
+Compile `RenderCommands::stats` only under `cfg(test)`, remove its
+`#[allow(dead_code)]`, and compile its `collect_render_stats` import only under
+the same test configuration. The existing 21 test call sites remain unchanged
+and continue to observe normalized-command statistics. Non-test library targets
+contain neither the helper nor its import.
+
+Preserve the active stateful statistics publication path in
+`src/renderer/dispatch.rs` and renderer test support. Do not create a second
+helper, route production through the test helper, suppress the lint elsewhere,
+or weaken the existing normalization tests.
 
 ## R05 Observable Behavior Matrix
 
@@ -256,7 +266,7 @@ support. Do not create a replacement helper or allowance.
 | Finite origin with zero size | Accepted when both derived maxima remain finite |
 | Internally constructed rectangle with an infinite derived maximum | `validate_rect` returns `InvalidInput` before planning |
 | Current public item without prior rustdoc | It has accurate rustdoc; strict missing-docs rustdoc emits no diagnostic |
-| Active renderer statistics publication | Behavior remains stateful and unchanged after dead helper deletion |
+| Active renderer statistics publication | Behavior remains stateful; normalized-command stats remain test-only; non-test builds contain no parallel helper or dead-code allowance |
 
 ## R06 Code And Test Outline
 
@@ -297,11 +307,13 @@ support. Do not create a replacement helper or allowance.
 - Verify zero missing-docs diagnostics from rustdoc without committing an
   inventory or lint attribute.
 
-### R06.4 Dead command path
+### R06.4 Test-only command statistics
 
-- Delete only the unused method, allowance, and import.
-- Retain focused statistics tests that exercise the real renderer publication
-  path; no test should assert source absence.
+- Gate the existing normalized-command stats method and its direct import with
+  `cfg(test)` and remove only the dead-code allowance.
+- Retain all current normalization call sites and focused statistics tests,
+  including those exercising the real renderer publication path; no test should
+  assert source absence.
 
 ## R07 Compatibility And Impacts
 
@@ -336,8 +348,9 @@ The initiative is accepted only when all of the following are true:
 4. finite and zero-area rectangle behavior remains covered;
 5. strict missing-docs rustdoc succeeds with no missing item, broken link,
    warning, or failed doctest for the current public surface;
-6. `RenderCommands::stats`, its dead-code allowance, and its unused import are
-   absent while active renderer statistics tests remain green;
+6. non-test builds omit `RenderCommands::stats` and its import, the dead-code
+   allowance is absent, and normalized-command plus active renderer statistics
+   tests remain green;
 7. the configured native and feature verification matrix passes using already
    installed offline tooling;
 8. repository-wide owned Rust contains no executable `unsafe` and no allowance
