@@ -111,7 +111,9 @@
 - RED evidence: add focused public-constructor and canonical-validation tests for
   both overflowing axes. Before correction, constructor cases must unexpectedly
   succeed or expose a non-finite maximum and the internal fixture must pass
-  canonical validation.
+  canonical validation. Add the condition-named
+  `rect_constructor_accepts_finite_and_zero_area_boundaries` characterization
+  before changing validation and keep it green before and after the correction.
 - Acceptance: both boundaries enforce identical derived-max semantics and
   diagnostics; `TryFrom<kurbo::Rect>` inherits the rule; existing downstream
   bounds rejection remains defense in depth; ordinary geometry behavior and
@@ -121,6 +123,7 @@
   ```sh
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render rect_constructor_rejects_non_finite_derived_maxima
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render canonical_rect_validation_rejects_non_finite_derived_maxima
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render rect_constructor_accepts_finite_and_zero_area_boundaries
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render signed_device_bounds_floor_minima_and_ceil_maxima
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render rect_try_from_kurbo_rejects_invalid_bounds
   CARGO_NET_OFFLINE=true cargo fmt --check
