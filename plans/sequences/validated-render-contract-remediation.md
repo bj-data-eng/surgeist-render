@@ -9,13 +9,14 @@
 - Initiative baseline: published/read-back `main` at
   `b02fa0c372472c88a511f45cb74b1ec0b356d181`.
 - Specification: `plans/specs/validated-render-contract-remediation.md` at
-  `c8c7fabef9db0494a01cfd2558f5174baa714db5`, normalized SHA-256
-  `1b57af4471b8bcea9f73f4bff5723227222083ba0d8ca367e14bc1155603933b`.
+  `2ee7b14d525519ae1f5c8a2756512ab786b10cea`, normalized SHA-256
+  `573a7f869f349d38c560dd9455fb6deb878161df4d3213517725a162dde63d7a`.
 - Specification review: `CLEAN` with no findings.
 - Initiative outcome: backend image identity and render-owned content reuse are
   collision-safe, public rectangles cannot expose non-finite maxima, the current
-  public model is fully documented, and the unused command-statistics path is
-  removed without root, sibling, dependency, feature, or permanent tooling work.
+  public model is fully documented, and normalized-command statistics support
+  is isolated to test builds without root, sibling, dependency, feature, or
+  permanent tooling work.
 
 ## 2 Ordering Constraints
 
@@ -46,11 +47,12 @@
   Rust 1.97 and wasm target remain available.
 - Entry state: a 64-bit content hash is supplied as Peniko/Vello identity and is
   the sole image fact in retained-mask and upload-telemetry identity; public and
-  canonical rectangle validation omit derived maxima; the unused command stats
-  helper remains allowed as dead code.
+  canonical rectangle validation omit derived maxima; normalized-command stats
+  support is compiled into non-test targets under a dead-code allowance.
 - Bounded outcome: Peniko owns unique backend blob IDs; render-owned mask reuse
   and upload telemetry use exact content equality; both rectangle boundaries
-  reject non-finite derived maxima; and the dead helper and allowance are gone.
+  reject non-finite derived maxima; and the normalized-command stats helper and
+  import are test-only with no dead-code allowance.
 - Exit evidence: deterministic forced-collision behavior, exact-content reuse,
   backend-ID separation, both derived-axis rejection and finite boundary cases,
   active renderer statistics behavior, configured feature/target/MSRV checks,
