@@ -38,8 +38,9 @@
 
 - Owning repository: `surgeist-render`.
 - Specification sections: R01 items 1, 2, and 4; R02; R03.1, R03.2, R03.4;
-  R04.1-R04.4, R04.6; applicable R05 rows; R06.1, R06.2, R06.4; R07; and
-  R08 items 1-4 and 6-10.
+  R04.1-R04.4, R04.6; R05 image-identity rows 1-5, rectangle rows 6-9, and
+  active-statistics row 11; R06.1, R06.2, R06.4; R07; and R08 items 1-4 and
+  6-10.
 - Prerequisites: specification review `CLEAN`; clean leaf `main`; local and
   authority tracking refs agree at the initiative baseline; installed offline
   Rust 1.97 and wasm target remain available.
@@ -62,8 +63,8 @@
 ### C02 Current Public Model Documentation
 
 - Owning repository: `surgeist-render`.
-- Specification sections: R01 item 3; R02; R03.3; R04.5; R06.3; R07; and R08
-  items 5 and 7-10.
+- Specification sections: R01 item 3; R02; R03.3; R04.5; R05
+  public-documentation row 10; R06.3; R07; and R08 items 5 and 7-10.
 - Prerequisite: C01 is reviewed, landed, published, remotely verified, and its
   corrected identity and rectangle contracts remain unchanged.
 - Entry state: strict missing-docs rustdoc reports undocumented items across the
