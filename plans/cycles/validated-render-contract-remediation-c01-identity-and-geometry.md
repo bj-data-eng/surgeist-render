@@ -4,7 +4,7 @@
 
 - Cycle: `P03/I01/S01/C01`.
 - Owning repository: `surgeist-render`.
-- Status: `draft`.
+- Status: `reviewed`.
 - Cycle base: published/read-back initiative baseline
   `b02fa0c372472c88a511f45cb74b1ec0b356d181`.
 - Specification: `plans/specs/validated-render-contract-remediation.md` at
