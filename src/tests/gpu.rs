@@ -9553,6 +9553,91 @@ fn colliding_images_for_test() -> (Image, Image) {
     (first, second)
 }
 
+fn byte_identical_images_with_different_fingerprints_for_test() -> (Image, Image) {
+    let first = Image::from_rgba_with_id_for_test(
+        Size::new(1.0, 1.0),
+        Arc::<[u8]>::from([12, 34, 56, 255]),
+        ImageId::new(1),
+    )
+    .unwrap();
+    let second = Image::from_rgba_with_id_for_test(
+        Size::new(1.0, 1.0),
+        Arc::<[u8]>::from([12, 34, 56, 255]),
+        ImageId::new(2),
+    )
+    .unwrap();
+    (first, second)
+}
+
+#[test]
+fn byte_identical_images_with_different_fingerprints_produce_equal_exact_mask_keys() {
+    let (first, second) = byte_identical_images_with_different_fingerprints_for_test();
+    let first = ResolvedMaskUploadDescriptor::try_from_image(first).unwrap();
+    let second = ResolvedMaskUploadDescriptor::try_from_image(second).unwrap();
+
+    assert_eq!(first.cache_key(), second.cache_key());
+}
+
+#[test]
+fn byte_identical_images_with_different_fingerprints_reuse_retained_mask_uploads() {
+    let (first, second) = byte_identical_images_with_different_fingerprints_for_test();
+    let first = ResolvedMaskUploadDescriptor::try_from_image(first).unwrap();
+    let second = ResolvedMaskUploadDescriptor::try_from_image(second).unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("exact-content reuse coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("exact-content reuse coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let queue = ready.queue_for_test();
+    let capabilities = DeviceCapabilities::from_device(ready.adapter_for_test(), device);
+    let manager = ResourceManager::new(ResourceCacheBudget::new(1_024 * 1_024));
+
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first_lease = first_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &first)
+        .unwrap();
+    let first_identity = first_lease.resource_identity();
+    first_frame.release(first_lease).unwrap();
+    let _ = first_frame.finish();
+
+    let mut second_frame = manager.begin_frame().unwrap();
+    let second_lease = second_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &second)
+        .unwrap();
+
+    assert_eq!(first_identity, second_lease.resource_identity());
+    assert_eq!(manager.stats().allocations, 1);
+    assert_eq!(manager.observation_for_test().payload_creation_attempts, 1);
+    second_frame.release(second_lease).unwrap();
+    let _ = second_frame.finish();
+}
+
+#[test]
+fn byte_identical_images_with_different_fingerprints_report_a_hit_without_second_upload() {
+    let (first, second) = byte_identical_images_with_different_fingerprints_for_test();
+    let mut first_scene = Scene::new();
+    first_scene.image(first, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch);
+    let mut second_scene = Scene::new();
+    second_scene.image(second, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch);
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
+
+    let first_stats =
+        pollster::block_on(renderer.render(&mut surface, &first_scene, Parameters::default()))
+            .unwrap();
+    let second_stats =
+        pollster::block_on(renderer.render(&mut surface, &second_scene, Parameters::default()))
+            .unwrap();
+
+    assert_eq!(first_stats.cache_misses, 1);
+    assert_eq!(first_stats.uploaded_bytes, 4);
+    assert_eq!(second_stats.cache_hits, 1);
+    assert_eq!(second_stats.cache_misses, 0);
+    assert_eq!(second_stats.uploaded_bytes, 0);
+}
+
 #[test]
 fn colliding_image_fingerprints_keep_peniko_blob_ids_distinct() {
     let (first, second) = colliding_images_for_test();

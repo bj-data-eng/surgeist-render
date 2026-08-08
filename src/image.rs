@@ -29,6 +29,7 @@ impl ImageId {
 #[derive(Clone)]
 pub(crate) struct ImageContentIdentity {
     fingerprint: ImageId,
+    content_hash: u64,
     width: u32,
     height: u32,
     bytes: Arc<[u8]>,
@@ -36,8 +37,10 @@ pub(crate) struct ImageContentIdentity {
 
 impl ImageContentIdentity {
     fn new(fingerprint: ImageId, width: u32, height: u32, bytes: Arc<[u8]>) -> Self {
+        let content_hash = stable_hash(&(width, height, bytes.as_ref()));
         Self {
             fingerprint,
+            content_hash,
             width,
             height,
             bytes,
@@ -64,10 +67,7 @@ impl fmt::Debug for ImageContentIdentity {
 
 impl PartialEq for ImageContentIdentity {
     fn eq(&self, other: &Self) -> bool {
-        self.fingerprint == other.fingerprint
-            && self.width == other.width
-            && self.height == other.height
-            && self.bytes == other.bytes
+        self.width == other.width && self.height == other.height && self.bytes == other.bytes
     }
 }
 
@@ -75,7 +75,7 @@ impl Eq for ImageContentIdentity {}
 
 impl Hash for ImageContentIdentity {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.fingerprint.hash(state);
+        self.content_hash.hash(state);
     }
 }
 
