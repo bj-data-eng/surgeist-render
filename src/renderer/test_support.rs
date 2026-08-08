@@ -13,6 +13,7 @@ use crate::{
     command::RenderCommands,
     frame::{FrameContext, FramePlan, GpuRenderGraph},
     gpu_transaction::GpuOperationStage,
+    image::ImageContentIdentity,
     pass::{ExecutableGraphDispatchEligibility, ExecutableGraphWorkingFormatRequest},
     readback::read_texture_rgba,
     resource::{ResourceManagerObservationForTest, WorkingFormat},
@@ -1095,7 +1096,7 @@ struct BoundedBackdropFixturePreparationForTest {
 }
 
 impl Renderer {
-    pub(crate) fn uploaded_images_for_test(&self) -> HashSet<ImageId> {
+    pub(crate) fn uploaded_images_for_test(&self) -> HashSet<ImageContentIdentity> {
         self.uploaded_images.clone()
     }
 }
@@ -1297,7 +1298,7 @@ impl Renderer {
         normalized: &RenderCommands,
         parameters: Parameters,
         encode_start: Instant,
-    ) -> (Stats, HashSet<ImageId>) {
+    ) -> (Stats, HashSet<ImageContentIdentity>) {
         let mut stats = Stats {
             encode_time: encode_start.elapsed(),
             render_time: Duration::ZERO,

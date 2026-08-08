@@ -6676,7 +6676,7 @@ fn texture_cache_records_misses_reuse_hits_and_live_count() {
     let manager = ResourceManager::default();
 
     let mut first_frame = manager.begin_frame().unwrap();
-    let first = first_frame.acquire(key, byte_len).unwrap();
+    let first = first_frame.acquire(key.clone(), byte_len).unwrap();
     assert_eq!(manager.stats().allocations, 1);
     assert_eq!(manager.stats().misses, 1);
     assert_eq!(manager.stats().hits, 0);
@@ -7415,8 +7415,14 @@ fn resource_role_keys_keep_allocation_namespaces_distinct() {
         wgpu::TextureUsages::TEXTURE_BINDING,
     )
     .unwrap();
-    let mask = ResolvedMaskUploadKey::new(
+    let mask_image = Image::from_rgba_with_id_for_test(
+        Size::new(2.0, 2.0),
+        Arc::<[u8]>::from([0; 16]),
         ImageId::new(1),
+    )
+    .unwrap();
+    let mask = ResolvedMaskUploadKey::from_image_for_test(
+        &mask_image,
         PhysicalSize::new(2, 2),
         ImageQuality::Medium,
         Extend::Pad,
@@ -7483,7 +7489,7 @@ fn texture_cache_rejects_stale_handle_after_reuse() {
     let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(3, 3));
     let manager = ResourceManager::default();
     let mut first_frame = manager.begin_frame().unwrap();
-    let first = first_frame.acquire(key, byte_len).unwrap();
+    let first = first_frame.acquire(key.clone(), byte_len).unwrap();
     let stale = first.token_for_test();
     first_frame.release(first).unwrap();
     let _ = first_frame.finish();
@@ -7508,7 +7514,7 @@ fn texture_cache_rejects_foreign_release_for_matching_descriptor() {
     let mut first_frame = first_manager.begin_frame().unwrap();
     let mut second_frame = second_manager.begin_frame().unwrap();
 
-    let foreign = first_frame.acquire(key, byte_len).unwrap();
+    let foreign = first_frame.acquire(key.clone(), byte_len).unwrap();
     let local = second_frame.acquire(key, byte_len).unwrap();
     let error = second_frame
         .release(foreign)
@@ -7573,7 +7579,7 @@ fn texture_lifecycle_accounting_is_separate_from_image_cache_stats() {
     let (key, byte_len) = modeled_effect_texture_for_test(PhysicalSize::new(4, 4));
     let manager = ResourceManager::default();
     let mut first_frame = manager.begin_frame().unwrap();
-    let first = first_frame.acquire(key, byte_len).unwrap();
+    let first = first_frame.acquire(key.clone(), byte_len).unwrap();
     first_frame.release(first).unwrap();
     let _ = first_frame.finish();
     let mut second_frame = manager.begin_frame().unwrap();
@@ -8063,8 +8069,12 @@ fn retained_capture_texture_lifecycle_is_deterministic_for_nested_layer_bounds()
     let manager = ResourceManager::default();
 
     let mut first_frame = manager.begin_frame().unwrap();
-    let outer_first = first_frame.acquire(outer_key, outer_byte_len).unwrap();
-    let inner_first = first_frame.acquire(inner_key, inner_byte_len).unwrap();
+    let outer_first = first_frame
+        .acquire(outer_key.clone(), outer_byte_len)
+        .unwrap();
+    let inner_first = first_frame
+        .acquire(inner_key.clone(), inner_byte_len)
+        .unwrap();
     let outer_identity = outer_first.resource_identity();
     let inner_identity = inner_first.resource_identity();
     first_frame.release(inner_first).unwrap();
@@ -9526,6 +9536,99 @@ fn warm_image_reuse_reports_cache_hit() {
     assert_eq!(warm.cache_hits, 1);
 }
 
+fn colliding_images_for_test() -> (Image, Image) {
+    let fingerprint = ImageId::new(0xC011_1D1E);
+    let first = Image::from_rgba_with_id_for_test(
+        Size::new(1.0, 1.0),
+        Arc::<[u8]>::from([255, 0, 0, 255]),
+        fingerprint,
+    )
+    .unwrap();
+    let second = Image::from_rgba_with_id_for_test(
+        Size::new(1.0, 1.0),
+        Arc::<[u8]>::from([0, 0, 255, 255]),
+        fingerprint,
+    )
+    .unwrap();
+    (first, second)
+}
+
+#[test]
+fn colliding_image_fingerprints_keep_peniko_blob_ids_distinct() {
+    let (first, second) = colliding_images_for_test();
+
+    assert_eq!(first.id(), second.id());
+    assert_ne!(image_data(&first).data.id(), image_data(&second).data.id());
+}
+
+#[test]
+fn colliding_image_fingerprints_produce_distinct_resolved_mask_keys() {
+    let (first, second) = colliding_images_for_test();
+    let first = ResolvedMaskUploadDescriptor::try_from_image(first).unwrap();
+    let second = ResolvedMaskUploadDescriptor::try_from_image(second).unwrap();
+
+    assert_ne!(first.cache_key(), second.cache_key());
+}
+
+#[test]
+fn colliding_image_fingerprints_do_not_reuse_retained_mask_uploads() {
+    let (first, second) = colliding_images_for_test();
+    let first = ResolvedMaskUploadDescriptor::try_from_image(first).unwrap();
+    let second = ResolvedMaskUploadDescriptor::try_from_image(second).unwrap();
+    let mut renderer = pollster::block_on(Renderer::new(Options::default()))
+        .expect("resolved-mask collision coverage requires a selected host adapter");
+    let ready = renderer
+        .default_ready_device_state_borrow_for_test()
+        .expect("resolved-mask collision coverage requires a ready WGPU device");
+    let device = ready.device_for_test();
+    let queue = ready.queue_for_test();
+    let capabilities = DeviceCapabilities::from_device(ready.adapter_for_test(), device);
+    let manager = ResourceManager::new(ResourceCacheBudget::new(1_024 * 1_024));
+
+    let mut first_frame = manager.begin_frame().unwrap();
+    let first_lease = first_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &first)
+        .unwrap();
+    let first_identity = first_lease.resource_identity();
+    first_frame.release(first_lease).unwrap();
+    let _ = first_frame.finish();
+
+    let mut second_frame = manager.begin_frame().unwrap();
+    let second_lease = second_frame
+        .acquire_resolved_mask_upload(device, queue, &capabilities, &second)
+        .unwrap();
+
+    assert_ne!(first_identity, second_lease.resource_identity());
+    assert_eq!(manager.stats().allocations, 2);
+    assert_eq!(manager.observation_for_test().payload_creation_attempts, 2);
+    second_frame.release(second_lease).unwrap();
+    let _ = second_frame.finish();
+}
+
+#[test]
+fn colliding_image_fingerprints_report_both_exact_contents_as_first_observations() {
+    let (first, second) = colliding_images_for_test();
+    let mut first_scene = Scene::new();
+    first_scene.image(first, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch);
+    let mut second_scene = Scene::new();
+    second_scene.image(second, Rect::new(0.0, 0.0, 1.0, 1.0), ImageFit::Stretch);
+    let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
+    let mut surface =
+        pollster::block_on(renderer.create_headless(Size::new(1.0, 1.0), 1.0)).unwrap();
+
+    let first_stats =
+        pollster::block_on(renderer.render(&mut surface, &first_scene, Parameters::default()))
+            .unwrap();
+    let second_stats =
+        pollster::block_on(renderer.render(&mut surface, &second_scene, Parameters::default()))
+            .unwrap();
+
+    assert_eq!(first_stats.cache_misses, 1);
+    assert_eq!(second_stats.cache_misses, 1);
+    assert_eq!(second_stats.cache_hits, 0);
+    assert_eq!(second_stats.uploaded_bytes, 4);
+}
+
 #[test]
 fn failed_render_does_not_warm_image_reuse_stats() {
     let mut renderer = pollster::block_on(Renderer::new(Options::default())).unwrap();
@@ -9953,7 +10056,7 @@ fn repeated_masked_and_blended_frames_reuse_resources_without_growth_or_readback
     let stable_resource_set =
         composition_resource_observations_are_stable(&resource_observations, &warmed_resources);
     let exact_mask_key_is_retained = warmed_resources.resolved_mask_upload_keys_for_test()
-        == [mask_key]
+        == [mask_key.clone()]
         && mask_key.physical_size() == PhysicalSize::new(2, 2)
         && mask_key.quality() == ImageQuality::High
         && mask_key.extend() == Extend::Reflect;
@@ -10870,34 +10973,45 @@ fn assert_effect_texture_rejections_preserve_state(
 }
 
 fn assert_resolved_mask_cache_keys_are_distinct() {
-    let image_id = ImageId::new(17);
+    let base = Image::from_rgba_with_id_for_test(
+        Size::new(8.0, 4.0),
+        vec![0; 8 * 4 * 4],
+        ImageId::new(17),
+    )
+    .unwrap();
+    let different_content = Image::from_rgba_with_id_for_test(
+        Size::new(8.0, 4.0),
+        vec![1; 8 * 4 * 4],
+        ImageId::new(18),
+    )
+    .unwrap();
     let keys = std::collections::HashSet::from([
-        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
-            image_id,
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::from_image_for_test(
+            &base,
             PhysicalSize::new(8, 4),
             ImageQuality::Medium,
             Extend::Pad,
         )),
-        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
-            ImageId::new(18),
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::from_image_for_test(
+            &different_content,
             PhysicalSize::new(8, 4),
             ImageQuality::Medium,
             Extend::Pad,
         )),
-        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
-            image_id,
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::from_image_for_test(
+            &base,
             PhysicalSize::new(9, 4),
             ImageQuality::Medium,
             Extend::Pad,
         )),
-        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
-            image_id,
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::from_image_for_test(
+            &base,
             PhysicalSize::new(8, 4),
             ImageQuality::High,
             Extend::Pad,
         )),
-        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::new(
-            image_id,
+        ResourceCacheKey::ResolvedMaskUpload(ResolvedMaskUploadKey::from_image_for_test(
+            &base,
             PhysicalSize::new(8, 4),
             ImageQuality::Medium,
             Extend::Reflect,

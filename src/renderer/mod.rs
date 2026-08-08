@@ -26,6 +26,7 @@ use super::{
     validation::*,
     *,
 };
+use crate::image::ImageContentIdentity;
 use std::{collections::HashSet, time::Instant};
 
 /// GPU-only renderer and owner of device-scoped resources and frame transactions.
@@ -39,7 +40,7 @@ pub struct Renderer {
     identity: RendererIdentity,
     options: Options,
     stats: Stats,
-    uploaded_images: HashSet<ImageId>,
+    uploaded_images: HashSet<ImageContentIdentity>,
     backend: Option<Backend>,
     default_device: Option<DeviceSlotIdentity>,
 }

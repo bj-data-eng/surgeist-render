@@ -34,15 +34,15 @@ impl AllocationGeneration {
 }
 
 impl ResourceCacheKey {
-    pub(super) const fn accepts_modeled_payload(self) -> bool {
+    pub(super) const fn accepts_modeled_payload(&self) -> bool {
         matches!(self, Self::VelloAtlas | Self::EffectTexture(_))
     }
 
-    pub(super) const fn is_vello_buffer(self) -> bool {
+    pub(super) const fn is_vello_buffer(&self) -> bool {
         matches!(self, Self::VelloBuffer(_))
     }
 
-    pub(super) const fn is_transient_vello_image(self) -> bool {
+    pub(super) const fn is_transient_vello_image(&self) -> bool {
         matches!(self, Self::VelloImage(key) if !key.is_persistent_atlas())
     }
 }
@@ -225,8 +225,8 @@ impl ResourceManager {
         let resolved_mask_upload_keys = state
             .entries
             .values()
-            .filter_map(|entry| match entry.key {
-                ResourceCacheKey::ResolvedMaskUpload(key) => Some(key),
+            .filter_map(|entry| match &entry.key {
+                ResourceCacheKey::ResolvedMaskUpload(key) => Some(key.clone()),
                 ResourceCacheKey::VelloAtlas
                 | ResourceCacheKey::VelloBuffer(_)
                 | ResourceCacheKey::VelloImage(_)

@@ -1912,7 +1912,7 @@ impl SemanticFrameGraphPlanner {
         if let Some((_, resource)) = self
             .resolved_mask_imports
             .iter()
-            .find(|(existing, _)| *existing == key)
+            .find(|(existing, _)| existing == &key)
         {
             return Ok(*resource);
         }

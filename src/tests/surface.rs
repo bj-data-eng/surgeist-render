@@ -1,9 +1,9 @@
 use crate::{
     Attachment, Color, DeviceLossReason, EffectQualityPolicy, Error, ErrorCode, Format,
-    GpuFaultKind, Image, ImageBuffer, ImageFit, ImageId, Options, Parameters, PhysicalSize,
-    PresentMode, Rect, RenderRoute, RenderSurfaceAvailability, Renderer, ResourceCacheBudget,
-    Result, RuntimeCapabilityUnavailable, RuntimeCapabilityUnavailableReason, RuntimeOperation,
-    Scene, Size, Stats, Surface, SurfaceOptions, SurfaceResourceState, SurfaceState,
+    GpuFaultKind, Image, ImageBuffer, ImageFit, Options, Parameters, PhysicalSize, PresentMode,
+    Rect, RenderRoute, RenderSurfaceAvailability, Renderer, ResourceCacheBudget, Result,
+    RuntimeCapabilityUnavailable, RuntimeCapabilityUnavailableReason, RuntimeOperation, Scene,
+    Size, Stats, Surface, SurfaceOptions, SurfaceResourceState, SurfaceState,
 };
 
 use crate::{
@@ -2714,7 +2714,7 @@ struct GraphAbortFixtureForTest {
     baseline_pixels: ImageBuffer,
     baseline_stats: Stats,
     baseline_parameters: Option<Parameters>,
-    baseline_uploaded_images: std::collections::HashSet<ImageId>,
+    baseline_uploaded_images: std::collections::HashSet<crate::image::ImageContentIdentity>,
     baseline_publication_count: usize,
     baseline_cache: crate::shader::DevicePassCacheCountsForTest,
     resources_before: crate::resource::ResourceManagerObservationForTest,

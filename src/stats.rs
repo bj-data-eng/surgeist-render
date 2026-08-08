@@ -1,11 +1,12 @@
 use super::{
-    Image, ImageId, Paint,
+    Image, Paint,
     command::{RenderCommand, RenderPaint},
     paint::PaintKind,
     pass::EncodedGpuGraphActivity,
     resource::{FrameCleanup, WorkingFormat},
     scene::Command,
 };
+use crate::image::ImageContentIdentity;
 use std::time::Duration;
 
 /// GPU execution route used by one successfully published frame.
@@ -81,9 +82,9 @@ pub struct Stats {
     pub glyphs: usize,
     /// Number of normalized layer commands.
     pub layers: usize,
-    /// Number of image identities already observed by this renderer.
+    /// Number of exact image contents already observed by this renderer.
     pub cache_hits: usize,
-    /// Number of first-observed image identities for this renderer.
+    /// Number of first-observed exact image contents for this renderer.
     pub cache_misses: usize,
     /// Straight-alpha source-image bytes first observed by this renderer.
     pub uploaded_bytes: u64,
@@ -135,7 +136,7 @@ impl GpuGraphStatsObservation {
 pub(crate) fn collect_stats(
     commands: &[Command],
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<ImageId>,
+    uploaded_images: &mut std::collections::HashSet<ImageContentIdentity>,
 ) {
     for command in commands {
         stats.commands = stats.commands.saturating_add(1);
@@ -178,7 +179,7 @@ pub(crate) fn collect_stats(
 fn collect_paint_stats(
     paint: &Paint,
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<ImageId>,
+    uploaded_images: &mut std::collections::HashSet<ImageContentIdentity>,
 ) {
     if let PaintKind::Image(image) = paint.kind() {
         collect_image_stats(image, stats, uploaded_images);
@@ -188,7 +189,7 @@ fn collect_paint_stats(
 pub(crate) fn collect_render_stats(
     commands: &[RenderCommand],
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<ImageId>,
+    uploaded_images: &mut std::collections::HashSet<ImageContentIdentity>,
 ) {
     for command in commands {
         stats.commands = stats.commands.saturating_add(1);
@@ -221,7 +222,7 @@ pub(crate) fn collect_render_stats(
 fn collect_render_paint_stats(
     paint: &RenderPaint,
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<ImageId>,
+    uploaded_images: &mut std::collections::HashSet<ImageContentIdentity>,
 ) {
     if let RenderPaint::Image(image) = paint {
         collect_image_stats(image, stats, uploaded_images);
@@ -231,10 +232,10 @@ fn collect_render_paint_stats(
 fn collect_image_stats(
     image: &Image,
     stats: &mut Stats,
-    uploaded_images: &mut std::collections::HashSet<ImageId>,
+    uploaded_images: &mut std::collections::HashSet<ImageContentIdentity>,
 ) {
     stats.images = stats.images.saturating_add(1);
-    if uploaded_images.insert(image.id()) {
+    if uploaded_images.insert(image.content_identity().clone()) {
         stats.cache_misses = stats.cache_misses.saturating_add(1);
         stats.uploaded_bytes = stats
             .uploaded_bytes

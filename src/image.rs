@@ -1,27 +1,93 @@
 use super::{BackendErrorCode, Error, PhysicalSize, Result, Size};
 use std::{
+    fmt,
     hash::{Hash, Hasher},
     sync::Arc,
 };
 
+/// A compact image fingerprint or caller-supplied resource handle.
+///
+/// This copyable value is not a collision-free proof of pixel equality and
+/// must not be used as the sole identity for a backend cache.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ImageId(u64);
 
 impl ImageId {
+    /// Creates a compact image fingerprint or caller-supplied resource handle.
     #[must_use]
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
+    /// Returns the compact underlying value.
     #[must_use]
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone)]
+pub(crate) struct ImageContentIdentity {
+    fingerprint: ImageId,
+    width: u32,
+    height: u32,
+    bytes: Arc<[u8]>,
+}
+
+impl ImageContentIdentity {
+    fn new(fingerprint: ImageId, width: u32, height: u32, bytes: Arc<[u8]>) -> Self {
+        Self {
+            fingerprint,
+            width,
+            height,
+            bytes,
+        }
+    }
+
+    #[cfg(test)]
+    const fn fingerprint(&self) -> ImageId {
+        self.fingerprint
+    }
+}
+
+impl fmt::Debug for ImageContentIdentity {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ImageContentIdentity")
+            .field("fingerprint", &self.fingerprint)
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("byte_len", &self.bytes.len())
+            .finish()
+    }
+}
+
+impl PartialEq for ImageContentIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint
+            && self.width == other.width
+            && self.height == other.height
+            && self.bytes == other.bytes
+    }
+}
+
+impl Eq for ImageContentIdentity {}
+
+impl Hash for ImageContentIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.fingerprint.hash(state);
+    }
+}
+
+/// A validated, shareable RGBA8 image and its sampling configuration.
+///
+/// Exact render-owned content identity includes the dimensions and shared
+/// pixel bytes. [`ImageId`] is retained only as a compact fingerprint, while
+/// the backend blob carries its own unique identity.
+#[derive(Clone, Debug)]
 pub struct Image {
     id: ImageId,
+    content_identity: ImageContentIdentity,
     pub(crate) size: Size,
     pub(crate) bytes: Arc<[u8]>,
     pub(crate) data: peniko::ImageData,
@@ -29,7 +95,19 @@ pub struct Image {
     pub(crate) extend: Extend,
 }
 
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.content_identity == other.content_identity
+            && self.quality == other.quality
+            && self.extend == other.extend
+    }
+}
+
 impl Image {
+    /// Creates a validated RGBA8 image with a deterministic compact fingerprint.
+    ///
+    /// Independently constructed images receive distinct backend blob IDs even
+    /// when their dimensions and bytes are equal.
     pub fn from_rgba(size: Size, data: impl Into<Arc<[u8]>>) -> Result<Self> {
         let data = data.into();
         validate_rgba_image(size, data.len())?;
@@ -38,11 +116,15 @@ impl Image {
             size.height().to_bits(),
             data.as_ref(),
         ));
-        let id = ImageId::new(id);
+        Self::from_validated_rgba_with_id(size, data, ImageId::new(id))
+    }
+
+    fn from_validated_rgba_with_id(size: Size, data: Arc<[u8]>, id: ImageId) -> Result<Self> {
         let width = image_dimension(size.width(), "width")?;
         let height = image_dimension(size.height(), "height")?;
+        let content_identity = ImageContentIdentity::new(id, width, height, Arc::clone(&data));
         let image = peniko::ImageData {
-            data: peniko::Blob::from_raw_parts(Arc::new(data.to_vec()), id.get()),
+            data: peniko::Blob::new(Arc::new(Arc::clone(&data))),
             format: peniko::ImageFormat::Rgba8,
             alpha_type: peniko::ImageAlphaType::Alpha,
             width,
@@ -50,6 +132,7 @@ impl Image {
         };
         Ok(Self {
             id,
+            content_identity,
             size,
             bytes: data,
             data: image,
@@ -58,6 +141,21 @@ impl Image {
         })
     }
 
+    #[cfg(test)]
+    pub(crate) fn from_rgba_with_id_for_test(
+        size: Size,
+        data: impl Into<Arc<[u8]>>,
+        id: ImageId,
+    ) -> Result<Self> {
+        let data = data.into();
+        validate_rgba_image(size, data.len())?;
+        Self::from_validated_rgba_with_id(size, data, id)
+    }
+
+    /// Returns the compact content fingerprint.
+    ///
+    /// This value alone does not prove pixel equality or identify backend
+    /// residency without collisions.
     #[must_use]
     pub const fn id(&self) -> ImageId {
         self.id
@@ -78,6 +176,10 @@ impl Image {
     pub const fn extend(mut self, extend: Extend) -> Self {
         self.extend = extend;
         self
+    }
+
+    pub(crate) const fn content_identity(&self) -> &ImageContentIdentity {
+        &self.content_identity
     }
 }
 
@@ -126,23 +228,23 @@ pub enum Extend {
     Reflect,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResolvedMaskUploadKey {
-    image_id: ImageId,
+    content_identity: ImageContentIdentity,
     physical_size: PhysicalSize,
     quality: ImageQuality,
     extend: Extend,
 }
 
 impl ResolvedMaskUploadKey {
-    pub(crate) const fn new(
-        image_id: ImageId,
+    const fn new(
+        content_identity: ImageContentIdentity,
         physical_size: PhysicalSize,
         quality: ImageQuality,
         extend: Extend,
     ) -> Self {
         Self {
-            image_id,
+            content_identity,
             physical_size,
             quality,
             extend,
@@ -150,29 +252,44 @@ impl ResolvedMaskUploadKey {
     }
 
     #[cfg(test)]
-    pub(crate) const fn image_id(self) -> ImageId {
-        self.image_id
+    pub(crate) fn from_image_for_test(
+        image: &Image,
+        physical_size: PhysicalSize,
+        quality: ImageQuality,
+        extend: Extend,
+    ) -> Self {
+        Self::new(
+            image.content_identity().clone(),
+            physical_size,
+            quality,
+            extend,
+        )
     }
 
     #[cfg(test)]
-    pub(crate) const fn physical_size(self) -> PhysicalSize {
+    pub(crate) const fn image_id(&self) -> ImageId {
+        self.content_identity.fingerprint()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn physical_size(&self) -> PhysicalSize {
         self.physical_size
     }
 
     #[cfg(test)]
-    pub(crate) const fn quality(self) -> ImageQuality {
+    pub(crate) const fn quality(&self) -> ImageQuality {
         self.quality
     }
 
     #[cfg(test)]
-    pub(crate) const fn extend(self) -> Extend {
+    pub(crate) const fn extend(&self) -> Extend {
         self.extend
     }
 }
 
 impl Hash for ResolvedMaskUploadKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.image_id.hash(state);
+        self.content_identity.hash(state);
         self.physical_size.hash(state);
         match self.quality {
             ImageQuality::Low => 0_u8,
@@ -358,9 +475,9 @@ impl ResolvedMaskUploadDescriptor {
         &self.image.bytes
     }
 
-    pub(crate) const fn cache_key(&self) -> ResolvedMaskUploadKey {
+    pub(crate) fn cache_key(&self) -> ResolvedMaskUploadKey {
         ResolvedMaskUploadKey::new(
-            self.image.id,
+            self.image.content_identity.clone(),
             self.physical_size,
             self.image.quality,
             self.image.extend,

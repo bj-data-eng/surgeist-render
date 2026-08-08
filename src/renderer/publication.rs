@@ -3,13 +3,13 @@ use super::{
     backend::{DeviceSlotIdentity, SurfaceFrameCommit},
     gpu_transaction::GpuOperationDraft,
 };
-use crate::{ImageId, Parameters, Result, Stats, Surface};
+use crate::{Parameters, Result, Stats, Surface, image::ImageContentIdentity};
 use std::{collections::HashSet, time::Instant};
 
 pub(super) struct RenderPublication {
     frame: SurfaceFrameCommit,
     stats: Stats,
-    uploaded_images: HashSet<ImageId>,
+    uploaded_images: HashSet<ImageContentIdentity>,
     parameters: Parameters,
 }
 
@@ -17,7 +17,7 @@ impl RenderPublication {
     pub(super) fn new(
         frame: SurfaceFrameCommit,
         stats: Stats,
-        uploaded_images: HashSet<ImageId>,
+        uploaded_images: HashSet<ImageContentIdentity>,
         parameters: Parameters,
     ) -> Self {
         Self {

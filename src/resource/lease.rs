@@ -120,7 +120,7 @@ impl ResourceManagerState {
                 .entries
                 .get_mut(&resource)
                 .expect("the selected idle resource must remain registered");
-            debug_assert!(entry.payload.matches_key(key));
+            debug_assert!(entry.payload.matches_key(&key));
             entry.state = ResourceEntryState::Leased { frame };
             self.stats.hits = self.stats.hits.saturating_add(1);
             (resource, entry.allocation_generation, entry.payload.clone())
@@ -144,7 +144,7 @@ impl ResourceManagerState {
                 self.payload_creation_attempts = self.payload_creation_attempts.saturating_add(1);
             }
             let payload = create_payload()?;
-            if !payload.matches_key(key) {
+            if !payload.matches_key(&key) {
                 return Err(Error::invalid_value(
                     "resource payload",
                     payload.label(),

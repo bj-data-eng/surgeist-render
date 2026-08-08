@@ -51,7 +51,7 @@ pub(crate) struct AllocationGeneration(pub(super) u64);
 
 /// One non-interchangeable namespace for every resource role entering the
 /// per-device manager.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum ResourceCacheKey {
     #[cfg(test)]
     VelloAtlas,
@@ -63,11 +63,11 @@ pub(crate) enum ResourceCacheKey {
 }
 
 impl ResourceCacheKey {
-    pub(super) const fn is_vello_atlas(self) -> bool {
+    pub(super) const fn is_vello_atlas(&self) -> bool {
         matches!(self, Self::VelloImage(key) if key.is_persistent_atlas())
     }
 
-    const fn accepts_graph_preparation(self) -> bool {
+    const fn accepts_graph_preparation(&self) -> bool {
         matches!(
             self,
             Self::EffectTexture(_) | Self::ResolvedMaskUpload(_) | Self::GaussianKernelBuffer(_)
@@ -77,7 +77,7 @@ impl ResourceCacheKey {
 
 /// Immutable concrete-allocation facts used to preflight a complete graph
 /// before opening its frame resource scope.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ResourceAllocationPreflight {
     key: ResourceCacheKey,
     byte_len: u64,
@@ -165,7 +165,7 @@ pub(super) enum ResourcePayload {
 }
 
 impl ResourcePayload {
-    pub(super) const fn matches_key(&self, key: ResourceCacheKey) -> bool {
+    pub(super) const fn matches_key(&self, key: &ResourceCacheKey) -> bool {
         match (self, key) {
             #[cfg(test)]
             (Self::Modeled, ResourceCacheKey::VelloAtlas | ResourceCacheKey::EffectTexture(_)) => {
