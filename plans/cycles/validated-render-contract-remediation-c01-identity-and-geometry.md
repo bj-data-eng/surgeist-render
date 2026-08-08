@@ -8,19 +8,19 @@
 - Cycle base: published/read-back initiative baseline
   `b02fa0c372472c88a511f45cb74b1ec0b356d181`.
 - Specification: `plans/specs/validated-render-contract-remediation.md` at
-  `c8c7fabef9db0494a01cfd2558f5174baa714db5`, normalized SHA-256
-  `1b57af4471b8bcea9f73f4bff5723227222083ba0d8ca367e14bc1155603933b`;
+  `2ee7b14d525519ae1f5c8a2756512ab786b10cea`, normalized SHA-256
+  `573a7f869f349d38c560dd9455fb6deb878161df4d3213517725a162dde63d7a`;
   R01 items 1, 2, and 4; R02; R03.1, R03.2, R03.4; R04.1-R04.4,
   R04.6; R05 rows 1-9 and 11; R06.1, R06.2, R06.4; R07; and R08 items
   1-4 and 6-10. Specification review: `CLEAN`.
 - Sequence: `plans/sequences/validated-render-contract-remediation.md` at
-  `ab18f035573c0346bf143fd99f22ec1e3569993b`, normalized SHA-256
-  `a86afc5915efc755a38f6f764d06c831ab207bcfdb9776de2bbb3487cee6f27e`;
+  `3ebac7d40858b44f9dcdd2db337621d060cd4716`, normalized SHA-256
+  `348523b2ff1762050041519cf2020b2a1748048838f31f91d34c87383910a6a0`;
   `C01 Collision-Safe Identity And Finite Geometry`. Sequence review: `CLEAN`.
 - Outcome: Peniko owns unique backend blob IDs; render-owned mask reuse and
   upload telemetry use exact content equality; public and canonical rectangle
-  validation reject non-finite derived maxima; and the unused command stats
-  helper and allowance are removed.
+  validation reject non-finite derived maxima; and normalized-command stats
+  support is test-only without a dead-code allowance.
 
 ## 2 Boundary
 
@@ -134,30 +134,37 @@
 - Dependency/intended commit: clean reviewed T01 head; one rectangle invariant
   and regression commit.
 
-### 4.3 T03 Remove The Unused Parallel Command-Statistics Path
+### 4.3 T03 Isolate Normalized-Command Statistics As Test Support
 
-- Files/area: `src/command.rs` and existing focused renderer statistics tests.
-- Intended outcome: delete unused `RenderCommands::stats`, its
-  `#[allow(dead_code)]`, and its now-unused import without changing the active
-  stateful statistics publication in renderer dispatch or test support.
+- Files/area: `src/command.rs`; the 21 existing call sites in model, style, and
+  Vello tests remain unchanged as verification inputs.
+- Intended outcome: compile `RenderCommands::stats` and its direct
+  `collect_render_stats` import only under `cfg(test)`, remove
+  `#[allow(dead_code)]`, and preserve the active stateful statistics publication
+  in renderer dispatch.
 - RED evidence: transiently remove only the allowance and run Clippy to confirm
-  the helper itself is reported as unused; do not commit that intermediate
-  state. Deleting the unused helper/import then makes the same gate green.
-- Acceptance: no replacement helper or allowance exists; warm reuse, failed
-  publication, and active render statistics retain their current behavior.
+  the helper is reported as unused in non-test targets; do not commit that
+  intermediate state. Isolating the method/import to test builds then makes the
+  same gate green while all existing normalized-command call sites compile.
+- Acceptance: non-test targets contain neither helper nor import; test builds
+  retain the one existing helper and all 21 callers; no replacement helper or
+  allowance exists; warm reuse, failed publication, normalization statistics,
+  and active render statistics retain their current behavior.
 - Commands:
 
   ```sh
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render warm_image_reuse_reports_cache_hit
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render failed_render_does_not_warm_image_reuse_stats
   CARGO_NET_OFFLINE=true cargo test -p surgeist-render texture_lifecycle_accounting_is_separate_from_image_cache_stats
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render scene_normalization_preserves_stats
+  CARGO_NET_OFFLINE=true cargo test -p surgeist-render authored_shadow_normalization_preserves_order_and_typed_boundaries
   CARGO_NET_OFFLINE=true cargo fmt --check
   CARGO_NET_OFFLINE=true RUSTFLAGS="-D warnings" cargo check -p surgeist-render
   CARGO_NET_OFFLINE=true cargo clippy -p surgeist-render --all-targets -- -F unsafe-code -D warnings
   ```
 
-- Dependency/intended commit: clean reviewed T02 head; one dead-path deletion
-  commit.
+- Dependency/intended commit: clean reviewed T02 head; one test-only statistics
+  isolation commit.
 
 ## 5 Completion
 
