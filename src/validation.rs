@@ -1,5 +1,6 @@
 use super::*;
 use super::{
+    geometry::validate_rect_maxima,
     paint::{GradientKind, PaintKind},
     shape::ShapeKind,
 };
@@ -170,7 +171,8 @@ pub(crate) fn validate_text_run(
 
 pub(crate) fn validate_rect(rect: Rect, name: &str) -> Result<()> {
     validate_point(rect.origin(), name)?;
-    validate_size(rect.size(), name)
+    validate_size(rect.size(), name)?;
+    validate_rect_maxima(rect, name)
 }
 
 pub(crate) fn validate_size(size: Size, name: &str) -> Result<()> {

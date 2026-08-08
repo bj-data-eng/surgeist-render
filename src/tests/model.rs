@@ -26,6 +26,7 @@ use crate::{
     reference,
     reference::{PremultipliedRgba8, ReferencePremultipliedRgba8Buffer},
     scene,
+    validation::validate_rect,
     vello_engine::{
         glyph::{BitmapSourceForTest, SelectedGlyphTrace, preflight_selected_glyphs},
         scene::VelloScene,
@@ -264,6 +265,84 @@ fn geometry_try_constructors_reject_invalid_values() {
     assert!(Rect::try_new(0.0, 0.0, 1.0, f64::INFINITY).is_err());
     assert!(Radii::try_all(-0.1).is_err());
     assert!(Transform::try_new([1.0, 0.0, 0.0, f64::NAN, 0.0, 0.0]).is_err());
+}
+
+#[test]
+fn rect_constructor_rejects_non_finite_derived_maxima() {
+    let cases = [
+        (
+            "x maximum",
+            (f64::MAX, 0.0, f64::MAX, 1.0),
+            "rectangle max x",
+        ),
+        (
+            "y maximum",
+            (0.0, f64::MAX, 1.0, f64::MAX),
+            "rectangle max y",
+        ),
+    ];
+
+    for (case, (x, y, width, height), expected_field) in cases {
+        let error = match Rect::try_new(x, y, width, height) {
+            Ok(rect) => panic!(
+                "{case} overflow unexpectedly constructed a rectangle with max {:?}",
+                rect.max()
+            ),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{case}");
+        assert_eq!(
+            error.invalid_value_diagnostic().map(InvalidValue::field),
+            Some(expected_field),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn canonical_rect_validation_rejects_non_finite_derived_maxima() {
+    let cases = [
+        (
+            "x maximum",
+            Rect::new(f64::MAX, 0.0, f64::MAX, 1.0),
+            "canonical rectangle max x",
+        ),
+        (
+            "y maximum",
+            Rect::new(0.0, f64::MAX, 1.0, f64::MAX),
+            "canonical rectangle max y",
+        ),
+    ];
+
+    for (case, rect, expected_field) in cases {
+        let error = validate_rect(rect, "canonical rectangle")
+            .expect_err("canonical validation must reject a non-finite derived maximum");
+
+        assert_eq!(error.code(), ErrorCode::InvalidInput, "{case}");
+        assert_eq!(
+            error.invalid_value_diagnostic().map(InvalidValue::field),
+            Some(expected_field),
+            "{case}"
+        );
+    }
+}
+
+#[test]
+fn rect_constructor_accepts_finite_and_zero_area_boundaries() {
+    let cases = [
+        ("finite maximum", (-f64::MAX, -1.0, f64::MAX, 1.0)),
+        ("zero-area maximum", (f64::MAX, f64::MAX, 0.0, 0.0)),
+    ];
+
+    for (case, (x, y, width, height)) in cases {
+        let rect = Rect::try_new(x, y, width, height)
+            .unwrap_or_else(|error| panic!("{case} should remain valid: {error:?}"));
+        let max = rect.max();
+
+        assert!(max.x().is_finite(), "{case} x maximum");
+        assert!(max.y().is_finite(), "{case} y maximum");
+    }
 }
 
 #[test]

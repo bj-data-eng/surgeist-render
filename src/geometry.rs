@@ -81,6 +81,7 @@ pub struct Rect {
 }
 
 impl Rect {
+    /// Creates a rectangle with finite components and finite derived maximum coordinates.
     pub fn try_new(x: f64, y: f64, width: f64, height: f64) -> Result<Self> {
         let origin = Point::try_new(x, y)?;
         if !width.is_finite() || width < 0.0 {
@@ -97,10 +98,12 @@ impl Rect {
                 "must be finite and non-negative",
             ));
         }
-        Ok(Self {
+        let rect = Self {
             origin,
             size: Size::new(width, height),
-        })
+        };
+        validate_rect_maxima(rect, "rectangle")?;
+        Ok(rect)
     }
 
     #[must_use]
@@ -139,6 +142,7 @@ impl Rect {
     }
 
     #[must_use]
+    /// Returns the derived maximum coordinates, which are finite for publicly constructed rectangles.
     pub fn max(self) -> Point {
         Point::new(self.x() + self.width(), self.y() + self.height())
     }
@@ -150,6 +154,22 @@ impl Rect {
             size: Size::new(width, height),
         }
     }
+}
+
+pub(crate) fn validate_rect_maxima(rect: Rect, name: &str) -> Result<()> {
+    for (axis, maximum) in [
+        ("x", rect.x() + rect.width()),
+        ("y", rect.y() + rect.height()),
+    ] {
+        if !maximum.is_finite() {
+            return Err(Error::invalid_value(
+                format!("{name} max {axis}"),
+                maximum,
+                "must be finite",
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl From<Rect> for kurbo::Rect {
