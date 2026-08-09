@@ -5,6 +5,12 @@ use super::super::{
 };
 use super::image::{BackgroundAreas, BackgroundClipGeometry, validate_background_rect};
 
+/// One authored border edge with a style, logical-pixel width, and paint.
+///
+/// Construction guarantees a finite non-negative width and a valid paint. The
+/// style remains authored until [`BoxDecorationInput::normalize`] either emits
+/// normalized command data, suppresses the edge, or reports an unsupported
+/// style.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BorderSide {
     style: BorderStyle,
@@ -12,21 +18,45 @@ pub struct BorderSide {
     paint: Paint,
 }
 
+/// The authored line style of one border edge.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BorderStyle {
+    /// Suppresses the border edge during normalization.
     None,
+    /// Suppresses the border edge during normalization.
     Hidden,
+    /// Selects a solid normalized border.
     Solid,
+    /// Selects a dashed normalized border.
     Dashed,
+    /// Selects a dotted normalized border.
     Dotted,
+    /// Selects a normalized three-band double border.
     Double,
+    /// Selects a groove border, which currently produces a
+    /// [`crate::PrimitiveOperation::BorderGrooveStyle`] unsupported diagnostic
+    /// during normalization.
     Groove,
+    /// Selects a ridge border, which currently produces a
+    /// [`crate::PrimitiveOperation::BorderRidgeStyle`] unsupported diagnostic
+    /// during normalization.
     Ridge,
+    /// Selects an inset border, which currently produces a
+    /// [`crate::PrimitiveOperation::BorderInsetStyle`] unsupported diagnostic
+    /// during normalization.
     Inset,
+    /// Selects an outset border, which currently produces a
+    /// [`crate::PrimitiveOperation::BorderOutsetStyle`] unsupported diagnostic
+    /// during normalization.
     Outset,
 }
 
 impl BorderSide {
+    /// Creates an authored border edge.
+    ///
+    /// `width` is measured in logical pixels. Returns
+    /// [`crate::ErrorCode::InvalidInput`] if it is negative or non-finite, or
+    /// if the converted paint violates its intrinsic invariants.
     pub fn try_new(style: BorderStyle, width: f64, paint: impl Into<Paint>) -> Result<Self> {
         validate_non_negative_f64(width, "border side width")?;
         let paint = paint.into();
@@ -39,21 +69,28 @@ impl BorderSide {
     }
 
     #[must_use]
+    /// Returns the authored border style.
     pub const fn style(&self) -> BorderStyle {
         self.style
     }
 
     #[must_use]
+    /// Returns the finite non-negative width in logical pixels.
     pub const fn width(&self) -> f64 {
         self.width
     }
 
     #[must_use]
+    /// Returns the validated border paint.
     pub const fn paint(&self) -> &Paint {
         &self.paint
     }
 }
 
+/// Four independently authored border edges.
+///
+/// Normalization visits them in top, right, bottom, then left order for each
+/// box-decoration fragment.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BorderEdges {
     top: BorderSide,
@@ -63,6 +100,7 @@ pub struct BorderEdges {
 }
 
 impl BorderEdges {
+    /// Groups four already validated border edges by physical side.
     #[must_use]
     pub const fn new(
         top: BorderSide,
@@ -79,26 +117,35 @@ impl BorderEdges {
     }
 
     #[must_use]
+    /// Returns the top edge.
     pub const fn top(&self) -> &BorderSide {
         &self.top
     }
 
     #[must_use]
+    /// Returns the right edge.
     pub const fn right(&self) -> &BorderSide {
         &self.right
     }
 
     #[must_use]
+    /// Returns the bottom edge.
     pub const fn bottom(&self) -> &BorderSide {
         &self.bottom
     }
 
     #[must_use]
+    /// Returns the left edge.
     pub const fn left(&self) -> &BorderSide {
         &self.left
     }
 }
 
+/// An authored outline around each box-decoration fragment.
+///
+/// Width and offset are logical-pixel values. Normalization suppresses `None`
+/// and zero-width outlines, accepts solid, dashed, and dotted styles, and
+/// reports typed unsupported diagnostics for double and automatic styles.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Outline {
     style: OutlineStyle,
@@ -107,17 +154,35 @@ pub struct Outline {
     offset: f64,
 }
 
+/// The authored line style of an outline.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum OutlineStyle {
+    /// Suppresses the outline during normalization.
     None,
+    /// Selects a solid normalized outline.
     Solid,
+    /// Selects a dashed normalized outline.
     Dashed,
+    /// Selects a dotted normalized outline.
     Dotted,
+    /// Selects a double outline, which currently produces a
+    /// [`crate::PrimitiveOperation::OutlineDoubleStyle`] unsupported diagnostic
+    /// during normalization.
     Double,
+    /// Selects an automatic outline, which currently produces a
+    /// [`crate::PrimitiveOperation::OutlineAutoStyle`] unsupported diagnostic
+    /// during normalization.
     Auto,
 }
 
 impl Outline {
+    /// Creates an authored outline.
+    ///
+    /// `width` must be finite and non-negative, `offset` must be finite, and
+    /// both are measured in logical pixels. Invalid numeric input or paint
+    /// returns [`crate::ErrorCode::InvalidInput`]. Negative offsets are accepted
+    /// here but can be rejected by normalization if they contract a fragment to
+    /// a non-positive target rectangle.
     pub fn try_new(
         style: OutlineStyle,
         width: f64,
@@ -137,32 +202,44 @@ impl Outline {
     }
 
     #[must_use]
+    /// Returns the authored outline style.
     pub const fn style(&self) -> OutlineStyle {
         self.style
     }
 
     #[must_use]
+    /// Returns the finite non-negative width in logical pixels.
     pub const fn width(&self) -> f64 {
         self.width
     }
 
     #[must_use]
+    /// Returns the validated outline paint.
     pub const fn paint(&self) -> &Paint {
         &self.paint
     }
 
     #[must_use]
+    /// Returns the finite logical-pixel offset from the border box.
     pub const fn offset(&self) -> f64 {
         self.offset
     }
 }
 
+/// The authored fragmentation mode carried into normalized decoration commands.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BoxDecorationBreak {
+    /// Carries slice semantics for this fragment.
     Slice,
+    /// Carries clone semantics for this fragment.
     Clone,
 }
 
+/// Corner radii normalized against one finite positive-area border box.
+///
+/// Radii are non-negative logical-pixel values. When adjacent requested radii
+/// exceed an available box dimension, all four radii are scaled by one common
+/// factor so every adjacent pair fits.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NormalizedBoxRadii {
     border_box: Rect,
@@ -170,6 +247,11 @@ pub struct NormalizedBoxRadii {
 }
 
 impl NormalizedBoxRadii {
+    /// Validates a logical border box and normalizes its radii.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] for a non-finite origin, a
+    /// non-positive or non-finite box dimension, or any negative or non-finite
+    /// radius.
     pub fn try_new(border_box: Rect, radii: Radii) -> Result<Self> {
         validate_background_rect(border_box, "box decoration border box")?;
         validate_box_decoration_radii(radii)?;
@@ -180,16 +262,23 @@ impl NormalizedBoxRadii {
     }
 
     #[must_use]
+    /// Returns the logical border box used as the normalization basis.
     pub const fn border_box(self) -> Rect {
         self.border_box
     }
 
     #[must_use]
+    /// Returns the non-negative radii after proportional scaling, if required.
     pub const fn radii(self) -> Radii {
         self.radii
     }
 }
 
+/// One validated fragment used to normalize border and outline command data.
+///
+/// The background areas and radii are expressed in logical coordinates. By
+/// default the border box supplies rectangular clip geometry; a validated clip
+/// override can replace it without changing the fragment's areas or radii.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoxDecorationFragment {
     areas: BackgroundAreas,
@@ -199,6 +288,10 @@ pub struct BoxDecorationFragment {
 }
 
 impl BoxDecorationFragment {
+    /// Creates a fragment and normalizes `radii` against its border box.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] when the border box or radii
+    /// violate [`NormalizedBoxRadii`] invariants.
     pub fn try_new(
         areas: BackgroundAreas,
         radii: Radii,
@@ -213,6 +306,9 @@ impl BoxDecorationFragment {
     }
 
     #[must_use]
+    /// Returns this fragment with validated border clip geometry installed.
+    ///
+    /// The new geometry replaces any previous override.
     pub fn with_border_clip_override(
         mut self,
         border_clip_override: BackgroundClipGeometry,
@@ -222,26 +318,35 @@ impl BoxDecorationFragment {
     }
 
     #[must_use]
+    /// Returns the fragment's logical border, padding, and content areas.
     pub const fn areas(&self) -> BackgroundAreas {
         self.areas
     }
 
     #[must_use]
+    /// Returns the radii normalized against the fragment's border box.
     pub const fn radii(&self) -> NormalizedBoxRadii {
         self.radii
     }
 
     #[must_use]
+    /// Returns the authored fragmentation mode.
     pub const fn break_mode(&self) -> BoxDecorationBreak {
         self.break_mode
     }
 
     #[must_use]
+    /// Returns the explicit border clip override, if one was installed.
     pub const fn border_clip_override(&self) -> Option<&BackgroundClipGeometry> {
         self.border_clip_override.as_ref()
     }
 }
 
+/// Authored border and outline facts for one or more validated fragments.
+///
+/// Normalization preserves fragment order. Within each fragment it emits
+/// non-suppressed borders in top, right, bottom, left order, followed by the
+/// outline when present and non-suppressed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct BoxDecorationInput {
     border_edges: Option<BorderEdges>,
@@ -250,6 +355,11 @@ pub struct BoxDecorationInput {
 }
 
 impl BoxDecorationInput {
+    /// Creates authored box-decoration input with at least one fragment.
+    ///
+    /// An empty fragment list returns [`crate::ErrorCode::InvalidInput`] with
+    /// the `box decoration fragments` diagnostic field. Border, outline, and
+    /// fragment values have already been validated by their constructors.
     pub fn try_new(
         border_edges: Option<BorderEdges>,
         outline: Option<Outline>,
@@ -270,20 +380,33 @@ impl BoxDecorationInput {
     }
 
     #[must_use]
+    /// Returns the four authored border edges, if present.
     pub const fn border_edges(&self) -> Option<&BorderEdges> {
         self.border_edges.as_ref()
     }
 
     #[must_use]
+    /// Returns the authored outline, if present.
     pub const fn outline(&self) -> Option<&Outline> {
         self.outline.as_ref()
     }
 
     #[must_use]
+    /// Returns the non-empty fragments in authored order.
     pub fn fragments(&self) -> &[BoxDecorationFragment] {
         &self.fragments
     }
 
+    /// Converts authored decoration facts into ordered normalized command data.
+    ///
+    /// `None`, `Hidden`, and zero-width borders, plus `None` and zero-width
+    /// outlines, emit no command. Groove, ridge, inset, and outset borders and
+    /// double or automatic outlines return their exact `BoxDecorations`
+    /// [`crate::UnsupportedPrimitive`] diagnostic. A finite negative outline
+    /// offset returns [`crate::ErrorCode::InvalidInput`] if the resulting target
+    /// rectangle is non-finite or has non-positive extent. The current
+    /// normalization is context-free; `capabilities` is reserved input and does
+    /// not alter these results.
     pub fn normalize(&self, _capabilities: Capabilities) -> Result<NormalizedBoxDecoration> {
         let mut commands = Vec::new();
 
@@ -336,14 +459,24 @@ impl BoxDecorationInput {
     }
 }
 
+/// A physical side selected by a normalized border command.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BoxSide {
+    /// The top border edge.
     Top,
+    /// The right border edge.
     Right,
+    /// The bottom border edge.
     Bottom,
+    /// The left border edge.
     Left,
 }
 
+/// Logical-pixel band widths for a normalized double border.
+///
+/// The outer and gap widths are each one third of the original width. The inner
+/// width is the remainder, so the three non-negative bands sum to the original
+/// finite non-negative width without integer rounding.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NormalizedDoubleBorderBands {
     original_width: f64,
@@ -367,41 +500,59 @@ impl NormalizedDoubleBorderBands {
     }
 
     #[must_use]
+    /// Returns the original logical-pixel border width.
     pub const fn original_width(self) -> f64 {
         self.original_width
     }
 
     #[must_use]
+    /// Returns the outer painted band's width in logical pixels.
     pub const fn outer_width(self) -> f64 {
         self.outer_width
     }
 
     #[must_use]
+    /// Returns the unpainted gap width in logical pixels.
     pub const fn gap_width(self) -> f64 {
         self.gap_width
     }
 
     #[must_use]
+    /// Returns the inner painted band's width in logical pixels.
     pub const fn inner_width(self) -> f64 {
         self.inner_width
     }
 }
 
+/// A border style accepted into normalized box-decoration command data.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalizedBorderStyle {
+    /// A solid border style.
     Solid,
+    /// A dashed border style, preserved without defining a dash algorithm here.
     Dashed,
+    /// A dotted border style, preserved without defining a dot algorithm here.
     Dotted,
+    /// A double border with three normalized logical-pixel bands.
     Double(NormalizedDoubleBorderBands),
 }
 
+/// An outline style accepted into normalized box-decoration command data.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum NormalizedOutlineStyle {
+    /// A solid outline style.
     Solid,
+    /// A dashed outline style, preserved without defining a dash algorithm here.
     Dashed,
+    /// A dotted outline style, preserved without defining a dot algorithm here.
     Dotted,
 }
 
+/// Normalized backend-facing data for one border edge of one fragment.
+///
+/// Geometry and widths are in logical coordinates. The value records validated
+/// paint, clip geometry, normalized corner radii, and fragmentation mode; it
+/// does not prescribe a border rasterization or dash-placement algorithm.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedBorderCommand {
     fragment_index: usize,
@@ -417,51 +568,66 @@ pub struct NormalizedBorderCommand {
 
 impl NormalizedBorderCommand {
     #[must_use]
+    /// Returns the zero-based index of the source fragment.
     pub const fn fragment_index(&self) -> usize {
         self.fragment_index
     }
 
     #[must_use]
+    /// Returns the physical border side.
     pub const fn side(&self) -> BoxSide {
         self.side
     }
 
     #[must_use]
+    /// Returns the finite non-negative width in logical pixels.
     pub const fn width(&self) -> f64 {
         self.width
     }
 
     #[must_use]
+    /// Returns the validated border paint.
     pub const fn paint(&self) -> &Paint {
         &self.paint
     }
 
     #[must_use]
+    /// Returns the normalized border style.
     pub const fn style(&self) -> &NormalizedBorderStyle {
         &self.style
     }
 
     #[must_use]
+    /// Returns the fragment border box in logical coordinates.
     pub const fn target_rect(&self) -> Rect {
         self.target_rect
     }
 
     #[must_use]
+    /// Returns the border clip geometry selected for the fragment.
     pub const fn clip(&self) -> &BackgroundClipGeometry {
         &self.clip
     }
 
     #[must_use]
+    /// Returns the corner radii normalized against the fragment border box.
     pub const fn radii(&self) -> NormalizedBoxRadii {
         self.radii
     }
 
     #[must_use]
+    /// Returns the source fragment's break mode.
     pub const fn break_mode(&self) -> BoxDecorationBreak {
         self.break_mode
     }
 }
 
+/// Normalized backend-facing data for one outline around one fragment.
+///
+/// Width, offset, and target geometry are in logical coordinates. The target
+/// rectangle is expanded or contracted by the offset only; the outline width
+/// remains a separate value. This type does not prescribe a line or dash
+/// rasterization algorithm.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedOutlineCommand {
     fragment_index: usize,
@@ -477,51 +643,66 @@ pub struct NormalizedOutlineCommand {
 
 impl NormalizedOutlineCommand {
     #[must_use]
+    /// Returns the zero-based index of the source fragment.
     pub const fn fragment_index(&self) -> usize {
         self.fragment_index
     }
 
     #[must_use]
+    /// Returns the finite non-negative width in logical pixels.
     pub const fn width(&self) -> f64 {
         self.width
     }
 
     #[must_use]
+    /// Returns the validated outline paint.
     pub const fn paint(&self) -> &Paint {
         &self.paint
     }
 
     #[must_use]
+    /// Returns the finite logical-pixel offset from the border box.
     pub const fn offset(&self) -> f64 {
         self.offset
     }
 
     #[must_use]
+    /// Returns the normalized outline style.
     pub const fn style(&self) -> NormalizedOutlineStyle {
         self.style
     }
 
     #[must_use]
+    /// Returns the finite positive-area logical rectangle derived from the
+    /// fragment border box and outline offset.
     pub const fn target_rect(&self) -> Rect {
         self.target_rect
     }
 
     #[must_use]
+    /// Returns the fragment's border clip geometry.
     pub const fn clip(&self) -> &BackgroundClipGeometry {
         &self.clip
     }
 
     #[must_use]
+    /// Returns the corner radii normalized against the fragment border box.
     pub const fn radii(&self) -> NormalizedBoxRadii {
         self.radii
     }
 
     #[must_use]
+    /// Returns the source fragment's break mode.
     pub const fn break_mode(&self) -> BoxDecorationBreak {
         self.break_mode
     }
 }
 
+/// Ordered normalized border and outline command data.
+///
+/// Commands retain fragment order; each fragment's border commands precede its
+/// optional outline command. An authored input whose styles are all suppressed
+/// produces an empty command slice.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedBoxDecoration {
     commands: Vec<NormalizedBoxDecorationCommand>,
@@ -529,11 +710,13 @@ pub struct NormalizedBoxDecoration {
 
 impl NormalizedBoxDecoration {
     #[must_use]
+    /// Returns normalized commands in deterministic emission order.
     pub fn commands(&self) -> &[NormalizedBoxDecorationCommand] {
         &self.commands
     }
 }
 
+/// One normalized box-decoration command.
 #[derive(Clone, Debug, PartialEq)]
 pub struct NormalizedBoxDecorationCommand {
     kind: NormalizedBoxDecorationCommandKind,
@@ -541,14 +724,18 @@ pub struct NormalizedBoxDecorationCommand {
 
 impl NormalizedBoxDecorationCommand {
     #[must_use]
+    /// Returns the command payload.
     pub const fn kind(&self) -> &NormalizedBoxDecorationCommandKind {
         &self.kind
     }
 }
 
+/// The normalized payload selected for a box-decoration command.
 #[derive(Clone, Debug, PartialEq)]
 pub enum NormalizedBoxDecorationCommandKind {
+    /// Carries one normalized border-edge command.
     Border(NormalizedBorderCommand),
+    /// Carries one normalized outline command.
     Outline(NormalizedOutlineCommand),
 }
 
