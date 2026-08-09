@@ -133,10 +133,12 @@ impl EffectPrecisionCapabilities {
     }
 }
 
-/// Semantic support for normalized authored rendering operations.
+/// Semantic operation support and compiled surface-adapter availability.
 ///
-/// This report is fixed by the crate's public contract. It does not describe a
-/// selected runtime device, surface, or enabled Cargo features; use
+/// Operation-support entries are fixed by the crate's public contract. The
+/// surface-adapter subsection instead reflects compiled feature and target
+/// availability, including `render-web` on `wasm32`. Neither describes a
+/// selected runtime device or surface; use
 /// [`crate::Renderer::runtime_capabilities`] for those runtime facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Capabilities {
@@ -154,12 +156,14 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// The current semantic rendering contract.
+    /// The current semantic rendering contract and compiled surface-adapter report.
     ///
-    /// The value describes which authored operations this crate accepts and how
-    /// it owns them. It is not a backend-name, runtime-device, or Cargo-feature
-    /// probe. Unsupported authored operations fail through
-    /// [`Self::ensure_supported`].
+    /// The operation entries describe which authored operations this crate
+    /// accepts and how it owns them. Surface-adapter entries instead reflect
+    /// compiled feature and target availability, including `render-web` on
+    /// `wasm32`. The value is not a backend-name or runtime-device probe.
+    /// Unsupported operations and unavailable compiled surface adapters fail
+    /// through [`Self::ensure_supported`].
     pub const CURRENT: Self = Self {
         geometry_targets: GeometryTargetCapabilities {
             rect_fill_stroke: true,
@@ -347,11 +351,13 @@ impl Capabilities {
         self.transform_coordinate_spaces
     }
 
-    /// Accepts a supported authored operation or returns its typed unsupported diagnostic.
+    /// Accepts a supported operation or compiled surface adapter.
     ///
     /// An unavailable operation produces [`crate::ErrorCode::UnsupportedPrimitive`]
-    /// with `primitive` available from [`Error::unsupported_primitive`]. This
-    /// semantic check does not query enabled Cargo features or a runtime device.
+    /// with `primitive` available from [`Error::unsupported_primitive`]. Semantic
+    /// operation support does not depend on enabled Cargo features. The
+    /// `WebCanvasSurface` result instead reflects whether `render-web` is compiled
+    /// for `wasm32`; neither kind of check queries a selected runtime device.
     pub fn ensure_supported(self, primitive: UnsupportedPrimitive) -> Result<()> {
         if self.supports(primitive) {
             Ok(())
