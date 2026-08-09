@@ -1,3 +1,5 @@
+#[cfg(test)]
+use super::stats::collect_render_stats;
 use super::{
     frame::{FrameContext, FramePlan, LogicalBounds},
     geometry::offset_radii,
@@ -5,7 +7,6 @@ use super::{
     paint::PaintKind,
     scene::Command,
     shape::ShapeKind,
-    stats::collect_render_stats,
     style::{ClipGeometryKind, FilterList, NormalizedClip},
     validation::*,
     *,
@@ -27,8 +28,8 @@ impl RenderCommands {
         FramePlan::try_from_commands(self, context)
     }
 
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub(crate) fn stats(&self) -> Stats {
         let mut stats = Stats::default();
         let mut uploaded_images = std::collections::HashSet::new();
