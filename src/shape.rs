@@ -6,7 +6,7 @@ use super::{
     },
 };
 
-/// A renderer-facing logical-space shape with one closed geometry kind.
+/// A renderer-facing logical-space shape selecting one member of a fixed, finite set of geometry kinds.
 ///
 /// Public construction preserves finite point, size, radius, and path-element invariants.
 #[derive(Clone, Debug, PartialEq)]
