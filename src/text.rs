@@ -4,21 +4,28 @@ use super::{
 };
 use std::borrow::Cow;
 
+/// An opaque caller-defined font identity used by authored text runs.
+///
+/// Equality and ordering compare the underlying `u64`. The value carries no
+/// lifetime, generation, or uniqueness guarantee; callers define its registry semantics.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct FontId(u64);
 
 impl FontId {
     #[must_use]
+    /// Creates a font identifier from its opaque numeric value.
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
 
     #[must_use]
+    /// Returns the underlying caller-defined value.
     pub const fn get(self) -> u64 {
         self.0
     }
 }
 
+/// Converts a raw caller-defined value to a [`FontId`] without validation or loss.
 impl From<u64> for FontId {
     fn from(value: u64) -> Self {
         Self::new(value)
@@ -146,26 +153,31 @@ impl<'a> TextRun<'a> {
     }
 
     #[must_use]
+    /// Returns the authored font reference.
     pub const fn font(&self) -> &FontRef<'a> {
         &self.font
     }
 
     #[must_use]
+    /// Returns the finite, positive font size in logical units.
     pub const fn size(&self) -> f32 {
         self.size
     }
 
     #[must_use]
+    /// Returns the finite transform applied to run-local geometry.
     pub const fn transform(&self) -> Transform {
         self.transform
     }
 
     #[must_use]
+    /// Returns the validated text fill paint.
     pub const fn paint(&self) -> &TextPaint {
         &self.paint
     }
 
     #[must_use]
+    /// Returns the authored glyphs in drawing order.
     pub const fn glyphs(&self) -> &'a [TextGlyph] {
         self.glyphs
     }
@@ -177,6 +189,9 @@ impl<'a> TextRun<'a> {
     }
 }
 
+/// An authored text run paired with a validated non-empty ordered shadow list.
+///
+/// The wrapper preserves the run's borrowed glyph and font-name lifetimes.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextShadowRun<'a> {
     run: TextRun<'a>,
@@ -184,6 +199,10 @@ pub struct TextShadowRun<'a> {
 }
 
 impl<'a> TextShadowRun<'a> {
+    /// Revalidates the text run, fill paint, and every shadow.
+    ///
+    /// Invalid run geometry, glyph data, paint, or shadow facts return a typed
+    /// input diagnostic.
     pub fn try_new(run: TextRun<'a>, shadows: ShadowList) -> Result<Self> {
         validate_text_run(run.size(), run.transform(), run.glyphs())?;
         validate_paint(run.paint().fill())?;
@@ -194,16 +213,23 @@ impl<'a> TextShadowRun<'a> {
     }
 
     #[must_use]
+    /// Returns the authored text run.
     pub const fn run(&self) -> &TextRun<'a> {
         &self.run
     }
 
     #[must_use]
+    /// Returns the non-empty shadows in rendering order.
     pub const fn shadows(&self) -> &ShadowList {
         &self.shadows
     }
 }
 
+/// An authored explicit text-decoration line in logical coordinates.
+///
+/// The line has distinct finite endpoints, finite positive thickness, a finite
+/// transform, and validated paint. The current render boundary accepts only a
+/// solid style; callers must expand other styles into explicit geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextDecorationLine {
     start: Point,
@@ -214,6 +240,9 @@ pub struct TextDecorationLine {
 }
 
 impl TextDecorationLine {
+    /// Creates a validated solid decoration line.
+    ///
+    /// Invalid endpoints, thickness, transform, or paint return a typed input diagnostic.
     pub fn try_solid(
         start: Point,
         end: Point,
@@ -231,6 +260,11 @@ impl TextDecorationLine {
         )
     }
 
+    /// Creates a validated decoration line when `style` is [`TextDecorationLineStyle::Solid`].
+    ///
+    /// Invalid geometry, thickness, transform, or paint returns an input
+    /// diagnostic. Any other well-formed style returns a typed unsupported
+    /// primitive diagnostic instead of approximating or expanding it.
     pub fn try_new(
         start: Point,
         end: Point,
@@ -264,42 +298,57 @@ impl TextDecorationLine {
     }
 
     #[must_use]
+    /// Returns the start point in line-local logical coordinates.
     pub const fn start(&self) -> Point {
         self.start
     }
 
     #[must_use]
+    /// Returns the distinct end point in line-local logical coordinates.
     pub const fn end(&self) -> Point {
         self.end
     }
 
     #[must_use]
+    /// Returns the finite, positive line thickness in logical units.
     pub const fn thickness(&self) -> f64 {
         self.thickness
     }
 
     #[must_use]
+    /// Returns the transform applied to the line-local geometry.
     pub const fn transform(&self) -> Transform {
         self.transform
     }
 
     #[must_use]
+    /// Returns the validated decoration paint.
     pub const fn paint(&self) -> &Paint {
         &self.paint
     }
 }
 
+/// Authored text-decoration line style requested at the render boundary.
+///
+/// Only [`Self::Solid`] is currently accepted by [`TextDecorationLine::try_new`];
+/// other variants remain distinguishable diagnostic inputs.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum TextDecorationLineStyle {
+    /// A single solid line, directly supported by this boundary.
     Solid,
+    /// A double line requiring caller-side expansion to explicit geometry.
     Double,
+    /// A dotted line requiring caller-side expansion to explicit geometry.
     Dotted,
+    /// A dashed line requiring caller-side expansion to explicit geometry.
     Dashed,
+    /// A wavy line requiring caller-side expansion to explicit geometry.
     Wavy,
 }
 
 impl TextDecorationLineStyle {
     #[must_use]
+    /// Returns the stable lowercase label used in diagnostics.
     pub const fn label(self) -> &'static str {
         match self {
             Self::Solid => "solid",
@@ -323,6 +372,10 @@ fn unsupported_text_decoration_style_error(style: TextDecorationLineStyle) -> su
     error
 }
 
+/// One authored glyph instance in run-local logical coordinates.
+///
+/// The glyph identifier is interpreted against the run's font. Position and
+/// advance values are finite `f32` values; advances may be negative or zero.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TextGlyph {
     id: u32,
@@ -332,6 +385,10 @@ pub struct TextGlyph {
 }
 
 impl TextGlyph {
+    /// Creates a glyph from a font glyph ID, position, and advance.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] when `x`, `y`, or `advance`
+    /// is non-finite.
     pub fn try_new(id: u32, x: f32, y: f32, advance: f32) -> Result<Self> {
         if !x.is_finite() || !y.is_finite() || !advance.is_finite() {
             return Err(super::Error::invalid_value(
@@ -344,35 +401,46 @@ impl TextGlyph {
     }
 
     #[must_use]
+    /// Returns the font-specific glyph identifier.
     pub const fn id(self) -> u32 {
         self.id
     }
 
     #[must_use]
+    /// Returns the run-local logical x-coordinate.
     pub const fn x(self) -> f32 {
         self.x
     }
 
     #[must_use]
+    /// Returns the run-local logical y-coordinate.
     pub const fn y(self) -> f32 {
         self.y
     }
 
     #[must_use]
+    /// Returns the authored logical advance.
     pub const fn advance(self) -> f32 {
         self.advance
     }
 }
 
+/// An authored font reference with caller identity and optional embedded font data.
+///
+/// The optional display name may be borrowed or owned. Embedded [`FontData`] is
+/// required when the renderer preflights glyphs; absence then returns a typed
+/// invalid-input diagnostic rather than selecting a fallback font.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FontRef<'a> {
     id: FontId,
+    /// Optional caller-facing font name retained with the authored reference.
     pub name: Option<Cow<'a, str>>,
     pub(crate) data: Option<FontData>,
 }
 
 impl<'a> FontRef<'a> {
     #[must_use]
+    /// Creates a font reference with no name or embedded data.
     pub fn new(id: impl Into<FontId>) -> Self {
         Self {
             id: id.into(),
@@ -382,17 +450,20 @@ impl<'a> FontRef<'a> {
     }
 
     #[must_use]
+    /// Returns the caller-defined font identity.
     pub const fn id(&self) -> FontId {
         self.id
     }
 
     #[must_use]
+    /// Returns this reference with a borrowed or owned display name.
     pub fn named(mut self, name: impl Into<Cow<'a, str>>) -> Self {
         self.name = Some(name.into());
         self
     }
 
     #[must_use]
+    /// Returns this reference with validated owned font data.
     pub fn with_data(mut self, data: FontData) -> Self {
         self.data = Some(data);
         self
@@ -451,18 +522,24 @@ pub(crate) fn invalid_font_data(byte_len: usize, index: u32) -> super::Error {
     )
 }
 
+/// A validated renderer-facing fill paint for authored text.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextPaint {
     fill: Paint,
 }
 
 impl TextPaint {
+    /// Creates text paint from a canonically validated fill source.
+    ///
+    /// Invalid nested color, gradient, geometry, stop, or image facts return a
+    /// typed input diagnostic.
     pub fn try_fill(fill: Paint) -> Result<Self> {
         validate_paint(&fill)?;
         Ok(Self { fill })
     }
 
     #[must_use]
+    /// Returns the validated fill paint.
     pub const fn fill(&self) -> &Paint {
         &self.fill
     }

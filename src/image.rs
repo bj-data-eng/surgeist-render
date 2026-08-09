@@ -8,7 +8,10 @@ use std::{
 /// A compact image fingerprint or caller-supplied resource handle.
 ///
 /// This copyable value is not a collision-free proof of pixel equality and
-/// must not be used as the sole identity for a backend cache.
+/// must not be used as the sole identity for a backend cache. Equality compares
+/// only the underlying `u64`; the value carries no lifetime, generation, or
+/// uniqueness guarantee. [`Image::from_rgba`] derives it deterministically,
+/// while [`ImageId::new`] accepts a caller-managed handle.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ImageId(u64);
 
@@ -83,7 +86,8 @@ impl Hash for ImageContentIdentity {
 ///
 /// Exact render-owned content identity includes the dimensions and shared
 /// pixel bytes. [`ImageId`] is retained only as a compact fingerprint, while
-/// the backend blob carries its own unique identity.
+/// the Peniko blob carries its own unique backend identity. Image equality uses
+/// exact content plus quality and extend policy rather than [`ImageId`] alone.
 #[derive(Clone, Debug)]
 pub struct Image {
     id: ImageId,
@@ -107,7 +111,9 @@ impl Image {
     /// Creates a validated RGBA8 image with a deterministic compact fingerprint.
     ///
     /// Independently constructed images receive distinct backend blob IDs even
-    /// when their dimensions and bytes are equal.
+    /// when their dimensions and bytes are equal. Returns an image-upload
+    /// diagnostic when dimensions are not finite non-negative integer pixels,
+    /// exceed `u32`, or the byte length is not exactly `width * height * 4`.
     pub fn from_rgba(size: Size, data: impl Into<Arc<[u8]>>) -> Result<Self> {
         let data = data.into();
         validate_rgba_image(size, data.len())?;
@@ -162,17 +168,24 @@ impl Image {
     }
 
     #[must_use]
+    /// Returns the logical image dimensions, which represent integer pixel counts.
     pub const fn size(&self) -> Size {
         self.size
     }
 
     #[must_use]
+    /// Returns this image with a different sampling-quality hint.
+    ///
+    /// The exact pixel content and backend blob identity are unchanged.
     pub const fn quality(mut self, quality: ImageQuality) -> Self {
         self.quality = quality;
         self
     }
 
     #[must_use]
+    /// Returns this image with a different out-of-bounds sampling policy.
+    ///
+    /// The exact pixel content and backend blob identity are unchanged.
     pub const fn extend(mut self, extend: Extend) -> Self {
         self.extend = extend;
         self
@@ -212,19 +225,31 @@ pub(crate) fn image_dimension(value: f64, name: &str) -> Result<u32> {
     Ok(value as u32)
 }
 
+/// A backend sampling-quality hint for an image.
+///
+/// The default is [`Self::Medium`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ImageQuality {
+    /// Prefer lower-cost, lower-quality sampling.
     Low,
+    /// Use the balanced default sampling quality.
     #[default]
     Medium,
+    /// Prefer higher-quality sampling.
     High,
 }
 
+/// Image sampling behavior outside the source bounds.
+///
+/// The default is edge padding through [`Self::Pad`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Extend {
+    /// Clamp sampling to the nearest edge pixel.
     #[default]
     Pad,
+    /// Tile the image in the same orientation.
     Repeat,
+    /// Tile the image while alternating orientation at each boundary.
     Reflect,
 }
 
@@ -306,12 +331,21 @@ impl Hash for ResolvedMaskUploadKey {
     }
 }
 
+/// Mapping policy for fitting an image into its destination rectangle.
+///
+/// The current default [`Self::None`] uses the same independent axis scaling as
+/// [`Self::Fill`] and [`Self::Stretch`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum ImageFit {
+    /// Scale independently along each axis to fill the destination rectangle.
     Fill,
+    /// Scale to fit entirely inside the destination while preserving aspect ratio.
     Contain,
+    /// Scale to cover the destination while preserving aspect ratio.
     Cover,
+    /// Stretch independently along each axis to match the destination rectangle.
     Stretch,
+    /// Use the current default mapping, which scales independently to the destination rectangle.
     #[default]
     None,
 }
@@ -522,6 +556,7 @@ pub(crate) fn validate_image_buffer_rgba_len(size: PhysicalSize, byte_len: usize
     Ok(())
 }
 
+/// Converts the public sampling-quality hint to its equivalent Peniko value.
 impl From<ImageQuality> for peniko::ImageQuality {
     fn from(quality: ImageQuality) -> Self {
         match quality {
@@ -532,6 +567,7 @@ impl From<ImageQuality> for peniko::ImageQuality {
     }
 }
 
+/// Converts the public extension policy to its equivalent Peniko value.
 impl From<Extend> for peniko::Extend {
     fn from(extend: Extend) -> Self {
         match extend {

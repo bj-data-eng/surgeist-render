@@ -140,10 +140,16 @@ impl Default for ResourceCacheBudget {
     }
 }
 
+/// Antialiasing mode for the GPU fine-raster stage.
+///
+/// The default is area antialiasing.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Antialiasing {
+    /// Use analytic area coverage.
     #[default]
     Area,
+    /// Use eight-sample multisample antialiasing.
     Msaa8,
+    /// Use sixteen-sample multisample antialiasing.
     Msaa16,
 }
