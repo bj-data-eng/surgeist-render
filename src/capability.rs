@@ -278,61 +278,80 @@ impl Capabilities {
         },
     };
 
+    /// Returns semantic support for geometry targets and geometry operations.
     #[must_use]
     pub const fn geometry_targets(self) -> GeometryTargetCapabilities {
         self.geometry_targets
     }
 
+    /// Returns semantic support for paint sources and color handling.
     #[must_use]
     pub const fn paint_sources(self) -> PaintSourceCapabilities {
         self.paint_sources
     }
 
+    /// Returns semantic support and resolution policy for image sampling.
     #[must_use]
     pub const fn image_sampling(self) -> ImageSamplingCapabilities {
         self.image_sampling
     }
 
+    /// Returns semantic support for shadow shapes and kinds.
     #[must_use]
     pub const fn shadows(self) -> ShadowCapabilities {
         self.shadows
     }
 
+    /// Returns semantic support for filter lists, planning, and GPU execution.
     #[must_use]
     pub const fn filters(self) -> FilterCapabilities {
         self.filters
     }
 
+    /// Returns semantic support for clips, masks, and resolved mask execution.
     #[must_use]
     pub const fn masks_clips(self) -> MaskClipCapabilities {
         self.masks_clips
     }
 
+    /// Returns semantic support for borders, outlines, radii, and fragments.
     #[must_use]
     pub const fn box_decorations(self) -> BoxDecorationCapabilities {
         self.box_decorations
     }
 
+    /// Returns semantic support for opacity, blending, and compositing modes.
     #[must_use]
     pub const fn compositing(self) -> CompositingCapabilities {
         self.compositing
     }
 
+    /// Returns semantic support for direct and GPU-graph offscreen phases.
     #[must_use]
     pub const fn offscreen_pipeline(self) -> OffscreenPipelineCapabilities {
         self.offscreen_pipeline
     }
 
+    /// Returns semantic surface-construction support for this compiled target.
+    ///
+    /// This does not report whether a selected runtime device or surface is
+    /// currently available.
     #[must_use]
     pub const fn surfaces(self) -> SurfaceCapabilities {
         self.surfaces
     }
 
+    /// Returns semantic support for transforms and coordinate-space tagging.
     #[must_use]
     pub const fn transform_coordinate_spaces(self) -> TransformCoordinateSpaceCapabilities {
         self.transform_coordinate_spaces
     }
 
+    /// Accepts a supported authored operation or returns its typed unsupported diagnostic.
+    ///
+    /// An unavailable operation produces [`crate::ErrorCode::UnsupportedPrimitive`]
+    /// with `primitive` available from [`Error::unsupported_primitive`]. This
+    /// semantic check does not query enabled Cargo features or a runtime device.
     pub fn ensure_supported(self, primitive: UnsupportedPrimitive) -> Result<()> {
         if self.supports(primitive) {
             Ok(())
@@ -579,31 +598,47 @@ impl Capabilities {
     }
 }
 
+/// Identifies the layer responsible for hit testing authored geometry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum HitTestOwnership {
+    /// Hit testing is resolved outside this rendering crate before rendering.
     RootOwned,
 }
 
+/// Policy for symbolic colors received by the rendering boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SymbolicColorPolicy {
+    /// Symbolic colors must be resolved before they reach this crate.
     RootResolvedOnly,
 }
 
+/// Policy for background-attachment coordinate spaces at this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum BackgroundAttachmentCoordinatePolicy {
+    /// Attachment coordinates must be resolved or explicitly tagged before rendering.
     RootResolvedOrTagged,
 }
 
+/// Policy for image orientation at this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageOrientationPolicy {
+    /// Image orientation must be resolved before it reaches this crate.
     RootResolvedOnly,
 }
 
+/// Policy for image color profiles at this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ImageColorProfilePolicy {
+    /// Image color profiles must be resolved before they reach this crate.
     RootResolvedOnly,
 }
 
+/// Semantic support for authored geometry targets and geometry operations.
+///
+/// A `true` accessor result means the operation is supported by the current
+/// rendering contract; `false` means it is unavailable and is rejected when
+/// represented by [`UnsupportedPrimitive`]. These are not runtime device facts
+/// or Cargo-feature flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct GeometryTargetCapabilities {
     rect_fill_stroke: bool,
@@ -618,52 +653,66 @@ pub struct GeometryTargetCapabilities {
 }
 
 impl GeometryTargetCapabilities {
+    /// Returns whether rectangles support fill and stroke rendering.
     #[must_use]
     pub const fn supports_rect_fill_stroke(self) -> bool {
         self.rect_fill_stroke
     }
 
+    /// Returns whether rounded rectangles support fill and stroke rendering.
     #[must_use]
     pub const fn supports_rounded_rect_fill_stroke(self) -> bool {
         self.rounded_rect_fill_stroke
     }
 
+    /// Returns whether circles and ellipses support fill and stroke rendering.
     #[must_use]
     pub const fn supports_circle_ellipse_fill_stroke(self) -> bool {
         self.circle_ellipse_fill_stroke
     }
 
+    /// Returns whether arbitrary paths support fill rendering.
     #[must_use]
     pub const fn supports_arbitrary_path_fill(self) -> bool {
         self.arbitrary_path_fill
     }
 
+    /// Returns whether arbitrary paths support centered strokes.
     #[must_use]
     pub const fn supports_arbitrary_path_centered_stroke(self) -> bool {
         self.arbitrary_path_centered_stroke
     }
 
+    /// Returns whether arbitrary paths support inside or outside stroke alignment.
     #[must_use]
     pub const fn supports_arbitrary_path_inside_outside_stroke(self) -> bool {
         self.arbitrary_path_inside_outside_stroke
     }
 
+    /// Returns whether geometry boolean operations are supported.
     #[must_use]
     pub const fn supports_geometry_booleans(self) -> bool {
         self.geometry_booleans
     }
 
+    /// Returns whether geometry offset operations are supported.
     #[must_use]
     pub const fn supports_geometry_offsets(self) -> bool {
         self.geometry_offsets
     }
 
+    /// Returns the layer responsible for geometry hit testing.
     #[must_use]
     pub const fn hit_testing(self) -> HitTestOwnership {
         self.hit_testing
     }
 }
 
+/// Semantic support for authored paint sources and color handling.
+///
+/// Boolean accessors report current rendering support, not runtime GPU facts or
+/// Cargo-feature selection. Policy accessors state what must be resolved before
+/// paint reaches this boundary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PaintSourceCapabilities {
     solid_rgba: bool,
@@ -679,57 +728,72 @@ pub struct PaintSourceCapabilities {
 }
 
 impl PaintSourceCapabilities {
+    /// Returns whether solid RGBA paint is supported.
     #[must_use]
     pub const fn supports_solid_rgba(self) -> bool {
         self.solid_rgba
     }
 
+    /// Returns whether gradient paint is supported.
     #[must_use]
     pub const fn supports_gradients(self) -> bool {
         self.gradients
     }
 
+    /// Returns whether image paint is supported.
     #[must_use]
     pub const fn supports_image_paint(self) -> bool {
         self.image_paint
     }
 
+    /// Returns whether shadows accept non-solid paint.
     #[must_use]
     pub const fn supports_non_solid_shadow_paint(self) -> bool {
         self.non_solid_shadow_paint
     }
 
+    /// Returns whether sRGB color conversion is supported.
     #[must_use]
     pub const fn supports_srgb_color_conversion(self) -> bool {
         self.srgb_color_conversion
     }
 
+    /// Returns whether HSL color conversion is supported.
     #[must_use]
     pub const fn supports_hsl_color_conversion(self) -> bool {
         self.hsl_color_conversion
     }
 
+    /// Returns whether unresolved symbolic colors are accepted.
     #[must_use]
     pub const fn supports_unresolved_symbolic_colors(self) -> bool {
         self.unresolved_symbolic_colors
     }
 
+    /// Returns whether authored color-mix functions are supported.
     #[must_use]
     pub const fn supports_color_mix(self) -> bool {
         self.color_mix
     }
 
+    /// Returns whether repeating gradients are supported.
     #[must_use]
     pub const fn supports_repeating_gradients(self) -> bool {
         self.repeating_gradients
     }
 
+    /// Returns the resolution policy for symbolic colors.
     #[must_use]
     pub const fn symbolic_color_policy(self) -> SymbolicColorPolicy {
         self.symbolic_color_policy
     }
 }
 
+/// Semantic support and resolution policy for authored image sampling.
+///
+/// Boolean accessors distinguish supported operations from operations rejected
+/// as unavailable by the current contract. They do not describe a selected GPU
+/// device or enabled Cargo feature.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ImageSamplingCapabilities {
     image_fit: bool,
@@ -748,72 +812,89 @@ pub struct ImageSamplingCapabilities {
 }
 
 impl ImageSamplingCapabilities {
+    /// Returns whether image-fit sizing is supported.
     #[must_use]
     pub const fn supports_image_fit(self) -> bool {
         self.image_fit
     }
 
+    /// Returns whether authored background positions are supported.
     #[must_use]
     pub const fn supports_background_position(self) -> bool {
         self.background_position
     }
 
+    /// Returns whether authored background sizes are supported.
     #[must_use]
     pub const fn supports_background_size(self) -> bool {
         self.background_size
     }
 
+    /// Returns whether independent x/y image repetition is supported.
     #[must_use]
     pub const fn supports_repeat_xy(self) -> bool {
         self.repeat_xy
     }
 
+    /// Returns whether `round` image repetition is supported.
     #[must_use]
     pub const fn supports_repeat_round(self) -> bool {
         self.repeat_round
     }
 
+    /// Returns whether `space` image repetition is supported.
     #[must_use]
     pub const fn supports_repeat_space(self) -> bool {
         self.repeat_space
     }
 
+    /// Returns whether filtered image paint is supported.
     #[must_use]
     pub const fn supports_filtered_image_paint(self) -> bool {
         self.filtered_image_paint
     }
 
+    /// Returns whether color-filtered image paint is supported.
     #[must_use]
     pub const fn supports_color_filtered_image_paint(self) -> bool {
         self.color_filtered_image_paint
     }
 
+    /// Returns whether this crate performs image-orientation conversion.
     #[must_use]
     pub const fn supports_image_orientation_conversion(self) -> bool {
         self.image_orientation_conversion
     }
 
+    /// Returns whether this crate performs image color-profile conversion.
     #[must_use]
     pub const fn supports_image_color_profile_conversion(self) -> bool {
         self.image_color_profile_conversion
     }
 
+    /// Returns the coordinate-resolution policy for background attachment.
     #[must_use]
     pub const fn attachment_coordinate_policy(self) -> BackgroundAttachmentCoordinatePolicy {
         self.attachment_coordinate_policy
     }
 
+    /// Returns the image-orientation resolution policy.
     #[must_use]
     pub const fn image_orientation_policy(self) -> ImageOrientationPolicy {
         self.image_orientation_policy
     }
 
+    /// Returns the image color-profile resolution policy.
     #[must_use]
     pub const fn image_color_profile_policy(self) -> ImageColorProfilePolicy {
         self.image_color_profile_policy
     }
 }
 
+/// Semantic support for authored shadow shapes and kinds.
+///
+/// Each accessor reports current contract support rather than a runtime GPU fact
+/// or Cargo-feature setting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ShadowCapabilities {
     rect_rounded_circle_shadows: bool,
@@ -823,21 +904,25 @@ pub struct ShadowCapabilities {
 }
 
 impl ShadowCapabilities {
+    /// Returns whether rectangle, rounded-rectangle, and circle shadows are supported.
     #[must_use]
     pub const fn supports_rect_rounded_circle_shadows(self) -> bool {
         self.rect_rounded_circle_shadows
     }
 
+    /// Returns whether ellipse and arbitrary-path shadows are supported.
     #[must_use]
     pub const fn supports_ellipse_path_shadows(self) -> bool {
         self.ellipse_path_shadows
     }
 
+    /// Returns whether inset box shadows are supported.
     #[must_use]
     pub const fn supports_inset_box_shadows(self) -> bool {
         self.inset_box_shadows
     }
 
+    /// Returns whether text shadows are supported.
     #[must_use]
     pub const fn supports_text_shadows(self) -> bool {
         self.text_shadows
@@ -845,6 +930,10 @@ impl ShadowCapabilities {
 }
 
 /// Semantic support for authored filter lists and their GPU execution phases.
+///
+/// Each boolean distinguishes a supported operation from an unavailable one in
+/// the current rendering contract. The report is not a selected-device query or
+/// a Cargo-feature inventory.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct FilterCapabilities {
     layer_filters: bool,
@@ -856,6 +945,7 @@ pub struct FilterCapabilities {
 }
 
 impl FilterCapabilities {
+    /// Returns whether authored layer filters are supported.
     #[must_use]
     pub const fn supports_layer_filters(self) -> bool {
         self.layer_filters
@@ -893,6 +983,9 @@ impl FilterCapabilities {
 }
 
 /// Semantic support for authored clips, masks, and resolved mask execution.
+///
+/// Each boolean reports current contract support rather than runtime device
+/// availability or Cargo-feature selection.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct MaskClipCapabilities {
     shape_clips: bool,
@@ -905,16 +998,19 @@ pub struct MaskClipCapabilities {
 }
 
 impl MaskClipCapabilities {
+    /// Returns whether authored shape clips are supported.
     #[must_use]
     pub const fn supports_shape_clips(self) -> bool {
         self.shape_clips
     }
 
+    /// Returns whether referenced clips execute at this boundary.
     #[must_use]
     pub const fn supports_clip_reference_execution(self) -> bool {
         self.clip_reference_execution
     }
 
+    /// Returns whether authored layer masks are supported.
     #[must_use]
     pub const fn supports_layer_masks(self) -> bool {
         self.layer_masks
@@ -926,22 +1022,30 @@ impl MaskClipCapabilities {
         self.resolved_alpha_mask_execution
     }
 
+    /// Returns whether luminance mask mode is supported.
     #[must_use]
     pub const fn supports_luminance_mask_mode(self) -> bool {
         self.luminance_mask_mode
     }
 
+    /// Returns whether multiple mask layers can be composed.
     #[must_use]
     pub const fn supports_multi_layer_mask_composition(self) -> bool {
         self.multi_layer_mask_composition
     }
 
+    /// Returns whether authored mask composite modes are supported.
     #[must_use]
     pub const fn supports_mask_composite_modes(self) -> bool {
         self.mask_composite_modes
     }
 }
 
+/// Semantic support for authored borders, outlines, radii, and fragments.
+///
+/// A `true` accessor result means the current rendering contract supports the
+/// named form; `false` means that form is unavailable. These values are not
+/// selected-device facts or Cargo-feature flags.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct BoxDecorationCapabilities {
     border_none_hidden_styles: bool,
@@ -963,87 +1067,107 @@ pub struct BoxDecorationCapabilities {
 }
 
 impl BoxDecorationCapabilities {
+    /// Returns whether `none` and `hidden` border styles are supported.
     #[must_use]
     pub const fn supports_border_none_hidden_styles(self) -> bool {
         self.border_none_hidden_styles
     }
 
+    /// Returns whether solid borders are supported.
     #[must_use]
     pub const fn supports_border_solid_style(self) -> bool {
         self.border_solid_style
     }
 
+    /// Returns whether dashed and dotted borders are supported.
     #[must_use]
     pub const fn supports_border_dashed_dotted_styles(self) -> bool {
         self.border_dashed_dotted_styles
     }
 
+    /// Returns whether double borders are supported.
     #[must_use]
     pub const fn supports_border_double_style(self) -> bool {
         self.border_double_style
     }
 
+    /// Returns whether groove borders are supported.
     #[must_use]
     pub const fn supports_border_groove_style(self) -> bool {
         self.border_groove_style
     }
 
+    /// Returns whether ridge borders are supported.
     #[must_use]
     pub const fn supports_border_ridge_style(self) -> bool {
         self.border_ridge_style
     }
 
+    /// Returns whether inset borders are supported.
     #[must_use]
     pub const fn supports_border_inset_style(self) -> bool {
         self.border_inset_style
     }
 
+    /// Returns whether outset borders are supported.
     #[must_use]
     pub const fn supports_border_outset_style(self) -> bool {
         self.border_outset_style
     }
 
+    /// Returns whether border radii are supported.
     #[must_use]
     pub const fn supports_border_radii(self) -> bool {
         self.border_radii
     }
 
+    /// Returns whether outlines are supported.
     #[must_use]
     pub const fn supports_outlines(self) -> bool {
         self.outlines
     }
 
+    /// Returns whether the `none` outline style is supported.
     #[must_use]
     pub const fn supports_outline_none_style(self) -> bool {
         self.outline_none_style
     }
 
+    /// Returns whether solid outlines are supported.
     #[must_use]
     pub const fn supports_outline_solid_style(self) -> bool {
         self.outline_solid_style
     }
 
+    /// Returns whether dashed and dotted outlines are supported.
     #[must_use]
     pub const fn supports_outline_dashed_dotted_styles(self) -> bool {
         self.outline_dashed_dotted_styles
     }
 
+    /// Returns whether double outlines are supported.
     #[must_use]
     pub const fn supports_outline_double_style(self) -> bool {
         self.outline_double_style
     }
 
+    /// Returns whether automatic outlines are supported.
     #[must_use]
     pub const fn supports_outline_auto_style(self) -> bool {
         self.outline_auto_style
     }
 
+    /// Returns whether fragmented box decorations are supported.
     #[must_use]
     pub const fn supports_fragments(self) -> bool {
         self.fragments
     }
 }
 
+/// Semantic support for opacity, blending, and compositing modes.
+///
+/// Accessors report current rendering support, not runtime GPU capabilities or
+/// enabled Cargo features.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct CompositingCapabilities {
     layer_opacity: bool,
@@ -1055,31 +1179,37 @@ pub struct CompositingCapabilities {
 }
 
 impl CompositingCapabilities {
+    /// Returns whether layer opacity is supported.
     #[must_use]
     pub const fn supports_layer_opacity(self) -> bool {
         self.layer_opacity
     }
 
+    /// Returns whether the current layer blend modes are supported.
     #[must_use]
     pub const fn supports_blend_modes(self) -> bool {
         self.blend_modes
     }
 
+    /// Returns whether root-backdrop policy is supported.
     #[must_use]
     pub const fn supports_root_backdrop_policy(self) -> bool {
         self.root_backdrop_policy
     }
 
+    /// Returns whether per-background blend modes are supported.
     #[must_use]
     pub const fn supports_background_blend_modes(self) -> bool {
         self.background_blend_modes
     }
 
+    /// Returns whether additional mix-blend modes are supported.
     #[must_use]
     pub const fn supports_additional_mix_blend_modes(self) -> bool {
         self.additional_mix_blend_modes
     }
 
+    /// Returns whether Porter-Duff composite modes are supported.
     #[must_use]
     pub const fn supports_porter_duff_composite_modes(self) -> bool {
         self.porter_duff_composite_modes
@@ -1109,16 +1239,19 @@ pub struct OffscreenPipelineCapabilities {
 }
 
 impl OffscreenPipelineCapabilities {
+    /// Returns whether the direct Vello route isolates opacity.
     #[must_use]
     pub const fn supports_direct_vello_opacity_isolation(self) -> bool {
         self.direct_vello_opacity_isolation
     }
 
+    /// Returns whether the direct Vello route isolates blend operations.
     #[must_use]
     pub const fn supports_direct_vello_blend_isolation(self) -> bool {
         self.direct_vello_blend_isolation
     }
 
+    /// Returns whether general offscreen layer rendering is supported.
     #[must_use]
     pub const fn supports_offscreen_layer_rendering(self) -> bool {
         self.offscreen_layer_rendering
@@ -1154,6 +1287,7 @@ impl OffscreenPipelineCapabilities {
         self.nested_opacity_composition
     }
 
+    /// Returns whether general mask execution is supported by the offscreen pipeline.
     #[must_use]
     pub const fn supports_mask_execution(self) -> bool {
         self.mask_execution
@@ -1171,6 +1305,7 @@ impl OffscreenPipelineCapabilities {
         self.broad_backdrop_execution
     }
 
+    /// Returns whether bounded backdrop content can be captured for filtering.
     #[must_use]
     pub const fn supports_bounded_backdrop_capture(self) -> bool {
         self.bounded_backdrop_capture
@@ -1182,12 +1317,19 @@ impl OffscreenPipelineCapabilities {
         self.bounded_backdrop_filter_execution
     }
 
+    /// Returns whether separate backdrop isolation and composition are supported.
     #[must_use]
     pub const fn supports_backdrop_isolation_composition(self) -> bool {
         self.backdrop_isolation_composition
     }
 }
 
+/// Semantic surface-construction support for the compiled target.
+///
+/// This report states which surface adapters the current build exposes. In
+/// particular, web-canvas support requires the `render-web` feature on
+/// `wasm32`. It does not state whether a selected runtime adapter, device, or
+/// surface is currently available; use [`RuntimeCapabilities`] for runtime facts.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SurfaceCapabilities {
     headless_surfaces: bool,
@@ -1195,17 +1337,23 @@ pub struct SurfaceCapabilities {
 }
 
 impl SurfaceCapabilities {
+    /// Returns whether headless surface construction is supported.
     #[must_use]
     pub const fn supports_headless_surfaces(self) -> bool {
         self.headless_surfaces
     }
 
+    /// Returns whether web-canvas construction is compiled for this target.
     #[must_use]
     pub const fn supports_web_canvas_surfaces(self) -> bool {
         self.web_canvas_surfaces
     }
 }
 
+/// Semantic support for transforms and explicit coordinate-space tagging.
+///
+/// The flags distinguish supported authored operations from unavailable ones;
+/// they are not runtime device capabilities or Cargo-feature settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TransformCoordinateSpaceCapabilities {
     affine_2d: bool,
@@ -1216,26 +1364,31 @@ pub struct TransformCoordinateSpaceCapabilities {
 }
 
 impl TransformCoordinateSpaceCapabilities {
+    /// Returns whether two-dimensional affine transforms are supported.
     #[must_use]
     pub const fn supports_affine_2d(self) -> bool {
         self.affine_2d
     }
 
+    /// Returns whether transform origins are supported.
     #[must_use]
     pub const fn supports_transform_origin(self) -> bool {
         self.transform_origin
     }
 
+    /// Returns whether skew transforms are supported.
     #[must_use]
     pub const fn supports_skew(self) -> bool {
         self.skew
     }
 
+    /// Returns whether three-dimensional transforms are supported.
     #[must_use]
     pub const fn supports_transform_3d(self) -> bool {
         self.transform_3d
     }
 
+    /// Returns whether explicit coordinate-space tags are supported.
     #[must_use]
     pub const fn supports_coordinate_space_tags(self) -> bool {
         self.coordinate_space_tags

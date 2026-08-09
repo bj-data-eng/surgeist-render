@@ -306,26 +306,53 @@ impl error::Error for Error {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 /// Stable classifications for render diagnostics, suitable for programmatic failure handling.
+///
+/// Callers first inspect [`Error::code`], then use the matching typed payload
+/// accessor for invalid input, unsupported primitives, unresolved resources,
+/// degraded quality, or unavailable runtime capabilities. Other codes describe
+/// backend-operation failures and may expose a safe source through
+/// [`std::error::Error::source`].
 pub enum ErrorCode {
+    /// Reports failure to create a GPU device.
     DeviceCreateFailed,
+    /// Reports failure to create renderer-owned GPU state.
     RendererCreateFailed,
+    /// Reports failure to create a render surface.
     SurfaceCreateFailed,
+    /// Reports failure to configure a render surface.
     SurfaceConfigureFailed,
+    /// Reports GPU memory exhaustion during a surface operation.
     SurfaceOutOfMemory,
+    /// Reports a surface operation that timed out.
     SurfaceTimeout,
+    /// Reports a surface configuration that became outdated before use.
     SurfaceOutdated,
+    /// Reports caller input that violates an intrinsic validation rule.
+    ///
+    /// When constructed from a typed value, details are available through
+    /// [`Error::invalid_value_diagnostic`].
     InvalidInput,
     /// Reports a render primitive that this renderer cannot represent.
     UnsupportedPrimitive,
+    /// Reports a resource reference that could not be resolved.
+    ///
+    /// Details are available through [`Error::unresolved_resource_diagnostic`].
     UnresolvedResource,
+    /// Reports a requested rendering quality that could not be preserved.
+    ///
+    /// Details are available through [`Error::degraded_quality_diagnostic`].
     DegradedQuality,
     /// Reports that a runtime GPU capability prevented a specific render operation.
     RuntimeCapabilityUnavailable,
+    /// Reports failure while uploading image data to the GPU.
     ImageUploadFailed,
+    /// Reports failure while validating, encoding, submitting, or executing a render.
     RenderFailed,
     /// Reports failure to copy, map, or decode pixels during GPU readback.
     ReadbackFailed,
+    /// Reports failure to present a completed surface frame.
     PresentFailed,
+    /// Reports that the selected platform or backend path is unsupported.
     UnsupportedBackend,
 }
 
@@ -546,6 +573,11 @@ pub enum GpuFaultKind {
     Internal,
 }
 
+/// Structured details for an [`ErrorCode::InvalidInput`] diagnostic.
+///
+/// The payload records the rejected field, its diagnostic rendering, and the
+/// violated invariant. Callers obtain it from [`Error::invalid_value_diagnostic`]
+/// instead of parsing [`Error::message`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InvalidValue {
     field: String,
@@ -554,6 +586,10 @@ pub struct InvalidValue {
 }
 
 impl InvalidValue {
+    /// Records an invalid field value and the rule it violates.
+    ///
+    /// `value` is formatted once for diagnostics; this constructor performs no
+    /// additional validation.
     #[must_use]
     pub fn new(
         field: impl Into<String>,
@@ -567,16 +603,19 @@ impl InvalidValue {
         }
     }
 
+    /// Returns the name of the rejected field or input.
     #[must_use]
     pub fn field(&self) -> &str {
         &self.field
     }
 
+    /// Returns the diagnostic rendering of the rejected value.
     #[must_use]
     pub fn value(&self) -> &str {
         &self.value
     }
 
+    /// Returns the rule the rejected value must satisfy.
     #[must_use]
     pub const fn invariant(&self) -> &'static str {
         self.invariant
@@ -590,6 +629,11 @@ impl InvalidValue {
     }
 }
 
+/// Typed semantic identity of an unsupported authored rendering operation.
+///
+/// [`Error::unsupported_render_primitive`] carries this payload with
+/// [`ErrorCode::UnsupportedPrimitive`], allowing callers to match the family and
+/// operation without parsing the diagnostic message.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct UnsupportedPrimitive {
     family: PrimitiveFamily,
@@ -597,44 +641,65 @@ pub struct UnsupportedPrimitive {
 }
 
 impl UnsupportedPrimitive {
+    /// Creates an unsupported-operation identity from its family and operation.
     #[must_use]
     pub const fn new(family: PrimitiveFamily, operation: PrimitiveOperation) -> Self {
         Self { family, operation }
     }
 
+    /// Returns the operation's rendering family.
     #[must_use]
     pub const fn family(self) -> PrimitiveFamily {
         self.family
     }
 
+    /// Returns the specific unsupported operation.
     #[must_use]
     pub const fn operation(self) -> PrimitiveOperation {
         self.operation
     }
 
+    /// Returns the operation's stable human-readable label.
     #[must_use]
     pub const fn label(self) -> &'static str {
         self.operation.label()
     }
 }
 
+/// Rendering domain that contains an unsupported authored operation.
+///
+/// This semantic classification is paired with [`PrimitiveOperation`] inside
+/// [`UnsupportedPrimitive`]. It does not report runtime device capability.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrimitiveFamily {
+    /// Geometry targets and geometry operations.
     GeometryTargets,
+    /// Paint sources and color handling.
     PaintSources,
+    /// Image sampling, placement, and conversion.
     ImageSampling,
+    /// Shadow shapes and kinds.
     Shadows,
+    /// Filter lists and filter execution.
     Filters,
+    /// Clip and mask operations.
     MasksAndClips,
+    /// Border, outline, and box-decoration operations.
     BoxDecorations,
+    /// Text-decoration operations.
     TextDecorations,
+    /// Opacity, blending, and compositing operations.
     Compositing,
+    /// Direct and GPU-graph offscreen operations.
     OffscreenPipeline,
+    /// Render-surface operations.
     Surfaces,
+    /// Transform and coordinate-space operations.
     TransformsAndCoordinateSpaces,
 }
 
 impl PrimitiveFamily {
+    /// Returns a stable human-readable label for the rendering family.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -654,71 +719,137 @@ impl PrimitiveFamily {
     }
 }
 
+/// Specific authored or normalized rendering operation used in capability diagnostics.
+///
+/// Values are paired with a [`PrimitiveFamily`] in [`UnsupportedPrimitive`].
+/// They describe semantic operations, not enabled Cargo features or facts about
+/// a selected runtime device.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrimitiveOperation {
+    /// Applying a filter to an authored layer.
     LayerFilter,
+    /// Clipping with an authored shape.
     ShapeClip,
+    /// Executing a referenced clip resource.
     ClipReferenceExecution,
+    /// Applying an authored layer mask.
     LayerMask,
+    /// Executing an authored alpha-mask source.
     AlphaMaskSourceExecution,
+    /// Executing a resolved image alpha mask.
     ResolvedAlphaMaskExecution,
+    /// Interpreting a mask as luminance.
     LuminanceMaskMode,
+    /// Composing more than one mask layer.
     MultiLayerMaskComposition,
+    /// Applying an authored mask composite mode.
     MaskCompositeMode,
+    /// Painting a shadow with a non-solid paint source.
     NonSolidShadowPaint,
+    /// Rendering a color that has not been symbolically resolved.
     UnresolvedSymbolicColor,
+    /// Evaluating an authored color-mix function.
     ColorMixFunction,
+    /// Converting or rendering an unsupported color space.
     UnsupportedColorSpace,
+    /// Rendering a repeating gradient.
     RepeatingGradient,
+    /// Repeating a background image with `round` sizing.
     BackgroundRepeatRound,
+    /// Repeating a background image with spaced placement.
     BackgroundRepeatSpace,
+    /// Applying a filter to image paint.
     FilteredImagePaint,
+    /// Applying a color filter to image paint.
     ColorFilteredImagePaint,
+    /// Converting image orientation at the rendering boundary.
     ImageOrientationConversion,
+    /// Converting an image color profile at the rendering boundary.
     ImageColorProfileConversion,
+    /// Rendering a shadow from an ellipse or arbitrary path.
     EllipsePathShadowShape,
+    /// Rendering an inset box shadow.
     InsetBoxShadow,
+    /// Rendering a text shadow.
     TextShadow,
+    /// Stroking an arbitrary path with inside or outside alignment.
     InsideOutsidePathStrokeAlignment,
+    /// Applying a boolean operation to geometry.
     GeometryBooleanOperation,
+    /// Offsetting geometry.
     GeometryOffsetOperation,
+    /// Constructing a web-canvas render surface.
     WebCanvasSurface,
+    /// Applying a `matrix3d` transform.
     Matrix3dTransform,
+    /// Applying a perspective transform.
     PerspectiveTransform,
+    /// Applying a three-dimensional rotation.
     Rotate3dTransform,
+    /// Translating along the z axis.
     TranslateZTransform,
+    /// Scaling along the z axis.
     ScaleZTransform,
+    /// Rendering a groove border.
     BorderGrooveStyle,
+    /// Rendering a ridge border.
     BorderRidgeStyle,
+    /// Rendering an inset border.
     BorderInsetStyle,
+    /// Rendering an outset border.
     BorderOutsetStyle,
+    /// Rendering a double outline.
     OutlineDoubleStyle,
+    /// Rendering an automatic outline.
     OutlineAutoStyle,
+    /// Rendering an authored text-decoration style.
     TextDecorationStyle,
+    /// Rendering an authored layer into a general offscreen target.
     OffscreenLayerRendering,
+    /// Retaining effect resources across frame transactions.
     PersistentEffectResources,
+    /// Capturing a bounded Vello span into a graph resource.
     BoundedVelloCapture,
+    /// Executing an image-processing GPU graph pass.
     ImagePassExecution,
+    /// Executing a GPU graph composition pass.
     CompositePassExecution,
+    /// Composing nested opacity through ordered passes.
     NestedOpacityComposition,
+    /// Executing a general mask operation in the offscreen pipeline.
     MaskExecution,
+    /// Executing a general layer filter in the offscreen pipeline.
     LayerFilterExecution,
+    /// Preserving and executing an ordered filter list.
     OrderedFilterList,
+    /// Executing a color-filter pass on the GPU.
     GpuColorFilterExecution,
+    /// Executing a blur-filter pass on the GPU.
     GpuBlurFilterExecution,
+    /// Executing a drop-shadow filter pass on the GPU.
     GpuDropShadowFilterExecution,
+    /// Planning filter execution regions and outsets.
     FilterRegionPlanning,
+    /// Executing an unbounded or root/nested backdrop form.
     BroadBackdropExecution,
+    /// Capturing bounded backdrop content for filtering.
     BoundedBackdropCapture,
+    /// Executing the supported bounded backdrop-filter subset.
     BoundedBackdropFilterExecution,
+    /// Isolating and composing a backdrop through separate phases.
     BackdropIsolationComposition,
+    /// Applying root-backdrop compositing policy.
     RootBackdropPolicy,
+    /// Blending an authored background layer.
     BackgroundBlendMode,
+    /// Applying an additional mix-blend mode.
     AdditionalMixBlendMode,
+    /// Applying a Porter-Duff composite mode.
     PorterDuffCompositeMode,
 }
 
 impl PrimitiveOperation {
+    /// Returns a stable human-readable label for the operation.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -786,6 +917,11 @@ impl PrimitiveOperation {
     }
 }
 
+/// Structured details for an [`ErrorCode::UnresolvedResource`] diagnostic.
+///
+/// The payload identifies the resource category and the caller-provided or
+/// normalized identifier that could not be resolved. Callers obtain it through
+/// [`Error::unresolved_resource_diagnostic`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UnresolvedResource {
     kind: UnresolvedResourceKind,
@@ -793,6 +929,7 @@ pub struct UnresolvedResource {
 }
 
 impl UnresolvedResource {
+    /// Records the resource kind and unresolved identifier.
     #[must_use]
     pub fn new(kind: UnresolvedResourceKind, identifier: impl Into<String>) -> Self {
         Self {
@@ -801,11 +938,13 @@ impl UnresolvedResource {
         }
     }
 
+    /// Returns the unresolved resource category.
     #[must_use]
     pub const fn kind(&self) -> UnresolvedResourceKind {
         self.kind
     }
 
+    /// Returns the identifier that could not be resolved.
     #[must_use]
     pub fn identifier(&self) -> &str {
         &self.identifier
@@ -820,16 +959,23 @@ impl UnresolvedResource {
     }
 }
 
+/// Category of resource named by an [`UnresolvedResource`] payload.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum UnresolvedResourceKind {
+    /// An image resource.
     Image,
+    /// A mask resource.
     Mask,
+    /// A filter resource.
     Filter,
+    /// A clip resource.
     Clip,
+    /// Ink bounds required for a text run.
     TextRunInkBounds,
 }
 
 impl UnresolvedResourceKind {
+    /// Returns a stable human-readable label for the resource category.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -842,6 +988,11 @@ impl UnresolvedResourceKind {
     }
 }
 
+/// Structured details for an [`ErrorCode::DegradedQuality`] diagnostic.
+///
+/// The payload identifies the quality limitation and the affected value. Callers
+/// obtain it through [`Error::degraded_quality_diagnostic`] rather than parsing
+/// [`Error::message`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DegradedQuality {
     kind: DegradedQualityKind,
@@ -849,6 +1000,7 @@ pub struct DegradedQuality {
 }
 
 impl DegradedQuality {
+    /// Records a quality limitation and its diagnostic value.
     #[must_use]
     pub fn new(kind: DegradedQualityKind, value: impl Into<String>) -> Self {
         Self {
@@ -857,11 +1009,13 @@ impl DegradedQuality {
         }
     }
 
+    /// Returns the class of quality limitation.
     #[must_use]
     pub const fn kind(&self) -> DegradedQualityKind {
         self.kind
     }
 
+    /// Returns the value associated with the limitation.
     #[must_use]
     pub fn value(&self) -> &str {
         &self.value
