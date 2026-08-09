@@ -9,19 +9,31 @@ use super::image::StyleResourceRef;
 use kurbo::Shape as KurboShape;
 
 #[derive(Clone, Debug, PartialEq)]
+/// An authored clip source with an optional tagged coordinate space.
+///
+/// Concrete shapes and paths can be normalized locally. A resource reference
+/// remains symbolic and produces an unresolved-resource diagnostic until the
+/// surrounding context replaces it with concrete geometry.
 pub struct ClipInput {
     kind: ClipInputKind,
     coordinate_space: Option<CoordinateSpaceTag>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// The authored source represented by a [`ClipInput`].
 pub enum ClipInputKind {
+    /// Validated shape geometry.
     Shape(Shape),
+    /// A validated path paired with its fill rule.
     Path(FilledPath),
+    /// A symbolic clip-resource reference.
     Reference(StyleResourceRef),
 }
 
 impl ClipInput {
+    /// Creates a clip from validated logical shape geometry.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] when the shape is invalid.
     pub fn try_shape(shape: Shape) -> Result<Self> {
         validate_shape(&shape)?;
         Ok(Self {
@@ -30,6 +42,9 @@ impl ClipInput {
         })
     }
 
+    /// Creates a clip from a filled logical path.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] when path validation fails.
     pub fn try_filled_path(path: FilledPath) -> Result<Self> {
         validate_path_clip(path.path())?;
         Ok(Self {
@@ -38,6 +53,7 @@ impl ClipInput {
         })
     }
 
+    /// Creates a symbolic clip-resource input.
     #[must_use]
     pub const fn reference(reference: StyleResourceRef) -> Self {
         Self {
@@ -46,17 +62,20 @@ impl ClipInput {
         }
     }
 
+    /// Associates the input with a tagged coordinate space.
     #[must_use]
     pub fn with_coordinate_space(mut self, coordinate_space: CoordinateSpaceTag) -> Self {
         self.coordinate_space = Some(coordinate_space);
         self
     }
 
+    /// Returns the authored clip source.
     #[must_use]
     pub const fn kind(&self) -> &ClipInputKind {
         &self.kind
     }
 
+    /// Returns the shape source, if this input contains one.
     #[must_use]
     pub const fn shape(&self) -> Option<&Shape> {
         match &self.kind {
@@ -66,6 +85,7 @@ impl ClipInput {
         }
     }
 
+    /// Returns the filled-path source, if this input contains one.
     #[must_use]
     pub const fn filled_path(&self) -> Option<&FilledPath> {
         match &self.kind {
@@ -75,6 +95,7 @@ impl ClipInput {
         }
     }
 
+    /// Returns the symbolic resource reference, if this input contains one.
     #[must_use]
     pub const fn reference_ref(&self) -> Option<&StyleResourceRef> {
         match &self.kind {
@@ -84,11 +105,16 @@ impl ClipInput {
         }
     }
 
+    /// Returns the optional coordinate-space tag.
     #[must_use]
     pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
         self.coordinate_space
     }
 
+    /// Checks whether the current capability contract accepts this clip source.
+    ///
+    /// Concrete geometry is checked as shape clipping. A symbolic reference
+    /// returns an unresolved clip-resource diagnostic.
     pub fn ensure_supported(&self, capabilities: Capabilities) -> Result<()> {
         match &self.kind {
             ClipInputKind::Shape(_) | ClipInputKind::Path(_) => {
@@ -103,6 +129,11 @@ impl ClipInput {
         }
     }
 
+    /// Converts a supported concrete input into normalized clip geometry.
+    ///
+    /// This validates the source and its finite transformed logical bounds.
+    /// Unsupported geometry returns a capability diagnostic, while symbolic
+    /// references return an unresolved-resource diagnostic.
     pub fn normalize(&self, capabilities: Capabilities) -> Result<NormalizedClip> {
         self.ensure_supported(capabilities)?;
         let geometry = match &self.kind {
@@ -120,12 +151,20 @@ impl ClipInput {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Intrinsically validated clip geometry and its optional coordinate-space tag.
+///
+/// Construction guarantees valid geometry, finite transform coefficients, and
+/// finite logical bounds after applying the tagged transform.
 pub struct NormalizedClip {
     geometry: ClipGeometry,
     coordinate_space: Option<CoordinateSpaceTag>,
 }
 
 impl NormalizedClip {
+    /// Validates normalized clip geometry in its optional coordinate space.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] for invalid geometry or for
+    /// transform coefficients or transformed bounds that are not finite.
     pub fn try_new(
         geometry: ClipGeometry,
         coordinate_space: Option<CoordinateSpaceTag>,
@@ -138,11 +177,13 @@ impl NormalizedClip {
         })
     }
 
+    /// Returns the normalized clip geometry.
     #[must_use]
     pub const fn geometry(&self) -> &ClipGeometry {
         &self.geometry
     }
 
+    /// Returns the optional coordinate-space tag used for the geometry.
     #[must_use]
     pub const fn coordinate_space(&self) -> Option<CoordinateSpaceTag> {
         self.coordinate_space
@@ -150,20 +191,45 @@ impl NormalizedClip {
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// Intrinsically validated clip geometry in logical rendering units.
 pub struct ClipGeometry {
     kind: ClipGeometryKind,
 }
 
 #[derive(Clone, Debug, PartialEq)]
+/// The closed geometry choice stored by [`ClipGeometry`].
 pub enum ClipGeometryKind {
+    /// An axis-aligned logical rectangle.
     Rect(Rect),
-    RoundedRect { rect: Rect, radii: Radii },
-    Circle { center: Point, radius: f64 },
-    Ellipse { center: Point, radii: Size },
+    /// A logical rectangle with corner radii.
+    RoundedRect {
+        /// The rectangle bounds.
+        rect: Rect,
+        /// The logical corner radii.
+        radii: Radii,
+    },
+    /// A circle in logical coordinates.
+    Circle {
+        /// The logical center point.
+        center: Point,
+        /// The logical radius.
+        radius: f64,
+    },
+    /// An ellipse in logical coordinates.
+    Ellipse {
+        /// The logical center point.
+        center: Point,
+        /// The horizontal and vertical logical radii.
+        radii: Size,
+    },
+    /// A logical path paired with its fill rule.
     Path(FilledPath),
 }
 
 impl ClipGeometry {
+    /// Validates and stores filled path geometry.
+    ///
+    /// Returns [`crate::ErrorCode::InvalidInput`] when path validation fails.
     pub fn try_path(path: FilledPath) -> Result<Self> {
         validate_path_clip(path.path())?;
         Ok(Self {
@@ -195,6 +261,7 @@ impl ClipGeometry {
         })
     }
 
+    /// Returns the normalized geometry choice.
     #[must_use]
     pub const fn kind(&self) -> &ClipGeometryKind {
         &self.kind
